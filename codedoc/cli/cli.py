@@ -32,6 +32,7 @@ examples:
   codedoc . --llm local              use a local LLM (Ollama / LM Studio)
   codedoc . --model claude-haiku-4-5-20251001 --llm api   use Claude
   codedoc . --output ./docs          write output to ./docs
+  codedoc . --ignore /myenv          ignore a project-root path
         """,
     )
 
@@ -67,6 +68,16 @@ examples:
         help="Output directory for generated docs (default: ./docs_output)",
     )
     parser.add_argument(
+        "--ignore",
+        action="append",
+        default=[],
+        metavar="PATH",
+        help=(
+            "Project-relative file or directory path to ignore. "
+            "Can be passed multiple times, e.g. --ignore /myenv --ignore generated."
+        ),
+    )
+    parser.add_argument(
         "--no-parallel",
         action="store_true",
         default=False,
@@ -81,7 +92,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.0",
+        version="%(prog)s 0.1.1",
     )
 
     return parser
@@ -106,6 +117,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["model_name"] = args.model
     if args.output:
         overrides["output_dir"] = args.output
+    if args.ignore:
+        overrides["ignore_paths"] = args.ignore
     if args.no_parallel:
         overrides["parallel_agents"] = False
     if args.verbose:

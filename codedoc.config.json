@@ -11,5 +11,15 @@
   "parallel_agents": true,
   "log_level": "INFO",
   "max_file_size_kb": 500,
-  "propagate_changes": true
+  "propagate_changes": true,
+  "skip_dirs": [
+    "myenv",
+    ".venv",
+    "venv",
+    "env",
+    "node_modules",
+    "__pycache__",
+    "docs_output"
+  ],
+  "ignore_paths": []
 }

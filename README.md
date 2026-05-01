@@ -95,11 +95,27 @@ Create `codedoc.config.json` in the project being documented:
   "supported_extensions": [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"],
   "parallel_agents": false,
   "max_file_size_kb": 500,
-  "propagate_changes": true
+  "propagate_changes": true,
+  "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "docs_output"],
+  "ignore_paths": ["/myenv", "services/generated"]
 }
 ```
 
 Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
+
+Use `skip_dirs` for directory names that should be skipped anywhere in the tree. Use `ignore_paths` for strict project-relative paths. A leading slash means "from the project root", so `/myenv` ignores only the root `myenv` directory.
+
+The same strict ignores are available from the CLI:
+
+```bash
+codedoc . --entry main.py --ignore /myenv --ignore services/generated
+```
+
+Or from an environment variable, separated by semicolons:
+
+```bash
+CODEDOC_IGNORE_PATHS=/myenv;services/generated
+```
 
 ## Output
 
@@ -120,9 +136,18 @@ stats = run_pipeline(".", {
     "entry_file": "src/main.py",
     "llm_mode": "local",
     "model_name": "qwen2.5-coder:7b",
+    "parallel_agents": False,
+    "output_dir": "docs_output",
+    "ignore_paths": ["/myenv", "services/generated"],
 })
 
 print(stats)
+```
+
+You can place that in a small script such as `run_codedoc.py` inside the project you want to document, then run:
+
+```bash
+python run_codedoc.py
 ```
 
 ## Contributing

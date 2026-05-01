@@ -40,6 +40,30 @@ DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "max_file_size_kb": 500,
     "propagate_changes": True,
+    "skip_dirs": [
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "env",
+        "myenv",
+        ".env",
+        "node_modules",
+        "site-packages",
+        "dist-packages",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        "target",
+        "docs_output",
+        ".mypy_cache",
+        ".pytest_cache",
+        ".ruff_cache",
+    ],
+    "ignore_paths": [],
 }
 
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
@@ -52,10 +76,11 @@ _ENV_KEY_MAP = {
     "ANTHROPIC_API_KEY": "api_key",
     "OUTPUT_DIR": "output_dir",
     "LOG_LEVEL": "log_level",
+    "CODEDOC_IGNORE_PATHS": "ignore_paths",
 }
 
 
-def load_config(root: Path) -> dict[str, Any]:
+def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load and merge config from JSON, .env, environment, and defaults."""
     config: dict[str, Any] = dict(DEFAULTS)
 
@@ -87,8 +112,14 @@ def load_config(root: Path) -> dict[str, Any]:
     for env_key, config_key in _ENV_KEY_MAP.items():
         val = os.environ.get(env_key)
         if val:
-            config[config_key] = val
+            if config_key == "ignore_paths":
+                config[config_key] = [p.strip() for p in val.split(";") if p.strip()]
+            else:
+                config[config_key] = val
             logger.debug("Config override from env: %s", env_key)
+
+    if overrides:
+        config.update({k: v for k, v in overrides.items() if k in DEFAULTS})
 
     _validate(config)
     return config
@@ -110,6 +141,12 @@ def _validate(config: dict[str, Any]) -> None:
 
     if not isinstance(config.get("supported_extensions"), list):
         raise ConfigError("supported_extensions must be a list of file extensions")
+
+    if not isinstance(config.get("skip_dirs"), list):
+        raise ConfigError("skip_dirs must be a list of directory names")
+
+    if not isinstance(config.get("ignore_paths"), list):
+        raise ConfigError("ignore_paths must be a list of project-relative paths")
 
     try:
         config["max_file_size_kb"] = int(config["max_file_size_kb"])

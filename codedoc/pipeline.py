@@ -31,9 +31,7 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
     if not ensure_codedoc_installed(root):
         raise RuntimeError("codedoc is not importable in the current Python environment.")
 
-    config = load_config(root)
-    if config_overrides:
-        config.update(config_overrides)
+    config = load_config(root, config_overrides)
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
@@ -45,6 +43,8 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
         root,
         supported_extensions=config["supported_extensions"],
         max_file_size_kb=config["max_file_size_kb"],
+        skip_dirs=config.get("skip_dirs"),
+        ignore_paths=config.get("ignore_paths"),
     )
     if not all_files:
         logger.warning("No supported files found in %s. Done.", root)
