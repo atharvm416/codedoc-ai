@@ -1,0 +1,15 @@
+{
+  "llm_mode": "api",
+  "model_name": "gpt-4o-mini",
+  "api_base_url": null,
+  "entry_file": null,
+  "output_dir": "docs_output",
+  "supported_extensions": [
+    ".py", ".ts", ".tsx", ".js", ".jsx",
+    ".dart", ".java", ".cs", ".html"
+  ],
+  "parallel_agents": true,
+  "log_level": "INFO",
+  "max_file_size_kb": 500,
+  "propagate_changes": true
+}

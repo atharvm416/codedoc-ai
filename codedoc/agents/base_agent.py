@@ -1,0 +1,112 @@
+"""
+Abstract base agent.
+
+Every agent (structure, dependency, documentation) inherits this class.
+Provides shared prompt building, JSON extraction, and error handling.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+from abc import ABC, abstractmethod
+from pathlib import Path
+
+from codedoc.llm.base import LLMProvider
+from codedoc.utils.errors import AgentError
+from codedoc.utils.logger import get_logger
+
+logger = get_logger(__name__)
+
+# Max characters of file content sent to the LLM
+_MAX_CONTENT_CHARS = 12_000
+
+
+class BaseAgent(ABC):
+    """
+    Abstract agent.
+
+    Subclasses implement `run()` which returns a dict of results.
+    """
+
+    #: Override in subclass — used in error messages and logs
+    agent_name: str = "BaseAgent"
+
+    def __init__(self, llm: LLMProvider) -> None:
+        self.llm = llm
+
+    @abstractmethod
+    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+        """
+        Analyse one file and return a result dict.
+
+        Args:
+            file_path: relative path string (for context in the prompt)
+            content:   raw file content
+            imports:   list of import strings extracted by the parser
+            language:  detected language tag
+
+        Returns:
+            dict of results — structure depends on the agent subclass
+        """
+
+    # ------------------------------------------------------------------
+    # Shared helpers
+    # ------------------------------------------------------------------
+
+    def _truncate(self, content: str) -> str:
+        """Truncate content to stay within token budget."""
+        if len(content) > _MAX_CONTENT_CHARS:
+            logger.debug(
+                "%s: truncating content from %d to %d chars for %s",
+                self.agent_name, len(content), _MAX_CONTENT_CHARS, "file"
+            )
+            return content[:_MAX_CONTENT_CHARS] + "\n... [truncated]"
+        return content
+
+    def _call_llm(self, prompt: str, system: str = "") -> str:
+        """Call the LLM and return raw text. Wraps errors as AgentError."""
+        try:
+            return self.llm.complete_json(prompt, system=system)
+        except Exception as exc:
+            raise AgentError(self.agent_name, "unknown", str(exc)) from exc
+
+    def _parse_json(self, raw: str, file_path: str) -> dict:
+        """
+        Extract and parse a JSON object from LLM output.
+        Handles models that wrap JSON in markdown fences.
+        """
+        # Strip markdown fences if present
+        cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
+
+        # Find the outermost { ... }
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start == -1 or end == -1:
+            raise AgentError(
+                self.agent_name, file_path,
+                f"LLM did not return a JSON object. Raw output: {raw[:200]}"
+            )
+        json_str = cleaned[start:end + 1]
+
+        try:
+            return json.loads(json_str)
+        except json.JSONDecodeError as exc:
+            raise AgentError(
+                self.agent_name, file_path,
+                f"JSON parse error: {exc}. Raw snippet: {json_str[:200]}"
+            ) from exc
+
+    def _safe_run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+        """
+        Wrapper that catches all errors and returns a fallback dict
+        instead of crashing the pipeline.
+        """
+        try:
+            return self.run(file_path, content, imports, language)
+        except AgentError as exc:
+            logger.warning("%s failed on %s: %s", self.agent_name, file_path, exc)
+            return {"error": str(exc), "agent": self.agent_name}
+        except Exception as exc:
+            logger.warning("%s unexpected error on %s: %s", self.agent_name, file_path, exc)
+            return {"error": str(exc), "agent": self.agent_name}
