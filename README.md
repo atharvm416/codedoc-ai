@@ -125,24 +125,6 @@ stats = run_pipeline(".", {
 print(stats)
 ```
 
-## Contributing
-
-Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
-
-## Publishing Your Public Repo
-
-Before publishing your own repository:
-
-- Confirm the `Homepage`, `Issues`, and `authors` fields in `pyproject.toml`.
-- Confirm the package name `codedoc-ai` is still available to you on PyPI.
-- Run:
-
-```bash
-python -m pytest
-python -m build
-python -m twine check dist/*
-```
-
 ## License
 
 This project is released under the MIT License. See [LICENSE](LICENSE).
