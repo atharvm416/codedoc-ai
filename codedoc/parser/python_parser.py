@@ -21,7 +21,7 @@ def parse(file_path: Path, language: str = "python") -> list[str]:
     Returns module names as strings, e.g. ["os", "pathlib", ".utils"].
     """
     try:
-        source = file_path.read_text(encoding="utf-8", errors="replace")
+        source = file_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
 

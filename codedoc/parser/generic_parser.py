@@ -69,7 +69,7 @@ def parse(file_path: Path, language: str) -> list[str]:
     Returns a list of raw import strings (not resolved to paths).
     """
     try:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
+        content = file_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
 

@@ -39,7 +39,7 @@ def parse(file_path: Path, language: str = "tsx") -> list[str]:
     Returns local/relative imports and path aliases; skips bare npm packages.
     """
     try:
-        content = file_path.read_text(encoding="utf-8", errors="replace")
+        content = file_path.read_text(encoding="utf-8-sig", errors="replace")
     except OSError as exc:
         raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
 

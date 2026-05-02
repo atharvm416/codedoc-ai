@@ -25,6 +25,7 @@ DEFAULTS: dict[str, Any] = {
     "api_key": None,
     "entry_file": None,
     "output_dir": "docs_output",
+    "output_format": "json",
     "supported_extensions": [
         ".py",
         ".ts",
@@ -75,6 +76,7 @@ _ENV_KEY_MAP = {
     "OPENAI_API_KEY": "api_key",
     "ANTHROPIC_API_KEY": "api_key",
     "OUTPUT_DIR": "output_dir",
+    "CODEDOC_OUTPUT_FORMAT": "output_format",
     "LOG_LEVEL": "log_level",
     "CODEDOC_IGNORE_PATHS": "ignore_paths",
 }
@@ -147,6 +149,11 @@ def _validate(config: dict[str, Any]) -> None:
 
     if not isinstance(config.get("ignore_paths"), list):
         raise ConfigError("ignore_paths must be a list of project-relative paths")
+
+    if config.get("output_format") not in ("json", "md", "both"):
+        raise ConfigError(
+            "output_format must be one of: 'json', 'md', or 'both'"
+        )
 
     try:
         config["max_file_size_kb"] = int(config["max_file_size_kb"])

@@ -11,7 +11,7 @@ from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.db import CodeDocDB
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
-from codedoc.core.output import write_outputs, write_summary
+from codedoc.core.output import write_project_outputs
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
 from codedoc.llm.factory import create_provider
@@ -35,6 +35,8 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
+    output_format = config.get("output_format", "json")
+    logger.info("Output format: %s", output_format)
 
     output_dir = root / config["output_dir"]
     error_reporter = ErrorReporter(root / "error.log")
@@ -51,7 +53,7 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
         return {"checked": 0, "failed": 0, "skipped": 0, "output_dir": str(output_dir)}
 
     graph, file_map = _build_graph(all_files, root, error_reporter)
-    selected_rels = _select_files(root, config, graph, file_map)
+    selected_rels, entry_rel = _select_files(root, config, graph, file_map)
 
     db = CodeDocDB(root)
     changed_rels = {
@@ -66,21 +68,45 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
     if skipped > 0:
         logger.info("Incremental mode: skipping %d unchanged file(s)", skipped)
 
-    if not process_rels:
-        logger.info("All selected files are up-to-date. Nothing to document.")
+    reused = 0
+    agent_rels: set[str] = set()
+    for rel_path in graph.topological_order():
+        if rel_path not in process_rels:
+            continue
+        if db.reuse_by_content_hash(file_map[rel_path]):
+            reused += 1
+        else:
+            agent_rels.add(rel_path)
+
+    if not agent_rels:
+        logger.info("All selected files are up-to-date or reused from cached content.")
         stats = {
             "checked": 0,
             "failed": 0,
-            "skipped": len(selected_rels),
+            "skipped": skipped,
+            "reused": reused,
             "output_dir": str(output_dir),
         }
-        write_summary(stats, output_dir, error_reporter.summary())
+        output_files = write_project_outputs(
+            db.documentation_records(
+                selected_rels,
+                file_map,
+                graph.topological_order(),
+            ),
+            stats,
+            output_dir,
+            error_reporter.summary(),
+            output_format,
+            entry_rel,
+            _graph_edges(graph, selected_rels),
+        )
+        stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
         return stats
 
     queue = ProcessingQueue()
     for rel_path in graph.topological_order():
-        if rel_path in process_rels:
+        if rel_path in agent_rels:
             queue.add(file_map[rel_path])
 
     try:
@@ -92,7 +118,7 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
         raise
 
     orchestrator = Orchestrator(llm, parallel=config.get("parallel_agents", True))
-    stats = {"checked": 0, "failed": 0, "skipped": skipped}
+    stats = {"checked": 0, "failed": 0, "skipped": skipped, "reused": reused}
 
     with Progress(
         SpinnerColumn(),
@@ -101,7 +127,7 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
         TaskProgressColumn(),
         transient=True,
     ) as progress:
-        task = progress.add_task("Documenting files...", total=len(process_rels))
+        task = progress.add_task("Documenting files...", total=len(agent_rels))
 
         while True:
             descriptor = queue.next()
@@ -113,11 +139,10 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
             progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
 
             try:
-                content = file_path.read_text(encoding="utf-8", errors="replace")
+                content = file_path.read_text(encoding="utf-8-sig", errors="replace")
                 imports = parse_file(descriptor)
                 result = orchestrator.process(descriptor, content, imports)
 
-                write_outputs(result, output_dir)
                 db.mark_processed(rel_path, file_path, result)
                 queue.mark_checked(rel_path)
 
@@ -144,7 +169,20 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
                 progress.advance(task)
 
     stats["output_dir"] = str(output_dir)
-    write_summary(stats, output_dir, error_reporter.summary())
+    output_files = write_project_outputs(
+        db.documentation_records(
+            selected_rels,
+            file_map,
+            graph.topological_order(),
+        ),
+        stats,
+        output_dir,
+        error_reporter.summary(),
+        output_format,
+        entry_rel,
+        _graph_edges(graph, selected_rels),
+    )
+    stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
 
     logger.info(
@@ -192,15 +230,15 @@ def _select_files(
     config: dict,
     graph: DependencyGraph,
     file_map: dict[str, dict],
-) -> set[str]:
+) -> tuple[set[str], str | None]:
     all_rel_paths = set(file_map)
     entry = detect_entry_file(root, config.get("entry_file"))
     if not entry:
-        return all_rel_paths
+        return all_rel_paths, None
 
     entry_rel = entry.relative_to(root).as_posix()
     if entry_rel not in file_map:
-        return all_rel_paths
+        return all_rel_paths, None
 
     reachable = graph.reachable_dependencies(entry_rel) or {entry_rel}
     logger.info(
@@ -208,4 +246,19 @@ def _select_files(
         entry_rel,
         len(reachable),
     )
-    return reachable
+    return reachable, entry_rel
+
+
+def _graph_edges(graph: DependencyGraph, selected_rels: set[str]) -> list[dict]:
+    edges: list[dict] = []
+    for rel_path in sorted(selected_rels):
+        for dependency in sorted(graph.dependencies_of(rel_path)):
+            if dependency in selected_rels:
+                edges.append(
+                    {
+                        "from": rel_path,
+                        "to": dependency,
+                        "type": "internal_import",
+                    }
+                )
+    return edges

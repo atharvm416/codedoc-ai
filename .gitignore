@@ -29,6 +29,7 @@ tmp/
 .coverage
 htmlcov/
 .tox/
+LOCAL_DEVELOPMENT.md
 
 # Type checkers
 .mypy_cache/

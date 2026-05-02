@@ -4,6 +4,7 @@
   "api_base_url": null,
   "entry_file": null,
   "output_dir": "docs_output",
+  "output_format": "json",
   "supported_extensions": [
     ".py", ".ts", ".tsx", ".js", ".jsx",
     ".dart", ".java", ".cs", ".html"

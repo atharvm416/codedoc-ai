@@ -8,6 +8,7 @@ Usage:
     codedoc . --llm local              # use local LLM (Ollama)
     codedoc . --model gpt-4o           # override model
     codedoc . --output ./my_docs       # override output directory
+    codedoc . --format md              # write Markdown instead of JSON
     codedoc . --verbose                # debug logging
     python -m codedoc .                # same as above, alternative invocation
 """
@@ -32,6 +33,7 @@ examples:
   codedoc . --llm local              use a local LLM (Ollama / LM Studio)
   codedoc . --model claude-haiku-4-5-20251001 --llm api   use Claude
   codedoc . --output ./docs          write output to ./docs
+  codedoc . --format md              write one combined Markdown file
   codedoc . --ignore /myenv          ignore a project-root path
         """,
     )
@@ -68,6 +70,12 @@ examples:
         help="Output directory for generated docs (default: ./docs_output)",
     )
     parser.add_argument(
+        "--format",
+        choices=["json", "md", "both"],
+        default=None,
+        help="Output format: json, md, or both (default: json)",
+    )
+    parser.add_argument(
         "--ignore",
         action="append",
         default=[],
@@ -92,7 +100,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.1",
+        version="%(prog)s 0.1.4",
     )
 
     return parser
@@ -117,6 +125,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["model_name"] = args.model
     if args.output:
         overrides["output_dir"] = args.output
+    if args.format:
+        overrides["output_format"] = args.format
     if args.ignore:
         overrides["ignore_paths"] = args.ignore
     if args.no_parallel:
@@ -130,8 +140,11 @@ def main(argv: list[str] | None = None) -> None:
 
         print(f"\ncodedoc complete.")
         print(f"  Files documented : {stats['checked']}")
+        print(f"  Files reused     : {stats.get('reused', 0)}")
         print(f"  Files failed     : {stats['failed']}")
         print(f"  Output directory : {stats['output_dir']}")
+        for output_file in stats.get("output_files", []):
+            print(f"  Output file      : {output_file}")
 
         if stats["failed"] > 0:
             print(f"\n  See error.log in {root} for details.")
