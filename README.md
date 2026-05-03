@@ -169,20 +169,6 @@ Use local mode when code should stay on the machine or when the user is running 
 
 Start Ollama and pull a coding model.
 
-Windows PowerShell:
-
-```powershell
-ollama pull qwen2.5-coder:7b
-ollama serve
-```
-
-In another PowerShell window:
-
-```powershell
-codedoc . --llm local --model qwen2.5-coder:7b
-```
-
-macOS/Linux:
 
 ```bash
 ollama pull qwen2.5-coder:7b

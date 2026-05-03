@@ -1,0 +1,1894 @@
+{
+  "version": 3,
+  "files": {
+    "lib/core/models/song_model.dart": {
+      "id": "8f1725a2b4c913496198ffe75f2740404b80722df1f5d125262d62fa1f5d764f",
+      "hash": "8f1725a2b4c913496198ffe75f2740404b80722df1f5d125262d62fa1f5d764f",
+      "format": "dart",
+      "path": "lib/core/models/song_model.dart",
+      "last_processed": "2026-05-03T17:23:05.667807+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [],
+      "description": "The song_model.dart file defines the SongModel class, which encapsulates the properties and behaviors of a music track, including attributes such as id, title, artist, album, data path, duration, and whether the track is an asset. This class provides methods to format the duration of the song, clean the title by removing unnecessary characters, and return a default artist name if the artist is unknown or empty.",
+      "role_in_system": "The SongModel class acts as a fundamental data structure within the application, enabling the management and manipulation of song information. It supports features related to music tracks, ensuring that song data is consistently formatted and accessible throughout the codebase.",
+      "key_concepts": [
+        "Data encapsulation",
+        "Getters for computed properties"
+      ],
+      "result": {
+        "file_path": "lib/core/models/song_model.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [],
+        "description": "The song_model.dart file defines the SongModel class, which encapsulates the properties and behaviors of a music track, including attributes such as id, title, artist, album, data path, duration, and whether the track is an asset. This class provides methods to format the duration of the song, clean the title by removing unnecessary characters, and return a default artist name if the artist is unknown or empty.",
+        "role_in_system": "The SongModel class acts as a fundamental data structure within the application, enabling the management and manipulation of song information. It supports features related to music tracks, ensuring that song data is consistently formatted and accessible throughout the codebase.",
+        "functions": [
+          {
+            "name": "durationFormatted",
+            "description": "Returns the duration of the song formatted as 'minutes:seconds'."
+          },
+          {
+            "name": "cleanTitle",
+            "description": "Cleans the title of the song by removing file extensions and unnecessary characters."
+          },
+          {
+            "name": "cleanArtist",
+            "description": "Returns a default value for the artist if it is unknown or empty."
+          }
+        ],
+        "classes": [
+          {
+            "name": "SongModel",
+            "description": "Represents a music track with properties such as id, title, artist, album, data, duration, and isAsset."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines a SongModel class that represents a music track with various attributes such as title, artist, album, and duration.",
+          "role_in_system": "The SongModel class serves as a data structure for managing song information within the application, facilitating operations related to music tracks.",
+          "functions": [
+            {
+              "name": "durationFormatted",
+              "description": "Returns the duration of the song formatted as 'minutes:seconds'."
+            },
+            {
+              "name": "cleanTitle",
+              "description": "Cleans the title of the song by removing file extensions and unnecessary characters."
+            },
+            {
+              "name": "cleanArtist",
+              "description": "Returns a default value for the artist if it is unknown or empty."
+            }
+          ],
+          "classes": [
+            {
+              "name": "SongModel",
+              "description": "Represents a music track with properties such as id, title, artist, album, data, duration, and isAsset."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [],
+          "external": [],
+          "usage_notes": [],
+          "warnings": []
+        },
+        "key_concepts": [
+          "Data encapsulation",
+          "Getters for computed properties"
+        ],
+        "usage_example": "import 'package:your_package/core/models/song_model.dart';",
+        "documentation": {
+          "description": "The song_model.dart file defines the SongModel class, which encapsulates the properties and behaviors of a music track, including attributes such as id, title, artist, album, data path, duration, and whether the track is an asset. This class provides methods to format the duration of the song, clean the title by removing unnecessary characters, and return a default artist name if the artist is unknown or empty.",
+          "role_in_system": "The SongModel class acts as a fundamental data structure within the application, enabling the management and manipulation of song information. It supports features related to music tracks, ensuring that song data is consistently formatted and accessible throughout the codebase.",
+          "key_concepts": [
+            "Data encapsulation",
+            "Getters for computed properties"
+          ],
+          "usage_example": "import 'package:your_package/core/models/song_model.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/core/theme/app_theme.dart": {
+      "id": "38f7457cee7d5b04c203294ca57f7d56ffdf0cc6744cae7b3b0e0040953f0161",
+      "hash": "38f7457cee7d5b04c203294ca57f7d56ffdf0cc6744cae7b3b0e0040953f0161",
+      "format": "dart",
+      "path": "lib/core/theme/app_theme.dart",
+      "last_processed": "2026-05-03T17:23:12.731621+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:flutter/services.dart"
+      ],
+      "description": "The app_theme.dart file defines the visual theme for a Flutter application, including color palettes, text styles, and overall theme data. It centralizes the management of UI aesthetics, ensuring a consistent look and feel across various components of the application.",
+      "role_in_system": "This file serves as a foundational element for the application's UI, providing a structured way to define and apply styles, colors, and themes that are used throughout the app, thereby enhancing maintainability and coherence in design.",
+      "key_concepts": [
+        "Singleton pattern for color and text style definitions",
+        "ThemeData encapsulation for consistent theming"
+      ],
+      "result": {
+        "file_path": "lib/core/theme/app_theme.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:flutter/services.dart"
+        ],
+        "description": "The app_theme.dart file defines the visual theme for a Flutter application, including color palettes, text styles, and overall theme data. It centralizes the management of UI aesthetics, ensuring a consistent look and feel across various components of the application.",
+        "role_in_system": "This file serves as a foundational element for the application's UI, providing a structured way to define and apply styles, colors, and themes that are used throughout the app, thereby enhancing maintainability and coherence in design.",
+        "functions": [],
+        "classes": [
+          {
+            "name": "AppColors",
+            "description": "Holds static color constants used throughout the application."
+          },
+          {
+            "name": "AppTextStyles",
+            "description": "Defines static text styles for various text elements in the application."
+          },
+          {
+            "name": "AppTheme",
+            "description": "Encapsulates the theme data for the application, including color schemes, text themes, and component styles."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the application's theme, including color palettes, text styles, and overall theme data for a Flutter application.",
+          "role_in_system": "It provides a centralized way to manage the visual aspects of the application, ensuring consistency across different UI components.",
+          "functions": [],
+          "classes": [
+            {
+              "name": "AppColors",
+              "description": "Holds static color constants used throughout the application."
+            },
+            {
+              "name": "AppTextStyles",
+              "description": "Defines static text styles for various text elements in the application."
+            },
+            {
+              "name": "AppTheme",
+              "description": "Encapsulates the theme data for the application, including color schemes, text themes, and component styles."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [],
+          "external": [
+            "flutter/material.dart",
+            "flutter/services.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides material design components and theming capabilities."
+            },
+            {
+              "import": "package:flutter/services.dart",
+              "used_for": "Enables access to platform-specific services, such as system UI overlays."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "Singleton pattern for color and text style definitions",
+          "ThemeData encapsulation for consistent theming"
+        ],
+        "usage_example": "import 'package:your_project/core/theme/app_theme.dart';",
+        "documentation": {
+          "description": "The app_theme.dart file defines the visual theme for a Flutter application, including color palettes, text styles, and overall theme data. It centralizes the management of UI aesthetics, ensuring a consistent look and feel across various components of the application.",
+          "role_in_system": "This file serves as a foundational element for the application's UI, providing a structured way to define and apply styles, colors, and themes that are used throughout the app, thereby enhancing maintainability and coherence in design.",
+          "key_concepts": [
+            "Singleton pattern for color and text style definitions",
+            "ThemeData encapsulation for consistent theming"
+          ],
+          "usage_example": "import 'package:your_project/core/theme/app_theme.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/core/services/audio_service.dart": {
+      "id": "e794baf0671e6363d163fc24a95e1e7d7fb694adeb63e8e8bd4966be8615901d",
+      "hash": "e794baf0671e6363d163fc24a95e1e7d7fb694adeb63e8e8bd4966be8615901d",
+      "format": "dart",
+      "path": "lib/core/services/audio_service.dart",
+      "last_processed": "2026-05-03T17:23:24.080975+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:audio_session/audio_session.dart",
+        "package:flutter/material.dart",
+        "package:just_audio/just_audio.dart",
+        "../models/song_model.dart"
+      ],
+      "description": "The audio_service.dart file defines the AudioService class, which is responsible for managing audio playback in the application. It handles functionalities such as song queueing, playback controls, and session management for audio interruptions, ensuring a seamless audio experience for users.",
+      "role_in_system": "The AudioService class acts as a singleton service that integrates with external audio libraries like just_audio and audio_session. It manages the state of the audio player and provides a centralized way to control audio playback throughout the application.",
+      "key_concepts": [
+        "Singleton pattern for managing a single instance of audio playback",
+        "ChangeNotifier for state management and UI updates",
+        "Integration with external audio libraries for playback and session management"
+      ],
+      "result": {
+        "file_path": "lib/core/services/audio_service.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:audio_session/audio_session.dart",
+          "package:flutter/material.dart",
+          "package:just_audio/just_audio.dart",
+          "../models/song_model.dart"
+        ],
+        "description": "The audio_service.dart file defines the AudioService class, which is responsible for managing audio playback in the application. It handles functionalities such as song queueing, playback controls, and session management for audio interruptions, ensuring a seamless audio experience for users.",
+        "role_in_system": "The AudioService class acts as a singleton service that integrates with external audio libraries like just_audio and audio_session. It manages the state of the audio player and provides a centralized way to control audio playback throughout the application.",
+        "functions": [
+          {
+            "name": "init",
+            "description": "Initializes the audio session and sets up listeners for audio interruptions and player state."
+          },
+          {
+            "name": "_loadAndPlay",
+            "description": "Loads the current song and starts playback."
+          },
+          {
+            "name": "playSong",
+            "description": "Sets the song to play and updates the queue."
+          },
+          {
+            "name": "togglePlayPause",
+            "description": "Toggles between playing and pausing the audio."
+          },
+          {
+            "name": "next",
+            "description": "Plays the next song in the queue, considering shuffle mode."
+          },
+          {
+            "name": "previous",
+            "description": "Plays the previous song in the queue or restarts the current song if less than 3 seconds in."
+          },
+          {
+            "name": "seek",
+            "description": "Seeks to a specified position in the current song."
+          },
+          {
+            "name": "setSpeed",
+            "description": "Sets the playback speed of the audio."
+          },
+          {
+            "name": "toggleShuffle",
+            "description": "Toggles the shuffle mode for the song queue."
+          },
+          {
+            "name": "toggleLoopMode",
+            "description": "Cycles through loop modes: off, all, and one."
+          },
+          {
+            "name": "dispose",
+            "description": "Cleans up resources by disposing of the audio player."
+          }
+        ],
+        "classes": [
+          {
+            "name": "AudioService",
+            "description": "A singleton class that manages audio playback and state."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the AudioService class, which manages audio playback, including song queueing, playback controls, and session management for audio interruptions.",
+          "role_in_system": "The AudioService class acts as a singleton service for handling audio playback in the application, integrating with external audio libraries and managing the state of the audio player.",
+          "functions": [
+            {
+              "name": "init",
+              "description": "Initializes the audio session and sets up listeners for audio interruptions and player state."
+            },
+            {
+              "name": "_loadAndPlay",
+              "description": "Loads the current song and starts playback."
+            },
+            {
+              "name": "playSong",
+              "description": "Sets the song to play and updates the queue."
+            },
+            {
+              "name": "togglePlayPause",
+              "description": "Toggles between playing and pausing the audio."
+            },
+            {
+              "name": "next",
+              "description": "Plays the next song in the queue, considering shuffle mode."
+            },
+            {
+              "name": "previous",
+              "description": "Plays the previous song in the queue or restarts the current song if less than 3 seconds in."
+            },
+            {
+              "name": "seek",
+              "description": "Seeks to a specified position in the current song."
+            },
+            {
+              "name": "setSpeed",
+              "description": "Sets the playback speed of the audio."
+            },
+            {
+              "name": "toggleShuffle",
+              "description": "Toggles the shuffle mode for the song queue."
+            },
+            {
+              "name": "toggleLoopMode",
+              "description": "Cycles through loop modes: off, all, and one."
+            },
+            {
+              "name": "dispose",
+              "description": "Cleans up resources by disposing of the audio player."
+            }
+          ],
+          "classes": [
+            {
+              "name": "AudioService",
+              "description": "A singleton class that manages audio playback and state."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../models/song_model.dart"
+          ],
+          "external": [
+            "audio_session",
+            "flutter",
+            "just_audio"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:audio_session/audio_session.dart",
+              "used_for": "Managing audio session and handling interruptions"
+            },
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Using Flutter's material design components and ChangeNotifier"
+            },
+            {
+              "import": "package:just_audio/just_audio.dart",
+              "used_for": "Playing audio files and managing audio playback"
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "Singleton pattern for managing a single instance of audio playback",
+          "ChangeNotifier for state management and UI updates",
+          "Integration with external audio libraries for playback and session management"
+        ],
+        "usage_example": "import 'package:your_app/core/services/audio_service.dart';",
+        "documentation": {
+          "description": "The audio_service.dart file defines the AudioService class, which is responsible for managing audio playback in the application. It handles functionalities such as song queueing, playback controls, and session management for audio interruptions, ensuring a seamless audio experience for users.",
+          "role_in_system": "The AudioService class acts as a singleton service that integrates with external audio libraries like just_audio and audio_session. It manages the state of the audio player and provides a centralized way to control audio playback throughout the application.",
+          "key_concepts": [
+            "Singleton pattern for managing a single instance of audio playback",
+            "ChangeNotifier for state management and UI updates",
+            "Integration with external audio libraries for playback and session management"
+          ],
+          "usage_example": "import 'package:your_app/core/services/audio_service.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/core/widgets/song_list_tile.dart": {
+      "id": "2b48d9747e3b2e486e8ff0859d5d7796ec8805dec192f0d56305c3d2b8cfb5f0",
+      "hash": "2b48d9747e3b2e486e8ff0859d5d7796ec8805dec192f0d56305c3d2b8cfb5f0",
+      "format": "dart",
+      "path": "lib/core/widgets/song_list_tile.dart",
+      "last_processed": "2026-05-03T17:23:31.842890+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:provider/provider.dart",
+        "../models/song_model.dart",
+        "../services/audio_service.dart",
+        "../theme/app_theme.dart"
+      ],
+      "description": "The song_list_tile.dart file defines a stateless widget called SongListTile, which is used to display a tile representing a song in a music application. It shows the song's title, artist, duration, and playback status, providing a visual interface for users to interact with the song playback functionality.",
+      "role_in_system": "This file serves as a UI component that integrates with the audio service to manage song playback and display relevant song information, enhancing the user experience in the music application.",
+      "key_concepts": [
+        "StatelessWidget",
+        "Consumer for state management",
+        "ListTile for displaying song information"
+      ],
+      "result": {
+        "file_path": "lib/core/widgets/song_list_tile.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:provider/provider.dart",
+          "../models/song_model.dart",
+          "../services/audio_service.dart",
+          "../theme/app_theme.dart"
+        ],
+        "description": "The song_list_tile.dart file defines a stateless widget called SongListTile, which is used to display a tile representing a song in a music application. It shows the song's title, artist, duration, and playback status, providing a visual interface for users to interact with the song playback functionality.",
+        "role_in_system": "This file serves as a UI component that integrates with the audio service to manage song playback and display relevant song information, enhancing the user experience in the music application.",
+        "functions": [],
+        "classes": [
+          {
+            "name": "SongListTile",
+            "description": "A stateless widget that displays a song's title, artist, duration, and playback status."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines a widget that represents a song list tile in a music application, displaying song details and playback status.",
+          "role_in_system": "It serves as a UI component that interacts with the audio service to manage song playback and display relevant song information.",
+          "functions": [],
+          "classes": [
+            {
+              "name": "SongListTile",
+              "description": "A stateless widget that displays a song's title, artist, duration, and playback status."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../models/song_model.dart",
+            "../services/audio_service.dart",
+            "../theme/app_theme.dart"
+          ],
+          "external": [
+            "flutter/material.dart",
+            "provider/provider.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides Material Design widgets and themes."
+            },
+            {
+              "import": "package:provider/provider.dart",
+              "used_for": "Enables state management using the Provider package."
+            },
+            {
+              "import": "../models/song_model.dart",
+              "used_for": "Defines the SongModel class used for song data."
+            },
+            {
+              "import": "../services/audio_service.dart",
+              "used_for": "Provides audio playback functionality."
+            },
+            {
+              "import": "../theme/app_theme.dart",
+              "used_for": "Contains application color themes."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatelessWidget",
+          "Consumer for state management",
+          "ListTile for displaying song information"
+        ],
+        "usage_example": "import 'package:your_app/core/widgets/song_list_tile.dart';",
+        "documentation": {
+          "description": "The song_list_tile.dart file defines a stateless widget called SongListTile, which is used to display a tile representing a song in a music application. It shows the song's title, artist, duration, and playback status, providing a visual interface for users to interact with the song playback functionality.",
+          "role_in_system": "This file serves as a UI component that integrates with the audio service to manage song playback and display relevant song information, enhancing the user experience in the music application.",
+          "key_concepts": [
+            "StatelessWidget",
+            "Consumer for state management",
+            "ListTile for displaying song information"
+          ],
+          "usage_example": "import 'package:your_app/core/widgets/song_list_tile.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/features/atharv_music/atharv_music_screen.dart": {
+      "id": "09b485e89b81267f917a2cc581c5ed1d81d1dec706d756a43e3d2716ae0af084",
+      "hash": "09b485e89b81267f917a2cc581c5ed1d81d1dec706d756a43e3d2716ae0af084",
+      "format": "dart",
+      "path": "lib/features/atharv_music/atharv_music_screen.dart",
+      "last_processed": "2026-05-03T17:23:41.492811+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:flutter/services.dart",
+        "../../core/models/song_model.dart",
+        "../../core/theme/app_theme.dart",
+        "../../core/widgets/song_list_tile.dart"
+      ],
+      "description": "The atharv_music_screen.dart file defines the AtharvMusicScreen, a Flutter screen that presents a user interface for displaying a list of music tracks. It allows users to search and view songs that are bundled within the application. The screen manages the loading of song assets, handles user input for searching, and updates the UI accordingly based on the state of the song data.",
+      "role_in_system": "This file serves as a crucial component of the music feature in the application, integrating song data from bundled assets and providing an interactive interface for users to explore and play music. It connects with other parts of the codebase by utilizing models, themes, and widgets defined in the core directory.",
+      "key_concepts": [
+        "StatefulWidget for managing UI state",
+        "Asynchronous asset loading",
+        "Filtering data based on user input"
+      ],
+      "result": {
+        "file_path": "lib/features/atharv_music/atharv_music_screen.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:flutter/services.dart",
+          "../../core/models/song_model.dart",
+          "../../core/theme/app_theme.dart",
+          "../../core/widgets/song_list_tile.dart"
+        ],
+        "description": "The atharv_music_screen.dart file defines the AtharvMusicScreen, a Flutter screen that presents a user interface for displaying a list of music tracks. It allows users to search and view songs that are bundled within the application. The screen manages the loading of song assets, handles user input for searching, and updates the UI accordingly based on the state of the song data.",
+        "role_in_system": "This file serves as a crucial component of the music feature in the application, integrating song data from bundled assets and providing an interactive interface for users to explore and play music. It connects with other parts of the codebase by utilizing models, themes, and widgets defined in the core directory.",
+        "functions": [
+          {
+            "name": "initState",
+            "description": "Initializes the state and loads bundled songs when the screen is created."
+          },
+          {
+            "name": "_loadBundledSongs",
+            "description": "Asynchronously loads song assets from the application's asset bundle and updates the state."
+          },
+          {
+            "name": "_filtered",
+            "description": "Returns a filtered list of songs based on the current search query."
+          },
+          {
+            "name": "build",
+            "description": "Builds the UI for the AtharvMusicScreen, including the song list and search functionality."
+          }
+        ],
+        "classes": [
+          {
+            "name": "AtharvMusicScreen",
+            "description": "A StatefulWidget that represents the main screen for displaying music."
+          },
+          {
+            "name": "_AtharvMusicScreenState",
+            "description": "The state class for AtharvMusicScreen that manages song loading and UI state."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the AtharvMusicScreen, a Flutter screen that displays a list of music tracks, allowing users to search and view songs from bundled assets.",
+          "role_in_system": "It serves as a user interface component for the music feature of the application, integrating song data and providing a way to interact with it.",
+          "functions": [
+            {
+              "name": "initState",
+              "description": "Initializes the state and loads bundled songs when the screen is created."
+            },
+            {
+              "name": "_loadBundledSongs",
+              "description": "Asynchronously loads song assets from the application's asset bundle and updates the state."
+            },
+            {
+              "name": "_filtered",
+              "description": "Returns a filtered list of songs based on the current search query."
+            },
+            {
+              "name": "build",
+              "description": "Builds the UI for the AtharvMusicScreen, including the song list and search functionality."
+            }
+          ],
+          "classes": [
+            {
+              "name": "AtharvMusicScreen",
+              "description": "A StatefulWidget that represents the main screen for displaying music."
+            },
+            {
+              "name": "_AtharvMusicScreenState",
+              "description": "The state class for AtharvMusicScreen that manages song loading and UI state."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../../core/models/song_model.dart",
+            "../../core/theme/app_theme.dart",
+            "../../core/widgets/song_list_tile.dart"
+          ],
+          "external": [
+            "flutter/material.dart",
+            "flutter/services.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides material design widgets and themes."
+            },
+            {
+              "import": "package:flutter/services.dart",
+              "used_for": "Allows access to platform-specific services, such as asset loading."
+            },
+            {
+              "import": "../../core/models/song_model.dart",
+              "used_for": "Defines the SongModel class used to represent song data."
+            },
+            {
+              "import": "../../core/theme/app_theme.dart",
+              "used_for": "Contains theme definitions for the app's UI."
+            },
+            {
+              "import": "../../core/widgets/song_list_tile.dart",
+              "used_for": "Provides a widget to display individual song items in a list."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatefulWidget for managing UI state",
+          "Asynchronous asset loading",
+          "Filtering data based on user input"
+        ],
+        "usage_example": "import 'lib/features/atharv_music/atharv_music_screen.dart';",
+        "documentation": {
+          "description": "The atharv_music_screen.dart file defines the AtharvMusicScreen, a Flutter screen that presents a user interface for displaying a list of music tracks. It allows users to search and view songs that are bundled within the application. The screen manages the loading of song assets, handles user input for searching, and updates the UI accordingly based on the state of the song data.",
+          "role_in_system": "This file serves as a crucial component of the music feature in the application, integrating song data from bundled assets and providing an interactive interface for users to explore and play music. It connects with other parts of the codebase by utilizing models, themes, and widgets defined in the core directory.",
+          "key_concepts": [
+            "StatefulWidget for managing UI state",
+            "Asynchronous asset loading",
+            "Filtering data based on user input"
+          ],
+          "usage_example": "import 'lib/features/atharv_music/atharv_music_screen.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/core/services/music_scanner.dart": {
+      "id": "e19f246413dcf52598f08420562e8908c99d2f1bc72599efae580d65b4d256d2",
+      "hash": "e19f246413dcf52598f08420562e8908c99d2f1bc72599efae580d65b4d256d2",
+      "format": "dart",
+      "path": "lib/core/services/music_scanner.dart",
+      "last_processed": "2026-05-03T17:23:49.740224+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "dart:io",
+        "package:flutter/material.dart",
+        "package:permission_handler/permission_handler.dart",
+        "../models/song_model.dart"
+      ],
+      "description": "The music_scanner.dart file defines the MusicScanner class, which is responsible for scanning the device's storage for audio files while managing the necessary permissions for accessing media. It provides methods to check, request, and verify permissions, as well as to recursively scan directories for audio files, returning a list of found songs represented by the SongModel class.",
+      "role_in_system": "This file acts as a service within the codebase, enabling the application to locate and retrieve audio files from the device's storage and SD card, ensuring that the required permissions are granted for media access, which is essential for any music-related functionality in the app.",
+      "key_concepts": [
+        "Permission handling for audio and storage access",
+        "Recursive directory scanning for audio files",
+        "Use of model classes to represent audio files"
+      ],
+      "result": {
+        "file_path": "lib/core/services/music_scanner.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "dart:io",
+          "package:flutter/material.dart",
+          "package:permission_handler/permission_handler.dart",
+          "../models/song_model.dart"
+        ],
+        "description": "The music_scanner.dart file defines the MusicScanner class, which is responsible for scanning the device's storage for audio files while managing the necessary permissions for accessing media. It provides methods to check, request, and verify permissions, as well as to recursively scan directories for audio files, returning a list of found songs represented by the SongModel class.",
+        "role_in_system": "This file acts as a service within the codebase, enabling the application to locate and retrieve audio files from the device's storage and SD card, ensuring that the required permissions are granted for media access, which is essential for any music-related functionality in the app.",
+        "functions": [
+          {
+            "name": "_getPermissionStatus",
+            "description": "Checks the current permission status for audio and storage access."
+          },
+          {
+            "name": "requestPermission",
+            "description": "Requests audio and storage permissions from the user."
+          },
+          {
+            "name": "isPermissionGranted",
+            "description": "Determines if the necessary permissions are granted."
+          },
+          {
+            "name": "isPermissionPermanentlyDenied",
+            "description": "Checks if the permissions are permanently denied."
+          },
+          {
+            "name": "scanDevice",
+            "description": "Scans the device and SD card for audio files and returns a list of found songs."
+          },
+          {
+            "name": "_scanDirectory",
+            "description": "Recursively scans a directory for audio files and adds them to the list of songs."
+          }
+        ],
+        "classes": [
+          {
+            "name": "MusicScanner",
+            "description": "A service class that handles scanning for audio files and managing permissions."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines a MusicScanner class that scans the device's storage for audio files and manages permissions for accessing media.",
+          "role_in_system": "It serves as a service to locate and retrieve audio files, ensuring the necessary permissions are granted for accessing media on the device.",
+          "functions": [
+            {
+              "name": "_getPermissionStatus",
+              "description": "Checks the current permission status for audio and storage access."
+            },
+            {
+              "name": "requestPermission",
+              "description": "Requests audio and storage permissions from the user."
+            },
+            {
+              "name": "isPermissionGranted",
+              "description": "Determines if the necessary permissions are granted."
+            },
+            {
+              "name": "isPermissionPermanentlyDenied",
+              "description": "Checks if the permissions are permanently denied."
+            },
+            {
+              "name": "scanDevice",
+              "description": "Scans the device and SD card for audio files and returns a list of found songs."
+            },
+            {
+              "name": "_scanDirectory",
+              "description": "Recursively scans a directory for audio files and adds them to the list of songs."
+            }
+          ],
+          "classes": [
+            {
+              "name": "MusicScanner",
+              "description": "A service class that handles scanning for audio files and managing permissions."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../models/song_model.dart"
+          ],
+          "external": [
+            "dart:io",
+            "flutter/material.dart",
+            "permission_handler"
+          ],
+          "usage_notes": [
+            {
+              "import": "dart:io",
+              "used_for": "Accessing file system and directories"
+            },
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Using Flutter's material design components"
+            },
+            {
+              "import": "package:permission_handler/permission_handler.dart",
+              "used_for": "Handling permissions for accessing audio files"
+            },
+            {
+              "import": "../models/song_model.dart",
+              "used_for": "Using the SongModel class to represent audio files"
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "Permission handling for audio and storage access",
+          "Recursive directory scanning for audio files",
+          "Use of model classes to represent audio files"
+        ],
+        "usage_example": "import 'lib/core/services/music_scanner.dart';",
+        "documentation": {
+          "description": "The music_scanner.dart file defines the MusicScanner class, which is responsible for scanning the device's storage for audio files while managing the necessary permissions for accessing media. It provides methods to check, request, and verify permissions, as well as to recursively scan directories for audio files, returning a list of found songs represented by the SongModel class.",
+          "role_in_system": "This file acts as a service within the codebase, enabling the application to locate and retrieve audio files from the device's storage and SD card, ensuring that the required permissions are granted for media access, which is essential for any music-related functionality in the app.",
+          "key_concepts": [
+            "Permission handling for audio and storage access",
+            "Recursive directory scanning for audio files",
+            "Use of model classes to represent audio files"
+          ],
+          "usage_example": "import 'lib/core/services/music_scanner.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/core/widgets/mini_player.dart": {
+      "id": "464b787f079a5e9fcb641fab33824b36ecd698107e51983f774269c126f40660",
+      "hash": "464b787f079a5e9fcb641fab33824b36ecd698107e51983f774269c126f40660",
+      "format": "dart",
+      "path": "lib/core/widgets/mini_player.dart",
+      "last_processed": "2026-05-03T17:23:56.941863+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:provider/provider.dart",
+        "../services/audio_service.dart",
+        "../theme/app_theme.dart",
+        "full_player_screen.dart"
+      ],
+      "description": "The mini_player.dart file defines a MiniPlayer widget that provides a compact interface for music playback, allowing users to view current song details and control playback actions such as play, pause, skip, and navigate to a full player screen.",
+      "role_in_system": "The MiniPlayer widget is an integral part of the audio playback feature, utilizing the AudioService to manage playback state and song information, thereby enhancing user interaction with the audio content.",
+      "key_concepts": [
+        "StatelessWidget",
+        "Provider for state management",
+        "GestureDetector for user interaction",
+        "LinearProgressIndicator for playback progress"
+      ],
+      "result": {
+        "file_path": "lib/core/widgets/mini_player.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:provider/provider.dart",
+          "../services/audio_service.dart",
+          "../theme/app_theme.dart",
+          "full_player_screen.dart"
+        ],
+        "description": "The mini_player.dart file defines a MiniPlayer widget that provides a compact interface for music playback, allowing users to view current song details and control playback actions such as play, pause, skip, and navigate to a full player screen.",
+        "role_in_system": "The MiniPlayer widget is an integral part of the audio playback feature, utilizing the AudioService to manage playback state and song information, thereby enhancing user interaction with the audio content.",
+        "functions": [],
+        "classes": [
+          {
+            "name": "MiniPlayer",
+            "description": "A StatelessWidget that builds a mini music player interface using the audio service to display song details and playback controls."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines a MiniPlayer widget that displays a compact music player interface, allowing users to interact with audio playback.",
+          "role_in_system": "The MiniPlayer widget serves as a part of the audio playback feature, providing a user interface for controlling music playback and displaying current song information.",
+          "functions": [],
+          "classes": [
+            {
+              "name": "MiniPlayer",
+              "description": "A StatelessWidget that builds a mini music player interface using the audio service to display song details and playback controls."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../services/audio_service.dart",
+            "../theme/app_theme.dart",
+            "full_player_screen.dart"
+          ],
+          "external": [
+            "flutter/material.dart",
+            "provider/provider.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides Material Design widgets and themes."
+            },
+            {
+              "import": "package:provider/provider.dart",
+              "used_for": "Enables state management using the Provider package."
+            },
+            {
+              "import": "../services/audio_service.dart",
+              "used_for": "Accesses audio service for managing playback and song information."
+            },
+            {
+              "import": "../theme/app_theme.dart",
+              "used_for": "Defines application-specific color themes."
+            },
+            {
+              "import": "full_player_screen.dart",
+              "used_for": "Navigates to the full player screen when the mini player is tapped."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatelessWidget",
+          "Provider for state management",
+          "GestureDetector for user interaction",
+          "LinearProgressIndicator for playback progress"
+        ],
+        "usage_example": "import 'package:your_project/core/widgets/mini_player.dart';",
+        "documentation": {
+          "description": "The mini_player.dart file defines a MiniPlayer widget that provides a compact interface for music playback, allowing users to view current song details and control playback actions such as play, pause, skip, and navigate to a full player screen.",
+          "role_in_system": "The MiniPlayer widget is an integral part of the audio playback feature, utilizing the AudioService to manage playback state and song information, thereby enhancing user interaction with the audio content.",
+          "key_concepts": [
+            "StatelessWidget",
+            "Provider for state management",
+            "GestureDetector for user interaction",
+            "LinearProgressIndicator for playback progress"
+          ],
+          "usage_example": "import 'package:your_project/core/widgets/mini_player.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/features/home/home_screen.dart": {
+      "id": "f4b464e9acec3b6481ccd1791678a78deb7a925713fead1ef93432fb21d1f343",
+      "hash": "f4b464e9acec3b6481ccd1791678a78deb7a925713fead1ef93432fb21d1f343",
+      "format": "dart",
+      "path": "lib/features/home/home_screen.dart",
+      "last_processed": "2026-05-03T17:24:03.780331+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "../atharv_music/atharv_music_screen.dart",
+        "../mixer/mixer_screen.dart",
+        "../library/library_screen.dart",
+        "../../core/theme/app_theme.dart",
+        "../../core/widgets/mini_player.dart"
+      ],
+      "description": "The home_screen.dart file defines the HomeScreen widget, which serves as the main interface for navigating between different screens in the application, including music, mixer, and library functionalities. It utilizes a bottom navigation bar to switch between these screens and manages the state of the currently selected screen.",
+      "role_in_system": "The HomeScreen acts as a container for various feature screens and manages the navigation between them. It integrates the Atharv Music, Mixer, and Library screens, providing a cohesive user experience and facilitating interaction with these features.",
+      "key_concepts": [
+        "StatefulWidget",
+        "IndexedStack",
+        "BottomNavigationBar"
+      ],
+      "result": {
+        "file_path": "lib/features/home/home_screen.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "../atharv_music/atharv_music_screen.dart",
+          "../mixer/mixer_screen.dart",
+          "../library/library_screen.dart",
+          "../../core/theme/app_theme.dart",
+          "../../core/widgets/mini_player.dart"
+        ],
+        "description": "The home_screen.dart file defines the HomeScreen widget, which serves as the main interface for navigating between different screens in the application, including music, mixer, and library functionalities. It utilizes a bottom navigation bar to switch between these screens and manages the state of the currently selected screen.",
+        "role_in_system": "The HomeScreen acts as a container for various feature screens and manages the navigation between them. It integrates the Atharv Music, Mixer, and Library screens, providing a cohesive user experience and facilitating interaction with these features.",
+        "functions": [
+          {
+            "name": "initState",
+            "description": "Initializes the list of screens to be displayed in the HomeScreen."
+          },
+          {
+            "name": "_onTabTapped",
+            "description": "Handles tab selection in the bottom navigation bar and pauses mixer tracks when leaving the mixer tab."
+          },
+          {
+            "name": "build",
+            "description": "Builds the UI for the HomeScreen, including the bottom navigation bar and the currently selected screen."
+          }
+        ],
+        "classes": [
+          {
+            "name": "HomeScreen",
+            "description": "A StatefulWidget that represents the main screen of the application."
+          },
+          {
+            "name": "_HomeScreenState",
+            "description": "The state class for HomeScreen that manages the current index and screen navigation."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the HomeScreen widget, which serves as the main interface for navigating between different screens in the application, including music, mixer, and library functionalities.",
+          "role_in_system": "The HomeScreen acts as a container for various feature screens and manages the navigation between them using a bottom navigation bar.",
+          "functions": [
+            {
+              "name": "initState",
+              "description": "Initializes the list of screens to be displayed in the HomeScreen."
+            },
+            {
+              "name": "_onTabTapped",
+              "description": "Handles tab selection in the bottom navigation bar and pauses mixer tracks when leaving the mixer tab."
+            },
+            {
+              "name": "build",
+              "description": "Builds the UI for the HomeScreen, including the bottom navigation bar and the currently selected screen."
+            }
+          ],
+          "classes": [
+            {
+              "name": "HomeScreen",
+              "description": "A StatefulWidget that represents the main screen of the application."
+            },
+            {
+              "name": "_HomeScreenState",
+              "description": "The state class for HomeScreen that manages the current index and screen navigation."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../atharv_music/atharv_music_screen.dart",
+            "../mixer/mixer_screen.dart",
+            "../library/library_screen.dart",
+            "../../core/theme/app_theme.dart",
+            "../../core/widgets/mini_player.dart"
+          ],
+          "external": [
+            "flutter/material.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides material design widgets and themes."
+            },
+            {
+              "import": "../atharv_music/atharv_music_screen.dart",
+              "used_for": "Represents the Atharv Music screen in the app."
+            },
+            {
+              "import": "../mixer/mixer_screen.dart",
+              "used_for": "Represents the Mixer screen in the app."
+            },
+            {
+              "import": "../library/library_screen.dart",
+              "used_for": "Represents the Library screen in the app."
+            },
+            {
+              "import": "../../core/theme/app_theme.dart",
+              "used_for": "Defines the app's theme."
+            },
+            {
+              "import": "../../core/widgets/mini_player.dart",
+              "used_for": "Displays a mini player widget."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatefulWidget",
+          "IndexedStack",
+          "BottomNavigationBar"
+        ],
+        "usage_example": "import 'package:your_project/features/home/home_screen.dart';",
+        "documentation": {
+          "description": "The home_screen.dart file defines the HomeScreen widget, which serves as the main interface for navigating between different screens in the application, including music, mixer, and library functionalities. It utilizes a bottom navigation bar to switch between these screens and manages the state of the currently selected screen.",
+          "role_in_system": "The HomeScreen acts as a container for various feature screens and manages the navigation between them. It integrates the Atharv Music, Mixer, and Library screens, providing a cohesive user experience and facilitating interaction with these features.",
+          "key_concepts": [
+            "StatefulWidget",
+            "IndexedStack",
+            "BottomNavigationBar"
+          ],
+          "usage_example": "import 'package:your_project/features/home/home_screen.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/features/library/library_screen.dart": {
+      "id": "17cbced75b2cddc5141e7f1fcac4908ebab600c9a6469c7aeb7bfda3b0b24b2a",
+      "hash": "17cbced75b2cddc5141e7f1fcac4908ebab600c9a6469c7aeb7bfda3b0b24b2a",
+      "format": "dart",
+      "path": "lib/features/library/library_screen.dart",
+      "last_processed": "2026-05-03T17:24:14.574236+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:permission_handler/permission_handler.dart",
+        "../../core/models/song_model.dart",
+        "../../core/services/music_scanner.dart",
+        "../../core/theme/app_theme.dart",
+        "../../core/widgets/song_list_tile.dart"
+      ],
+      "description": "The library_screen.dart file defines the LibraryScreen widget, which provides a user interface for a music application. It allows users to scan their device for music files, manage permissions, and display the music library. The widget handles various states such as loading, permission denial, and displaying the list of songs.",
+      "role_in_system": "This file serves as a crucial component of the music application, enabling users to interact with their music library and ensuring that the necessary permissions are managed effectively. It connects with other parts of the codebase, such as models and services, to retrieve and display music data.",
+      "key_concepts": [
+        "StatefulWidget",
+        "Permission handling",
+        "Custom UI with Sliver components"
+      ],
+      "result": {
+        "file_path": "lib/features/library/library_screen.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:permission_handler/permission_handler.dart",
+          "../../core/models/song_model.dart",
+          "../../core/services/music_scanner.dart",
+          "../../core/theme/app_theme.dart",
+          "../../core/widgets/song_list_tile.dart"
+        ],
+        "description": "The library_screen.dart file defines the LibraryScreen widget, which provides a user interface for a music application. It allows users to scan their device for music files, manage permissions, and display the music library. The widget handles various states such as loading, permission denial, and displaying the list of songs.",
+        "role_in_system": "This file serves as a crucial component of the music application, enabling users to interact with their music library and ensuring that the necessary permissions are managed effectively. It connects with other parts of the codebase, such as models and services, to retrieve and display music data.",
+        "functions": [
+          {
+            "name": "initState",
+            "description": "Initializes the state and checks for permissions when the widget is created."
+          },
+          {
+            "name": "dispose",
+            "description": "Cleans up resources by removing the widget observer."
+          },
+          {
+            "name": "didChangeAppLifecycleState",
+            "description": "Re-checks permissions when the app resumes from the background."
+          },
+          {
+            "name": "_checkAndLoad",
+            "description": "Checks if the necessary permissions are granted and initiates a scan if they are."
+          },
+          {
+            "name": "_startScan",
+            "description": "Requests permissions and scans the device for music files."
+          },
+          {
+            "name": "_filtered",
+            "description": "Filters the list of songs based on the user's search input."
+          },
+          {
+            "name": "build",
+            "description": "Builds the UI for the LibraryScreen, displaying the music library and handling various states."
+          }
+        ],
+        "classes": [
+          {
+            "name": "LibraryScreen",
+            "description": "A StatefulWidget that represents the main screen for displaying the user's music library."
+          },
+          {
+            "name": "_LibraryScreenState",
+            "description": "The state class for LibraryScreen that manages the logic and state of the widget."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the LibraryScreen widget, which displays a music library interface, allowing users to scan their device for music files and manage permissions.",
+          "role_in_system": "It serves as a user interface component within a music application, facilitating interaction with the device's music library.",
+          "functions": [
+            {
+              "name": "initState",
+              "description": "Initializes the state and checks for permissions when the widget is created."
+            },
+            {
+              "name": "dispose",
+              "description": "Cleans up resources by removing the widget observer."
+            },
+            {
+              "name": "didChangeAppLifecycleState",
+              "description": "Re-checks permissions when the app resumes from the background."
+            },
+            {
+              "name": "_checkAndLoad",
+              "description": "Checks if the necessary permissions are granted and initiates a scan if they are."
+            },
+            {
+              "name": "_startScan",
+              "description": "Requests permissions and scans the device for music files."
+            },
+            {
+              "name": "_filtered",
+              "description": "Filters the list of songs based on the user's search input."
+            },
+            {
+              "name": "build",
+              "description": "Builds the UI for the LibraryScreen, displaying the music library and handling various states."
+            }
+          ],
+          "classes": [
+            {
+              "name": "LibraryScreen",
+              "description": "A StatefulWidget that represents the main screen for displaying the user's music library."
+            },
+            {
+              "name": "_LibraryScreenState",
+              "description": "The state class for LibraryScreen that manages the logic and state of the widget."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../../core/models/song_model.dart",
+            "../../core/services/music_scanner.dart",
+            "../../core/theme/app_theme.dart",
+            "../../core/widgets/song_list_tile.dart"
+          ],
+          "external": [
+            "flutter/material.dart",
+            "permission_handler/permission_handler.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides material design widgets and themes."
+            },
+            {
+              "import": "package:permission_handler/permission_handler.dart",
+              "used_for": "Handles permission requests for accessing device storage."
+            },
+            {
+              "import": "../../core/models/song_model.dart",
+              "used_for": "Defines the SongModel class used to represent songs."
+            },
+            {
+              "import": "../../core/services/music_scanner.dart",
+              "used_for": "Contains methods for scanning the device for music files."
+            },
+            {
+              "import": "../../core/theme/app_theme.dart",
+              "used_for": "Defines the app's color theme."
+            },
+            {
+              "import": "../../core/widgets/song_list_tile.dart",
+              "used_for": "Provides a widget for displaying individual song items."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatefulWidget",
+          "Permission handling",
+          "Custom UI with Sliver components"
+        ],
+        "usage_example": "import 'package:your_app/features/library/library_screen.dart';",
+        "documentation": {
+          "description": "The library_screen.dart file defines the LibraryScreen widget, which provides a user interface for a music application. It allows users to scan their device for music files, manage permissions, and display the music library. The widget handles various states such as loading, permission denial, and displaying the list of songs.",
+          "role_in_system": "This file serves as a crucial component of the music application, enabling users to interact with their music library and ensuring that the necessary permissions are managed effectively. It connects with other parts of the codebase, such as models and services, to retrieve and display music data.",
+          "key_concepts": [
+            "StatefulWidget",
+            "Permission handling",
+            "Custom UI with Sliver components"
+          ],
+          "usage_example": "import 'package:your_app/features/library/library_screen.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/features/mixer/mixer_screen.dart": {
+      "id": "1597629e7dfb1aaa2be41098e3ee78736fa0f8a5145b38b664048c85158611b8",
+      "hash": "1597629e7dfb1aaa2be41098e3ee78736fa0f8a5145b38b664048c85158611b8",
+      "format": "dart",
+      "path": "lib/features/mixer/mixer_screen.dart",
+      "last_processed": "2026-05-03T17:24:29.001290+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "dart:async",
+        "dart:io",
+        "dart:math",
+        "package:flutter/material.dart",
+        "package:flutter/services.dart",
+        "package:just_audio/just_audio.dart",
+        "package:path_provider/path_provider.dart",
+        "package:permission_handler/permission_handler.dart",
+        "package:record/record.dart",
+        "package:shared_preferences/shared_preferences.dart",
+        "../../core/models/song_model.dart",
+        "../../core/services/music_scanner.dart",
+        "../../core/theme/app_theme.dart"
+      ],
+      "description": "The mixer_screen.dart file defines the MixerScreen widget, which provides a user interface for mixing audio tracks, recording audio, and visualizing audio playback in a Flutter application. It manages the state of audio tracks, handles recording functionalities, and updates a visualizer based on the playback state.",
+      "role_in_system": "This file serves as a crucial component of the audio mixing feature in the application, integrating functionalities for loading songs, managing tracks, recording audio, and visualizing playback, thereby enhancing the user experience in audio manipulation.",
+      "key_concepts": [
+        "StatefulWidget",
+        "AnimationController",
+        "CustomPainter for visualizations",
+        "Asynchronous programming with Future",
+        "SharedPreferences for state persistence"
+      ],
+      "result": {
+        "file_path": "lib/features/mixer/mixer_screen.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "dart:async",
+          "dart:io",
+          "dart:math",
+          "package:flutter/material.dart",
+          "package:flutter/services.dart",
+          "package:just_audio/just_audio.dart",
+          "package:path_provider/path_provider.dart",
+          "package:permission_handler/permission_handler.dart",
+          "package:record/record.dart",
+          "package:shared_preferences/shared_preferences.dart",
+          "../../core/models/song_model.dart",
+          "../../core/services/music_scanner.dart",
+          "../../core/theme/app_theme.dart"
+        ],
+        "description": "The mixer_screen.dart file defines the MixerScreen widget, which provides a user interface for mixing audio tracks, recording audio, and visualizing audio playback in a Flutter application. It manages the state of audio tracks, handles recording functionalities, and updates a visualizer based on the playback state.",
+        "role_in_system": "This file serves as a crucial component of the audio mixing feature in the application, integrating functionalities for loading songs, managing tracks, recording audio, and visualizing playback, thereby enhancing the user experience in audio manipulation.",
+        "functions": [
+          {
+            "name": "initState",
+            "description": "Initializes the state of the MixerScreen, sets up visualizer animation, and loads songs."
+          },
+          {
+            "name": "_loadSongs",
+            "description": "Loads asset and device songs for the track picker."
+          },
+          {
+            "name": "_loadSavedState",
+            "description": "Restores previously saved track and recording states."
+          },
+          {
+            "name": "_saveState",
+            "description": "Persists the current track and recording states."
+          },
+          {
+            "name": "_addTrackWithSong",
+            "description": "Adds a new track with the specified song to the mixer."
+          },
+          {
+            "name": "_addEmptyTrack",
+            "description": "Adds an empty track to the mixer."
+          },
+          {
+            "name": "pauseAllTracks",
+            "description": "Pauses all currently playing tracks."
+          },
+          {
+            "name": "_updateVisualizer",
+            "description": "Updates the visualizer based on the current playback state."
+          },
+          {
+            "name": "_startRecording",
+            "description": "Starts recording audio and manages recording state."
+          },
+          {
+            "name": "_stopRecording",
+            "description": "Stops the recording and saves the audio file."
+          },
+          {
+            "name": "_fmtDur",
+            "description": "Formats a Duration object into a string representation."
+          },
+          {
+            "name": "_showSnack",
+            "description": "Displays a snackbar with a message."
+          },
+          {
+            "name": "dispose",
+            "description": "Cleans up resources when the MixerScreen is removed from the widget tree."
+          },
+          {
+            "name": "build",
+            "description": "Builds the UI for the MixerScreen."
+          },
+          {
+            "name": "_buildVisualizer",
+            "description": "Creates the visualizer widget."
+          },
+          {
+            "name": "_buildTrackCard",
+            "description": "Creates a card widget for displaying a track."
+          }
+        ],
+        "classes": [
+          {
+            "name": "MixerScreen",
+            "description": "A StatefulWidget that provides the interface for mixing audio tracks."
+          },
+          {
+            "name": "MixerScreenState",
+            "description": "The state class for MixerScreen that manages the audio mixing logic and UI."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file defines the MixerScreen widget, which allows users to mix audio tracks, record audio, and visualize audio playback in a Flutter application.",
+          "role_in_system": "It serves as a user interface for mixing and managing audio tracks, integrating functionalities for recording and visualizing audio.",
+          "functions": [
+            {
+              "name": "initState",
+              "description": "Initializes the state of the MixerScreen, sets up visualizer animation, and loads songs."
+            },
+            {
+              "name": "_loadSongs",
+              "description": "Loads asset and device songs for the track picker."
+            },
+            {
+              "name": "_loadSavedState",
+              "description": "Restores previously saved track and recording states."
+            },
+            {
+              "name": "_saveState",
+              "description": "Persists the current track and recording states."
+            },
+            {
+              "name": "_addTrackWithSong",
+              "description": "Adds a new track with the specified song to the mixer."
+            },
+            {
+              "name": "_addEmptyTrack",
+              "description": "Adds an empty track to the mixer."
+            },
+            {
+              "name": "pauseAllTracks",
+              "description": "Pauses all currently playing tracks."
+            },
+            {
+              "name": "_updateVisualizer",
+              "description": "Updates the visualizer based on the current playback state."
+            },
+            {
+              "name": "_startRecording",
+              "description": "Starts recording audio and manages recording state."
+            },
+            {
+              "name": "_stopRecording",
+              "description": "Stops the recording and saves the audio file."
+            },
+            {
+              "name": "_fmtDur",
+              "description": "Formats a Duration object into a string representation."
+            },
+            {
+              "name": "_showSnack",
+              "description": "Displays a snackbar with a message."
+            },
+            {
+              "name": "dispose",
+              "description": "Cleans up resources when the MixerScreen is removed from the widget tree."
+            },
+            {
+              "name": "build",
+              "description": "Builds the UI for the MixerScreen."
+            },
+            {
+              "name": "_buildVisualizer",
+              "description": "Creates the visualizer widget."
+            },
+            {
+              "name": "_buildTrackCard",
+              "description": "Creates a card widget for displaying a track."
+            }
+          ],
+          "classes": [
+            {
+              "name": "MixerScreen",
+              "description": "A StatefulWidget that provides the interface for mixing audio tracks."
+            },
+            {
+              "name": "MixerScreenState",
+              "description": "The state class for MixerScreen that manages the audio mixing logic and UI."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "../../core/models/song_model.dart",
+            "../../core/services/music_scanner.dart",
+            "../../core/theme/app_theme.dart"
+          ],
+          "external": [
+            "dart:async",
+            "dart:io",
+            "dart:math",
+            "flutter/material.dart",
+            "flutter/services.dart",
+            "just_audio/just_audio.dart",
+            "path_provider/path_provider.dart",
+            "permission_handler/permission_handler.dart",
+            "record/record.dart",
+            "shared_preferences/shared_preferences.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "dart:async",
+              "used_for": "Asynchronous programming with Future and Timer."
+            },
+            {
+              "import": "dart:io",
+              "used_for": "File operations for checking existence and accessing paths."
+            },
+            {
+              "import": "dart:math",
+              "used_for": "Generating random numbers for visualizer."
+            },
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Building the UI components of the MixerScreen."
+            },
+            {
+              "import": "package:flutter/services.dart",
+              "used_for": "Accessing platform-specific services."
+            },
+            {
+              "import": "package:just_audio/just_audio.dart",
+              "used_for": "Audio playback functionalities."
+            },
+            {
+              "import": "package:path_provider/path_provider.dart",
+              "used_for": "Accessing the file system directories."
+            },
+            {
+              "import": "package:permission_handler/permission_handler.dart",
+              "used_for": "Requesting and checking permissions for microphone access."
+            },
+            {
+              "import": "package:record/record.dart",
+              "used_for": "Recording audio functionalities."
+            },
+            {
+              "import": "package:shared_preferences/shared_preferences.dart",
+              "used_for": "Persisting user preferences and state."
+            },
+            {
+              "import": "../../core/models/song_model.dart",
+              "used_for": "Defining the SongModel used in the mixer."
+            },
+            {
+              "import": "../../core/services/music_scanner.dart",
+              "used_for": "Scanning device for music files."
+            },
+            {
+              "import": "../../core/theme/app_theme.dart",
+              "used_for": "Accessing application theme colors."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatefulWidget",
+          "AnimationController",
+          "CustomPainter for visualizations",
+          "Asynchronous programming with Future",
+          "SharedPreferences for state persistence"
+        ],
+        "usage_example": "import 'lib/features/mixer/mixer_screen.dart';",
+        "documentation": {
+          "description": "The mixer_screen.dart file defines the MixerScreen widget, which provides a user interface for mixing audio tracks, recording audio, and visualizing audio playback in a Flutter application. It manages the state of audio tracks, handles recording functionalities, and updates a visualizer based on the playback state.",
+          "role_in_system": "This file serves as a crucial component of the audio mixing feature in the application, integrating functionalities for loading songs, managing tracks, recording audio, and visualizing playback, thereby enhancing the user experience in audio manipulation.",
+          "key_concepts": [
+            "StatefulWidget",
+            "AnimationController",
+            "CustomPainter for visualizations",
+            "Asynchronous programming with Future",
+            "SharedPreferences for state persistence"
+          ],
+          "usage_example": "import 'lib/features/mixer/mixer_screen.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "lib/main.dart": {
+      "id": "9a3ca4a7a42afbf8199f957b35f159ad9d9b6b5fd1815d2b9a9dbf16aeeec1ba",
+      "hash": "9a3ca4a7a42afbf8199f957b35f159ad9d9b6b5fd1815d2b9a9dbf16aeeec1ba",
+      "format": "dart",
+      "path": "lib/main.dart",
+      "last_processed": "2026-05-03T17:24:37.991713+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "dart",
+      "imports": [
+        "package:flutter/material.dart",
+        "package:provider/provider.dart",
+        "core/theme/app_theme.dart",
+        "core/services/audio_service.dart",
+        "features/home/home_screen.dart"
+      ],
+      "description": "The lib/main.dart file serves as the entry point for the Flutter application, initializing the app and setting up the main widget structure. It ensures that the Flutter framework is properly initialized and runs the MyApp widget, which is responsible for providing the main user interface and integrating various services and themes.",
+      "role_in_system": "This file connects to and supports the rest of the codebase by integrating essential components such as the audio service and the app's theme. It establishes the main structure of the application, allowing for the management of state and the presentation of the home screen.",
+      "key_concepts": [
+        "StatelessWidget",
+        "Provider for state management",
+        "MaterialApp for UI structure"
+      ],
+      "result": {
+        "file_path": "lib/main.dart",
+        "language": "dart",
+        "extension": ".dart",
+        "imports": [
+          "package:flutter/material.dart",
+          "package:provider/provider.dart",
+          "core/theme/app_theme.dart",
+          "core/services/audio_service.dart",
+          "features/home/home_screen.dart"
+        ],
+        "description": "The lib/main.dart file serves as the entry point for the Flutter application, initializing the app and setting up the main widget structure. It ensures that the Flutter framework is properly initialized and runs the MyApp widget, which is responsible for providing the main user interface and integrating various services and themes.",
+        "role_in_system": "This file connects to and supports the rest of the codebase by integrating essential components such as the audio service and the app's theme. It establishes the main structure of the application, allowing for the management of state and the presentation of the home screen.",
+        "functions": [
+          {
+            "name": "main",
+            "description": "Initializes the Flutter binding and runs the MyApp widget."
+          }
+        ],
+        "classes": [
+          {
+            "name": "MyApp",
+            "description": "A stateless widget that sets up the application with a provider for audio services and defines the main theme and home screen."
+          }
+        ],
+        "exports": [],
+        "structure": {
+          "description": "This file serves as the entry point for a Flutter application, initializing the app and setting up the main widget structure.",
+          "role_in_system": "It integrates various components such as themes and services, and provides the main user interface for the application.",
+          "functions": [
+            {
+              "name": "main",
+              "description": "Initializes the Flutter binding and runs the MyApp widget."
+            }
+          ],
+          "classes": [
+            {
+              "name": "MyApp",
+              "description": "A stateless widget that sets up the application with a provider for audio services and defines the main theme and home screen."
+            }
+          ],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "core/theme/app_theme.dart",
+            "core/services/audio_service.dart",
+            "features/home/home_screen.dart"
+          ],
+          "external": [
+            "flutter/material.dart",
+            "provider/provider.dart"
+          ],
+          "usage_notes": [
+            {
+              "import": "package:flutter/material.dart",
+              "used_for": "Provides Material Design widgets and themes."
+            },
+            {
+              "import": "package:provider/provider.dart",
+              "used_for": "Enables state management using the Provider package."
+            },
+            {
+              "import": "core/theme/app_theme.dart",
+              "used_for": "Defines the app's light theme."
+            },
+            {
+              "import": "core/services/audio_service.dart",
+              "used_for": "Handles audio playback functionalities."
+            },
+            {
+              "import": "features/home/home_screen.dart",
+              "used_for": "Main screen of the application."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "StatelessWidget",
+          "Provider for state management",
+          "MaterialApp for UI structure"
+        ],
+        "usage_example": "import 'lib/main.dart';",
+        "documentation": {
+          "description": "The lib/main.dart file serves as the entry point for the Flutter application, initializing the app and setting up the main widget structure. It ensures that the Flutter framework is properly initialized and runs the MyApp widget, which is responsible for providing the main user interface and integrating various services and themes.",
+          "role_in_system": "This file connects to and supports the rest of the codebase by integrating essential components such as the audio service and the app's theme. It establishes the main structure of the application, allowing for the management of state and the presentation of the home screen.",
+          "key_concepts": [
+            "StatelessWidget",
+            "Provider for state management",
+            "MaterialApp for UI structure"
+          ],
+          "usage_example": "import 'lib/main.dart';"
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    },
+    "web/index.html": {
+      "id": "0eb0e613f3de35c23604f4cf24b32ce028a4fb41c95f796a2a15ba77639d3979",
+      "hash": "0eb0e613f3de35c23604f4cf24b32ce028a4fb41c95f796a2a15ba77639d3979",
+      "format": "html",
+      "path": "web/index.html",
+      "last_processed": "2026-05-03T17:24:44.131947+00:00",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "language": "html",
+      "imports": [
+        "flutter_bootstrap.js",
+        "icons/Icon-192.png",
+        "favicon.png",
+        "manifest.json"
+      ],
+      "description": "The index.html file serves as the main entry point for the Flutter web application, establishing the document structure and including essential resources such as meta tags, icons, and scripts necessary for the application to function correctly in a web environment.",
+      "role_in_system": "This file integrates the Flutter framework with web technologies, enabling the Flutter app to be rendered in a web browser. It sets up the base path for the application, includes the Flutter bootstrap script for initialization, and defines metadata for the web app.",
+      "key_concepts": [
+        "Base href configuration for serving the app from different paths",
+        "Meta tags for mobile web app capabilities and icons",
+        "Asynchronous loading of the Flutter bootstrap script"
+      ],
+      "result": {
+        "file_path": "web/index.html",
+        "language": "html",
+        "extension": ".html",
+        "imports": [
+          "flutter_bootstrap.js",
+          "icons/Icon-192.png",
+          "favicon.png",
+          "manifest.json"
+        ],
+        "description": "The index.html file serves as the main entry point for the Flutter web application, establishing the document structure and including essential resources such as meta tags, icons, and scripts necessary for the application to function correctly in a web environment.",
+        "role_in_system": "This file integrates the Flutter framework with web technologies, enabling the Flutter app to be rendered in a web browser. It sets up the base path for the application, includes the Flutter bootstrap script for initialization, and defines metadata for the web app.",
+        "functions": [],
+        "classes": [],
+        "exports": [],
+        "structure": {
+          "description": "This HTML file serves as the entry point for a Flutter web application, defining the document structure and including necessary resources.",
+          "role_in_system": "It integrates the Flutter framework with web technologies, allowing the Flutter app to be rendered in a web browser.",
+          "functions": [],
+          "classes": [],
+          "exports": []
+        },
+        "dependencies_analysis": {
+          "internal": [
+            "icons/Icon-192.png",
+            "favicon.png",
+            "manifest.json",
+            "flutter_bootstrap.js"
+          ],
+          "external": [],
+          "usage_notes": [
+            {
+              "import": "flutter_bootstrap.js",
+              "used_for": "Provides custom configuration to the Flutter loader during initialization."
+            },
+            {
+              "import": "icons/Icon-192.png",
+              "used_for": "Used as the apple touch icon for the web app."
+            },
+            {
+              "import": "favicon.png",
+              "used_for": "Used as the favicon for the web app."
+            },
+            {
+              "import": "manifest.json",
+              "used_for": "Defines the web app's metadata and settings."
+            }
+          ],
+          "warnings": []
+        },
+        "key_concepts": [
+          "Base href configuration for serving the app from different paths",
+          "Meta tags for mobile web app capabilities and icons",
+          "Asynchronous loading of the Flutter bootstrap script"
+        ],
+        "usage_example": "",
+        "documentation": {
+          "description": "The index.html file serves as the main entry point for the Flutter web application, establishing the document structure and including essential resources such as meta tags, icons, and scripts necessary for the application to function correctly in a web environment.",
+          "role_in_system": "This file integrates the Flutter framework with web technologies, enabling the Flutter app to be rendered in a web browser. It sets up the base path for the application, includes the Flutter bootstrap script for initialization, and defines metadata for the web app.",
+          "key_concepts": [
+            "Base href configuration for serving the app from different paths",
+            "Meta tags for mobile web app capabilities and icons",
+            "Asynchronous loading of the Flutter bootstrap script"
+          ],
+          "usage_example": ""
+        },
+        "state": "checked"
+      },
+      "reused_from": null
+    }
+  },
+  "history": [
+    {
+      "file_path": "lib/core/models/song_model.dart",
+      "processed_at": "2026-05-03T17:23:05.667807+00:00",
+      "previous_hash": null,
+      "hash": "8f1725a2b4c913496198ffe75f2740404b80722df1f5d125262d62fa1f5d764f",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The song_model.dart file defines the SongModel class, which encapsulates the properties and behaviors of a music track, including attributes such as id, title, artist, album, data path, duration, and whether the track is an asset. This class provides methods to format the duration of the song, clean the title by removing unnecessary characters, and return a default artist name if the artist is unknown or empty.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/core/theme/app_theme.dart",
+      "processed_at": "2026-05-03T17:23:12.731621+00:00",
+      "previous_hash": null,
+      "hash": "38f7457cee7d5b04c203294ca57f7d56ffdf0cc6744cae7b3b0e0040953f0161",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The app_theme.dart file defines the visual theme for a Flutter application, including color palettes, text styles, and overall theme data. It centralizes the management of UI aesthetics, ensuring a consistent look and feel across various components of the application.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/core/services/audio_service.dart",
+      "processed_at": "2026-05-03T17:23:24.080975+00:00",
+      "previous_hash": null,
+      "hash": "e794baf0671e6363d163fc24a95e1e7d7fb694adeb63e8e8bd4966be8615901d",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The audio_service.dart file defines the AudioService class, which is responsible for managing audio playback in the application. It handles functionalities such as song queueing, playback controls, and session management for audio interruptions, ensuring a seamless audio experience for users.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/core/widgets/song_list_tile.dart",
+      "processed_at": "2026-05-03T17:23:31.842890+00:00",
+      "previous_hash": null,
+      "hash": "2b48d9747e3b2e486e8ff0859d5d7796ec8805dec192f0d56305c3d2b8cfb5f0",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The song_list_tile.dart file defines a stateless widget called SongListTile, which is used to display a tile representing a song in a music application. It shows the song's title, artist, duration, and playback status, providing a visual interface for users to interact with the song playback functionality.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/features/atharv_music/atharv_music_screen.dart",
+      "processed_at": "2026-05-03T17:23:41.492811+00:00",
+      "previous_hash": null,
+      "hash": "09b485e89b81267f917a2cc581c5ed1d81d1dec706d756a43e3d2716ae0af084",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The atharv_music_screen.dart file defines the AtharvMusicScreen, a Flutter screen that presents a user interface for displaying a list of music tracks. It allows users to search and view songs that are bundled within the application. The screen manages the loading of song assets, handles user input for searching, and updates the UI accordingly based on the state of the song data.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/core/services/music_scanner.dart",
+      "processed_at": "2026-05-03T17:23:49.740224+00:00",
+      "previous_hash": null,
+      "hash": "e19f246413dcf52598f08420562e8908c99d2f1bc72599efae580d65b4d256d2",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The music_scanner.dart file defines the MusicScanner class, which is responsible for scanning the device's storage for audio files while managing the necessary permissions for accessing media. It provides methods to check, request, and verify permissions, as well as to recursively scan directories for audio files, returning a list of found songs represented by the SongModel class.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/core/widgets/mini_player.dart",
+      "processed_at": "2026-05-03T17:23:56.941863+00:00",
+      "previous_hash": null,
+      "hash": "464b787f079a5e9fcb641fab33824b36ecd698107e51983f774269c126f40660",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The mini_player.dart file defines a MiniPlayer widget that provides a compact interface for music playback, allowing users to view current song details and control playback actions such as play, pause, skip, and navigate to a full player screen.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/features/home/home_screen.dart",
+      "processed_at": "2026-05-03T17:24:03.780331+00:00",
+      "previous_hash": null,
+      "hash": "f4b464e9acec3b6481ccd1791678a78deb7a925713fead1ef93432fb21d1f343",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The home_screen.dart file defines the HomeScreen widget, which serves as the main interface for navigating between different screens in the application, including music, mixer, and library functionalities. It utilizes a bottom navigation bar to switch between these screens and manages the state of the currently selected screen.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/features/library/library_screen.dart",
+      "processed_at": "2026-05-03T17:24:14.574236+00:00",
+      "previous_hash": null,
+      "hash": "17cbced75b2cddc5141e7f1fcac4908ebab600c9a6469c7aeb7bfda3b0b24b2a",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The library_screen.dart file defines the LibraryScreen widget, which provides a user interface for a music application. It allows users to scan their device for music files, manage permissions, and display the music library. The widget handles various states such as loading, permission denial, and displaying the list of songs.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/features/mixer/mixer_screen.dart",
+      "processed_at": "2026-05-03T17:24:29.001290+00:00",
+      "previous_hash": null,
+      "hash": "1597629e7dfb1aaa2be41098e3ee78736fa0f8a5145b38b664048c85158611b8",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The mixer_screen.dart file defines the MixerScreen widget, which provides a user interface for mixing audio tracks, recording audio, and visualizing audio playback in a Flutter application. It manages the state of audio tracks, handles recording functionalities, and updates a visualizer based on the playback state.",
+      "reused_from": null
+    },
+    {
+      "file_path": "lib/main.dart",
+      "processed_at": "2026-05-03T17:24:37.991713+00:00",
+      "previous_hash": null,
+      "hash": "9a3ca4a7a42afbf8199f957b35f159ad9d9b6b5fd1815d2b9a9dbf16aeeec1ba",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The lib/main.dart file serves as the entry point for the Flutter application, initializing the app and setting up the main widget structure. It ensures that the Flutter framework is properly initialized and runs the MyApp widget, which is responsible for providing the main user interface and integrating various services and themes.",
+      "reused_from": null
+    },
+    {
+      "file_path": "web/index.html",
+      "processed_at": "2026-05-03T17:24:44.131947+00:00",
+      "previous_hash": null,
+      "hash": "0eb0e613f3de35c23604f4cf24b32ce028a4fb41c95f796a2a15ba77639d3979",
+      "git_commit": null,
+      "author": "Atharv Mannur",
+      "description": "The index.html file serves as the main entry point for the Flutter web application, establishing the document structure and including essential resources such as meta tags, icons, and scripts necessary for the application to function correctly in a web environment.",
+      "reused_from": null
+    }
+  ]
+}
