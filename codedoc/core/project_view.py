@@ -26,17 +26,20 @@ def build_project_view(
 
     for file in files:
         path = file["path"]
-        file["links"] = {
+        links = {
             "internal_dependencies": internal_by_from.get(path, []),
             "imported_by": imported_by.get(path, []),
             "external_dependencies": file.pop("external_dependencies", []),
         }
+        links = {key: value for key, value in links.items() if value}
+        if links:
+            file["links"] = links
 
     folders = _folder_view(files)
     languages = sorted({file["language"] for file in files if file.get("language")})
     dependency_catalog = _dependency_catalog(files)
 
-    return {
+    view = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "project": {
@@ -58,6 +61,7 @@ def build_project_view(
         "dependency_graph": graph_edges,
         "files": files,
     }
+    return {key: value for key, value in view.items() if value not in (None, "", [], {})}
 
 
 def markdown_from_view(view: dict, error_summary: str = "") -> str:
@@ -146,22 +150,23 @@ def markdown_to_view(markdown: str) -> dict:
 
     for file in files:
         path = file["path"]
-        links = file.setdefault("links", {})
-        links.setdefault(
-            "internal_dependencies",
-            sorted(edge["to"] for edge in edges if edge["from"] == path),
-        )
-        links.setdefault(
-            "imported_by",
-            sorted(edge["from"] for edge in edges if edge["to"] == path),
-        )
-        links.setdefault("external_dependencies", [])
+        existing_links = file.pop("links", {})
+        links = {
+            "internal_dependencies": existing_links.get("internal_dependencies")
+            or sorted(edge["to"] for edge in edges if edge["from"] == path),
+            "imported_by": existing_links.get("imported_by")
+            or sorted(edge["from"] for edge in edges if edge["to"] == path),
+            "external_dependencies": existing_links.get("external_dependencies", []),
+        }
+        links = _prune_empty(links)
+        if links:
+            file["links"] = links
 
     folders = _folder_view(files) if files else []
     languages = sorted({file["language"] for file in files if file.get("language")})
     entry_file = project.get("entry_file")
 
-    return {
+    view = {
         "schema_version": SCHEMA_VERSION,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "project": {
@@ -183,6 +188,7 @@ def markdown_to_view(markdown: str) -> dict:
         "dependency_graph": edges,
         "files": files,
     }
+    return _prune_empty(view)
 
 
 def json_from_markdown(markdown: str) -> str:
@@ -428,6 +434,27 @@ def _strip_code(value: str) -> str:
 def _set_if_value(target: dict, key: str, value: Any) -> None:
     if value not in (None, "", [], {}):
         target[key] = value
+
+
+def _prune_empty(value: Any) -> Any:
+    if isinstance(value, dict):
+        pruned = {
+            key: _prune_empty(item)
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        }
+        return {
+            key: item
+            for key, item in pruned.items()
+            if item not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_prune_empty(item) for item in value)
+            if item not in (None, "", [], {})
+        ]
+    return value
 
 
 def _dependency_usage_map(usage_notes: list) -> dict[str, str]:

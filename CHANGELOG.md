@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1 - 2026-05-13
+
+- Cleaned generated cache and public JSON by pruning empty arrays, empty objects, nulls, and duplicate nested fields.
+- Removed the top-level cache `version` field from newly written `codedoc_db.json`.
+- Improved Markdown-to-JSON conversion so it no longer recreates empty default sections.
+- Tightened agent prompts to avoid placeholder package names and empty output fields.
+
 ## 0.5.0 - 2026-05-13
 
 - Promoted `codedoc-ai` to the 0.5.0 feature line.

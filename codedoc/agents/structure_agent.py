@@ -45,7 +45,8 @@ Rules:
 - Use only information from the provided code
 - Do not hallucinate functions or classes that are not in the code
 - Keep descriptions concise (1-2 sentences)
-- If there are no functions/classes/exports, return an empty list []
+- If functions, classes, or exports are not present, omit that key instead of returning an empty list
+- Do not include empty arrays, empty objects, null values, or duplicate fields
 """
 
 

@@ -56,7 +56,9 @@ Rules:
 - Do not add catalog_updates for obvious language utilities unless there is a project-specific reason
 - usage_notes should describe file-specific or non-obvious usage that should not become global catalog text
 - Omit generic repeated usage_notes for common imports such as typing, datetime, pydantic, flutter/material.dart, or provider unless this file uses them in a special way
-- warnings list may be empty if no concerns are found
+- Omit warnings if no concerns are found
+- Omit dependencies_analysis entirely when there are no internal dependencies, external dependencies, dependency_refs, catalog_updates, usage_notes, or warnings
+- Do not include empty arrays, empty objects, null values, or duplicate fields
 - Do not invent imports not present in the provided list
 """
 

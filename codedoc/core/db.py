@@ -14,8 +14,6 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 DB_FILENAME = "codedoc_db.json"
-DB_VERSION = 3
-
 
 def _compute_file_hash(file_path: Path) -> str:
     """Compute a SHA256 hash of file content."""
@@ -45,19 +43,17 @@ class CodeDocDB:
             return self._empty()
 
         if "files" in data:
-            data.setdefault("version", DB_VERSION)
             data.setdefault("history", [])
             return data
 
         # Backwards compatibility for v1, where rel_path entries lived at root.
         return {
-            "version": DB_VERSION,
             "files": data,
             "history": [],
         }
 
     def _empty(self) -> dict:
-        return {"version": DB_VERSION, "files": {}, "history": []}
+        return {"files": {}, "history": []}
 
     def _save(self) -> None:
         try:
@@ -72,7 +68,7 @@ class CodeDocDB:
         """Return True if the file has changed or was never processed before."""
         current_hash = _compute_file_hash(file_path)
         entry = self.data.get("files", {}).get(rel_path)
-        if not entry or entry.get("hash") != current_hash or not entry.get("result"):
+        if not entry or entry.get("hash") != current_hash or not _has_documentation(entry):
             return True
         logger.debug("Skipping unchanged file: %s", rel_path)
         return False
@@ -87,7 +83,7 @@ class CodeDocDB:
             return False
 
         source_rel, source_entry = reusable
-        result = dict(source_entry.get("result", {}))
+        result = _result_from_entry(source_entry, source_rel)
         result["file_path"] = rel_path
         result["language"] = descriptor.get("language", result.get("language", ""))
         result["extension"] = descriptor.get("extension", result.get("extension", ""))
@@ -134,7 +130,8 @@ class CodeDocDB:
             "reused_from": reused_from,
         }
 
-        self.data["files"][rel_path] = {
+        cache_result = _compact_result_for_cache(result)
+        entry = {
             "id": current_hash,
             "hash": current_hash,
             "format": file_path.suffix.lower().lstrip("."),
@@ -147,16 +144,18 @@ class CodeDocDB:
             "description": result.get("description", ""),
             "role_in_system": result.get("role_in_system", ""),
             "key_concepts": result.get("key_concepts", []),
-            "result": result,
+            "result": cache_result,
             "reused_from": reused_from,
         }
-        self.data["history"].append(change_event)
+        self.data.pop("version", None)
+        self.data["files"][rel_path] = _prune_empty(entry)
+        self.data["history"].append(_prune_empty(change_event))
         self.data["history"] = self.data["history"][-500:]
         self._save()
 
     def _find_result_by_hash(self, content_hash: str) -> tuple[str, dict] | None:
         for rel_path, entry in sorted(self.data.get("files", {}).items()):
-            if entry.get("hash") == content_hash and entry.get("result"):
+            if entry.get("hash") == content_hash and _has_documentation(entry):
                 return rel_path, entry
         return None
 
@@ -175,7 +174,7 @@ class CodeDocDB:
             if rel_path not in rel_paths:
                 continue
             entry = self.data.get("files", {}).get(rel_path)
-            if not entry or not entry.get("result"):
+            if not entry or not _has_documentation(entry):
                 continue
 
             descriptor = file_map.get(rel_path, {})
@@ -183,13 +182,17 @@ class CodeDocDB:
             if descriptor_path and entry.get("hash") != _compute_file_hash(descriptor_path):
                 continue
 
-            result = dict(entry.get("result", {}))
+            result = _result_from_entry(entry, rel_path)
             result.setdefault("file_path", rel_path)
             result.setdefault(
                 "language",
                 entry.get("language", descriptor.get("language", "")),
             )
             result.setdefault("extension", descriptor.get("extension", ""))
+            result.setdefault("imports", entry.get("imports", []))
+            result.setdefault("description", entry.get("description", ""))
+            result.setdefault("role_in_system", entry.get("role_in_system", ""))
+            result.setdefault("key_concepts", entry.get("key_concepts", []))
 
             records.append(
                 {
@@ -224,3 +227,78 @@ def _git_value(root: Path, command: list[str]) -> str | None:
 
     value = completed.stdout.strip()
     return value or None
+
+
+def _compact_result_for_cache(result: dict) -> dict:
+    """Remove fields already stored on the cache record and empty sections."""
+    compact = dict(result or {})
+    for key in (
+        "file_path",
+        "language",
+        "extension",
+        "imports",
+        "description",
+        "role_in_system",
+        "key_concepts",
+        "state",
+    ):
+        compact.pop(key, None)
+
+    documentation = compact.get("documentation")
+    if isinstance(documentation, dict):
+        for key in ("description", "role_in_system", "key_concepts", "usage_example"):
+            if documentation.get(key) == result.get(key):
+                documentation.pop(key, None)
+        if not documentation:
+            compact.pop("documentation", None)
+
+    dependencies = compact.get("dependencies_analysis")
+    if isinstance(dependencies, dict):
+        dependencies = _prune_empty(dependencies)
+        if dependencies:
+            compact["dependencies_analysis"] = dependencies
+        else:
+            compact.pop("dependencies_analysis", None)
+
+    structure = compact.get("structure")
+    if isinstance(structure, dict):
+        compact["structure"] = _prune_empty(structure)
+
+    return _prune_empty(compact)
+
+
+def _has_documentation(entry: dict) -> bool:
+    return bool(entry.get("result") or entry.get("description") or entry.get("role_in_system"))
+
+
+def _result_from_entry(entry: dict, rel_path: str) -> dict:
+    result = dict(entry.get("result", {}))
+    result.setdefault("file_path", rel_path)
+    result.setdefault("language", entry.get("language", ""))
+    result.setdefault("imports", entry.get("imports", []))
+    result.setdefault("description", entry.get("description", ""))
+    result.setdefault("role_in_system", entry.get("role_in_system", ""))
+    result.setdefault("key_concepts", entry.get("key_concepts", []))
+    result.setdefault("state", "checked")
+    return _prune_empty(result)
+
+
+def _prune_empty(value):
+    if isinstance(value, dict):
+        pruned = {
+            key: _prune_empty(item)
+            for key, item in value.items()
+            if item not in (None, "", [], {})
+        }
+        return {
+            key: item
+            for key, item in pruned.items()
+            if item not in (None, "", [], {})
+        }
+    if isinstance(value, list):
+        return [
+            item
+            for item in (_prune_empty(item) for item in value)
+            if item not in (None, "", [], {})
+        ]
+    return value

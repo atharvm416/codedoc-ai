@@ -55,7 +55,9 @@ def test_json_is_the_default_combined_output(tmp_path):
     assert '"result"' not in output
     assert '"tree"' in output
     assert '"folders"' in output
-    assert '"dependency_graph"' in output
+    assert '"dependency_graph"' not in output
+    assert '"exports": []' not in output
+    assert '"dependencies_analysis": {}' not in output
 
 
 def test_markdown_format_writes_only_combined_markdown(tmp_path):
@@ -168,6 +170,52 @@ def test_public_output_converts_json_and_markdown_without_llm():
     assert converted["files"][0]["links"]["external_dependencies"] == ["click"]
 
 
+def test_markdown_to_json_does_not_create_empty_default_sections():
+    import json
+
+    from codedoc.core.project_view import json_from_markdown
+
+    markdown = """# codedoc project documentation
+
+## Project Overview
+
+- Entry file: `main.py`
+- Files documented: 1
+- Languages: python
+- Folders: `.`
+
+## Run Summary
+
+- Files checked: 1
+- Files failed: 0
+- Files skipped: 0
+- Files reused from cache: 0
+
+## Project Tree
+
+```text
+main.py
+```
+
+## Files
+
+### main.py
+
+**ID:** `abc123`  
+**Format:** py  
+**Language:** python  
+
+**Description:** Main entry point.
+
+"""
+
+    converted = json.loads(json_from_markdown(markdown))
+
+    assert "dependency_graph" not in converted
+    assert "dependency_catalog" not in converted
+    assert "links" not in converted["files"][0]
+
+
 def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
     from codedoc.core.db import CodeDocDB
 
@@ -195,6 +243,15 @@ def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
     assert records[0]["file_path"] == "main.py"
     assert records[0]["format"] == "py"
     assert records[0]["documentation"]["description"] == "Main entry point."
+    assert records[0]["documentation"]["file_path"] == "main.py"
+
+    import json
+
+    cache = json.loads(db.db_path.read_text(encoding="utf-8"))
+    assert "version" not in cache
+    cached_result = cache["files"]["main.py"].get("result", {})
+    assert "file_path" not in cached_result
+    assert "state" not in cached_result
 
     source.write_text("def main():\n    return 1\n", encoding="utf-8")
     assert db.needs_processing("main.py", source) is True
