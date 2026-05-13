@@ -216,6 +216,51 @@ main.py
     assert "links" not in converted["files"][0]
 
 
+def test_public_output_normalizes_external_package_names(tmp_path):
+    import json
+
+    from codedoc.core.output import write_project_outputs
+
+    json_path, _ = write_project_outputs(
+        [
+            {
+                "id": "main-hash",
+                "hash": "main-hash",
+                "file_path": "lib/main.dart",
+                "format": "dart",
+                "language": "dart",
+                "last_processed": "2026-05-13T00:00:00+00:00",
+                "documentation": {
+                    "file_path": "lib/main.dart",
+                    "language": "dart",
+                    "description": "Starts the app.",
+                    "dependencies_analysis": {
+                        "external": [
+                            "flutter/material.dart",
+                            "provider/provider.dart",
+                            "dart:async",
+                        ],
+                        "dependency_refs": [
+                            "flutter/material.dart",
+                            "provider/provider.dart",
+                        ],
+                    },
+                    "state": "checked",
+                },
+            }
+        ],
+        {"checked": 1, "failed": 0, "skipped": 0},
+        tmp_path,
+    )
+
+    payload = json.loads(json_path.read_text(encoding="utf-8"))
+    assert payload["files"][0]["links"]["external_dependencies"] == [
+        "dart:async",
+        "flutter",
+        "provider",
+    ]
+
+
 def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
     from codedoc.core.db import CodeDocDB
 
@@ -255,6 +300,40 @@ def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
 
     source.write_text("def main():\n    return 1\n", encoding="utf-8")
     assert db.needs_processing("main.py", source) is True
+
+
+def test_cache_result_does_not_duplicate_structure_sections(tmp_path):
+    from codedoc.core.db import CodeDocDB
+
+    source = tmp_path / "main.py"
+    source.write_text("def main():\n    pass\n", encoding="utf-8")
+
+    db = CodeDocDB(tmp_path)
+    db.mark_processed(
+        "main.py",
+        source,
+        {
+            "file_path": "main.py",
+            "language": "python",
+            "extension": ".py",
+            "description": "Main entry point.",
+            "functions": [{"name": "main", "description": "Runs the app."}],
+            "classes": [],
+            "structure": {
+                "description": "Main entry point.",
+                "functions": [{"name": "main", "description": "Runs the app."}],
+                "classes": [],
+            },
+            "state": "checked",
+        },
+    )
+
+    import json
+
+    cache = json.loads(db.db_path.read_text(encoding="utf-8"))
+    result = cache["files"]["main.py"]["result"]
+    assert "functions" in result
+    assert "structure" not in result
 
 
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):

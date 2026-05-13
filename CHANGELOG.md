@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.2 - 2026-05-13
+
+- Fixed cache structure duplication issues in generated documentation output.
+- Improved dependency/import resolution to prevent incorrect file mappings and false dependency relationships.
+- Cleaned and normalized public dependency output generation.
+- Reduced noisy dependency cycles in generated Markdown and JSON outputs.
+- Added regression coverage for cache structure and dependency resolution behavior.
+
 ## 0.5.1 - 2026-05-13
 
 - Cleaned generated cache and public JSON by pruning empty arrays, empty objects, nulls, and duplicate nested fields.

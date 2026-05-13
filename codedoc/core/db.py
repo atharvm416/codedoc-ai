@@ -260,9 +260,7 @@ def _compact_result_for_cache(result: dict) -> dict:
         else:
             compact.pop("dependencies_analysis", None)
 
-    structure = compact.get("structure")
-    if isinstance(structure, dict):
-        compact["structure"] = _prune_empty(structure)
+    compact.pop("structure", None)
 
     return _prune_empty(compact)
 

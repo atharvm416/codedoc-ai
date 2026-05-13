@@ -130,6 +130,7 @@ def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
     current = PurePosixPath(_to_posix(current_file))
     current_dir = current.parent
     candidates: list[str] = []
+    suffix = PurePosixPath(import_str).suffix
 
     if import_str.startswith("package:"):
         package_path = import_str.split("/", 1)
@@ -141,6 +142,9 @@ def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
         candidates.append(_normalize_posix(str(current_dir / import_str)))
     elif import_str.startswith("."):
         candidates.append(_resolve_python_relative(import_str, current_dir))
+    elif suffix:
+        candidates.append(_normalize_posix(import_str))
+        candidates.append(_normalize_posix(str(current_dir / import_str)))
     elif "/" in import_str or "\\" in import_str:
         candidates.append(_normalize_posix(import_str))
         candidates.append(_normalize_posix(str(current_dir / import_str)))
@@ -177,14 +181,6 @@ def _match_candidate(candidate: str, known: dict[str, str]) -> str | None:
         lower = variant.lower()
         if lower in known_lower:
             return known_lower[lower]
-
-    basename_matches = [
-        original
-        for key, original in known.items()
-        if PurePosixPath(key).name.lower() in {PurePosixPath(v).name.lower() for v in variants}
-    ]
-    if len(basename_matches) == 1:
-        return basename_matches[0]
 
     return None
 

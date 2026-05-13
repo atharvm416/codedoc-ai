@@ -206,6 +206,13 @@ def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
     dependencies = result.get("dependencies_analysis", {})
     external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
+    external = sorted(
+        {
+            _normalize_dependency_name(name, "external")
+            for name in external
+            if _normalize_dependency_name(name, "external")
+        }
+    )
     usage_notes = dependencies.get("usage_notes", []) if isinstance(dependencies, dict) else []
     dependency_refs = (
         dependencies.get("dependency_refs", []) if isinstance(dependencies, dict) else []
@@ -462,7 +469,7 @@ def _dependency_usage_map(usage_notes: list) -> dict[str, str]:
     for note in usage_notes:
         if not isinstance(note, dict):
             continue
-        name = _normalize_dependency_name(note.get("import", ""))
+        name = _normalize_dependency_name(note.get("import", ""), "external")
         used_for = str(note.get("used_for", "")).strip()
         if name and used_for and name not in usage:
             usage[name] = used_for
@@ -474,12 +481,13 @@ def _clean_catalog_updates(catalog_updates: list) -> list[dict]:
     for item in catalog_updates:
         if not isinstance(item, dict):
             continue
-        name = _normalize_dependency_name(item.get("name", ""))
+        type_hint = item.get("type") if item.get("type") in ("internal", "external") else ""
+        name = _normalize_dependency_name(item.get("name", ""), type_hint)
         if not name:
             continue
         update = {
             "name": name,
-            "type": item.get("type") if item.get("type") in ("internal", "external") else _dependency_type(name),
+            "type": type_hint or _dependency_type(name),
             "used_for": str(item.get("used_for", "")).strip(),
         }
         updates.append({key: value for key, value in update.items() if value not in ("", None)})
@@ -494,9 +502,9 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
         usage = file.pop("dependency_usage", {})
         catalog_updates = file.pop("dependency_catalog_updates", [])
         dependency_refs = [
-            _normalize_dependency_name(name)
+            _normalize_dependency_name(name, "external")
             for name in file.pop("dependency_refs", [])
-            if _normalize_dependency_name(name)
+            if _normalize_dependency_name(name, "external")
         ]
         links = file.get("links", {})
 
@@ -517,7 +525,7 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
                 item["used_for"] = update["used_for"]
 
         for dependency in dependency_refs:
-            name = _normalize_dependency_name(dependency)
+            name = _normalize_dependency_name(dependency, "external")
             if not name:
                 continue
             item = catalog.get(name)
@@ -538,7 +546,7 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
                 item["used_for"] = usage[name]
 
         for dependency in links.get("external_dependencies", []):
-            name = _normalize_dependency_name(dependency)
+            name = _normalize_dependency_name(dependency, "external")
             if not name:
                 continue
             item = catalog.get(name)
@@ -613,10 +621,12 @@ def _merge_dependency_type(existing: str | None, candidate: str | None) -> str:
     return candidate or existing or "unknown"
 
 
-def _normalize_dependency_name(name: Any) -> str:
+def _normalize_dependency_name(name: Any, dependency_type_hint: str = "") -> str:
     value = str(name or "").strip()
     if value.startswith("package:"):
         value = value[len("package:") :]
+    if dependency_type_hint == "external":
+        return _external_package_name(value)
     return value
 
 
@@ -624,6 +634,19 @@ def _dependency_type(name: str) -> str:
     if name.startswith(".") or "/" in name:
         return "internal"
     return "external"
+
+
+def _external_package_name(name: str) -> str:
+    value = name.strip()
+    if not value:
+        return ""
+    if value.startswith("dart:"):
+        return value
+    if value.startswith(("./", "../")):
+        return value
+    if "/" in value:
+        return value.split("/", 1)[0]
+    return value
 
 
 def _edge_indexes(graph_edges: list[dict]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
