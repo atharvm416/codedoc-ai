@@ -122,7 +122,14 @@ def _walk(
     if scan_root is not None:
         _walk.scan_root = scan_root
 
-    for item in root.iterdir():
+    try:
+        entries = list(root.iterdir())
+    except OSError as exc:
+        _walk.skipped_dirs += 1
+        logger.warning("Skipping unreadable directory %s: %s", root, exc)
+        return
+
+    for item in entries:
         rel = item.relative_to(_walk.scan_root).as_posix()
         if item.is_dir():
             if (
@@ -132,7 +139,7 @@ def _walk(
             ):
                 _walk.skipped_dirs += 1
                 continue
-            yield from _walk(item, skip_dirs)
+            yield from _walk(item, skip_dirs, _walk.ignore_prefixes, _walk.scan_root)
         elif item.is_file():
             if _is_ignored(rel, _walk.ignore_prefixes):
                 continue

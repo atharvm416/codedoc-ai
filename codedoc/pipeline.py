@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import concurrent.futures
 from pathlib import Path
+from typing import Any
 
 from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
 
@@ -16,14 +18,29 @@ from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
 from codedoc.llm.factory import create_provider
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import ErrorReporter, OutputError, ParseError
+from codedoc.utils.errors import AgentError, ErrorReporter, OutputError, ParseError
 from codedoc.utils.logger import get_logger, set_level
 
 logger = get_logger(__name__)
 
 
-def run_pipeline(project_root: str | Path, config_overrides: dict | None = None) -> dict:
-    """Run the full documentation pipeline on a project."""
+def run_pipeline(
+    project_root: str | Path | dict | None = ".",
+    config_overrides: dict | None = None,
+) -> dict:
+    """Run the full documentation pipeline on a project.
+
+    ``project_root`` defaults to the current working directory. For convenience,
+    callers may pass the config dict as the first argument:
+
+        run_pipeline({"output_format": "md"})
+    """
+    if isinstance(project_root, dict) and config_overrides is None:
+        config_overrides = project_root
+        project_root = "."
+    if project_root is None:
+        project_root = "."
+
     root = Path(project_root).resolve()
     if not root.exists():
         raise FileNotFoundError(f"Project root does not exist: {root}")
@@ -119,54 +136,26 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
 
     orchestrator = Orchestrator(llm, parallel=config.get("parallel_agents", True))
     stats = {"checked": 0, "failed": 0, "skipped": skipped, "reused": reused}
+    max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
+    retry_attempts = config.get("file_retry_attempts", 1)
+    max_consecutive_failures = config.get("max_consecutive_failures", 5)
+    logger.info(
+        "File concurrency: max_parallel_files=%d retry_attempts=%d max_consecutive_failures=%d",
+        max_workers,
+        retry_attempts,
+        max_consecutive_failures,
+    )
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Documenting files...", total=len(agent_rels))
-
-        while True:
-            descriptor = queue.next()
-            if descriptor is None:
-                break
-
-            rel_path = descriptor["rel_path"]
-            file_path: Path = descriptor["path"]
-            progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
-
-            try:
-                content = file_path.read_text(encoding="utf-8-sig", errors="replace")
-                imports = parse_file(descriptor)
-                result = orchestrator.process(descriptor, content, imports)
-
-                db.mark_processed(rel_path, file_path, result)
-                queue.mark_checked(rel_path)
-
-                stats["checked"] += 1
-                logger.info("[OK] %s", rel_path)
-
-            except ParseError as exc:
-                error_reporter.record(exc, context=rel_path)
-                queue.mark_failed(rel_path, str(exc))
-                stats["failed"] += 1
-
-            except OutputError as exc:
-                error_reporter.record(exc, context=rel_path)
-                queue.mark_failed(rel_path, str(exc))
-                stats["failed"] += 1
-
-            except Exception as exc:
-                error_reporter.record(exc, context=rel_path)
-                queue.mark_failed(rel_path, str(exc))
-                stats["failed"] += 1
-                logger.warning("[FAIL] %s: %s", rel_path, exc)
-
-            finally:
-                progress.advance(task)
+    _process_agent_files(
+        queue=queue,
+        orchestrator=orchestrator,
+        db=db,
+        stats=stats,
+        error_reporter=error_reporter,
+        max_workers=max_workers,
+        retry_attempts=retry_attempts,
+        max_consecutive_failures=max_consecutive_failures,
+    )
 
     stats["output_dir"] = str(output_dir)
     output_files = write_project_outputs(
@@ -200,6 +189,210 @@ def run_pipeline(project_root: str | Path, config_overrides: dict | None = None)
         )
 
     return stats
+
+
+def _process_agent_files(
+    queue: ProcessingQueue,
+    orchestrator: Orchestrator,
+    db: CodeDocDB,
+    stats: dict,
+    error_reporter: ErrorReporter,
+    max_workers: int,
+    retry_attempts: int,
+    max_consecutive_failures: int,
+) -> None:
+    descriptors = []
+    while True:
+        descriptor = queue.next()
+        if descriptor is None:
+            break
+        descriptors.append(descriptor)
+
+    if max_workers <= 1 or len(descriptors) <= 1:
+        _process_files_sequentially(
+            descriptors,
+            orchestrator,
+            db,
+            queue,
+            stats,
+            error_reporter,
+            retry_attempts,
+            max_consecutive_failures,
+        )
+        return
+
+    consecutive_failures = 0
+    failed_descriptors = []
+    health_reported = False
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Documenting files...", total=len(descriptors))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+            future_map = {
+                pool.submit(_process_one_file, descriptor, orchestrator): descriptor
+                for descriptor in descriptors
+            }
+
+            for future in concurrent.futures.as_completed(future_map):
+                descriptor = future_map[future]
+                rel_path = descriptor["rel_path"]
+                progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
+                try:
+                    result = future.result()
+                    db.mark_processed(rel_path, descriptor["path"], result)
+                    queue.mark_checked(rel_path)
+                    stats["checked"] += 1
+                    consecutive_failures = 0
+                    logger.info("[OK] %s", rel_path)
+                except Exception as exc:
+                    failed_descriptors.append(descriptor)
+                    consecutive_failures += 1
+                    logger.warning("[RETRY] %s failed in parallel: %s", rel_path, exc)
+                    if (
+                        consecutive_failures >= max_consecutive_failures
+                        and not health_reported
+                    ):
+                        health_reported = True
+                        _cancel_pending(future_map)
+                        error_reporter.record(
+                            RuntimeError(
+                                "Parallel processing saw "
+                                f"{consecutive_failures} consecutive file failures. "
+                                "The API/provider may be unavailable or rate-limited; "
+                                "failed files will be retried sequentially for clearer diagnostics."
+                            ),
+                            context="parallel processing health check",
+                        )
+                finally:
+                    progress.advance(task)
+
+    if failed_descriptors:
+        logger.info(
+            "Retrying %d failed file(s) sequentially for clearer errors.",
+            len(failed_descriptors),
+        )
+        _process_files_sequentially(
+            failed_descriptors,
+            orchestrator,
+            db,
+            queue,
+            stats,
+            error_reporter,
+            retry_attempts,
+            max_consecutive_failures,
+        )
+
+
+def _process_files_sequentially(
+    descriptors: list[dict],
+    orchestrator: Orchestrator,
+    db: CodeDocDB,
+    queue: ProcessingQueue,
+    stats: dict,
+    error_reporter: ErrorReporter,
+    retry_attempts: int,
+    max_consecutive_failures: int,
+) -> None:
+    consecutive_failures = 0
+
+    with Progress(
+        SpinnerColumn(),
+        TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        TaskProgressColumn(),
+        transient=True,
+    ) as progress:
+        task = progress.add_task("Documenting files...", total=len(descriptors))
+        for descriptor in descriptors:
+            rel_path = descriptor["rel_path"]
+            progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
+            try:
+                result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
+                db.mark_processed(rel_path, descriptor["path"], result)
+                queue.mark_checked(rel_path)
+                stats["checked"] += 1
+                consecutive_failures = 0
+                logger.info("[OK] %s", rel_path)
+            except (ParseError, OutputError, AgentError) as exc:
+                error_reporter.record(exc, context=rel_path)
+                queue.mark_failed(rel_path, str(exc))
+                stats["failed"] += 1
+                consecutive_failures += 1
+            except Exception as exc:
+                error_reporter.record(exc, context=rel_path)
+                queue.mark_failed(rel_path, str(exc))
+                stats["failed"] += 1
+                consecutive_failures += 1
+                logger.warning("[FAIL] %s: %s", rel_path, exc)
+            finally:
+                progress.advance(task)
+
+            if consecutive_failures >= max_consecutive_failures:
+                error_reporter.record(
+                    RuntimeError(
+                        "Stopping sequential processing after "
+                        f"{consecutive_failures} consecutive file failures. "
+                        "Check API credentials, provider availability, model name, "
+                        "rate limits, and network connectivity."
+                    ),
+                    context="sequential processing health check",
+                )
+                break
+
+
+def _process_one_file_with_retries(
+    descriptor: dict,
+    orchestrator: Orchestrator,
+    retry_attempts: int,
+) -> dict:
+    last_error: Exception | None = None
+    for attempt in range(retry_attempts + 1):
+        try:
+            return _process_one_file(descriptor, orchestrator)
+        except Exception as exc:
+            last_error = exc
+            if attempt < retry_attempts:
+                logger.info(
+                    "Retrying %s (%d/%d): %s",
+                    descriptor["rel_path"],
+                    attempt + 1,
+                    retry_attempts,
+                    exc,
+                )
+    raise last_error or RuntimeError("Unknown processing failure")
+
+
+def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
+    file_path: Path = descriptor["path"]
+    content = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    imports = parse_file(descriptor)
+    result = orchestrator.process(descriptor, content, imports)
+    errors = _agent_errors(result)
+    if errors:
+        raise AgentError(orchestrator.__class__.__name__, descriptor["rel_path"], "; ".join(errors))
+    return result
+
+
+def _agent_errors(result: dict) -> list[str]:
+    errors = []
+    for key in ("structure", "dependencies_analysis", "documentation"):
+        value: Any = result.get(key, {})
+        if isinstance(value, dict) and value.get("error"):
+            agent = value.get("agent", key)
+            errors.append(f"{agent}: {value['error']}")
+    return errors
+
+
+def _cancel_pending(future_map: dict) -> None:
+    for future in future_map:
+        if not future.done():
+            future.cancel()
 
 
 def _build_graph(

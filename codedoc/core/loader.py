@@ -20,6 +20,7 @@ logger = get_logger(__name__)
 
 DEFAULTS: dict[str, Any] = {
     "llm_mode": "api",
+    "llm_provider": "auto",
     "model_name": "gpt-4o-mini",
     "api_base_url": None,
     "api_key": None,
@@ -38,6 +39,9 @@ DEFAULTS: dict[str, Any] = {
         ".html",
     ],
     "parallel_agents": True,
+    "max_parallel_files": 5,
+    "file_retry_attempts": 1,
+    "max_consecutive_failures": 5,
     "log_level": "INFO",
     "max_file_size_kb": 500,
     "propagate_changes": True,
@@ -70,15 +74,17 @@ DEFAULTS: dict[str, Any] = {
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
 _ENV_KEY_MAP = {
     "LLM_MODE": "llm_mode",
+    "LLM_PROVIDER": "llm_provider",
     "MODEL_NAME": "model_name",
     "API_BASE_URL": "api_base_url",
     "LLM_API_KEY": "api_key",
-    "OPENAI_API_KEY": "api_key",
-    "ANTHROPIC_API_KEY": "api_key",
     "OUTPUT_DIR": "output_dir",
     "CODEDOC_OUTPUT_FORMAT": "output_format",
     "LOG_LEVEL": "log_level",
     "CODEDOC_IGNORE_PATHS": "ignore_paths",
+    "CODEDOC_MAX_PARALLEL_FILES": "max_parallel_files",
+    "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
+    "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
 }
 
 
@@ -132,10 +138,18 @@ def _validate(config: dict[str, Any]) -> None:
     if config["llm_mode"] not in ("local", "api"):
         raise ConfigError(f"llm_mode must be 'local' or 'api', got '{config['llm_mode']}'")
 
-    if config["llm_mode"] == "api" and not config.get("api_key"):
+    if config.get("llm_provider") not in ("auto", "openai", "anthropic", "gemini"):
+        raise ConfigError(
+            "llm_provider must be one of: 'auto', 'openai', 'anthropic', or 'gemini'"
+        )
+
+    if config["llm_mode"] == "api" and not (
+        config.get("api_key") or _has_provider_api_key()
+    ):
         logger.warning(
             "llm_mode is 'api' but no API key was found. Set LLM_API_KEY, "
-            "OPENAI_API_KEY, or ANTHROPIC_API_KEY in your environment or .env file."
+            "OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY "
+            "in your environment or .env file."
         )
 
     if config["llm_mode"] == "local" and not config.get("api_base_url"):
@@ -159,3 +173,31 @@ def _validate(config: dict[str, Any]) -> None:
         config["max_file_size_kb"] = int(config["max_file_size_kb"])
     except (TypeError, ValueError) as exc:
         raise ConfigError("max_file_size_kb must be an integer") from exc
+
+    for key in ("max_parallel_files", "file_retry_attempts", "max_consecutive_failures"):
+        try:
+            config[key] = int(config[key])
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(f"{key} must be an integer") from exc
+
+    if config["max_parallel_files"] < 1:
+        raise ConfigError("max_parallel_files must be at least 1")
+
+    if config["file_retry_attempts"] < 0:
+        raise ConfigError("file_retry_attempts must be 0 or greater")
+
+    if config["max_consecutive_failures"] < 1:
+        raise ConfigError("max_consecutive_failures must be at least 1")
+
+
+def _has_provider_api_key() -> bool:
+    return any(
+        os.environ.get(key)
+        for key in (
+            "OPENAI_API_KEY",
+            "ANTHROPIC_API_KEY",
+            "GEMINI_API_KEY",
+            "GOOGLE_API_KEY",
+            "LLM_API_KEY",
+        )
+    )

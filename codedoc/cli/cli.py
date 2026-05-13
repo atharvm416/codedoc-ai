@@ -2,15 +2,18 @@
 codedoc CLI entry point.
 
 Usage:
+    codedoc run                        # document current directory
+    codedoc execute                    # alias for codedoc run
     codedoc .                          # document current directory
     codedoc /path/to/project           # document a specific directory
-    codedoc . --entry src/main.py      # specify entry file
-    codedoc . --llm local              # use local LLM (Ollama)
-    codedoc . --model gpt-4o           # override model
-    codedoc . --output ./my_docs       # override output directory
-    codedoc . --format md              # write Markdown instead of JSON
-    codedoc . --verbose                # debug logging
-    python -m codedoc .                # same as above, alternative invocation
+    codedoc run --entry src/main.py    # specify entry file
+    codedoc run --llm local            # use local LLM (Ollama)
+    codedoc run --provider gemini      # use Google Gemini
+    codedoc run --model gpt-4o         # override model
+    codedoc run --output ./my_docs     # override output directory
+    codedoc run --format md            # write Markdown instead of JSON
+    codedoc run --verbose              # debug logging
+    python -m codedoc run              # same as above, alternative invocation
 """
 
 from __future__ import annotations
@@ -27,14 +30,18 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  codedoc .                          document the current directory
+  codedoc run                        document the current directory
+  codedoc execute                    alias for codedoc run
+  codedoc .                          document the current directory (legacy style)
   codedoc /path/to/project           document a specific project
-  codedoc . --entry src/main.py      start from a specific entry file
-  codedoc . --llm local              use a local LLM (Ollama / LM Studio)
-  codedoc . --model claude-haiku-4-5-20251001 --llm api   use Claude
-  codedoc . --output ./docs          write output to ./docs
-  codedoc . --format md              write one combined Markdown file
-  codedoc . --ignore /myenv          ignore a project-root path
+  codedoc run src                    document ./src
+  codedoc run --entry src/main.py    start from a specific entry file
+  codedoc run --llm local            use a local LLM (Ollama / LM Studio)
+  codedoc run --provider gemini      use Google Gemini
+  codedoc run --model claude-haiku-4-5-20251001 --llm api   use Claude
+  codedoc run --output ./docs        write output to ./docs
+  codedoc run --format md            write one combined Markdown file
+  codedoc run --ignore /myenv        ignore a project-root path
         """,
     )
 
@@ -56,6 +63,12 @@ examples:
         choices=["api", "local"],
         default=None,
         help="LLM mode: 'api' (OpenAI/Claude) or 'local' (Ollama/LM Studio)",
+    )
+    parser.add_argument(
+        "--provider",
+        choices=["auto", "openai", "anthropic", "gemini"],
+        default=None,
+        help="API provider: auto, openai, anthropic, or gemini (default: auto)",
     )
     parser.add_argument(
         "--model",
@@ -92,6 +105,13 @@ examples:
         help="Disable parallel agent execution (useful for local LLMs with limited VRAM)",
     )
     parser.add_argument(
+        "--max-parallel-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum files to process at once (default: 5)",
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         default=False,
@@ -100,13 +120,20 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.4",
+        version="%(prog)s 0.5.0",
     )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+    if argv and argv[0] in {"run", "execute"}:
+        argv = argv[1:]
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -121,6 +148,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["entry_file"] = args.entry
     if args.llm:
         overrides["llm_mode"] = args.llm
+    if args.provider:
+        overrides["llm_provider"] = args.provider
     if args.model:
         overrides["model_name"] = args.model
     if args.output:
@@ -131,6 +160,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["ignore_paths"] = args.ignore
     if args.no_parallel:
         overrides["parallel_agents"] = False
+    if args.max_parallel_files is not None:
+        overrides["max_parallel_files"] = args.max_parallel_files
     if args.verbose:
         overrides["log_level"] = "DEBUG"
 

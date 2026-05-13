@@ -1,6 +1,6 @@
 """codedoc: local-first, LLM-agnostic codebase documentation."""
 
-__version__ = "0.1.4"
+__version__ = "0.5.0"
 __author__ = "codedoc contributors"
 
 

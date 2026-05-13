@@ -4,6 +4,7 @@ API-based LLM providers.
 Supports:
   - OpenAI  (and any OpenAI-compatible endpoint: Together, Groq, etc.)
   - Anthropic Claude
+  - Google Gemini
 """
 
 from __future__ import annotations
@@ -87,3 +88,59 @@ class AnthropicProvider(LLMProvider):
     @property
     def provider_name(self) -> str:
         return f"Anthropic({self._model})"
+
+
+class GeminiProvider(LLMProvider):
+    """
+    Google Gemini provider using the official google-genai SDK.
+    """
+
+    def __init__(self, api_key: str, model: str = "gemini-2.5-flash"):
+        try:
+            from google import genai
+            from google.genai import types
+        except ImportError as exc:
+            raise LLMError(
+                "Gemini",
+                "google-genai package not installed. Run: pip install google-genai",
+            ) from exc
+
+        self._model = model
+        self._client = genai.Client(api_key=api_key)
+        self._types = types
+        logger.info("Gemini provider ready - model: %s", model)
+
+    def complete(self, prompt: str, system: str = "", temperature: float = 0.1) -> str:
+        contents = prompt if not system else f"{system}\n\n{prompt}"
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=self._types.GenerateContentConfig(temperature=temperature),
+            )
+            return response.text or ""
+        except Exception as exc:
+            raise LLMError("Gemini", str(exc)) from exc
+
+    def complete_json(self, prompt: str, system: str = "") -> str:
+        json_system = (
+            (system + "\n\n" if system else "")
+            + "Respond ONLY with valid JSON. No markdown fences, no explanation, no preamble."
+        )
+        contents = f"{json_system}\n\n{prompt}"
+        try:
+            response = self._client.models.generate_content(
+                model=self._model,
+                contents=contents,
+                config=self._types.GenerateContentConfig(
+                    temperature=0.0,
+                    response_mime_type="application/json",
+                ),
+            )
+            return response.text or ""
+        except Exception as exc:
+            raise LLMError("Gemini", str(exc)) from exc
+
+    @property
+    def provider_name(self) -> str:
+        return f"Gemini({self._model})"

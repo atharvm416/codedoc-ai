@@ -8,6 +8,8 @@ __all__ = [
     "DependencyGraph",
     "write_outputs",
     "write_summary",
+    "json_from_markdown",
+    "markdown_from_json",
     "CodeDocDB",
 ]
 
@@ -33,6 +35,13 @@ def __getattr__(name: str):
         from codedoc.core.output import write_outputs, write_summary
 
         return {"write_outputs": write_outputs, "write_summary": write_summary}[name]
+    if name in {"json_from_markdown", "markdown_from_json"}:
+        from codedoc.core.project_view import json_from_markdown, markdown_from_json
+
+        return {
+            "json_from_markdown": json_from_markdown,
+            "markdown_from_json": markdown_from_json,
+        }[name]
     if name == "CodeDocDB":
         from codedoc.core.db import CodeDocDB
 

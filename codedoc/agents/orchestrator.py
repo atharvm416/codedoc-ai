@@ -140,7 +140,7 @@ class Orchestrator:
             "structure": structure,
 
             # From DependencyAgent
-            "dependencies_analysis": dependencies.get("dependencies_analysis", {}),
+            "dependencies_analysis": dependencies.get("dependencies_analysis", dependencies),
 
             # From DocumentationAgent
             "key_concepts": documentation.get("key_concepts", []),

@@ -2,11 +2,10 @@
 
 from __future__ import annotations
 
-import json
 from datetime import datetime, timezone
 from pathlib import Path
 
-from codedoc.core.project_view import build_project_view, markdown_from_view
+from codedoc.core.project_view import build_project_view, json_from_view, markdown_from_view
 from codedoc.utils.errors import OutputError
 from codedoc.utils.logger import get_logger
 
@@ -70,11 +69,7 @@ def _write_project_json(
     error_summary: str,
     path: Path,
 ) -> None:
-    payload = dict(view)
-    if error_summary and error_summary != "No errors.":
-        payload["errors"] = error_summary
-
-    path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    path.write_text(json_from_view(view, error_summary), encoding="utf-8")
 
 
 def _write_project_markdown(
@@ -120,4 +115,3 @@ def _remove_unselected_outputs(output_dir: Path, keep: set[str]) -> None:
                 path.unlink()
             except OSError as exc:
                 logger.debug("Could not remove legacy output %s: %s", path, exc)
-
