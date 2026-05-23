@@ -1,10 +1,10 @@
 # codedoc-ai
 
-`codedoc-ai` is a local-first Python library and CLI that generates structured, reusable documentation memory for source codebases. It is built for AI coding agents, human maintainers, and teams that want a stable map of a project before making changes.
+`codedoc-ai` is a Python library and CLI that generates structured, reusable documentation memory for source codebases. It is built for AI coding agents, human maintainers, and teams that want a stable map of a project before making changes.
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.5.2`.
+Current release: `0.6.0`.
 
 ## What It Does
 
@@ -23,7 +23,8 @@ Current release: `0.5.2`.
 - Reuses cached analysis for unchanged files.
 - Reuses cached analysis when another file has identical content.
 - Recreates the selected output file from cache if the user deletes it.
-- Writes a clean, structured public project view to `docs_output/codedoc.json` by default, or Markdown when requested.
+- Embeds metadata (entry point, schema version) in every output file so the next run can resume without re-specifying the entry.
+- Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
 - Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
 - Converts public JSON to Markdown without another AI call.
 - Parses generated Markdown back into the public JSON shape when needed.
@@ -40,11 +41,11 @@ codedoc run
 
 | Setting | Default |
 | --- | --- |
-| LLM mode | `api` |
+| LLM provider | `auto` (OpenAI) |
 | API model | `gpt-4o-mini` |
-| Output directory | `docs_output` |
+| Output directory | `codedoc` |
 | Output format | `json` |
-| Output file | `docs_output/codedoc.json` |
+| Output file | `codedoc/codedoc.json` |
 | Parallel agents | `true` |
 | Max parallel files | `5` |
 | File retry attempts | `1` |
@@ -52,7 +53,7 @@ codedoc run
 | Change propagation | `true` |
 | Max file size | `500 KB` |
 
-Because default `llm_mode` is `api`, a user must provide an API key unless they choose local mode.
+Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
 
 ## Installation
 
@@ -72,43 +73,56 @@ google-genai
 
 ## Quick Start
 
-Document the current project using the default API model and JSON output:
+### First Run
 
-```bash
-codedoc run
-```
-
-Document from a known entry file:
+Provide an entry point when you want CodeDoc to document only the reachable project dependencies from that file, then save the result to the `codedoc/` folder:
 
 ```bash
 codedoc run --entry src/main.py
 ```
 
-Write output to a custom directory:
+`codedoc/codedoc.json` is written by default. The entry point is embedded as metadata in the output file so you never need to specify it again.
+
+Write to a custom location:
 
 ```bash
-codedoc run --output docs_output
+codedoc run --entry src/main.py --output docs/report.json
 ```
 
-Write Markdown instead of JSON:
+Write only Markdown:
+
+```bash
+codedoc run --entry src/main.py --format md
+```
+
+### Subsequent Runs
+
+After the first run, just run:
+
+```bash
+codedoc run
+```
+
+CodeDoc finds `codedoc/codedoc.json` automatically, reads the entry point from its metadata, and only reprocesses files that have changed.
+
+Point to a specific previously generated file:
+
+```bash
+codedoc run --output docs/report.json
+```
+
+Convert format without any AI calls (served entirely from the cache):
 
 ```bash
 codedoc run --format md
-```
-
-Write both JSON and Markdown:
-
-```bash
 codedoc run --format both
 ```
 
-Limit file-level concurrency:
+Limit file-level concurrency (useful with strict API rate limits):
 
 ```bash
 codedoc run --max-parallel-files 3
 ```
-
-Use this when an API has strict rate limits, or when a local model cannot comfortably handle 5 files in flight.
 
 ## CLI Help
 
@@ -132,43 +146,42 @@ Common commands:
 
 | Command | Purpose |
 | --- | --- |
-| `codedoc run` | Document the current directory with default JSON output. |
+| `codedoc run --entry src/main.py` | First run — specify entry file; output to `codedoc/`. |
+| `codedoc run` | Subsequent run — entry read from `codedoc/codedoc.json` metadata. |
 | `codedoc execute` | Alias for `codedoc run`. |
-| `codedoc run --format md` | Write only `docs_output/codedoc.md`. |
+| `codedoc run --format json` | Write only `codedoc/codedoc.json`. |
+| `codedoc run --format md` | Write only `codedoc/codedoc.md`. |
 | `codedoc run --format both` | Write both JSON and Markdown. |
-| `codedoc run --entry src/main.py` | Start from a known entry file. |
-| `codedoc run --output docs` | Write public output to `docs`. |
-| `codedoc run --llm local --model qwen2.5-coder:7b` | Use a local OpenAI-compatible model. |
+| `codedoc run --output docs` | Write output to `docs/` directory. |
+| `codedoc run --output docs/report.json` | Write a single named JSON file. |
+| `codedoc run --output docs/report.md` | Write a single named Markdown file. |
 | `codedoc run --provider gemini --model gemini-2.5-flash` | Use Google Gemini. |
+| `codedoc run --provider anthropic --model claude-haiku-4-5-20251001` | Use Anthropic Claude. |
 | `codedoc run --ignore /myenv --ignore generated` | Ignore project paths. |
 | `codedoc run --max-parallel-files 3` | Limit concurrent file processing. |
 | `codedoc .` | Legacy shorthand for documenting the current directory. |
 | `codedoc --version` | Print the installed version. |
 
-## Choosing an LLM
+## Choosing a Provider
 
-Use this rule of thumb:
-
-| Use case | Recommended mode |
+| Use case | Recommended provider |
 | --- | --- |
-| Best default quality with minimal setup | OpenAI API |
-| Claude-specific documentation style or Anthropic account | Anthropic API |
-| Google AI Studio / Gemini account | Gemini API |
-| No cloud calls, private code, or offline workflows | Local LLM |
-| OpenAI-compatible gateway such as LM Studio, Ollama, LiteLLM, or a custom endpoint | Local mode or API mode with `api_base_url` |
+| Best default quality with minimal setup | OpenAI (`gpt-4o-mini` or `gpt-4o`) |
+| Claude-specific documentation style or Anthropic account | Anthropic Claude |
+| Google AI Studio / Gemini account | Google Gemini |
+| OpenAI-compatible gateway such as LiteLLM or a custom endpoint | OpenAI mode with `api_base_url` |
 
 Provider selection is deterministic:
 
-- `llm_mode = "local"` always uses the local OpenAI-compatible provider.
-- `llm_provider = "openai"` uses OpenAI/OpenAI-compatible APIs.
+- `llm_provider = "openai"` uses OpenAI or any OpenAI-compatible API.
 - `llm_provider = "anthropic"` uses Anthropic Claude.
 - `llm_provider = "gemini"` uses Google Gemini through the official `google-genai` SDK.
 - `llm_provider = "auto"` with a model name starting with `claude` uses Anthropic.
 - `llm_provider = "auto"` with a model name starting with `gemini` uses Gemini.
-- `llm_provider = "auto"` with any other model uses OpenAI/OpenAI-compatible APIs.
-- If no model is provided in API mode, `gpt-4o-mini` is used.
+- `llm_provider = "auto"` with any other model uses OpenAI or an OpenAI-compatible API.
+- If no model is provided, `gpt-4o-mini` is used.
 - If Gemini is selected and no model is provided, `gemini-2.5-flash` is used.
-- If no model is provided in local mode, `qwen2.5-coder:7b` is used.
+- If Anthropic is selected and no model is provided, `claude-haiku-4-5-20251001` is used.
 
 ## OpenAI API Setup
 
@@ -178,54 +191,54 @@ Windows PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY="sk-your-openai-key"
-codedoc run --llm api --model gpt-4o-mini
+codedoc run --model gpt-4o-mini
 ```
 
 Windows Command Prompt:
 
 ```bat
 set OPENAI_API_KEY=sk-your-openai-key
-codedoc run --llm api --model gpt-4o-mini
+codedoc run --model gpt-4o-mini
 ```
 
 macOS/Linux:
 
 ```bash
 export OPENAI_API_KEY="sk-your-openai-key"
-codedoc run --llm api --model gpt-4o-mini
+codedoc run --model gpt-4o-mini
 ```
 
 OpenAI-compatible API example:
 
 ```bash
-codedoc run --llm api --model your-model-name
+codedoc run --model your-model-name
 ```
 
 For compatible APIs, set `api_base_url` in `codedoc.config.json` or `API_BASE_URL` in `.env`.
 
 ## Anthropic API Setup
 
-Use Anthropic by choosing a Claude model name. The model name must start with `claude` so `codedoc` can select the Anthropic provider.
+Use Anthropic by selecting the `anthropic` provider or using a model name that starts with `claude`.
 
 Windows PowerShell:
 
 ```powershell
 $env:ANTHROPIC_API_KEY="sk-ant-your-anthropic-key"
-codedoc run --llm api --model claude-haiku-4-5-20251001
+codedoc run --provider anthropic --model claude-haiku-4-5-20251001
 ```
 
 Windows Command Prompt:
 
 ```bat
 set ANTHROPIC_API_KEY=sk-ant-your-anthropic-key
-codedoc run --llm api --model claude-haiku-4-5-20251001
+codedoc run --provider anthropic --model claude-haiku-4-5-20251001
 ```
 
 macOS/Linux:
 
 ```bash
 export ANTHROPIC_API_KEY="sk-ant-your-anthropic-key"
-codedoc run --llm api --model claude-haiku-4-5-20251001
+codedoc run --provider anthropic --model claude-haiku-4-5-20251001
 ```
 
 ## Gemini API Setup
@@ -236,76 +249,24 @@ Windows PowerShell:
 
 ```powershell
 $env:GEMINI_API_KEY="your-gemini-api-key"
-codedoc run --llm api --provider gemini --model gemini-2.5-flash
+codedoc run --provider gemini --model gemini-2.5-flash
 ```
 
 Windows Command Prompt:
 
 ```bat
 set GEMINI_API_KEY=your-gemini-api-key
-codedoc run --llm api --provider gemini --model gemini-2.5-flash
+codedoc run --provider gemini --model gemini-2.5-flash
 ```
 
 macOS/Linux:
 
 ```bash
 export GEMINI_API_KEY="your-gemini-api-key"
-codedoc run --llm api --provider gemini --model gemini-2.5-flash
+codedoc run --provider gemini --model gemini-2.5-flash
 ```
 
 `GOOGLE_API_KEY` is also supported as an alias for `GEMINI_API_KEY`.
-
-## Local LLM Setup
-
-Use local mode when code should stay on the machine or when the user is running Ollama, LM Studio, llama.cpp server, or another OpenAI-compatible local server.
-
-### Ollama
-
-Start Ollama and pull a coding model.
-
-
-```bash
-ollama pull qwen2.5-coder:7b
-ollama serve
-```
-
-In another terminal:
-
-```bash
-codedoc run --llm local --model qwen2.5-coder:7b
-```
-
-Default Ollama URL:
-
-```text
-http://localhost:11434/v1
-```
-
-### LM Studio
-
-In LM Studio, start the local server with an OpenAI-compatible endpoint. The common base URL is:
-
-```text
-http://localhost:1234/v1
-```
-
-Then run:
-
-```bash
-codedoc run --llm local --model your-loaded-model
-```
-
-Set the base URL in config:
-
-```json
-{
-  "llm_mode": "local",
-  "model_name": "your-loaded-model",
-  "api_base_url": "http://localhost:1234/v1"
-}
-```
-
-For local LLMs, set `parallel_agents` to `false` if the model or GPU has limited memory.
 
 ## A Word From Codex
 
@@ -342,12 +303,11 @@ Create `codedoc.config.json` in the project being documented:
 
 ```json
 {
-  "llm_mode": "api",
   "llm_provider": "auto",
   "model_name": "gpt-4o-mini",
   "api_base_url": null,
   "entry_file": null,
-  "output_dir": "docs_output",
+  "output_dir": "codedoc",
   "output_format": "json",
   "supported_extensions": [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"],
   "parallel_agents": true,
@@ -357,14 +317,14 @@ Create `codedoc.config.json` in the project being documented:
   "log_level": "INFO",
   "max_file_size_kb": 500,
   "propagate_changes": true,
-  "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "docs_output"],
+  "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
   "ignore_paths": ["/myenv", "services/generated"]
 }
 ```
 
 Configuration precedence, from strongest to weakest:
 
-1. CLI flags, such as `--model`, `--llm`, `--format`, and `--output`.
+1. CLI flags, such as `--model`, `--provider`, `--format`, and `--output`.
 2. Environment variables and values loaded from `.env`.
 3. `codedoc.config.json` or `config.json`.
 4. Built-in defaults.
@@ -373,8 +333,8 @@ Supported output formats:
 
 | Value | Result |
 | --- | --- |
-| `json` | Writes only `docs_output/codedoc.json`. This is the default. |
-| `md` | Writes only `docs_output/codedoc.md`. |
+| `json` | Writes only `codedoc/codedoc.json`. |
+| `md` | Writes only `codedoc/codedoc.md`. |
 | `both` | Writes both combined files. |
 
 Parallelism settings:
@@ -399,10 +359,9 @@ Supported variables:
 | `GEMINI_API_KEY` | Google Gemini API key. |
 | `GOOGLE_API_KEY` | Google API key alias for Gemini. |
 | `LLM_API_KEY` | Generic fallback API key. |
-| `LLM_MODE` | `api` or `local`. |
 | `LLM_PROVIDER` | `auto`, `openai`, `anthropic`, or `gemini`. |
 | `MODEL_NAME` | Model name to use. |
-| `API_BASE_URL` | OpenAI-compatible base URL. |
+| `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
@@ -415,7 +374,6 @@ Example `.env` for OpenAI:
 
 ```text
 OPENAI_API_KEY=sk-your-openai-key
-LLM_MODE=api
 MODEL_NAME=gpt-4o-mini
 CODEDOC_OUTPUT_FORMAT=json
 ```
@@ -424,7 +382,6 @@ Example `.env` for Anthropic:
 
 ```text
 ANTHROPIC_API_KEY=sk-ant-your-anthropic-key
-LLM_MODE=api
 LLM_PROVIDER=anthropic
 MODEL_NAME=claude-haiku-4-5-20251001
 CODEDOC_OUTPUT_FORMAT=json
@@ -434,18 +391,8 @@ Example `.env` for Gemini:
 
 ```text
 GEMINI_API_KEY=your-gemini-api-key
-LLM_MODE=api
 LLM_PROVIDER=gemini
 MODEL_NAME=gemini-2.5-flash
-CODEDOC_OUTPUT_FORMAT=json
-```
-
-Example `.env` for Ollama:
-
-```text
-LLM_MODE=local
-MODEL_NAME=qwen2.5-coder:7b
-API_BASE_URL=http://localhost:11434/v1
 CODEDOC_OUTPUT_FORMAT=json
 ```
 
@@ -477,39 +424,76 @@ export CODEDOC_IGNORE_PATHS="/myenv;services/generated"
 
 ## Output and Cache
 
-`codedoc` writes public documentation to the selected output directory and private incremental memory to the project root.
+`codedoc` writes public documentation and its incremental cache to the same output directory. Everything stays in one place — the project root is never written to.
 
 Default output:
 
 ```text
-docs_output/codedoc.json
-codedoc_db.json
+codedoc/codedoc.json
+codedoc/codedoc_db.json
 ```
 
-Markdown output:
+JSON only:
+
+```bash
+codedoc run --format json
+```
+
+```text
+codedoc/codedoc.json
+codedoc/codedoc_db.json
+```
+
+Markdown only:
 
 ```bash
 codedoc run --format md
 ```
 
 ```text
-docs_output/codedoc.md
-codedoc_db.json
+codedoc/codedoc.md
+codedoc/codedoc_db.json
 ```
 
-Both formats:
+Custom output file name and location:
 
 ```bash
-codedoc run --format both
+codedoc run --entry src/main.py --output project_docs/analysis.json
+codedoc run --entry src/main.py --output project_docs/analysis.md
 ```
+
+When a file path is passed to `--output`, the format is inferred from the extension — no need to also pass `--format`. Passing an unsupported extension (anything other than `.json` or `.md`) stops the run with a clear error.
+
+### Metadata and Resume
+
+Every generated file embeds a small metadata block that stores the entry point and schema version. This is how CodeDoc resumes documentation runs without asking for `--entry` a second time.
+
+In JSON files the block is the first key in the document:
+
+```json
+{
+  "_codedoc": {
+    "entry_file": "src/main.py",
+    "schema_version": "1.3",
+    "generated_at": "2025-..."
+  },
+  ...
+}
+```
+
+In Markdown files it is an HTML comment at the very top:
 
 ```text
-docs_output/codedoc.json
-docs_output/codedoc.md
-codedoc_db.json
+<!-- codedoc-ai: {"entry_file": "src/main.py", "schema_version": "1.3", ...} -->
 ```
 
-The selected output format is authoritative. If a previous run wrote Markdown and the next run selects JSON, the old Markdown output is removed. If the selected output file is deleted, `codedoc` recreates it from `codedoc_db.json` when the cache is still valid.
+If this metadata is missing or corrupted, `codedoc` raises a clear error rather than silently failing. To recover, re-run with `--entry` to generate a fresh document.
+
+### Cache Behaviour
+
+All generated files — including `codedoc_db.json` — are stored in the output directory so the project root stays clean. On the first run after upgrading from an older version, any existing `codedoc_db.json` at the project root is automatically moved into the output directory.
+
+The selected output format is authoritative for the default filenames (`codedoc.json` and `codedoc.md`). If a previous run wrote `codedoc.json` and the next run selects `md` only, the old `codedoc.json` is removed. Custom-named output files (e.g. `analysis.json`) are never automatically deleted between runs. If the selected output file is deleted, `codedoc` recreates it from `codedoc_db.json` when the cache is still valid.
 
 The CLI logs the selected output format and the exact output file path during execution for better visibility.
 
@@ -587,18 +571,19 @@ That means `--format md` does not require a separate Markdown-generating AI call
 On each run, `codedoc` follows this process:
 
 1. Load config and environment.
-2. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
-3. Build a dependency graph from parsed imports.
-4. Select files from `--entry`, `entry_file`, auto-detected entry, or all files.
-5. Compute each selected file's SHA-256 hash.
-6. Skip files whose path and hash already match the cache.
-7. Reuse cached analysis if another file has the same content hash.
-8. If `propagate_changes` is true, reprocess files that depend on changed files.
-9. Send only remaining files to the selected LLM, up to `max_parallel_files` at a time.
-10. Retry failed parallel files sequentially so errors are easier to diagnose.
-11. Stop early if repeated failures suggest the API or provider is unavailable.
-12. Update `codedoc_db.json` from the main pipeline path.
-13. Rebuild the selected output file from cached records.
+2. Resolve the entry point — from `--entry` if given, otherwise from metadata in the existing output file or legacy auto-detection.
+3. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
+4. Build a dependency graph from parsed imports.
+5. Select files reachable from the entry point.
+6. Compute each selected file's SHA-256 hash.
+7. Skip files whose path and hash already match the cache.
+8. Reuse cached analysis if another file has the same content hash.
+9. If `propagate_changes` is true, reprocess files that depend on changed files.
+10. Send only remaining files to the selected LLM, up to `max_parallel_files` at a time.
+11. Retry failed parallel files sequentially so errors are easier to diagnose.
+12. Stop early if repeated failures suggest the API or provider is unavailable.
+13. Update `codedoc_db.json` from the main pipeline path.
+14. Rebuild the selected output file from cached records, embedding metadata for the next run.
 
 This means repeated runs should only send new or changed code to the LLM. Unchanged code and exact duplicate content are reused.
 
@@ -613,14 +598,12 @@ from codedoc import run_pipeline
 
 stats = run_pipeline({
     "entry_file": "src/main.py",
-    "llm_mode": "local",
     "llm_provider": "auto",
-    "model_name": "qwen2.5-coder:7b",
-    "api_base_url": "http://localhost:11434/v1",
-    "parallel_agents": False,
-    "max_parallel_files": 2,
+    "model_name": "gpt-4o-mini",
+    "parallel_agents": True,
+    "max_parallel_files": 5,
     "file_retry_attempts": 1,
-    "output_dir": "docs_output",
+    "output_dir": "codedoc",
     "output_format": "json",
     "ignore_paths": ["/myenv", "services/generated"],
 })
@@ -668,7 +651,6 @@ CLI flags map directly to config keys:
 | --- | --- |
 | `PATH` | Optional first `run_pipeline(project_root, ...)` argument |
 | `--entry` | `entry_file` |
-| `--llm` | `llm_mode` |
 | `--provider` | `llm_provider` |
 | `--model` | `model_name` |
 | `--output` | `output_dir` |
@@ -683,19 +665,8 @@ CLI flags map directly to config keys:
 If API mode fails with an API key error:
 
 - Set `OPENAI_API_KEY` for OpenAI models.
-- Set `ANTHROPIC_API_KEY` for Claude models.
-- Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` for Gemini models.
-- Make sure Claude model names start with `claude`.
-- Make sure Gemini model names start with `gemini`, or pass `--provider gemini`.
-
-If local mode fails:
-
-- Confirm the local server is running.
-- Confirm the `api_base_url` points to an OpenAI-compatible `/v1` endpoint.
-- For Ollama, use `http://localhost:11434/v1`.
-- For LM Studio, commonly use `http://localhost:1234/v1`.
-- Try `parallel_agents: false` for smaller local models.
-- Lower `max_parallel_files` if the model or server cannot handle concurrent files.
+- Set `ANTHROPIC_API_KEY` for Claude models. Make sure model names start with `claude`.
+- Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` for Gemini models. Make sure model names start with `gemini`, or pass `--provider gemini`.
 
 If many files fail quickly:
 

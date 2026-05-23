@@ -6,10 +6,18 @@ import json
 import re
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codedoc.utils.errors import ConfigError
+
 SCHEMA_VERSION = "1.3"
+
+# Regex that matches the metadata comment embedded in Markdown output:
+#   <!-- codedoc-ai: { ... } -->
+_CODEDOC_META_COMMENT_RE = re.compile(
+    r"<!--\s*codedoc-ai:\s*(\{.*?\})\s*-->", re.DOTALL
+)
 
 
 def build_project_view(
@@ -66,8 +74,8 @@ def build_project_view(
 
 def markdown_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as Markdown."""
-    lines: list[str] = ["# codedoc project documentation\n\n"]
     project = view.get("project", {})
+    lines: list[str] = [_build_meta_comment(view, project), "# codedoc project documentation\n\n"]
     run = view.get("run", {})
 
     lines += [
@@ -137,7 +145,17 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
     payload = dict(view)
     if error_summary and error_summary != "No errors.":
         payload["errors"] = error_summary
-    return json.dumps(payload, indent=2, ensure_ascii=False)
+    # Embed _codedoc metadata block first so it's easy to find
+    project = view.get("project", {})
+    meta_block = {
+        "_codedoc": {
+            "entry_file": project.get("entry_file"),
+            "schema_version": view.get("schema_version", SCHEMA_VERSION),
+            "generated_at": view.get("generated_at", ""),
+        }
+    }
+    ordered = {**meta_block, **payload}
+    return json.dumps(ordered, indent=2, ensure_ascii=False)
 
 
 def markdown_to_view(markdown: str) -> dict:
@@ -200,6 +218,73 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
     """Convert codedoc JSON output to Markdown without using an LLM."""
     view = json.loads(data) if isinstance(data, str) else data
     return markdown_from_view(view, error_summary)
+
+
+def read_codedoc_meta(file_path: Path) -> dict:
+    """
+    Read CodeDoc metadata from a previously generated .json or .md output file.
+
+    Returns a dict containing at least ``entry_file`` and ``schema_version``.
+    Raises :class:`~codedoc.utils.errors.ConfigError` when the file cannot be
+    read, is not a recognised CodeDoc output, or is missing required metadata.
+    """
+    try:
+        content = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise ConfigError(f"Cannot read '{file_path}': {exc}") from exc
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".json":
+        try:
+            data = json.loads(content)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"'{file_path}' is not a valid CodeDoc file: JSON parse error."
+            ) from exc
+        meta = data.get("_codedoc")
+        if not isinstance(meta, dict) or not meta.get("entry_file"):
+            raise ConfigError(
+                f"'{file_path}' does not appear to be a valid CodeDoc file. "
+                "The '_codedoc' metadata block is missing or has no entry_file. "
+                "Re-run with --entry to generate a fresh document."
+            )
+        return meta
+
+    if suffix == ".md":
+        match = _CODEDOC_META_COMMENT_RE.search(content)
+        if not match:
+            raise ConfigError(
+                f"'{file_path}' does not appear to be a valid CodeDoc file. "
+                "The metadata comment (<!-- codedoc-ai: ... -->) is missing. "
+                "Re-run with --entry to generate a fresh document."
+            )
+        try:
+            meta = json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            raise ConfigError(
+                f"'{file_path}' has a malformed CodeDoc metadata comment."
+            ) from exc
+        if not meta.get("entry_file"):
+            raise ConfigError(
+                f"'{file_path}' CodeDoc metadata is missing the entry_file field."
+            )
+        return meta
+
+    raise ConfigError(
+        f"'{file_path}' has unsupported extension '{suffix}'. "
+        "CodeDoc output files must end in .json or .md."
+    )
+
+
+def _build_meta_comment(view: dict, project: dict) -> str:
+    """Return a one-line HTML comment embedding CodeDoc metadata for Markdown output."""
+    meta = {
+        "entry_file": project.get("entry_file"),
+        "schema_version": view.get("schema_version", SCHEMA_VERSION),
+        "generated_at": view.get("generated_at", ""),
+    }
+    return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
 
 
 def _clean_file(record: dict) -> dict:

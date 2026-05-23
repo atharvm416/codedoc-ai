@@ -43,7 +43,7 @@ SKIP_DIRS = {
     "__pycache__", ".git", "node_modules", ".venv", "venv",
     "env", "myenv", ".env", ".hg", ".svn", "site-packages", "dist-packages",
     "dist", "build", ".next", ".nuxt", "target",
-    "docs_output", ".mypy_cache", ".pytest_cache", ".ruff_cache",
+    "codedoc", ".mypy_cache", ".pytest_cache", ".ruff_cache",
 }
 
 

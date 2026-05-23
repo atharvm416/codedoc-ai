@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.6.0 - 2026-05-23
+
+- Added metadata-backed reruns:
+  - JSON output now includes a top-level `_codedoc` metadata block.
+  - Markdown output now includes a hidden `codedoc-ai` metadata comment.
+  - Stored metadata includes the entry file, schema version, and generation time.
+  - Subsequent runs can recover the entry file from a previously generated `.json` or `.md` documentation file.
+- Changed first-run/resume behavior:
+  - First runs require an explicit entry file when no valid previous CodeDoc output is available.
+  - If no output path is provided, CodeDoc checks the default `codedoc/` folder for previous docs.
+  - Invalid or metadata-free documentation files now fail clearly instead of being treated as valid resume sources.
+- Changed default generated output location from `docs_output/` to `codedoc/`.
+- Kept JSON as the default public output format.
+- Added support for output file paths:
+  - `--output docs/report.json` writes a named JSON file.
+  - `--output docs/report.md` writes a named Markdown file.
+  - File extension now determines the selected output format for explicit file paths.
+  - Unsupported output file extensions now raise a configuration error.
+- Moved the incremental cache into the selected output directory:
+  - `codedoc_db.json` is now stored beside generated docs.
+  - Existing root-level `codedoc_db.json` files are migrated into the output directory when possible.
+- Improved output cleanup:
+  - Default managed files (`codedoc.json`, `codedoc.md`) are removed when switching formats.
+  - Legacy per-file outputs such as `main.py.json` and `main.py.md` are cleaned up.
+  - Custom-named output files are preserved across runs.
+- Simplified provider mode support for this release:
+  - Active providers are OpenAI/OpenAI-compatible, Anthropic, and Gemini.
+  - Local provider code remains in the package but is not exposed through the CLI/factory in 0.6.0.
+  - Removed `--llm` / `LLM_MODE` from the documented public workflow.
+- Improved provider implementations:
+  - Reused Anthropic clients instead of creating a client per request.
+  - Added native JSON-mode handling for OpenAI and Gemini where available.
+  - Improved Gemini system-instruction handling.
+- Updated CLI help, README, and version metadata for the 0.6.0 workflow.
+- Added regression coverage for:
+  - Missing entry plus missing docs raising a clear configuration error.
+  - Resuming from existing JSON metadata.
+  - Custom output filename behavior.
+  - JSON remaining the default format.
+  - Cache/output cleanup and metadata preservation.
+
 ## 0.5.2 - 2026-05-13
 
 - Fixed cache structure duplication issues in generated documentation output.

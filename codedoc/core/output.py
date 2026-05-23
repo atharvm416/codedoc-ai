@@ -11,8 +11,11 @@ from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# Default output filenames — only these are ever auto-cleaned between runs.
+# Custom filenames (set via --output path/to/name.json) are never deleted.
 PROJECT_JSON = "codedoc.json"
 PROJECT_MARKDOWN = "codedoc.md"
+_MANAGED_FILENAMES = frozenset({PROJECT_JSON, PROJECT_MARKDOWN})
 
 
 def write_project_outputs(
@@ -23,27 +26,45 @@ def write_project_outputs(
     output_format: str = "json",
     entry_file: str | None = None,
     graph_edges: list[dict] | None = None,
+    json_filename: str = PROJECT_JSON,
+    md_filename: str = PROJECT_MARKDOWN,
 ) -> tuple[Path | None, Path | None]:
-    """Write selected combined output file(s)."""
+    """
+    Write selected combined output file(s).
+
+    Args:
+        records:        Documentation records from CodeDocDB.
+        stats:          Pipeline run statistics.
+        output_dir:     Directory to write output files into.
+        error_summary:  Optional error log summary to embed in output.
+        output_format:  One of "json", "md", or "both".
+        entry_file:     Relative path of the project entry file, if known.
+        graph_edges:    Dependency graph edge list.
+        json_filename:  Filename for JSON output (default: codedoc.json).
+        md_filename:    Filename for Markdown output (default: codedoc.md).
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_format not in ("json", "md", "both"):
         raise OutputError(str(output_dir), f"Unsupported output format: {output_format}")
 
-    selected = _selected_output_names(output_format)
+    selected = _selected_output_names(output_format, json_filename, md_filename)
     _remove_unselected_outputs(output_dir, selected)
-    json_path = output_dir / PROJECT_JSON if PROJECT_JSON in selected else None
-    md_path = output_dir / PROJECT_MARKDOWN if PROJECT_MARKDOWN in selected else None
+
+    json_path = output_dir / json_filename if output_format in ("json", "both") else None
+    md_path = output_dir / md_filename if output_format in ("md", "both") else None
 
     try:
         view = build_project_view(records, stats, entry_file, graph_edges)
         if json_path:
             _write_project_json(view, error_summary, json_path)
+            logger.info("JSON output: %s", json_path)
         if md_path:
             _write_project_markdown(view, error_summary, md_path)
+            logger.info("Markdown output: %s", md_path)
     except Exception as exc:
         raise OutputError(str(output_dir), str(exc)) from exc
 
-    written = [path.name for path in (json_path, md_path) if path]
+    written = [p.name for p in (json_path, md_path) if p]
     logger.debug("Output written: %s", ", ".join(written))
     return json_path, md_path
 
@@ -61,22 +82,18 @@ def write_outputs(result: dict, output_dir: Path) -> tuple[Path, Path]:
         "author": None,
         "documentation": result,
     }
-    return write_project_outputs([record], {"checked": 1, "failed": 0, "skipped": 0}, output_dir)
+    return write_project_outputs(
+        [record],
+        {"checked": 1, "failed": 0, "skipped": 0},
+        output_dir,
+    )
 
 
-def _write_project_json(
-    view: dict,
-    error_summary: str,
-    path: Path,
-) -> None:
+def _write_project_json(view: dict, error_summary: str, path: Path) -> None:
     path.write_text(json_from_view(view, error_summary), encoding="utf-8")
 
 
-def _write_project_markdown(
-    view: dict,
-    error_summary: str,
-    path: Path,
-) -> None:
+def _write_project_markdown(view: dict, error_summary: str, path: Path) -> None:
     path.write_text(markdown_from_view(view, error_summary), encoding="utf-8")
 
 
@@ -97,21 +114,47 @@ def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Pat
     return summary_path
 
 
-def _selected_output_names(output_format: str) -> set[str]:
+def _selected_output_names(
+    output_format: str,
+    json_filename: str,
+    md_filename: str,
+) -> set[str]:
+    """Return the set of output filenames that should be kept for this run."""
     if output_format == "json":
-        return {PROJECT_JSON}
+        return {json_filename}
     if output_format == "md":
-        return {PROJECT_MARKDOWN}
-    return {PROJECT_JSON, PROJECT_MARKDOWN}
+        return {md_filename}
+    return {json_filename, md_filename}
 
 
 def _remove_unselected_outputs(output_dir: Path, keep: set[str]) -> None:
-    """Remove old docs so the output directory keeps only selected docs files."""
+    """
+    Remove previously generated docs files that are no longer selected.
+
+    Only the two default managed filenames (codedoc.json, codedoc.md) are
+    ever removed automatically.  Custom-named output files are never deleted,
+    so switching between named outputs on consecutive runs does not cause
+    data loss.
+    """
+    for name in _MANAGED_FILENAMES:
+        if name in keep:
+            continue
+        path = output_dir / name
+        if path.exists():
+            try:
+                path.unlink()
+                logger.debug("Removed unselected output: %s", path)
+            except OSError as exc:
+                logger.debug("Could not remove legacy output %s: %s", path, exc)
+
     for pattern in ("*.json", "*.md"):
         for path in output_dir.glob(pattern):
-            if path.name in keep:
+            if path.name in keep or path.name in _MANAGED_FILENAMES:
+                continue
+            if "." not in path.stem:
                 continue
             try:
                 path.unlink()
+                logger.debug("Removed legacy per-file output: %s", path)
             except OSError as exc:
                 logger.debug("Could not remove legacy output %s: %s", path, exc)

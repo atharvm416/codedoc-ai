@@ -261,6 +261,73 @@ def test_public_output_normalizes_external_package_names(tmp_path):
     ]
 
 
+def test_pipeline_requires_entry_when_no_existing_docs(tmp_path):
+    import pytest
+
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("def main():\n    return 'ok'\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="No entry point specified"):
+        run_pipeline(
+            tmp_path,
+            {
+                "output_dir": "docs_output",
+                "output_format": "json",
+                "propagate_changes": False,
+            },
+        )
+
+
+def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch):
+    from codedoc.core.db import CodeDocDB
+    from codedoc.pipeline import run_pipeline
+
+    main = tmp_path / "main.py"
+    main.write_text("def main():\n    return 'ok'\n", encoding="utf-8")
+
+    output_dir = tmp_path / "docs_output"
+    output_dir.mkdir()
+    (output_dir / "codedoc.json").write_text(
+        '{"_codedoc": {"entry_file": "main.py", "schema_version": "1.3"}}',
+        encoding="utf-8",
+    )
+
+    db = CodeDocDB(tmp_path, output_dir)
+    db.mark_processed(
+        "main.py",
+        main,
+        {
+            "file_path": "main.py",
+            "language": "python",
+            "extension": ".py",
+            "imports": [],
+            "description": "Resumed from metadata.",
+            "state": "checked",
+        },
+    )
+
+    def fail_if_llm_is_created(config):
+        raise AssertionError("LLM should not be created for cached metadata resume")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_is_created)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "output_dir": "docs_output",
+            "output_format": "json",
+            "propagate_changes": False,
+        },
+    )
+
+    assert stats["checked"] == 0
+    assert "Resumed from metadata." in (
+        output_dir / "codedoc.json"
+    ).read_text(encoding="utf-8")
+
+
 def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
     from codedoc.core.db import CodeDocDB
 
@@ -342,11 +409,25 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
 
     first = tmp_path / "first.py"
     second = tmp_path / "second.py"
+    entry = tmp_path / "entry.py"
     content = "def shared():\n    return 1\n"
     first.write_text(content, encoding="utf-8")
     second.write_text(content, encoding="utf-8")
+    entry.write_text("import first\nimport second\n", encoding="utf-8")
 
     db = CodeDocDB(tmp_path)
+    db.mark_processed(
+        "entry.py",
+        entry,
+        {
+            "file_path": "entry.py",
+            "language": "python",
+            "extension": ".py",
+            "imports": ["first", "second"],
+            "description": "Entry module.",
+            "state": "checked",
+        },
+    )
     db.mark_processed(
         "first.py",
         first,
@@ -370,6 +451,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
         {
             "output_dir": "docs_output",
             "output_format": "json",
+            "entry_file": "entry.py",
             "propagate_changes": False,
         },
     )
@@ -387,6 +469,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
         {
             "output_dir": "docs_output",
             "output_format": "json",
+            "entry_file": "entry.py",
             "propagate_changes": False,
         },
     )
@@ -516,7 +599,13 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
     monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_is_created)
     monkeypatch.chdir(tmp_path)
 
-    stats = run_pipeline({"output_dir": "docs_output", "output_format": "md"})
+    stats = run_pipeline(
+        {
+            "output_dir": "docs_output",
+            "output_format": "md",
+            "entry_file": "main.py",
+        }
+    )
 
     assert stats["checked"] == 0
     assert (tmp_path / "docs_output" / "codedoc.md").exists()
@@ -558,8 +647,11 @@ def test_pipeline_processes_files_with_bounded_parallelism(tmp_path, monkeypatch
     from codedoc.pipeline import run_pipeline
 
     for index in range(6):
+        imports = ""
+        if index == 0:
+            imports = "".join(f"import file_{dep}\n" for dep in range(1, 6))
         (tmp_path / f"file_{index}.py").write_text(
-            f"def func_{index}():\n    return {index}\n",
+            f"{imports}def func_{index}():\n    return {index}\n",
             encoding="utf-8",
         )
 
@@ -625,6 +717,7 @@ def test_pipeline_processes_files_with_bounded_parallelism(tmp_path, monkeypatch
         {
             "output_dir": "docs_output",
             "output_format": "json",
+            "entry_file": "file_0.py",
             "parallel_agents": False,
             "max_parallel_files": 3,
             "propagate_changes": False,
@@ -700,6 +793,7 @@ def test_pipeline_retries_failed_file_before_marking_failed(tmp_path, monkeypatc
         {
             "output_dir": "docs_output",
             "output_format": "json",
+            "entry_file": "main.py",
             "parallel_agents": False,
             "max_parallel_files": 1,
             "file_retry_attempts": 1,

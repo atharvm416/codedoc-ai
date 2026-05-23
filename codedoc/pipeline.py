@@ -14,11 +14,12 @@ from codedoc.core.db import CodeDocDB
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
 from codedoc.core.output import write_project_outputs
+from codedoc.core.project_view import read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
 from codedoc.llm.factory import create_provider
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import AgentError, ErrorReporter, OutputError, ParseError
+from codedoc.utils.errors import AgentError, ConfigError, ErrorReporter, OutputError, ParseError
 from codedoc.utils.logger import get_logger, set_level
 
 logger = get_logger(__name__)
@@ -48,7 +49,14 @@ def run_pipeline(
     if not ensure_codedoc_installed(root):
         raise RuntimeError("codedoc is not importable in the current Python environment.")
 
+    if config_overrides is None:
+        config_overrides = {}
+
     config = load_config(root, config_overrides)
+
+    # Resolve entry point from previous docs *after* loading config so that
+    # entry_file set in codedoc.config.json is also visible.
+    _resolve_entry_and_docs(root, config)
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
@@ -56,6 +64,7 @@ def run_pipeline(
     logger.info("Output format: %s", output_format)
 
     output_dir = root / config["output_dir"]
+    output_dir.mkdir(parents=True, exist_ok=True)
     error_reporter = ErrorReporter(root / "error.log")
 
     all_files = scan_files(
@@ -72,7 +81,7 @@ def run_pipeline(
     graph, file_map = _build_graph(all_files, root, error_reporter)
     selected_rels, entry_rel = _select_files(root, config, graph, file_map)
 
-    db = CodeDocDB(root)
+    db = CodeDocDB(root, output_dir)
     changed_rels = {
         rel for rel in selected_rels if db.needs_processing(rel, file_map[rel]["path"])
     }
@@ -116,6 +125,8 @@ def run_pipeline(
             output_format,
             entry_rel,
             _graph_edges(graph, selected_rels),
+            json_filename=config.get("output_json_filename", "codedoc.json"),
+            md_filename=config.get("output_md_filename", "codedoc.md"),
         )
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
@@ -170,6 +181,8 @@ def run_pipeline(
         output_format,
         entry_rel,
         _graph_edges(graph, selected_rels),
+        json_filename=config.get("output_json_filename", "codedoc.json"),
+        md_filename=config.get("output_md_filename", "codedoc.md"),
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
@@ -393,6 +406,71 @@ def _cancel_pending(future_map: dict) -> None:
     for future in future_map:
         if not future.done():
             future.cancel()
+
+
+def _resolve_entry_and_docs(root: Path, config: dict) -> None:
+    """
+    Auto-discover the entry point from a previously generated CodeDoc file.
+
+    Called *after* load_config so that ``entry_file`` from any source
+    (CLI flag, config JSON, environment variable) is already present.
+    Mutates ``config`` in-place.
+
+    Rules
+    -----
+    1. If entry_file is already set in config, return immediately — nothing to resolve.
+    2. Determine which docs file to examine:
+       - If ``output_dir`` in config contains a file extension (.json / .md), treat it
+         as a direct path to the docs file.
+       - Otherwise look for ``codedoc.json`` or ``codedoc.md`` inside the output
+         directory (default: ``<root>/codedoc/``).
+    3. If a docs file is found:
+       - Parse its metadata via ``read_codedoc_meta`` (raises ConfigError if invalid).
+       - Populate ``config["entry_file"]`` from the metadata.
+    4. If *no* docs file is found and no entry_file is configured, raise a
+       ConfigError explaining that the entry point is mandatory.
+    """
+    # Already have an explicit entry from any config source — nothing to resolve.
+    if config.get("entry_file"):
+        return
+
+    raw_output = config.get("output_dir", "codedoc")
+    p = Path(raw_output)
+
+    if p.suffix.lower() in (".json", ".md"):
+        # User gave a specific file path like "docs/report.json"
+        candidate = (root / p) if not p.is_absolute() else p
+        candidates: list[Path] = [candidate]
+    else:
+        # Directory — probe for the configured filenames in order.
+        out_dir = (root / p) if not p.is_absolute() else p
+        candidates = []
+        if config.get("output_format") in ("json", "both"):
+            candidates.append(out_dir / config.get("output_json_filename", "codedoc.json"))
+        if config.get("output_format") in ("md", "both"):
+            candidates.append(out_dir / config.get("output_md_filename", "codedoc.md"))
+
+    for candidate in candidates:
+        if candidate.exists():
+            # read_codedoc_meta raises ConfigError when metadata is absent/corrupt
+            meta = read_codedoc_meta(candidate)
+            entry = meta.get("entry_file")
+            if entry:
+                logger.info(
+                    "Resuming: entry '%s' read from '%s'", entry, candidate.name
+                )
+                config["entry_file"] = entry
+            return  # docs file found (even if entry was empty — handled by validate)
+
+    raise ConfigError(
+        "No entry point specified and no existing CodeDoc documentation was found.\n\n"
+        "For a first run, provide the entry file:\n"
+        "  codedoc run --entry src/main.py\n\n"
+        "For subsequent runs, point to your previously generated file:\n"
+        "  codedoc run --output path/to/codedoc.json\n"
+        "or run from the same directory so the default codedoc/ folder can be "
+        "checked automatically."
+    )
 
 
 def _build_graph(
