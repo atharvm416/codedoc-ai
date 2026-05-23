@@ -60,7 +60,7 @@ class Orchestrator:
         file_path = descriptor["rel_path"]
         language = descriptor.get("language", "generic")
 
-        logger.info("Processing: %s", file_path)
+        logger.debug("Running agents for %s with %s", file_path, self.llm.provider_name)
 
         if self.parallel:
             structure, dependencies = self._run_parallel(

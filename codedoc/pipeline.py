@@ -6,8 +6,6 @@ import concurrent.futures
 from pathlib import Path
 from typing import Any
 
-from rich.progress import BarColumn, Progress, SpinnerColumn, TaskProgressColumn, TextColumn
-
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.db import CodeDocDB
@@ -151,8 +149,11 @@ def run_pipeline(
     retry_attempts = config.get("file_retry_attempts", 1)
     max_consecutive_failures = config.get("max_consecutive_failures", 5)
     logger.info(
-        "File concurrency: max_parallel_files=%d retry_attempts=%d max_consecutive_failures=%d",
+        "File processing plan: %d file(s), up to %d file(s) in parallel, "
+        "provider=%s, retry_attempts=%d, max_consecutive_failures=%d",
+        len(agent_rels),
         max_workers,
+        llm.provider_name,
         retry_attempts,
         max_consecutive_failures,
     )
@@ -238,52 +239,59 @@ def _process_agent_files(
     failed_descriptors = []
     health_reported = False
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Documenting files...", total=len(descriptors))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            future_map = {
-                pool.submit(_process_one_file, descriptor, orchestrator): descriptor
-                for descriptor in descriptors
-            }
+    total = len(descriptors)
+    completed = 0
+    logger.info(
+        "Starting parallel documentation: %d file(s), max_parallel_files=%d, provider=%s",
+        total,
+        max_workers,
+        orchestrator.llm.provider_name,
+    )
 
-            for future in concurrent.futures.as_completed(future_map):
-                descriptor = future_map[future]
-                rel_path = descriptor["rel_path"]
-                progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
-                try:
-                    result = future.result()
-                    db.mark_processed(rel_path, descriptor["path"], result)
-                    queue.mark_checked(rel_path)
-                    stats["checked"] += 1
-                    consecutive_failures = 0
-                    logger.info("[OK] %s", rel_path)
-                except Exception as exc:
-                    failed_descriptors.append(descriptor)
-                    consecutive_failures += 1
-                    logger.warning("[RETRY] %s failed in parallel: %s", rel_path, exc)
-                    if (
-                        consecutive_failures >= max_consecutive_failures
-                        and not health_reported
-                    ):
-                        health_reported = True
-                        _cancel_pending(future_map)
-                        error_reporter.record(
-                            RuntimeError(
-                                "Parallel processing saw "
-                                f"{consecutive_failures} consecutive file failures. "
-                                "The API/provider may be unavailable or rate-limited; "
-                                "failed files will be retried sequentially for clearer diagnostics."
-                            ),
-                            context="parallel processing health check",
-                        )
-                finally:
-                    progress.advance(task)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        future_map = {}
+        for index, descriptor in enumerate(descriptors, start=1):
+            rel_path = descriptor["rel_path"]
+            logger.info(
+                "[START %d/%d] %s | provider=%s",
+                index,
+                total,
+                rel_path,
+                orchestrator.llm.provider_name,
+            )
+            future_map[pool.submit(_process_one_file, descriptor, orchestrator)] = (
+                descriptor,
+                index,
+            )
+
+        for future in concurrent.futures.as_completed(future_map):
+            descriptor, index = future_map[future]
+            rel_path = descriptor["rel_path"]
+            try:
+                result = future.result()
+                db.mark_processed(rel_path, descriptor["path"], result)
+                queue.mark_checked(rel_path)
+                stats["checked"] += 1
+                consecutive_failures = 0
+                completed += 1
+                _log_file_progress("OK", rel_path, completed, total)
+            except Exception as exc:
+                failed_descriptors.append(descriptor)
+                consecutive_failures += 1
+                completed += 1
+                _log_file_progress("RETRY", rel_path, completed, total, str(exc))
+                if consecutive_failures >= max_consecutive_failures and not health_reported:
+                    health_reported = True
+                    _cancel_pending(future_map)
+                    error_reporter.record(
+                        RuntimeError(
+                            "Parallel processing saw "
+                            f"{consecutive_failures} consecutive file failures. "
+                            "The API/provider may be unavailable or rate-limited; "
+                            "failed files will be retried sequentially for clearer diagnostics."
+                        ),
+                        context="parallel processing health check",
+                    )
 
     if failed_descriptors:
         logger.info(
@@ -314,49 +322,53 @@ def _process_files_sequentially(
 ) -> None:
     consecutive_failures = 0
 
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        BarColumn(),
-        TaskProgressColumn(),
-        transient=True,
-    ) as progress:
-        task = progress.add_task("Documenting files...", total=len(descriptors))
-        for descriptor in descriptors:
-            rel_path = descriptor["rel_path"]
-            progress.update(task, description=f"[cyan]{rel_path}[/cyan]")
-            try:
-                result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
-                db.mark_processed(rel_path, descriptor["path"], result)
-                queue.mark_checked(rel_path)
-                stats["checked"] += 1
-                consecutive_failures = 0
-                logger.info("[OK] %s", rel_path)
-            except (ParseError, OutputError, AgentError) as exc:
-                error_reporter.record(exc, context=rel_path)
-                queue.mark_failed(rel_path, str(exc))
-                stats["failed"] += 1
-                consecutive_failures += 1
-            except Exception as exc:
-                error_reporter.record(exc, context=rel_path)
-                queue.mark_failed(rel_path, str(exc))
-                stats["failed"] += 1
-                consecutive_failures += 1
-                logger.warning("[FAIL] %s: %s", rel_path, exc)
-            finally:
-                progress.advance(task)
+    total = len(descriptors)
+    logger.info(
+        "Starting sequential documentation: %d file(s), provider=%s",
+        total,
+        orchestrator.llm.provider_name,
+    )
 
-            if consecutive_failures >= max_consecutive_failures:
-                error_reporter.record(
-                    RuntimeError(
-                        "Stopping sequential processing after "
-                        f"{consecutive_failures} consecutive file failures. "
-                        "Check API credentials, provider availability, model name, "
-                        "rate limits, and network connectivity."
-                    ),
-                    context="sequential processing health check",
-                )
-                break
+    for index, descriptor in enumerate(descriptors, start=1):
+        rel_path = descriptor["rel_path"]
+        logger.info(
+            "[START %d/%d] %s | provider=%s",
+            index,
+            total,
+            rel_path,
+            orchestrator.llm.provider_name,
+        )
+        try:
+            result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
+            db.mark_processed(rel_path, descriptor["path"], result)
+            queue.mark_checked(rel_path)
+            stats["checked"] += 1
+            consecutive_failures = 0
+            _log_file_progress("OK", rel_path, index, total)
+        except (ParseError, OutputError, AgentError) as exc:
+            error_reporter.record(exc, context=rel_path)
+            queue.mark_failed(rel_path, str(exc))
+            stats["failed"] += 1
+            consecutive_failures += 1
+            _log_file_progress("FAIL", rel_path, index, total, str(exc))
+        except Exception as exc:
+            error_reporter.record(exc, context=rel_path)
+            queue.mark_failed(rel_path, str(exc))
+            stats["failed"] += 1
+            consecutive_failures += 1
+            _log_file_progress("FAIL", rel_path, index, total, str(exc))
+
+        if consecutive_failures >= max_consecutive_failures:
+            error_reporter.record(
+                RuntimeError(
+                    "Stopping sequential processing after "
+                    f"{consecutive_failures} consecutive file failures. "
+                    "Check API credentials, provider availability, model name, "
+                    "rate limits, and network connectivity."
+                ),
+                context="sequential processing health check",
+            )
+            break
 
 
 def _process_one_file_with_retries(
@@ -379,6 +391,31 @@ def _process_one_file_with_retries(
                     exc,
                 )
     raise last_error or RuntimeError("Unknown processing failure")
+
+
+def _log_file_progress(
+    status: str,
+    rel_path: str,
+    completed: int,
+    total: int,
+    detail: str | None = None,
+) -> None:
+    percent = int((completed / total) * 100) if total else 100
+    remaining = max(total - completed, 0)
+    message = "[%s] %s | %d/%d complete (%d%%), %d remaining"
+    if detail:
+        logger.warning(
+            message + " | %s",
+            status,
+            rel_path,
+            completed,
+            total,
+            percent,
+            remaining,
+            detail,
+        )
+    else:
+        logger.info(message, status, rel_path, completed, total, percent, remaining)
 
 
 def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:

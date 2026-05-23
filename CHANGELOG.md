@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.1 - 2026-05-23
+
+- Improved run logging:
+  - Replaced animated file progress bars with stable log lines.
+  - Logs now show provider/model, configured file concurrency, file start events, completion percentage, and remaining file count.
+  - Format switches now log when an unselected public output file is removed.
+  - Parallel file processing is now visible in log output.
+  - Internal agent processing events demoted to debug level to reduce noise.
+
 ## 0.6.0 - 2026-05-23
 
 - Added metadata-backed reruns:

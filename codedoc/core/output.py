@@ -143,7 +143,7 @@ def _remove_unselected_outputs(output_dir: Path, keep: set[str]) -> None:
         if path.exists():
             try:
                 path.unlink()
-                logger.debug("Removed unselected output: %s", path)
+                logger.info("Removed unselected output: %s", path)
             except OSError as exc:
                 logger.debug("Could not remove legacy output %s: %s", path, exc)
 
