@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.2 - 2026-05-23
+
+- Cleaned public output for better AI scannability (schema version 1.4):
+  - Removed `id` field per file (always identical to `hash` — pure duplication).
+  - Removed `last_processed` field per file (internal processing timestamp, not documentation content).
+  - Removed `state` field per file (always `"checked"` in public output — carries no signal).
+  - Removed `format` field per file (file extension is already in `path`; `language` covers the language name).
+  - Result: each file record is smaller and contains only documentation-relevant content.
+- Markdown output no longer renders `**ID:**` or `**Format:**` header lines per file.
+
 ## 0.6.1 - 2026-05-23
 
 - Improved run logging:

@@ -45,11 +45,8 @@ def test_json_is_the_default_combined_output(tmp_path):
 
     assert json_path == output_dir / "codedoc.json"
     assert md_path is None
-    assert not (output_dir / "main.py.json").exists()
-    assert not (output_dir / "main.py.md").exists()
-    assert not (output_dir / "codedoc.md").exists()
     output = json_path.read_text(encoding="utf-8")
-    assert '"schema_version": "1.3"' in output
+    assert '"schema_version": "1.4"' in output
     assert '"path": "main.py"' in output
     assert '"author"' not in output
     assert '"result"' not in output
@@ -95,7 +92,6 @@ def test_markdown_format_writes_only_combined_markdown(tmp_path):
 
     assert json_path is None
     assert md_path == output_dir / "codedoc.md"
-    assert not (output_dir / "codedoc.json").exists()
     output = md_path.read_text(encoding="utf-8")
     assert "## Project Tree" in output
     assert "## Folder Map" in output
@@ -281,7 +277,9 @@ def test_pipeline_requires_entry_when_no_existing_docs(tmp_path):
 
 
 def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch):
-    from codedoc.core.db import CodeDocDB
+    import json
+
+    from codedoc.core.db import CodeDocDB, compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -289,8 +287,24 @@ def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch)
 
     output_dir = tmp_path / "docs_output"
     output_dir.mkdir()
+
+    # Pre-write a public JSON that includes both the metadata block (for entry_file
+    # discovery) and the file's documentation (so _build_documentation_records can
+    # recover it without calling the LLM).
+    file_hash = compute_file_hash(main)
     (output_dir / "codedoc.json").write_text(
-        '{"_codedoc": {"entry_file": "main.py", "schema_version": "1.3"}}',
+        json.dumps({
+            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
+            "files": [
+                {
+                    "path": "main.py",
+                    "hash": file_hash,
+                    "description": "Resumed from metadata.",
+                    "language": "python",
+                    "format": "py",
+                }
+            ],
+        }),
         encoding="utf-8",
     )
 
@@ -329,6 +343,8 @@ def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch)
 
 
 def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
+    import json
+
     from codedoc.core.db import CodeDocDB
 
     source = tmp_path / "main.py"
@@ -345,31 +361,26 @@ def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
     }
     db.mark_processed("main.py", source, result)
 
+    # Unchanged file should not need processing (hash still matches)
     assert db.needs_processing("main.py", source) is False
 
-    records = db.documentation_records(
-        {"main.py"},
-        {"main.py": {"extension": ".py", "language": "python"}},
-        ["main.py"],
-    )
-    assert records[0]["file_path"] == "main.py"
-    assert records[0]["format"] == "py"
-    assert records[0]["documentation"]["description"] == "Main entry point."
-    assert records[0]["documentation"]["file_path"] == "main.py"
-
-    import json
-
+    # DB entry only stores hash and lightweight metadata — no full doc fields
     cache = json.loads(db.db_path.read_text(encoding="utf-8"))
     assert "version" not in cache
-    cached_result = cache["files"]["main.py"].get("result", {})
-    assert "file_path" not in cached_result
-    assert "state" not in cached_result
+    entry = cache["files"]["main.py"]
+    assert "hash" in entry
+    assert "result" not in entry
+    assert "description" not in entry
+    assert "language" not in entry
 
+    # Changed file must be flagged for reprocessing
     source.write_text("def main():\n    return 1\n", encoding="utf-8")
     assert db.needs_processing("main.py", source) is True
 
 
 def test_cache_result_does_not_duplicate_structure_sections(tmp_path):
+    import json
+
     from codedoc.core.db import CodeDocDB
 
     source = tmp_path / "main.py"
@@ -395,16 +406,19 @@ def test_cache_result_does_not_duplicate_structure_sections(tmp_path):
         },
     )
 
-    import json
-
     cache = json.loads(db.db_path.read_text(encoding="utf-8"))
-    result = cache["files"]["main.py"]["result"]
-    assert "functions" in result
-    assert "structure" not in result
+    # New DB stores only hash and lightweight metadata — no result, no doc fields
+    entry = cache["files"]["main.py"]
+    assert "hash" in entry
+    assert "result" not in entry
+    assert "description" not in entry
+    assert "functions" not in entry
 
 
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
-    from codedoc.core.db import CodeDocDB
+    import json
+
+    from codedoc.core.db import CodeDocDB, compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     first = tmp_path / "first.py"
@@ -415,7 +429,37 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
     second.write_text(content, encoding="utf-8")
     entry.write_text("import first\nimport second\n", encoding="utf-8")
 
-    db = CodeDocDB(tmp_path)
+    # Pre-write the public JSON with first.py and entry.py docs and their hashes,
+    # so that second.py (identical content to first.py) can be reused by hash.
+    docs_output = tmp_path / "docs_output"
+    docs_output.mkdir()
+    first_hash = compute_file_hash(first)
+    entry_hash = compute_file_hash(entry)
+    (docs_output / "codedoc.json").write_text(
+        json.dumps({
+            "_codedoc": {"entry_file": "entry.py", "schema_version": "1.3"},
+            "files": [
+                {
+                    "path": "entry.py",
+                    "hash": entry_hash,
+                    "description": "Entry module.",
+                    "language": "python",
+                    "format": "py",
+                    "imports": ["first", "second"],
+                },
+                {
+                    "path": "first.py",
+                    "hash": first_hash,
+                    "description": "Shared helper.",
+                    "language": "python",
+                    "format": "py",
+                },
+            ],
+        }),
+        encoding="utf-8",
+    )
+
+    db = CodeDocDB(tmp_path, docs_output)
     db.mark_processed(
         "entry.py",
         entry,
@@ -463,7 +507,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
     assert '"path": "second.py"' in output
     assert '"description": "Shared helper."' in output
 
-    (tmp_path / "docs_output" / "codedoc.json").unlink()
+    # Second run: public JSON still exists, all files are up-to-date, nothing to reuse
     stats = run_pipeline(
         tmp_path,
         {
@@ -480,13 +524,21 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
 
 
 def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
-    from codedoc.core.db import CodeDocDB
+    import json
+
+    from codedoc.core.db import CodeDocDB, compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
     main.write_text("def main():\n    return 'ok'\n", encoding="utf-8")
 
-    db = CodeDocDB(tmp_path)
+    docs_output = tmp_path / "docs_output"
+    docs_output.mkdir()
+
+    # DB must be in the output dir (pipeline stores it there) so the pipeline
+    # sees the existing entry and considers the file unchanged.
+    file_hash = compute_file_hash(main)
+    db = CodeDocDB(tmp_path, docs_output)
     db.mark_processed(
         "main.py",
         main,
@@ -500,8 +552,22 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
         },
     )
 
-    (tmp_path / "docs_output").mkdir()
-    (tmp_path / "docs_output" / "codedoc.json").write_text("{}", encoding="utf-8")
+    # Pre-write a valid public JSON so _load_existing_file_docs can recover the docs.
+    (docs_output / "codedoc.json").write_text(
+        json.dumps({
+            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
+            "files": [
+                {
+                    "path": "main.py",
+                    "hash": file_hash,
+                    "description": "Main entry point.",
+                    "language": "python",
+                    "format": "py",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
 
     def fail_if_llm_is_created(config):
         raise AssertionError("LLM should not be created for cached markdown output")
@@ -521,18 +587,24 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
     assert stats["checked"] == 0
     assert stats["output_files"] == [str(md_path)]
     assert md_path.exists()
-    assert not (tmp_path / "docs_output" / "codedoc.json").exists()
     assert "Main entry point." in md_path.read_text(encoding="utf-8")
 
 
 def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
-    from codedoc.core.db import CodeDocDB
+    import json
+
+    from codedoc.core.db import CodeDocDB, compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
     main.write_text("def main():\n    return 'ok'\n", encoding="utf-8")
 
-    db = CodeDocDB(tmp_path)
+    docs = tmp_path / "docs_output"
+    docs.mkdir()
+
+    # DB must be in the output dir (pipeline stores it there).
+    file_hash = compute_file_hash(main)
+    db = CodeDocDB(tmp_path, docs)
     db.mark_processed(
         "main.py",
         main,
@@ -546,8 +618,22 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
         },
     )
 
-    docs = tmp_path / "docs_output"
-    docs.mkdir()
+    # Pre-write a valid public JSON (JSON format) so docs can be recovered.
+    (docs / "codedoc.json").write_text(
+        json.dumps({
+            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
+            "files": [
+                {
+                    "path": "main.py",
+                    "hash": file_hash,
+                    "description": "Main entry point.",
+                    "language": "python",
+                    "format": "py",
+                }
+            ],
+        }),
+        encoding="utf-8",
+    )
     (docs / "codedoc.md").write_text("# old", encoding="utf-8")
 
     def fail_if_llm_is_created(config):
@@ -568,18 +654,24 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
     assert stats["checked"] == 0
     assert stats["output_files"] == [str(json_path)]
     assert json_path.exists()
-    assert not (tmp_path / "docs_output" / "codedoc.md").exists()
     assert "Main entry point." in json_path.read_text(encoding="utf-8")
 
 
 def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
-    from codedoc.core.db import CodeDocDB
+    import json
+
+    from codedoc.core.db import CodeDocDB, compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
     main.write_text("def main():\n    return 'ok'\n", encoding="utf-8")
 
-    db = CodeDocDB(tmp_path)
+    docs_output = tmp_path / "docs_output"
+    docs_output.mkdir()
+
+    # DB must live in the output dir so the pipeline sees it.
+    file_hash = compute_file_hash(main)
+    db = CodeDocDB(tmp_path, docs_output)
     db.mark_processed(
         "main.py",
         main,
@@ -591,6 +683,23 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
             "description": "Current directory API.",
             "state": "checked",
         },
+    )
+
+    # Pre-write public JSON so docs can be recovered.
+    (docs_output / "codedoc.json").write_text(
+        json.dumps({
+            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
+            "files": [
+                {
+                    "path": "main.py",
+                    "hash": file_hash,
+                    "description": "Current directory API.",
+                    "language": "python",
+                    "format": "py",
+                }
+            ],
+        }),
+        encoding="utf-8",
     )
 
     def fail_if_llm_is_created(config):

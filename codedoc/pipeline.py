@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import concurrent.futures
+import json
 from pathlib import Path
 from typing import Any
 
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
-from codedoc.core.db import CodeDocDB
+from codedoc.core.db import CodeDocDB, compute_file_hash
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
 from codedoc.core.output import write_project_outputs
@@ -21,6 +22,92 @@ from codedoc.utils.errors import AgentError, ConfigError, ErrorReporter, OutputE
 from codedoc.utils.logger import get_logger, set_level
 
 logger = get_logger(__name__)
+
+
+def _load_existing_file_docs(output_dir: Path, json_filename: str) -> dict[str, dict]:
+    """Load per-file documentation from an existing public JSON output file.
+    Returns a dict mapping rel_path -> file record dict (as stored in the JSON's 'files' array).
+    """
+    json_path = output_dir / json_filename
+    if not json_path.exists():
+        return {}
+    try:
+        data = json.loads(json_path.read_text(encoding="utf-8"))
+        return {f["path"]: f for f in data.get("files", []) if isinstance(f, dict) and f.get("path")}
+    except Exception:
+        return {}
+
+
+def _public_record_to_doc(file_record: dict) -> dict:
+    """Convert a public JSON file record back to a documentation dict for pipeline use."""
+    links = file_record.get("links", {})
+    doc = {
+        "file_path": file_record.get("path", ""),
+        "language": file_record.get("language", ""),
+        "imports": file_record.get("imports", []),
+        "description": file_record.get("description", ""),
+        "role_in_system": file_record.get("role_in_system", ""),
+        "key_concepts": file_record.get("key_concepts", []),
+        "functions": file_record.get("functions", []),
+        "classes": file_record.get("classes", []),
+        "exports": file_record.get("exports", []),
+        "usage_example": file_record.get("usage_example", ""),
+        "dependencies_analysis": {
+            "external": links.get("external_dependencies", []),
+            "internal": links.get("internal_dependencies", []),
+        },
+    }
+    return {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
+
+
+def _build_documentation_records(
+    rel_paths: set,
+    file_map: dict,
+    ordered_paths: list,
+    existing_docs: dict,
+    new_results: dict,
+    db,
+) -> list[dict]:
+    """Build documentation records for write_project_outputs.
+
+    For files processed this run: use new_results (raw LLM dict or reused public record).
+    For unchanged files: use existing_docs (from public JSON) + deps_analysis from DB.
+    """
+    records = []
+    for rel_path in ordered_paths:
+        if rel_path not in rel_paths:
+            continue
+        entry = db.get_entry(rel_path)
+        if not entry:
+            continue
+
+        if rel_path in new_results:
+            result = new_results[rel_path]
+            if isinstance(result, dict) and result.get("path") and not result.get("file_path"):
+                # Public JSON file record (from reuse)
+                doc = _public_record_to_doc(result)
+            else:
+                # Raw LLM result
+                doc = dict(result)
+            # Merge deps_analysis from DB if raw LLM result doesn't have it
+            if entry.get("dependencies_analysis") and not doc.get("dependencies_analysis"):
+                doc["dependencies_analysis"] = entry["dependencies_analysis"]
+        elif rel_path in existing_docs:
+            doc = _public_record_to_doc(existing_docs[rel_path])
+            if entry.get("dependencies_analysis"):
+                doc["dependencies_analysis"] = entry["dependencies_analysis"]
+        else:
+            continue
+
+        records.append({
+            "hash": entry.get("hash", ""),
+            "file_path": rel_path,
+            "language": doc.get("language", ""),
+            "git_commit": entry.get("git_commit"),
+            "author": entry.get("author"),
+            "documentation": doc,
+        })
+    return records
 
 
 def run_pipeline(
@@ -65,6 +152,12 @@ def run_pipeline(
     output_dir.mkdir(parents=True, exist_ok=True)
     error_reporter = ErrorReporter(root / "error.log")
 
+    json_filename = config.get("output_json_filename", "codedoc.json")
+    existing_docs = _load_existing_file_docs(output_dir, json_filename)
+    docs_by_hash: dict[str, dict] = {
+        doc["hash"]: doc for doc in existing_docs.values() if doc.get("hash")
+    }
+
     all_files = scan_files(
         root,
         supported_extensions=config["supported_extensions"],
@@ -92,12 +185,23 @@ def run_pipeline(
     if skipped > 0:
         logger.info("Incremental mode: skipping %d unchanged file(s)", skipped)
 
+    new_results: dict[str, dict] = {}
     reused = 0
     agent_rels: set[str] = set()
     for rel_path in graph.topological_order():
         if rel_path not in process_rels:
             continue
-        if db.reuse_by_content_hash(file_map[rel_path]):
+        descriptor = file_map[rel_path]
+        content_hash = compute_file_hash(descriptor["path"])
+        if content_hash in docs_by_hash:
+            source_doc = docs_by_hash[content_hash]
+            new_results[rel_path] = source_doc
+            db.mark_processed(rel_path, descriptor["path"])
+            logger.info(
+                "Reusing cached documentation for %s from identical content in %s",
+                rel_path,
+                source_doc.get("path", "unknown"),
+            )
             reused += 1
         else:
             agent_rels.add(rel_path)
@@ -112,10 +216,13 @@ def run_pipeline(
             "output_dir": str(output_dir),
         }
         output_files = write_project_outputs(
-            db.documentation_records(
+            _build_documentation_records(
                 selected_rels,
                 file_map,
                 graph.topological_order(),
+                existing_docs,
+                new_results,
+                db,
             ),
             stats,
             output_dir,
@@ -167,14 +274,18 @@ def run_pipeline(
         max_workers=max_workers,
         retry_attempts=retry_attempts,
         max_consecutive_failures=max_consecutive_failures,
+        new_results=new_results,
     )
 
     stats["output_dir"] = str(output_dir)
     output_files = write_project_outputs(
-        db.documentation_records(
+        _build_documentation_records(
             selected_rels,
             file_map,
             graph.topological_order(),
+            existing_docs,
+            new_results,
+            db,
         ),
         stats,
         output_dir,
@@ -214,6 +325,7 @@ def _process_agent_files(
     max_workers: int,
     retry_attempts: int,
     max_consecutive_failures: int,
+    new_results: dict,
 ) -> None:
     descriptors = []
     while True:
@@ -232,6 +344,7 @@ def _process_agent_files(
             error_reporter,
             retry_attempts,
             max_consecutive_failures,
+            new_results,
         )
         return
 
@@ -249,27 +362,18 @@ def _process_agent_files(
     )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map = {}
-        for index, descriptor in enumerate(descriptors, start=1):
-            rel_path = descriptor["rel_path"]
-            logger.info(
-                "[START %d/%d] %s | provider=%s",
-                index,
-                total,
-                rel_path,
-                orchestrator.llm.provider_name,
-            )
-            future_map[pool.submit(_process_one_file, descriptor, orchestrator)] = (
-                descriptor,
-                index,
-            )
+        future_map = {
+            pool.submit(_process_one_file, descriptor, orchestrator): descriptor
+            for descriptor in descriptors
+        }
 
         for future in concurrent.futures.as_completed(future_map):
-            descriptor, index = future_map[future]
+            descriptor = future_map[future]
             rel_path = descriptor["rel_path"]
             try:
                 result = future.result()
                 db.mark_processed(rel_path, descriptor["path"], result)
+                new_results[rel_path] = result
                 queue.mark_checked(rel_path)
                 stats["checked"] += 1
                 consecutive_failures = 0
@@ -307,6 +411,7 @@ def _process_agent_files(
             error_reporter,
             retry_attempts,
             max_consecutive_failures,
+            new_results,
         )
 
 
@@ -319,6 +424,7 @@ def _process_files_sequentially(
     error_reporter: ErrorReporter,
     retry_attempts: int,
     max_consecutive_failures: int,
+    new_results: dict,
 ) -> None:
     consecutive_failures = 0
 
@@ -331,16 +437,10 @@ def _process_files_sequentially(
 
     for index, descriptor in enumerate(descriptors, start=1):
         rel_path = descriptor["rel_path"]
-        logger.info(
-            "[START %d/%d] %s | provider=%s",
-            index,
-            total,
-            rel_path,
-            orchestrator.llm.provider_name,
-        )
         try:
             result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
             db.mark_processed(rel_path, descriptor["path"], result)
+            new_results[rel_path] = result
             queue.mark_checked(rel_path)
             stats["checked"] += 1
             consecutive_failures = 0
@@ -419,6 +519,8 @@ def _log_file_progress(
 
 
 def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
+    rel_path = descriptor["rel_path"]
+    logger.info("[START] %s | provider=%s", rel_path, orchestrator.llm.provider_name)
     file_path: Path = descriptor["path"]
     content = file_path.read_text(encoding="utf-8-sig", errors="replace")
     imports = parse_file(descriptor)

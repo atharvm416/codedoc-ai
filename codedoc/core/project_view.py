@@ -11,7 +11,7 @@ from typing import Any
 
 from codedoc.utils.errors import ConfigError
 
-SCHEMA_VERSION = "1.3"
+SCHEMA_VERSION = "1.4"
 
 # Regex that matches the metadata comment embedded in Markdown output:
 #   <!-- codedoc-ai: { ... } -->
@@ -307,12 +307,9 @@ def _clean_file(record: dict) -> dict:
     )
 
     file = {
-        "id": record.get("id", ""),
         "hash": record.get("hash", ""),
         "path": record.get("file_path") or result.get("file_path", ""),
-        "format": record.get("format", ""),
         "language": result.get("language") or record.get("language", ""),
-        "last_processed": record.get("last_processed", ""),
         "description": result.get("description", ""),
         "role_in_system": result.get("role_in_system", ""),
         "imports": result.get("imports", []),
@@ -321,7 +318,6 @@ def _clean_file(record: dict) -> dict:
         "exports": result.get("exports", []),
         "key_concepts": result.get("key_concepts", []),
         "usage_example": result.get("usage_example", ""),
-        "state": result.get("state", "checked"),
         "external_dependencies": external,
         "dependency_refs": dependency_refs,
         "dependency_usage": _dependency_usage_map(usage_notes),
@@ -378,8 +374,6 @@ def _parse_markdown_files(markdown: str) -> list[dict]:
 
         path, _, body = chunk.partition("\n")
         file: dict[str, Any] = {"path": path.strip()}
-        _set_if_value(file, "id", _strip_code(_bold_value(body, "ID")))
-        _set_if_value(file, "format", _bold_value(body, "Format"))
         _set_if_value(file, "language", _bold_value(body, "Language"))
         _set_if_value(file, "description", _paragraph_after_label(body, "Description"))
         _set_if_value(file, "role_in_system", _paragraph_after_label(body, "Role"))
@@ -818,8 +812,6 @@ def _render_tree_lines(tree: dict, indent: int = 0) -> list[str]:
 def _append_file_markdown(lines: list[str], file: dict) -> None:
     lines += [
         f"### {file.get('path', 'unknown')}\n\n",
-        f"**ID:** `{file.get('id', '')}`  \n",
-        f"**Format:** {file.get('format', '')}  \n",
         f"**Language:** {file.get('language', '')}  \n\n",
     ]
     if file.get("description"):

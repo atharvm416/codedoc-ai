@@ -26,6 +26,9 @@ codedoc_db.json
 .pytest_cache/
 tmp/
 .tmp/
+.tmp*/
+.tmp_pytest_base/
+pytest-cache-files-*/
 .coverage
 htmlcov/
 .tox/

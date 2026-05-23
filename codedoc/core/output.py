@@ -11,11 +11,8 @@ from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Default output filenames — only these are ever auto-cleaned between runs.
-# Custom filenames (set via --output path/to/name.json) are never deleted.
 PROJECT_JSON = "codedoc.json"
 PROJECT_MARKDOWN = "codedoc.md"
-_MANAGED_FILENAMES = frozenset({PROJECT_JSON, PROJECT_MARKDOWN})
 
 
 def write_project_outputs(
@@ -47,8 +44,7 @@ def write_project_outputs(
     if output_format not in ("json", "md", "both"):
         raise OutputError(str(output_dir), f"Unsupported output format: {output_format}")
 
-    selected = _selected_output_names(output_format, json_filename, md_filename)
-    _remove_unselected_outputs(output_dir, selected)
+    selected = _selected_output_names(output_format, json_filename, md_filename)  # noqa: F841
 
     json_path = output_dir / json_filename if output_format in ("json", "both") else None
     md_path = output_dir / md_filename if output_format in ("md", "both") else None
@@ -119,42 +115,9 @@ def _selected_output_names(
     json_filename: str,
     md_filename: str,
 ) -> set[str]:
-    """Return the set of output filenames that should be kept for this run."""
+    """Return the set of output filenames that should be written for this run."""
     if output_format == "json":
         return {json_filename}
     if output_format == "md":
         return {md_filename}
     return {json_filename, md_filename}
-
-
-def _remove_unselected_outputs(output_dir: Path, keep: set[str]) -> None:
-    """
-    Remove previously generated docs files that are no longer selected.
-
-    Only the two default managed filenames (codedoc.json, codedoc.md) are
-    ever removed automatically.  Custom-named output files are never deleted,
-    so switching between named outputs on consecutive runs does not cause
-    data loss.
-    """
-    for name in _MANAGED_FILENAMES:
-        if name in keep:
-            continue
-        path = output_dir / name
-        if path.exists():
-            try:
-                path.unlink()
-                logger.info("Removed unselected output: %s", path)
-            except OSError as exc:
-                logger.debug("Could not remove legacy output %s: %s", path, exc)
-
-    for pattern in ("*.json", "*.md"):
-        for path in output_dir.glob(pattern):
-            if path.name in keep or path.name in _MANAGED_FILENAMES:
-                continue
-            if "." not in path.stem:
-                continue
-            try:
-                path.unlink()
-                logger.debug("Removed legacy per-file output: %s", path)
-            except OSError as exc:
-                logger.debug("Could not remove legacy output %s: %s", path, exc)
