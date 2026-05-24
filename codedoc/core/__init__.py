@@ -6,9 +6,9 @@ __all__ = [
     "detect_entry_file",
     "ProcessingQueue",
     "DependencyGraph",
-    "write_outputs",
     "write_summary",
-    "CodeDocDB",
+    "json_from_markdown",
+    "markdown_from_json",
 ]
 
 
@@ -29,12 +29,15 @@ def __getattr__(name: str):
         from codedoc.core.graph import DependencyGraph
 
         return DependencyGraph
-    if name in {"write_outputs", "write_summary"}:
-        from codedoc.core.output import write_outputs, write_summary
+    if name == "write_summary":
+        from codedoc.core.output import write_summary
 
-        return {"write_outputs": write_outputs, "write_summary": write_summary}[name]
-    if name == "CodeDocDB":
-        from codedoc.core.db import CodeDocDB
+        return write_summary
+    if name in {"json_from_markdown", "markdown_from_json"}:
+        from codedoc.core.project_view import json_from_markdown, markdown_from_json
 
-        return CodeDocDB
+        return {
+            "json_from_markdown": json_from_markdown,
+            "markdown_from_json": markdown_from_json,
+        }[name]
     raise AttributeError(name)

@@ -45,7 +45,10 @@ Rules:
 - Base the documentation only on the provided code and analyses
 - Write for a developer who is new to this codebase
 - Be specific — avoid generic phrases like 'this file contains utility functions'
-- key_concepts list may be empty if nothing noteworthy
+- If there are no noteworthy key_concepts, omit key_concepts instead of returning an empty list
+- If there is no real usage example from the codebase context, omit usage_example instead of inventing placeholder package names
+- Never use placeholder package names such as your_project, your_package, your_app, or your_package_name
+- Do not include empty arrays, empty objects, null values, or duplicate fields
 """
 
 

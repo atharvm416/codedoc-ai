@@ -55,3 +55,29 @@ class TestResolveImport:
         all_files = {"src/App.tsx"}
         result = resolve_import("./missing", "src/App.tsx", all_files, Path("."))
         assert result is None
+
+    def test_does_not_resolve_external_imports_by_basename(self):
+        all_files = {"web/index.html", "lib/main.dart"}
+
+        assert resolve_import("dart:io", "lib/main.dart", all_files, Path(".")) is None
+        assert (
+            resolve_import("androidx.annotation.Keep", "android/Main.java", all_files, Path("."))
+            is None
+        )
+        assert (
+            resolve_import("flutter_bootstrap.js", "web/index.html", all_files, Path("."))
+            is None
+        )
+
+    def test_resolves_file_import_with_extension(self):
+        all_files = {
+            "lib/core/widgets/mini_player.dart",
+            "lib/core/widgets/full_player_screen.dart",
+        }
+        result = resolve_import(
+            "full_player_screen.dart",
+            "lib/core/widgets/mini_player.dart",
+            all_files,
+            Path("."),
+        )
+        assert result == "lib/core/widgets/full_player_screen.dart"

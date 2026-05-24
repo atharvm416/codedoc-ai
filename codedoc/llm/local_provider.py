@@ -3,6 +3,17 @@ Local LLM provider — Ollama and LM Studio.
 
 Both expose an OpenAI-compatible /v1/chat/completions endpoint,
 so we use the openai SDK pointed at localhost.
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+DORMANT — not exposed in the current release.
+
+This module is intentionally excluded from the factory and CLI.
+The code is kept here as a reserved implementation that can be
+re-enabled in a future version.  Nothing in the active pipeline
+imports or calls this module.
+
+Do not delete or modify without updating factory.py accordingly.
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 """
 
 from __future__ import annotations

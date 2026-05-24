@@ -1,16 +1,20 @@
 """
 codedoc CLI entry point.
 
-Usage:
-    codedoc .                          # document current directory
-    codedoc /path/to/project           # document a specific directory
-    codedoc . --entry src/main.py      # specify entry file
-    codedoc . --llm local              # use local LLM (Ollama)
-    codedoc . --model gpt-4o           # override model
-    codedoc . --output ./my_docs       # override output directory
-    codedoc . --format md              # write Markdown instead of JSON
-    codedoc . --verbose                # debug logging
-    python -m codedoc .                # same as above, alternative invocation
+First run:
+    codedoc run --entry src/main.py              # document from entry; save to codedoc/
+    codedoc run --entry src/main.py --output docs/report.json
+
+Subsequent runs (entry auto-read from previous docs when available):
+    codedoc run                                  # resumes from codedoc/ folder
+    codedoc run --output codedoc/codedoc.json    # explicit path to previous output
+    codedoc run --format md                      # convert existing JSON to Markdown
+
+Other usage:
+    codedoc run --provider gemini --entry src/main.py
+    codedoc run --model gpt-4o --entry src/main.py
+    codedoc run --verbose
+    python -m codedoc run --entry src/main.py
 """
 
 from __future__ import annotations
@@ -23,18 +27,26 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codedoc",
-        description="AI-powered codebase documentation — local-first, LLM-agnostic.",
+        description="AI-powered codebase documentation â€” structured, incremental, LLM-agnostic.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
-  codedoc .                          document the current directory
-  codedoc /path/to/project           document a specific project
-  codedoc . --entry src/main.py      start from a specific entry file
-  codedoc . --llm local              use a local LLM (Ollama / LM Studio)
-  codedoc . --model claude-haiku-4-5-20251001 --llm api   use Claude
-  codedoc . --output ./docs          write output to ./docs
-  codedoc . --format md              write one combined Markdown file
-  codedoc . --ignore /myenv          ignore a project-root path
+  # --- First run ---
+  codedoc run --entry src/main.py                          document from entry; save to codedoc/
+  codedoc run --entry src/main.py --output ./docs          save to custom directory
+  codedoc run --entry src/main.py --output docs/api.json   save as a named JSON file
+  codedoc run --entry src/main.py --format md              write only codedoc.md
+
+  # --- Subsequent runs: entry read from existing docs ---
+  codedoc run                                              resume from codedoc/ (auto-detected)
+  codedoc run --output codedoc/codedoc.json                resume from explicit file path
+  codedoc run --format md                                  convert cached JSON â†’ Markdown
+  codedoc run --format both                                generate JSON + Markdown
+
+  # --- Provider / model overrides ---
+  codedoc run --provider gemini --entry src/main.py
+  codedoc run --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
+  codedoc run --ignore /myenv --entry src/main.py          ignore a project-root path
         """,
     )
 
@@ -49,25 +61,40 @@ examples:
         "--entry",
         metavar="FILE",
         default=None,
-        help="Entry file relative to project root (e.g. src/main.py)",
+        help=(
+            "Entry file relative to project root (e.g. src/main.py). "
+            "Required for the first run. On subsequent runs the entry point is "
+            "read automatically from the previously generated documentation file."
+        ),
     )
     parser.add_argument(
-        "--llm",
-        choices=["api", "local"],
+        "--provider",
+        choices=["auto", "openai", "anthropic", "gemini"],
         default=None,
-        help="LLM mode: 'api' (OpenAI/Claude) or 'local' (Ollama/LM Studio)",
+        help="API provider: auto, openai, anthropic, or gemini (default: auto)",
     )
     parser.add_argument(
         "--model",
         metavar="MODEL",
         default=None,
-        help="Model name to use (e.g. gpt-4o-mini, claude-haiku-4-5-20251001, qwen2.5-coder:7b)",
+        help=(
+            "Model name to use â€” e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
+            "gemini-2.5-flash. When set, provider is auto-detected from the model name."
+        ),
     )
     parser.add_argument(
         "--output",
-        metavar="DIR",
+        metavar="PATH",
         default=None,
-        help="Output directory for generated docs (default: ./docs_output)",
+        help=(
+            "Output path â€” a directory (e.g. my_docs) or a specific file "
+            "(e.g. docs/report.json or docs/report.md). "
+            "Defaults to codedoc/ in the project root. "
+            "On subsequent runs, pointing to an existing CodeDoc file resumes "
+            "documentation from the entry point stored in that file. "
+            "When a file path is given, format is inferred from the extension "
+            "and overrides --format. Unsupported extensions stop the run with an error."
+        ),
     )
     parser.add_argument(
         "--format",
@@ -81,15 +108,25 @@ examples:
         default=[],
         metavar="PATH",
         help=(
-            "Project-relative file or directory path to ignore. "
-            "Can be passed multiple times, e.g. --ignore /myenv --ignore generated."
+            "Project-relative path to ignore. "
+            "Can be passed multiple times: --ignore /myenv --ignore generated"
         ),
     )
     parser.add_argument(
         "--no-parallel",
         action="store_true",
         default=False,
-        help="Disable parallel agent execution (useful for local LLMs with limited VRAM)",
+        help=(
+            "Disable parallel agent execution within each file. "
+            "Useful when an API has strict concurrency limits."
+        ),
+    )
+    parser.add_argument(
+        "--max-parallel-files",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Maximum files to process at once (default: 5)",
     )
     parser.add_argument(
         "--verbose", "-v",
@@ -100,13 +137,20 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.1.4",
+        version="%(prog)s 0.7.0",
     )
 
     return parser
 
 
 def main(argv: list[str] | None = None) -> None:
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+    if argv and argv[0] in {"run", "execute"}:
+        argv = argv[1:]
+
     parser = build_parser()
     args = parser.parse_args(argv)
 
@@ -119,8 +163,8 @@ def main(argv: list[str] | None = None) -> None:
     overrides: dict = {}
     if args.entry:
         overrides["entry_file"] = args.entry
-    if args.llm:
-        overrides["llm_mode"] = args.llm
+    if args.provider:
+        overrides["llm_provider"] = args.provider
     if args.model:
         overrides["model_name"] = args.model
     if args.output:
@@ -131,6 +175,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["ignore_paths"] = args.ignore
     if args.no_parallel:
         overrides["parallel_agents"] = False
+    if args.max_parallel_files is not None:
+        overrides["max_parallel_files"] = args.max_parallel_files
     if args.verbose:
         overrides["log_level"] = "DEBUG"
 

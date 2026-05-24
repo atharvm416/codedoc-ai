@@ -1,10 +1,14 @@
 {
   "llm_mode": "api",
+  "llm_provider": "auto",
   "model_name": "gpt-4o-mini",
   "api_base_url": null,
   "entry_file": null,
   "output_dir": "docs_output",
   "output_format": "json",
+  "max_parallel_files": 5,
+  "file_retry_attempts": 1,
+  "max_consecutive_failures": 5,
   "supported_extensions": [
     ".py", ".ts", ".tsx", ".js", ".jsx",
     ".dart", ".java", ".cs", ".html"

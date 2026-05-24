@@ -1,0 +1,174 @@
+{
+  "_codedoc": {
+    "schema_version": "2.0",
+    "generated_at": "2026-05-24T10:00:00+00:00",
+    "entry_file": "lib/main.dart",
+    "file_count": 3,
+    "languages": ["dart"],
+    "folders": ["lib"]
+  },
+
+  "run": {
+    "files_checked": 3,
+    "files_failed": 0,
+    "files_skipped": 0,
+    "files_reused": 0
+  },
+
+  "stale_files": [],
+
+  "tree": {
+    "lib": {
+      "core": {
+        "models": {
+          "song_model.dart": { "type": "file", "path": "lib/core/models/song_model.dart" }
+        },
+        "services": {
+          "audio_service.dart": { "type": "file", "path": "lib/core/services/audio_service.dart" }
+        }
+      },
+      "main.dart": { "type": "file", "path": "lib/main.dart" }
+    }
+  },
+
+  "dependency_catalog": [
+    {
+      "name": "just_audio",
+      "type": "external",
+      "used_for": "Audio playback and queue management",
+      "files": ["lib/core/services/audio_service.dart"]
+    },
+    {
+      "name": "flutter",
+      "type": "external",
+      "used_for": "UI framework",
+      "files": ["lib/core/services/audio_service.dart", "lib/main.dart"]
+    }
+  ],
+
+  "dependency_graph": {
+    "lib/core/services/audio_service.dart": ["lib/core/models/song_model.dart"],
+    "lib/main.dart": ["lib/core/services/audio_service.dart"]
+  },
+
+  "files": [
+
+    {
+      "hash": "8f1725a2b4c913496198ffe75f27404",
+      "path": "lib/core/models/song_model.dart",
+      "language": "dart",
+      "description": "Data model for a music track.",
+      "role_in_system": "Core data structure used across all audio features.",
+
+      "classes": [
+        {
+          "name": "SongModel",
+          "fields": [
+            "final String id",
+            "final String title",
+            "final String? artist",
+            "final String filePath",
+            "final Duration? duration",
+            "final bool isAsset"
+          ],
+          "description": "Immutable record representing one music track."
+        }
+      ],
+
+      "functions": [
+        {
+          "name": "durationFormatted",
+          "signature": "String get durationFormatted",
+          "description": "Returns duration as 'mm:ss' string."
+        },
+        {
+          "name": "cleanTitle",
+          "signature": "String get cleanTitle",
+          "description": "Strips file extension and trailing noise from title."
+        },
+        {
+          "name": "cleanArtist",
+          "signature": "String get cleanArtist",
+          "description": "Returns artist or 'Unknown Artist' if blank."
+        }
+      ],
+
+      "source": "class SongModel {\n  final String id;\n  final String title;\n  final String? artist;\n  final String filePath;\n  final Duration? duration;\n  final bool isAsset;\n\n  const SongModel({\n    required this.id,\n    required this.title,\n    this.artist,\n    required this.filePath,\n    this.duration,\n    this.isAsset = false,\n  });\n\n  String get durationFormatted { ... }\n  String get cleanTitle { ... }\n  String get cleanArtist { ... }\n}",
+
+      "links": {
+        "imported_by": [
+          "lib/core/services/audio_service.dart",
+          "lib/main.dart"
+        ]
+      }
+    },
+
+    {
+      "hash": "e794baf0671e6363d163fc24a95e1e7",
+      "path": "lib/core/services/audio_service.dart",
+      "language": "dart",
+      "description": "Manages audio playback, queue, shuffle, loop, and session interruptions.",
+      "role_in_system": "Singleton ChangeNotifier wiring the audio player to the UI layer.",
+
+      "classes": [
+        {
+          "name": "AudioService",
+          "fields": [
+            "final AudioPlayer _player",
+            "List<SongModel> _queue",
+            "int _currentIndex",
+            "bool _shuffle",
+            "LoopMode _loopMode"
+          ],
+          "description": "Singleton managing all playback state."
+        }
+      ],
+
+      "functions": [
+        {
+          "name": "init",
+          "signature": "Future<void> init()",
+          "description": "Initialises audio session and sets up interruption listeners."
+        },
+        {
+          "name": "playSong",
+          "signature": "Future<void> playSong(SongModel song, {List<SongModel>? queue})",
+          "description": "Starts playback; replaces queue when provided."
+        },
+        {
+          "name": "togglePlayPause",
+          "signature": "Future<void> togglePlayPause()",
+          "description": "Toggles playing/paused state."
+        },
+        {
+          "name": "seek",
+          "signature": "Future<void> seek(Duration position)",
+          "description": "Seeks to a position in the current track."
+        },
+        {
+          "name": "setSpeed",
+          "signature": "Future<void> setSpeed(double speed)",
+          "description": "Sets playback rate (0.5 – 2.0)."
+        },
+        {
+          "name": "toggleShuffle",
+          "signature": "void toggleShuffle()",
+          "description": "Flips shuffle mode and notifies listeners."
+        },
+        {
+          "name": "dispose",
+          "signature": "void dispose()",
+          "description": "Releases player resources."
+        }
+      ],
+
+      "key_concepts": ["Singleton", "ChangeNotifier", "AudioSession"],
+
+      "links": {
+        "imported_by": ["lib/main.dart"],
+        "external_dependencies": ["audio_session", "flutter", "just_audio"]
+      }
+    }
+
+  ]
+}

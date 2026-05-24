@@ -45,3 +45,25 @@ def test_scan_ignores_single_file_path(tmp_path):
     rels = {f["rel_path"] for f in files}
 
     assert rels == {"main.py"}
+
+
+def test_scan_skips_unreadable_directories(tmp_path, monkeypatch):
+    (tmp_path / "main.py").write_text("print('ok')\n")
+    blocked = tmp_path / "pytest_cache"
+    blocked.mkdir()
+
+    original_iterdir = type(tmp_path).iterdir
+
+    def fake_iterdir(path):
+        if path == blocked:
+            raise PermissionError("access denied")
+        return original_iterdir(path)
+
+    monkeypatch.setattr(type(tmp_path), "iterdir", fake_iterdir)
+
+    from codedoc.core.scanner import scan_files
+
+    files = scan_files(tmp_path, supported_extensions=[".py"])
+    rels = {f["rel_path"] for f in files}
+
+    assert rels == {"main.py"}

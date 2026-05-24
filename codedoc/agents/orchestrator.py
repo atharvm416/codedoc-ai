@@ -55,12 +55,12 @@ class Orchestrator:
             imports:    import strings from parser
 
         Returns:
-            Merged dict ready for output.write_outputs()
+            Merged dict with structure and dependency analysis for this file.
         """
         file_path = descriptor["rel_path"]
         language = descriptor.get("language", "generic")
 
-        logger.info("Processing: %s", file_path)
+        logger.debug("Running agents for %s with %s", file_path, self.llm.provider_name)
 
         if self.parallel:
             structure, dependencies = self._run_parallel(
@@ -140,7 +140,7 @@ class Orchestrator:
             "structure": structure,
 
             # From DependencyAgent
-            "dependencies_analysis": dependencies.get("dependencies_analysis", {}),
+            "dependencies_analysis": dependencies.get("dependencies_analysis", dependencies),
 
             # From DocumentationAgent
             "key_concepts": documentation.get("key_concepts", []),
