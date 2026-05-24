@@ -279,7 +279,7 @@ def test_pipeline_requires_entry_when_no_existing_docs(tmp_path):
 def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch):
     import json
 
-    from codedoc.core.db import CodeDocDB, compute_file_hash
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -308,20 +308,6 @@ def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch)
         encoding="utf-8",
     )
 
-    db = CodeDocDB(tmp_path, output_dir)
-    db.mark_processed(
-        "main.py",
-        main,
-        {
-            "file_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": [],
-            "description": "Resumed from metadata.",
-            "state": "checked",
-        },
-    )
-
     def fail_if_llm_is_created(config):
         raise AssertionError("LLM should not be created for cached metadata resume")
 
@@ -342,83 +328,11 @@ def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch)
     ).read_text(encoding="utf-8")
 
 
-def test_db_reuses_cached_documentation_for_unchanged_files(tmp_path):
-    import json
-
-    from codedoc.core.db import CodeDocDB
-
-    source = tmp_path / "main.py"
-    source.write_text("def main():\n    pass\n", encoding="utf-8")
-
-    db = CodeDocDB(tmp_path)
-    result = {
-        "file_path": "main.py",
-        "language": "python",
-        "extension": ".py",
-        "imports": [],
-        "description": "Main entry point.",
-        "state": "checked",
-    }
-    db.mark_processed("main.py", source, result)
-
-    # Unchanged file should not need processing (hash still matches)
-    assert db.needs_processing("main.py", source) is False
-
-    # DB entry only stores hash and lightweight metadata — no full doc fields
-    cache = json.loads(db.db_path.read_text(encoding="utf-8"))
-    assert "version" not in cache
-    entry = cache["files"]["main.py"]
-    assert "hash" in entry
-    assert "result" not in entry
-    assert "description" not in entry
-    assert "language" not in entry
-
-    # Changed file must be flagged for reprocessing
-    source.write_text("def main():\n    return 1\n", encoding="utf-8")
-    assert db.needs_processing("main.py", source) is True
-
-
-def test_cache_result_does_not_duplicate_structure_sections(tmp_path):
-    import json
-
-    from codedoc.core.db import CodeDocDB
-
-    source = tmp_path / "main.py"
-    source.write_text("def main():\n    pass\n", encoding="utf-8")
-
-    db = CodeDocDB(tmp_path)
-    db.mark_processed(
-        "main.py",
-        source,
-        {
-            "file_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-            "description": "Main entry point.",
-            "functions": [{"name": "main", "description": "Runs the app."}],
-            "classes": [],
-            "structure": {
-                "description": "Main entry point.",
-                "functions": [{"name": "main", "description": "Runs the app."}],
-                "classes": [],
-            },
-            "state": "checked",
-        },
-    )
-
-    cache = json.loads(db.db_path.read_text(encoding="utf-8"))
-    # New DB stores only hash and lightweight metadata — no result, no doc fields
-    entry = cache["files"]["main.py"]
-    assert "hash" in entry
-    assert "result" not in entry
-    assert "description" not in entry
-    assert "functions" not in entry
-
 
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
     import json
 
-    from codedoc.core.db import CodeDocDB, compute_file_hash
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     first = tmp_path / "first.py"
@@ -457,32 +371,6 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
             ],
         }),
         encoding="utf-8",
-    )
-
-    db = CodeDocDB(tmp_path, docs_output)
-    db.mark_processed(
-        "entry.py",
-        entry,
-        {
-            "file_path": "entry.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": ["first", "second"],
-            "description": "Entry module.",
-            "state": "checked",
-        },
-    )
-    db.mark_processed(
-        "first.py",
-        first,
-        {
-            "file_path": "first.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": [],
-            "description": "Shared helper.",
-            "state": "checked",
-        },
     )
 
     def fail_if_llm_is_created(config):
@@ -526,7 +414,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
 def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
     import json
 
-    from codedoc.core.db import CodeDocDB, compute_file_hash
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -535,22 +423,7 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
     docs_output = tmp_path / "docs_output"
     docs_output.mkdir()
 
-    # DB must be in the output dir (pipeline stores it there) so the pipeline
-    # sees the existing entry and considers the file unchanged.
     file_hash = compute_file_hash(main)
-    db = CodeDocDB(tmp_path, docs_output)
-    db.mark_processed(
-        "main.py",
-        main,
-        {
-            "file_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": [],
-            "description": "Main entry point.",
-            "state": "checked",
-        },
-    )
 
     # Pre-write a valid public JSON so _load_existing_file_docs can recover the docs.
     (docs_output / "codedoc.json").write_text(
@@ -593,7 +466,7 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
 def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
     import json
 
-    from codedoc.core.db import CodeDocDB, compute_file_hash
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -602,21 +475,7 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
     docs = tmp_path / "docs_output"
     docs.mkdir()
 
-    # DB must be in the output dir (pipeline stores it there).
     file_hash = compute_file_hash(main)
-    db = CodeDocDB(tmp_path, docs)
-    db.mark_processed(
-        "main.py",
-        main,
-        {
-            "file_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": [],
-            "description": "Main entry point.",
-            "state": "checked",
-        },
-    )
 
     # Pre-write a valid public JSON (JSON format) so docs can be recovered.
     (docs / "codedoc.json").write_text(
@@ -660,7 +519,7 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
 def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
     import json
 
-    from codedoc.core.db import CodeDocDB, compute_file_hash
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -669,21 +528,7 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
     docs_output = tmp_path / "docs_output"
     docs_output.mkdir()
 
-    # DB must live in the output dir so the pipeline sees it.
     file_hash = compute_file_hash(main)
-    db = CodeDocDB(tmp_path, docs_output)
-    db.mark_processed(
-        "main.py",
-        main,
-        {
-            "file_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-            "imports": [],
-            "description": "Current directory API.",
-            "state": "checked",
-        },
-    )
 
     # Pre-write public JSON so docs can be recovered.
     (docs_output / "codedoc.json").write_text(
@@ -1037,3 +882,242 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
     assert "### react" in markdown
     assert "src/" in markdown
     assert "`src/main.tsx` -> `src/router.tsx`" in markdown
+
+
+# ---------------------------------------------------------------------------
+# 0.7.0 regression tests
+# ---------------------------------------------------------------------------
+
+def test_md_output_embeds_file_hashes_in_metadata_comment(tmp_path):
+    """file_hashes must appear in the <!-- codedoc-ai: ... --> comment so that
+    subsequent --format md runs can perform incremental hash checks."""
+    import json as _json
+
+    from codedoc.core.output import write_project_outputs
+
+    output_dir = tmp_path / "out"
+    records = [
+        {
+            "hash": "deadbeef01",
+            "file_path": "app.py",
+            "language": "python",
+            "documentation": {
+                "file_path": "app.py",
+                "language": "python",
+                "description": "The app.",
+            },
+        }
+    ]
+    _, md_path = write_project_outputs(
+        records,
+        {"checked": 1, "failed": 0, "skipped": 0},
+        output_dir,
+        output_format="md",
+        entry_file="app.py",
+    )
+
+    assert md_path is not None
+    content = md_path.read_text(encoding="utf-8")
+    assert "<!-- codedoc-ai:" in content
+
+    # Extract metadata comment and verify file_hashes is present
+    import re
+    match = re.search(r"<!-- codedoc-ai: (\{.*?\}) -->", content, re.DOTALL)
+    assert match, "metadata comment not found"
+    meta = _json.loads(match.group(1))
+    assert "file_hashes" in meta
+    assert meta["file_hashes"].get("app.py") == "deadbeef01"
+
+
+def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
+    """Second --format md run must not call the LLM for unchanged files.
+    This verifies that file_hashes from the MD metadata comment are used
+    for the incremental hash check when no JSON exists."""
+    import json as _json
+
+    from codedoc.core.db import compute_file_hash
+    from codedoc.core.output import write_project_outputs
+    from codedoc.pipeline import run_pipeline
+
+    # Write a source file
+    src = tmp_path / "app.py"
+    src.write_text("def app(): pass\n", encoding="utf-8")
+    real_hash = compute_file_hash(src)
+
+    output_dir = tmp_path / "docs_output"
+
+    # Simulate what a first MD run would have produced: an MD file with
+    # file_hashes embedded in the metadata comment.  No JSON file exists.
+    records = [
+        {
+            "hash": real_hash,
+            "file_path": "app.py",
+            "language": "python",
+            "documentation": {
+                "file_path": "app.py",
+                "language": "python",
+                "description": "The app module.",
+            },
+        }
+    ]
+    write_project_outputs(
+        records,
+        {"checked": 1, "failed": 0, "skipped": 0},
+        output_dir,
+        output_format="md",
+        entry_file="app.py",
+    )
+    # Confirm: only MD exists, no JSON
+    assert (output_dir / "codedoc.md").exists()
+    assert not (output_dir / "codedoc.json").exists()
+
+    def fail_if_llm_used(config):
+        raise AssertionError("LLM must not be called — file is unchanged")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_used)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "app.py",
+            "output_dir": "docs_output",
+            "output_format": "md",
+            "propagate_changes": False,
+        },
+    )
+
+    assert stats["checked"] == 0
+    assert (output_dir / "codedoc.md").exists()
+    assert not (output_dir / "codedoc.json").exists()
+
+
+def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
+    """--output docs/claude.json after a previous --format md run that wrote
+    docs/claude.md must read the entry from claude.md and resume without error."""
+    import json as _json
+
+    from codedoc.core.db import compute_file_hash
+    from codedoc.core.output import write_project_outputs
+    from codedoc.pipeline import run_pipeline
+
+    src = tmp_path / "main.py"
+    src.write_text("def main(): pass\n", encoding="utf-8")
+    real_hash = compute_file_hash(src)
+
+    docs_dir = tmp_path / "docs"
+
+    # Simulate a previous --format md run that wrote docs/claude.md
+    records = [
+        {
+            "hash": real_hash,
+            "file_path": "main.py",
+            "language": "python",
+            "documentation": {
+                "file_path": "main.py",
+                "language": "python",
+                "description": "Entry module.",
+            },
+        }
+    ]
+    write_project_outputs(
+        records,
+        {"checked": 1, "failed": 0, "skipped": 0},
+        docs_dir,
+        output_format="md",
+        entry_file="main.py",
+        md_filename="claude.md",
+    )
+
+    assert (docs_dir / "claude.md").exists()
+    assert not (docs_dir / "claude.json").exists()
+
+    def fail_if_llm_used(config):
+        raise AssertionError("LLM must not be called — file is unchanged")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_used)
+
+    # Now run with --output docs/claude.json — should find claude.md as sibling
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "output_dir": "docs/claude.json",
+            "propagate_changes": False,
+        },
+    )
+
+    assert stats["checked"] == 0
+    assert (docs_dir / "claude.json").exists()
+    json_content = (docs_dir / "claude.json").read_text(encoding="utf-8")
+    assert "Entry module." in json_content
+
+
+def test_select_files_warns_when_entry_not_in_file_map(tmp_path, monkeypatch, caplog):
+    """When the entry file exists on disk but is not picked up by the scanner
+    (e.g. unsupported extension), a clear warning must be logged instead of
+    silently falling back to documenting all files."""
+    import logging
+    import json as _json
+
+    from codedoc.pipeline import run_pipeline
+
+    # A .py file the scanner will pick up
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+    # Entry file physically exists but has an unsupported extension —
+    # scanner will ignore it, so it won't appear in file_map.
+    (tmp_path / "entry.txt").write_text("entrypoint\n", encoding="utf-8")
+
+    def fake_provider(config):
+        class P:
+            provider_name = "fake"
+            def complete_json(self, prompt, system=""): return _json.dumps({
+                "description": "x", "role_in_system": "x",
+                "functions": [], "classes": [], "exports": [],
+                "key_concepts": [], "usage_example": "",
+                "dependencies_analysis": {"internal": [], "external": []},
+            })
+            def complete(self, prompt, system="", temperature=0.1):
+                return self.complete_json(prompt)
+        return P()
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", fake_provider)
+
+    with caplog.at_level(logging.WARNING, logger="codedoc.pipeline"):
+        run_pipeline(
+            tmp_path,
+            {
+                "output_dir": "docs_output",
+                "output_format": "json",
+                "entry_file": "entry.txt",   # exists but unsupported extension → not in file_map
+                "propagate_changes": False,
+                "max_parallel_files": 1,
+                "parallel_agents": False,
+            },
+        )
+
+    assert any(
+        "not found in the scanned file set" in r.message
+        for r in caplog.records
+    ), "Expected warning about entry file not found in scanned set"
+
+
+def test_format_both_with_named_file_raises_config_error(tmp_path):
+    """--format both combined with a named output file must raise ConfigError,
+    not silently downgrade to a single format."""
+    from codedoc.utils.errors import ConfigError
+    from codedoc.pipeline import run_pipeline
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    try:
+        run_pipeline(
+            tmp_path,
+            {
+                "output_dir": "docs/report.md",   # named file
+                "output_format": "both",           # conflicts
+                "entry_file": "main.py",
+            },
+        )
+        assert False, "Expected ConfigError was not raised"
+    except ConfigError as exc:
+        assert "both" in str(exc).lower()
+        assert "directory" in str(exc).lower()

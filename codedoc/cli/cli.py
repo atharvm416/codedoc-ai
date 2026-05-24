@@ -27,7 +27,7 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codedoc",
-        description="AI-powered codebase documentation — structured, incremental, LLM-agnostic.",
+        description="AI-powered codebase documentation â€” structured, incremental, LLM-agnostic.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
@@ -40,7 +40,7 @@ examples:
   # --- Subsequent runs: entry read from existing docs ---
   codedoc run                                              resume from codedoc/ (auto-detected)
   codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON → Markdown
+  codedoc run --format md                                  convert cached JSON â†’ Markdown
   codedoc run --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
@@ -78,7 +78,7 @@ examples:
         metavar="MODEL",
         default=None,
         help=(
-            "Model name to use — e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
+            "Model name to use â€” e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
             "gemini-2.5-flash. When set, provider is auto-detected from the model name."
         ),
     )
@@ -87,7 +87,7 @@ examples:
         metavar="PATH",
         default=None,
         help=(
-            "Output path — a directory (e.g. my_docs) or a specific file "
+            "Output path â€” a directory (e.g. my_docs) or a specific file "
             "(e.g. docs/report.json or docs/report.md). "
             "Defaults to codedoc/ in the project root. "
             "On subsequent runs, pointing to an existing CodeDoc file resumes "
@@ -137,7 +137,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.6.2",
+        version="%(prog)s 0.7.0",
     )
 
     return parser

@@ -177,15 +177,22 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
     inferred_format = "json" if suffix == ".json" else "md"
     parent_str = str(p.parent)  # "." when no directory component
 
-    # Warn if --format was explicitly passed and conflicts with the extension.
-    explicit_format = overrides.get("output_format")
-    if explicit_format and explicit_format != inferred_format and explicit_format != "both":
+    # Check for format conflicts with the file extension.
+    # config["output_format"] holds the merged value from all sources at this point.
+    current_format = config.get("output_format")
+    if current_format and current_format != inferred_format:
+        if current_format == "both":
+            raise ConfigError(
+                f"'--format both' cannot be combined with a named output file ('{p.name}'). "
+                f"Provide a directory instead — e.g. '--output {parent_str or '.'}' — "
+                "and codedoc will write both codedoc.json and codedoc.md there."
+            )
         logger.warning(
             "Output file '%s' implies format '%s', but --format '%s' was also "
             "specified. The file extension takes precedence — '%s' will be used.",
             p.name,
             inferred_format,
-            explicit_format,
+            current_format,
             inferred_format,
         )
 

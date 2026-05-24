@@ -1,5 +1,48 @@
 # Changelog
 
+## 0.7.0 - 2026-05-24
+
+### MD-only incremental now works (Issue 1)
+- `_build_meta_comment` now embeds a `file_hashes` dict inside the `<!-- codedoc-ai: ... -->` metadata comment written at the top of every `codedoc.md`. Each entry maps a relative file path to its SHA-256 hash.
+- `_load_existing_file_docs` now falls back to the MD file when no JSON exists. It reads hashes from the metadata comment and file records from the parsed MD content. Users who only ever run `--format md` no longer pay full LLM cost on every run.
+- MD files generated before 0.7.0 have no `file_hashes`; the first 0.7.0 run re-processes everything once, then subsequent runs are incremental.
+- Zero extra files: MD-only output remains a single file.
+
+### Cross-format resume (Issue 2)
+- `_resolve_entry_and_docs` now checks for a same-stem `.md` sibling when a `.json` candidate does not exist (e.g. `--output codedoc/claude.json` after a previous run wrote `codedoc/claude.md`).
+- `_load_existing_file_docs` checks the same-stem MD sibling before falling back to the configured MD filename.
+
+### Warning when entry file not in scanned set (Issue 3)
+- `_select_files` now logs a `WARNING` when the entry file exists on disk but is absent from the scanner's file map (unsupported extension, too large, in a skip directory).
+
+### Removed dead `write_outputs` function (Issue 4)
+- `codedoc/core/output.py`: removed the never-called `write_outputs()` backward-compat wrapper that still referenced removed fields (`id`, `format`, `last_processed`, `git_commit`, `author`). Unused `datetime`/`timezone` imports also removed.
+
+### `--format both` with a named file is now a hard error (Issue 5)
+- `_resolve_output_spec` raises `ConfigError` when `output_format` is `"both"` and a named file path is given. Previously this silently downgraded to a single format. The error message directs developers to use a directory path instead.
+
+### Tests
+- Added 5 regression tests covering all fixes above.
+
+## 0.6.4 - 2026-05-24
+
+- Removed `codedoc_db.json` entirely — the public `codedoc.json` output already stores `hash` per file, which is sufficient for incremental processing.
+- Hash-based incremental check now compares `compute_file_hash(path)` against `existing_docs[rel].get("hash")` from the public JSON, replacing the DB lookup.
+- Added `_deps` field per file in the public JSON: stores the raw `dependencies_analysis` dict so the dependency catalog can be fully rebuilt from unchanged files on the next incremental run without an LLM call. Not rendered in Markdown output.
+- `_public_record_to_doc` now reads `_deps` back and sets it as `dependencies_analysis`; falls back to `links.external_dependencies` for old-format JSON files.
+- No per-file checkpoint writes during a run — crash recovery now means re-running the affected files.
+- Legacy cleanup: if `codedoc_db.json` exists in the output directory at run time, it is deleted and a log message is emitted.
+- `codedoc/core/db.py` stripped to just the `compute_file_hash` utility; `CodeDocDB` class removed.
+
+## 0.6.3 - 2026-05-24
+
+- Trimmed `codedoc_db.json` to the minimum needed for incremental runs:
+  - Removed `history` array entirely — every field it contained (`file_path`, `processed_at`, `hash`, `author`) was already present in the `files` section, making it pure duplication. It was also never read anywhere in the pipeline.
+  - Removed `author` and `git_commit` fields from per-file DB entries — no longer stored in any output since 0.6.2, so they served no purpose in the cache.
+  - Removed git subprocess calls (`git rev-parse`, `git config user.name`) from the DB write path — nothing reads their output anymore, so there is no reason to shell out on every file write.
+- Each DB entry now contains only: `hash`, `last_processed`, and (when present) `dependencies_analysis`.
+- Existing `codedoc_db.json` files with the old format are migrated transparently on the next run (history is silently dropped).
+
 ## 0.6.2 - 2026-05-23
 
 - Cleaned public output for better AI scannability (schema version 1.4):

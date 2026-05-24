@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from pathlib import Path
 
 from codedoc.core.project_view import build_project_view, json_from_view, markdown_from_view
@@ -64,25 +63,6 @@ def write_project_outputs(
     logger.debug("Output written: %s", ", ".join(written))
     return json_path, md_path
 
-
-def write_outputs(result: dict, output_dir: Path) -> tuple[Path, Path]:
-    """Backward compatible wrapper that writes a one-file project document."""
-    record = {
-        "id": "",
-        "hash": "",
-        "file_path": result.get("file_path", ""),
-        "format": result.get("extension", "").lstrip("."),
-        "language": result.get("language", ""),
-        "last_processed": datetime.now(timezone.utc).isoformat(),
-        "git_commit": None,
-        "author": None,
-        "documentation": result,
-    }
-    return write_project_outputs(
-        [record],
-        {"checked": 1, "failed": 0, "skipped": 0},
-        output_dir,
-    )
 
 
 def _write_project_json(view: dict, error_summary: str, path: Path) -> None:

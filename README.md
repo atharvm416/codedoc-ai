@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.6.1`.
+Current release: `0.7.0`.
 
 ## What It Does
 
@@ -18,12 +18,10 @@ Current release: `0.6.1`.
 - Processes up to 5 files at a time by default.
 - Retries failed parallel files sequentially for clearer diagnostics.
 - Stops early with actionable provider/API health messages when many files fail consecutively.
-- Stores incremental memory in `codedoc_db.json`.
 - Uses SHA-256 content hashes as smart file IDs.
-- Reuses cached analysis for unchanged files.
-- Reuses cached analysis when another file has identical content.
-- Recreates the selected output file from cache if the user deletes it.
-- Embeds metadata (entry point, schema version) in every output file so the next run can resume without re-specifying the entry.
+- Reuses existing documentation for unchanged files.
+- Reuses existing documentation when another file has identical content.
+- Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
 - Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
 - Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
 - Converts public JSON to Markdown without another AI call.
@@ -268,35 +266,6 @@ codedoc run --provider gemini --model gemini-2.5-flash
 
 `GOOGLE_API_KEY` is also supported as an alias for `GEMINI_API_KEY`.
 
-## A Word From Codex
-
-From the perspective of a coding agent, `codedoc-ai` acts like a compact project memory layer. I still need to read the actual code before editing, but a current `codedoc.json` gives me a much better starting map: what files exist, what they own, how they depend on each other, what has changed, and where the risky parts probably are.
-
-That matters because most agent time is spent on discovery before implementation. Without a project memory file, an agent has to repeatedly search, open, infer, and cross-check files. With `codedoc-ai`, the agent can first inspect a structured registry, then open only the files that are likely to matter.
-
-Estimated impact for Codex, Claude, Copilot-style agents, and other AI coding tools:
-
-| Area | Without `codedoc-ai` | With fresh `codedoc.json` | Practical improvement |
-| --- | --- | --- | --- |
-| Initial codebase understanding | Search-heavy and partial | Project map available immediately | 25-35% better first-pass understanding |
-| Discovery token usage | High | Lower, because the agent reads a compact index first | 25-50% fewer discovery tokens on medium projects |
-| Relevant file selection | Manual search and inference | Uses file roles, tree, folders, and dependency links | 30-60% faster targeting |
-| Complex cross-file edits | More fragile | Better impact map through dependencies and `imported_by` links | 20-40% better edit reliability |
-| Hallucination risk | Higher when file roles are guessed | Lower when roles, imports, and relationships are explicit | 20-35% lower risk with fresh output |
-| Refactor safety | Depends on repeated manual tracing | Dependency graph and catalog guide impact checks | 25-45% better safety |
-| New session onboarding | Starts nearly cold | Starts from reusable project memory | 40-70% faster orientation |
-
-The most important caveat is freshness. `codedoc.json` should guide the agent, not replace code reading. The best workflow is:
-
-1. Read `codedoc.json` first.
-2. Use it to identify likely files, folders, symbols, and dependency paths.
-3. Open the real source files before editing.
-4. Make the change.
-5. Run focused tests.
-6. Regenerate `codedoc` output so the memory reflects the new code.
-
-This is why the library favors structured JSON internally. AI-generated text can vary, but a stable machine-readable project view lets future agents and developers reason over the codebase with less repeated discovery.
-
 ## Configuration
 
 Create `codedoc.config.json` in the project being documented:
@@ -424,13 +393,12 @@ export CODEDOC_IGNORE_PATHS="/myenv;services/generated"
 
 ## Output and Cache
 
-`codedoc` writes public documentation and its incremental cache to the same output directory. Everything stays in one place — the project root is never written to.
+`codedoc` writes all output to the configured output directory. The project root is never written to.
 
 Default output:
 
 ```text
 codedoc/codedoc.json
-codedoc/codedoc_db.json
 ```
 
 JSON only:
@@ -441,7 +409,6 @@ codedoc run --format json
 
 ```text
 codedoc/codedoc.json
-codedoc/codedoc_db.json
 ```
 
 Markdown only:
@@ -452,7 +419,6 @@ codedoc run --format md
 
 ```text
 codedoc/codedoc.md
-codedoc/codedoc_db.json
 ```
 
 Custom output file name and location:
@@ -462,7 +428,7 @@ codedoc run --entry src/main.py --output project_docs/analysis.json
 codedoc run --entry src/main.py --output project_docs/analysis.md
 ```
 
-When a file path is passed to `--output`, the format is inferred from the extension — no need to also pass `--format`. Passing an unsupported extension (anything other than `.json` or `.md`) stops the run with a clear error.
+When a file path is passed to `--output`, the format is inferred from the extension — no need to also pass `--format`. Passing an unsupported extension (anything other than `.json` or `.md`) stops the run with a clear error. `--format both` requires a directory, not a named file.
 
 ### Metadata and Resume
 
@@ -474,44 +440,30 @@ In JSON files the block is the first key in the document:
 {
   "_codedoc": {
     "entry_file": "src/main.py",
-    "schema_version": "1.3",
+    "schema_version": "1.4",
     "generated_at": "2025-..."
   },
   ...
 }
 ```
 
-In Markdown files it is an HTML comment at the very top:
+In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
 
 ```text
-<!-- codedoc-ai: {"entry_file": "src/main.py", "schema_version": "1.3", ...} -->
+<!-- codedoc-ai: {"entry_file": "src/main.py", "schema_version": "1.4", "file_hashes": {"src/main.py": "abc123...", ...}} -->
 ```
 
 If this metadata is missing or corrupted, `codedoc` raises a clear error rather than silently failing. To recover, re-run with `--entry` to generate a fresh document.
 
-### Cache Behaviour
+If a JSON output file is missing but an identically-named Markdown file is present (e.g. `codedoc/claude.md` when `codedoc/claude.json` is expected), `codedoc` reads the entry point from the Markdown metadata and resumes from there.
 
-All generated files — including `codedoc_db.json` — are stored in the output directory so the project root stays clean. On the first run after upgrading from an older version, any existing `codedoc_db.json` at the project root is automatically moved into the output directory.
+### Incremental Cache Behaviour
 
-The selected output format is authoritative for the default filenames (`codedoc.json` and `codedoc.md`). If a previous run wrote `codedoc.json` and the next run selects `md` only, the old `codedoc.json` is removed. Custom-named output files (e.g. `analysis.json`) are never automatically deleted between runs. If the selected output file is deleted, `codedoc` recreates it from `codedoc_db.json` when the cache is still valid.
+Incremental state lives inside the output file itself — there is no separate cache database. On each run, `codedoc` reads the existing output file, extracts per-file hashes and documentation records, and compares them against current file content. Only files whose content has changed are sent to the LLM.
 
 The CLI logs the selected output format and the exact output file path during execution for better visibility.
 
-`codedoc_db.json` stores:
-
-- File path.
-- File format.
-- SHA-256 content hash.
-- Last processed timestamp.
-- Git commit and author when available (stored only in internal cache, not public output by default).
-- Imports.
-- Generated description and structure.
-- Full cached documentation result.
-- Processing history.
-
-Keep `codedoc_db.json` ignored unless the team intentionally wants to version generated project memory.
-
-The public `codedoc.json` and `codedoc.md` are cleaner than the cache. They include:
+The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readable output files. They include:
 
 - Project overview (entry file, file count, languages).
 - File tree representation.
@@ -522,7 +474,7 @@ The public `codedoc.json` and `codedoc.md` are cleaner than the cache. They incl
 - Imports, exports, functions, classes.
 - Internal, external, and reverse dependencies (`imported_by`).
 
-They exclude cache-specific data such as history, raw LLM responses, and author metadata by default.
+They exclude internal processing data such as raw LLM responses and per-file history.
 
 ### Dependency Catalog
 
@@ -576,14 +528,13 @@ On each run, `codedoc` follows this process:
 4. Build a dependency graph from parsed imports.
 5. Select files reachable from the entry point.
 6. Compute each selected file's SHA-256 hash.
-7. Skip files whose path and hash already match the cache.
-8. Reuse cached analysis if another file has the same content hash.
+7. Skip files whose path and hash already match the existing output.
+8. Reuse existing documentation if another file has the same content hash.
 9. If `propagate_changes` is true, reprocess files that depend on changed files.
 10. Send only remaining files to the selected LLM, up to `max_parallel_files` at a time.
 11. Retry failed parallel files sequentially so errors are easier to diagnose.
 12. Stop early if repeated failures suggest the API or provider is unavailable.
-13. Update `codedoc_db.json` from the main pipeline path.
-14. Rebuild the selected output file from cached records, embedding metadata for the next run.
+13. Rebuild the selected output file from processed records, embedding metadata for the next run.
 
 This means repeated runs should only send new or changed code to the LLM. Unchanged code and exact duplicate content are reused.
 

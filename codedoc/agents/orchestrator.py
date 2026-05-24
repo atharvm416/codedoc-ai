@@ -55,7 +55,7 @@ class Orchestrator:
             imports:    import strings from parser
 
         Returns:
-            Merged dict ready for output.write_outputs()
+            Merged dict with structure and dependency analysis for this file.
         """
         file_path = descriptor["rel_path"]
         language = descriptor.get("language", "generic")

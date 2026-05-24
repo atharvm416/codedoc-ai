@@ -278,11 +278,22 @@ def read_codedoc_meta(file_path: Path) -> dict:
 
 
 def _build_meta_comment(view: dict, project: dict) -> str:
-    """Return a one-line HTML comment embedding CodeDoc metadata for Markdown output."""
+    """Return a one-line HTML comment embedding CodeDoc metadata for Markdown output.
+
+    Includes ``file_hashes`` so that subsequent ``--format md`` runs can perform
+    incremental hash checks without requiring a sibling JSON file.
+    """
+    files = view.get("files", [])
+    file_hashes = {
+        f["path"]: f["hash"]
+        for f in files
+        if isinstance(f, dict) and f.get("path") and f.get("hash")
+    }
     meta = {
         "entry_file": project.get("entry_file"),
         "schema_version": view.get("schema_version", SCHEMA_VERSION),
         "generated_at": view.get("generated_at", ""),
+        "file_hashes": file_hashes,
     }
     return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
 
@@ -318,6 +329,7 @@ def _clean_file(record: dict) -> dict:
         "exports": result.get("exports", []),
         "key_concepts": result.get("key_concepts", []),
         "usage_example": result.get("usage_example", ""),
+        "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
         "external_dependencies": external,
         "dependency_refs": dependency_refs,
         "dependency_usage": _dependency_usage_map(usage_notes),

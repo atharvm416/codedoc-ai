@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.6.2"
+version = "0.7.0"
 description = "Local-first, LLM-agnostic codebase documentation for AI coding agents"
 readme = "README.md"
 license = "MIT"
@@ -56,3 +56,5 @@ include = ["codedoc*"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+tmp_path_retention_policy = "failed"
+tmp_path_retention_count = 3

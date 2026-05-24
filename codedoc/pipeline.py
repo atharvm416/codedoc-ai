@@ -9,11 +9,11 @@ from typing import Any
 
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
-from codedoc.core.db import CodeDocDB, compute_file_hash
+from codedoc.core.db import compute_file_hash
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
 from codedoc.core.output import write_project_outputs
-from codedoc.core.project_view import read_codedoc_meta
+from codedoc.core.project_view import markdown_to_view, read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
 from codedoc.llm.factory import create_provider
@@ -24,23 +24,91 @@ from codedoc.utils.logger import get_logger, set_level
 logger = get_logger(__name__)
 
 
-def _load_existing_file_docs(output_dir: Path, json_filename: str) -> dict[str, dict]:
-    """Load per-file documentation from an existing public JSON output file.
-    Returns a dict mapping rel_path -> file record dict (as stored in the JSON's 'files' array).
+def _load_existing_file_docs(
+    output_dir: Path,
+    json_filename: str,
+    md_filename: str = "codedoc.md",
+) -> dict[str, dict]:
+    """Load per-file documentation from an existing public output file.
+
+    Tries JSON first (full fidelity, includes ``_deps``).  When JSON is absent
+    — e.g. the project has only ever been run with ``--format md`` — falls back
+    to the MD file so that incremental hash checks still work.  The MD fallback
+    checks two candidates in order:
+
+    1. Same-stem sibling of ``json_filename`` (``claude.json`` → ``claude.md``)
+    2. The explicitly configured ``md_filename`` (default ``codedoc.md``)
+
+    Returns a dict mapping rel_path → file record dict.
     """
     json_path = output_dir / json_filename
-    if not json_path.exists():
-        return {}
+    if json_path.exists():
+        try:
+            data = json.loads(json_path.read_text(encoding="utf-8"))
+            return {
+                f["path"]: f
+                for f in data.get("files", [])
+                if isinstance(f, dict) and f.get("path")
+            }
+        except Exception:
+            return {}
+
+    # JSON not found — try MD fallback (MD-only users and cross-format resume).
+    stem_sibling = output_dir / (Path(json_filename).stem + ".md")
+    configured_md = output_dir / md_filename
+    md_candidates: list[Path] = [stem_sibling]
+    if configured_md != stem_sibling:
+        md_candidates.append(configured_md)
+
+    for md_path in md_candidates:
+        if md_path.exists():
+            try:
+                return _load_existing_file_docs_from_md(md_path)
+            except Exception:
+                pass
+
+    return {}
+
+
+def _load_existing_file_docs_from_md(md_path: Path) -> dict[str, dict]:
+    """Parse an existing MD output file into a file-record dict.
+
+    Hashes are read from the ``file_hashes`` map embedded in the
+    ``<!-- codedoc-ai: ... -->`` metadata comment (written since 0.7.0).
+    Older MD files without that field produce records with empty hashes,
+    causing all files to re-process once — after which the new MD will
+    carry hashes and incremental will work normally.
+
+    Note: ``_deps`` is absent (MD does not store raw dependency analysis),
+    so catalog_updates for unchanged files are not reconstructed.  External
+    dependencies are preserved via the ``links`` block.
+    """
+    content = md_path.read_text(encoding="utf-8-sig", errors="replace")
+
+    # Extract file_hashes from the embedded metadata comment.
+    file_hashes: dict[str, str] = {}
     try:
-        data = json.loads(json_path.read_text(encoding="utf-8"))
-        return {f["path"]: f for f in data.get("files", []) if isinstance(f, dict) and f.get("path")}
-    except Exception:
-        return {}
+        meta = read_codedoc_meta(md_path)
+        file_hashes = meta.get("file_hashes") or {}
+    except ConfigError:
+        pass  # Old MD without file_hashes — all files will re-process this run.
+
+    # Parse file records from the MD content.
+    view = markdown_to_view(content)
+    result: dict[str, dict] = {}
+    for file_record in view.get("files", []):
+        path = file_record.get("path")
+        if path:
+            result[path] = {**file_record, "hash": file_hashes.get(path, "")}
+    return result
 
 
 def _public_record_to_doc(file_record: dict) -> dict:
     """Convert a public JSON file record back to a documentation dict for pipeline use."""
     links = file_record.get("links", {})
+    deps = file_record.get("_deps") or {
+        "external": links.get("external_dependencies", []),
+    }
     doc = {
         "file_path": file_record.get("path", ""),
         "language": file_record.get("language", ""),
@@ -52,10 +120,7 @@ def _public_record_to_doc(file_record: dict) -> dict:
         "classes": file_record.get("classes", []),
         "exports": file_record.get("exports", []),
         "usage_example": file_record.get("usage_example", ""),
-        "dependencies_analysis": {
-            "external": links.get("external_dependencies", []),
-            "internal": links.get("internal_dependencies", []),
-        },
+        "dependencies_analysis": deps,
     }
     return {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
 
@@ -66,19 +131,15 @@ def _build_documentation_records(
     ordered_paths: list,
     existing_docs: dict,
     new_results: dict,
-    db,
 ) -> list[dict]:
     """Build documentation records for write_project_outputs.
 
     For files processed this run: use new_results (raw LLM dict or reused public record).
-    For unchanged files: use existing_docs (from public JSON) + deps_analysis from DB.
+    For unchanged files: use existing_docs (from public JSON).
     """
     records = []
     for rel_path in ordered_paths:
         if rel_path not in rel_paths:
-            continue
-        entry = db.get_entry(rel_path)
-        if not entry:
             continue
 
         if rel_path in new_results:
@@ -89,25 +150,39 @@ def _build_documentation_records(
             else:
                 # Raw LLM result
                 doc = dict(result)
-            # Merge deps_analysis from DB if raw LLM result doesn't have it
-            if entry.get("dependencies_analysis") and not doc.get("dependencies_analysis"):
-                doc["dependencies_analysis"] = entry["dependencies_analysis"]
         elif rel_path in existing_docs:
             doc = _public_record_to_doc(existing_docs[rel_path])
-            if entry.get("dependencies_analysis"):
-                doc["dependencies_analysis"] = entry["dependencies_analysis"]
         else:
             continue
 
+        # Hash: compute fresh for processed files; use stored hash for unchanged files
+        if rel_path in new_results:
+            descriptor = file_map.get(rel_path, {})
+            try:
+                file_hash = compute_file_hash(descriptor["path"]) if descriptor.get("path") else ""
+            except Exception:
+                file_hash = existing_docs.get(rel_path, {}).get("hash", "")
+        else:
+            file_hash = existing_docs.get(rel_path, {}).get("hash", "")
+
         records.append({
-            "hash": entry.get("hash", ""),
+            "hash": file_hash,
             "file_path": rel_path,
             "language": doc.get("language", ""),
-            "git_commit": entry.get("git_commit"),
-            "author": entry.get("author"),
             "documentation": doc,
         })
     return records
+
+
+def _remove_legacy_db(output_dir: Path) -> None:
+    """Remove codedoc_db.json left over from earlier versions."""
+    legacy = output_dir / "codedoc_db.json"
+    if legacy.exists():
+        try:
+            legacy.unlink()
+            logger.info("Removed legacy codedoc_db.json (no longer used since 0.6.4)")
+        except Exception:
+            pass
 
 
 def run_pipeline(
@@ -150,10 +225,12 @@ def run_pipeline(
 
     output_dir = root / config["output_dir"]
     output_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_db(output_dir)
     error_reporter = ErrorReporter(root / "error.log")
 
     json_filename = config.get("output_json_filename", "codedoc.json")
-    existing_docs = _load_existing_file_docs(output_dir, json_filename)
+    md_filename = config.get("output_md_filename", "codedoc.md")
+    existing_docs = _load_existing_file_docs(output_dir, json_filename, md_filename)
     docs_by_hash: dict[str, dict] = {
         doc["hash"]: doc for doc in existing_docs.values() if doc.get("hash")
     }
@@ -172,9 +249,9 @@ def run_pipeline(
     graph, file_map = _build_graph(all_files, root, error_reporter)
     selected_rels, entry_rel = _select_files(root, config, graph, file_map)
 
-    db = CodeDocDB(root, output_dir)
     changed_rels = {
-        rel for rel in selected_rels if db.needs_processing(rel, file_map[rel]["path"])
+        rel for rel in selected_rels
+        if compute_file_hash(file_map[rel]["path"]) != existing_docs.get(rel, {}).get("hash", "")
     }
     if config.get("propagate_changes", True):
         process_rels = graph.affected_by_changes(changed_rels) & selected_rels
@@ -196,7 +273,6 @@ def run_pipeline(
         if content_hash in docs_by_hash:
             source_doc = docs_by_hash[content_hash]
             new_results[rel_path] = source_doc
-            db.mark_processed(rel_path, descriptor["path"])
             logger.info(
                 "Reusing cached documentation for %s from identical content in %s",
                 rel_path,
@@ -222,7 +298,6 @@ def run_pipeline(
                 graph.topological_order(),
                 existing_docs,
                 new_results,
-                db,
             ),
             stats,
             output_dir,
@@ -268,7 +343,6 @@ def run_pipeline(
     _process_agent_files(
         queue=queue,
         orchestrator=orchestrator,
-        db=db,
         stats=stats,
         error_reporter=error_reporter,
         max_workers=max_workers,
@@ -285,7 +359,6 @@ def run_pipeline(
             graph.topological_order(),
             existing_docs,
             new_results,
-            db,
         ),
         stats,
         output_dir,
@@ -319,7 +392,6 @@ def run_pipeline(
 def _process_agent_files(
     queue: ProcessingQueue,
     orchestrator: Orchestrator,
-    db: CodeDocDB,
     stats: dict,
     error_reporter: ErrorReporter,
     max_workers: int,
@@ -338,7 +410,6 @@ def _process_agent_files(
         _process_files_sequentially(
             descriptors,
             orchestrator,
-            db,
             queue,
             stats,
             error_reporter,
@@ -372,7 +443,6 @@ def _process_agent_files(
             rel_path = descriptor["rel_path"]
             try:
                 result = future.result()
-                db.mark_processed(rel_path, descriptor["path"], result)
                 new_results[rel_path] = result
                 queue.mark_checked(rel_path)
                 stats["checked"] += 1
@@ -405,7 +475,6 @@ def _process_agent_files(
         _process_files_sequentially(
             failed_descriptors,
             orchestrator,
-            db,
             queue,
             stats,
             error_reporter,
@@ -418,7 +487,6 @@ def _process_agent_files(
 def _process_files_sequentially(
     descriptors: list[dict],
     orchestrator: Orchestrator,
-    db: CodeDocDB,
     queue: ProcessingQueue,
     stats: dict,
     error_reporter: ErrorReporter,
@@ -439,7 +507,6 @@ def _process_files_sequentially(
         rel_path = descriptor["rel_path"]
         try:
             result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
-            db.mark_processed(rel_path, descriptor["path"], result)
             new_results[rel_path] = result
             queue.mark_checked(rel_path)
             stats["checked"] += 1
@@ -601,6 +668,26 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
                 config["entry_file"] = entry
             return  # docs file found (even if entry was empty — handled by validate)
 
+        # Cross-format resume: JSON candidate missing → check same-stem MD sibling.
+        # e.g. --output codedoc/claude.json after a previous --format md run that
+        # wrote codedoc/claude.md.
+        if candidate.suffix.lower() == ".json":
+            md_sibling = candidate.with_suffix(".md")
+            if md_sibling.exists():
+                try:
+                    meta = read_codedoc_meta(md_sibling)
+                    entry = meta.get("entry_file")
+                    if entry:
+                        logger.info(
+                            "Cross-format resume: entry '%s' read from '%s'",
+                            entry,
+                            md_sibling.name,
+                        )
+                        config["entry_file"] = entry
+                    return  # sibling found — existing docs loaded separately via _load_existing_file_docs
+                except ConfigError:
+                    pass  # sibling exists but is not a valid CodeDoc file — keep searching
+
     raise ConfigError(
         "No entry point specified and no existing CodeDoc documentation was found.\n\n"
         "For a first run, provide the entry file:\n"
@@ -648,6 +735,13 @@ def _select_files(
 
     entry_rel = entry.relative_to(root).as_posix()
     if entry_rel not in file_map:
+        logger.warning(
+            "Entry file '%s' was not found in the scanned file set — "
+            "documenting all %d file(s) instead. "
+            "Check --ignore flags, skip_dirs config, and supported_extensions.",
+            entry_rel,
+            len(all_rel_paths),
+        )
         return all_rel_paths, None
 
     reachable = graph.reachable_dependencies(entry_rel) or {entry_rel}
