@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.7.1 - 2026-05-25
+
+### Fixed: provider-specific default models not applied when `--model` is omitted (GitHub Issue #2)
+
+- `codedoc/core/loader.py`: changed `DEFAULTS["model_name"]` from `"gpt-4o-mini"` to `""`.
+- Previously, the global default `"gpt-4o-mini"` was a truthy string that short-circuited the `or` fallbacks in the provider factory for every provider. Running `--provider gemini` without `--model` would silently send requests to Gemini using the OpenAI model name `gpt-4o-mini`, causing a 404 from the Gemini API. The same bug applied to `--provider anthropic` without `--model`, which would have called Anthropic with `gpt-4o-mini` and failed.
+- With an empty string default, the factory's per-provider fallbacks now activate correctly:
+  - Gemini with no model → `gemini-2.5-flash`
+  - Anthropic with no model → `claude-haiku-4-5-20251001`
+  - OpenAI / auto with no model → `gpt-4o-mini` (unchanged)
+- Behaviour when `--model` is explicitly passed is unchanged.
+
 ## 0.7.0 - 2026-05-24
 
 ### MD-only incremental now works (Issue 1)
