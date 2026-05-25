@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.7.0`.
+Current release: `0.7.1`.
 
 ## What It Does
 

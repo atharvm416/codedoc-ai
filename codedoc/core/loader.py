@@ -21,7 +21,7 @@ logger = get_logger(__name__)
 DEFAULTS: dict[str, Any] = {
     "llm_mode": "api",
     "llm_provider": "auto",
-    "model_name": "gpt-4o-mini",
+    "model_name": "",
     "api_base_url": None,
     "api_key": None,
     "entry_file": None,
