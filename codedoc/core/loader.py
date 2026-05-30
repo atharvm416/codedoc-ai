@@ -40,6 +40,7 @@ DEFAULTS: dict[str, Any] = {
         ".cs",
         ".html",
     ],
+    "safe_mode": False,
     "parallel_agents": True,
     "max_parallel_files": 5,
     "file_retry_attempts": 1,
@@ -86,6 +87,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_PARALLEL_FILES": "max_parallel_files",
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
+    "CODEDOC_SAFE_MODE": "safe_mode",
 }
 
 
@@ -233,6 +235,13 @@ def _validate(config: dict[str, Any]) -> None:
             "OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY "
             "in your environment or .env file."
         )
+
+    # Coerce safe_mode to bool (env vars arrive as strings).
+    raw_safe = config.get("safe_mode", False)
+    if isinstance(raw_safe, str):
+        config["safe_mode"] = raw_safe.strip().lower() in ("true", "1", "yes")
+    else:
+        config["safe_mode"] = bool(raw_safe)
 
     if not isinstance(config.get("supported_extensions"), list):
         raise ConfigError("supported_extensions must be a list of file extensions.")

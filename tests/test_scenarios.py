@@ -796,3 +796,135 @@ def test_J4_no_codedoc_db_ever_written(tmp_path, monkeypatch):
                                  "propagate_changes": False, "parallel_agents": False})
         assert not (tmp_path / "codedoc" / "codedoc_db.json").exists(), \
             f"codedoc_db.json found after --format {fmt}"
+
+
+# ---------------------------------------------------------------------------
+# Group K — Recovery / ownership hardening (0.7.2 fixes)
+# ---------------------------------------------------------------------------
+
+def _codedoc_json(path: Path, records: list[dict], status: str | None = None) -> None:
+    meta: dict = {
+        "entry_file": "main.py",
+        "schema_version": "1.4",
+        "generated_at": "2026-05-30T00:00:00+00:00",
+    }
+    if status:
+        meta["status"] = status
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"_codedoc": meta, "files": records}), encoding="utf-8")
+
+
+def test_K1_safewriter_raises_on_malformed_target(tmp_path):
+    """K1 (Scenario R): SafeWriter refuses to overwrite a malformed target file."""
+    from codedoc.core.safe_writer import SafeWriter
+    from codedoc.utils.errors import ConfigError
+
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    (out / "codedoc.json").write_text("{ not valid json", encoding="utf-8")
+
+    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    try:
+        sw.load()
+        assert False, "load() should have raised on a malformed target file"
+    except ConfigError:
+        pass
+
+
+def test_K2_safewriter_raises_on_foreign_target(tmp_path):
+    """K2 (Scenario P): SafeWriter refuses a valid-JSON file with no _codedoc block."""
+    from codedoc.core.safe_writer import SafeWriter
+    from codedoc.utils.errors import ConfigError
+
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    (out / "codedoc.json").write_text(json.dumps({"name": "not-codedoc"}), encoding="utf-8")
+
+    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    try:
+        sw.load()
+        assert False, "load() should have raised on a foreign file"
+    except ConfigError:
+        pass
+
+
+def test_K3_safewriter_preloads_completed_records(tmp_path):
+    """K3 (Scenario Q): a completed codedoc.json is preserved across a safe-mode interrupt.
+
+    After preloading, the first record() flush must keep the prior records, not
+    overwrite the file with only the newly processed one.
+    """
+    from codedoc.core.safe_writer import SafeWriter
+
+    out = tmp_path / "codedoc"
+    _codedoc_json(out / "codedoc.json", [
+        {"path": "a.py", "hash": "HA"},
+        {"path": "b.py", "hash": "HB"},
+    ])  # completed output — no in_progress status
+
+    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    sw.load()
+    sw.record("c.py", {"language": "python"}, file_hash="HC")  # then "interrupt"
+
+    after = json.loads((out / "codedoc.json").read_text(encoding="utf-8"))
+    paths = sorted(f["path"] for f in after["files"])
+    assert paths == ["a.py", "b.py", "c.py"], paths
+
+
+def test_K4_stale_build_file_does_not_override_newer_json(tmp_path):
+    """K4 (Scenario S): a build file older than codedoc.json is treated as stale."""
+    from codedoc.pipeline import _load_existing_file_docs
+    from codedoc.core.output import BUILD_FILENAME
+    import time
+
+    out = tmp_path / "codedoc"
+    _codedoc_json(out / BUILD_FILENAME, [{"path": "main.py", "hash": "OLD"}])
+    time.sleep(0.05)
+    _codedoc_json(out / "codedoc.json", [{"path": "main.py", "hash": "NEW"}])
+
+    res = _load_existing_file_docs(out, "codedoc.json")
+    assert res["main.py"]["hash"] == "NEW"
+    assert not (out / BUILD_FILENAME).exists()  # stale build file removed
+
+
+def test_K5_newer_build_file_overrides_older_json(tmp_path):
+    """K5 (Scenario N): a build file newer than codedoc.json still wins per-file."""
+    from codedoc.pipeline import _load_existing_file_docs
+    from codedoc.core.output import BUILD_FILENAME
+    import time
+
+    out = tmp_path / "codedoc"
+    _codedoc_json(out / "codedoc.json", [{"path": "main.py", "hash": "OLD"}])
+    time.sleep(0.05)
+    _codedoc_json(out / BUILD_FILENAME, [{"path": "main.py", "hash": "NEW"}], status="in_progress")
+
+    res = _load_existing_file_docs(out, "codedoc.json")
+    assert res["main.py"]["hash"] == "NEW"
+
+
+def test_K6_old_checkpoint_without_hash_is_reprocessed(tmp_path, monkeypatch):
+    """K6 (Scenario F): a checkpoint entry with no _checkpoint_hash is reprocessed, not resumed.
+
+    Checkpoints written before 0.7.2 carry no hash and cannot be verified, so the
+    routing loop must re-send those files to the LLM rather than silently
+    restoring potentially stale documentation.
+    """
+    patch_provider(monkeypatch)
+    (tmp_path / "main.py").write_text("x=1\n")
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    (out / ".codedoc_progress.json").write_text(json.dumps({
+        "codedoc_checkpoint": True,
+        "version": "1",
+        "created_at": "2026-05-29T00:00:00+00:00",
+        "updated_at": "2026-05-29T00:00:00+00:00",
+        "entry_file": "main.py",
+        "total_recorded": 1,
+        "results": {"main.py": {"language": "python", "description": "stale"}},
+    }), encoding="utf-8")
+
+    from codedoc.pipeline import run_pipeline
+    stats = run_pipeline(tmp_path, {"entry_file": "main.py",
+                                     "propagate_changes": False, "parallel_agents": False})
+    assert stats["checked"] == 1          # re-sent to the LLM
+    assert stats.get("resumed", 0) == 0   # not restored from the hash-less checkpoint

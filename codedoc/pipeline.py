@@ -9,10 +9,12 @@ from typing import Any
 
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
+from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.db import compute_file_hash
+from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
-from codedoc.core.output import write_project_outputs
+from codedoc.core.output import BUILD_FILENAME, write_project_outputs
 from codedoc.core.project_view import markdown_to_view, read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
@@ -29,31 +31,96 @@ def _load_existing_file_docs(
     json_filename: str,
     md_filename: str = "codedoc.md",
 ) -> dict[str, dict]:
-    """Load per-file documentation from an existing public output file.
+    """Load per-file documentation from existing output files.
 
-    Tries JSON first (full fidelity, includes ``_deps``).  When JSON is absent
-    — e.g. the project has only ever been run with ``--format md`` — falls back
-    to the MD file so that incremental hash checks still work.  The MD fallback
-    checks two candidates in order:
+    Loads from up to two JSON sources and merges them so that LLM work
+    completed in any prior run is never silently discarded:
 
-    1. Same-stem sibling of ``json_filename`` (``claude.json`` → ``claude.md``)
-    2. The explicitly configured ``md_filename`` (default ``codedoc.md``)
+    1. **Final JSON output** (e.g. ``codedoc.json``) — loaded as the baseline.
+    2. **Internal build file** (``.codedoc_build.json``) — overlaid on top
+       *only when it is newer than the final JSON*.  Present when an MD-oriented
+       run did not complete cleanly.  When newer, its records take priority
+       per-file; when older than the final JSON it is treated as stale, skipped,
+       and removed (see step 2 in the body).
+    3. **Markdown fallback** — used when neither JSON source exists (MD-only
+       users and cross-format resume).  Checks two candidates:
+
+       * Same-stem sibling of ``json_filename`` (``claude.json`` → ``claude.md``)
+       * The explicitly configured ``md_filename`` (default ``codedoc.md``)
 
     Returns a dict mapping rel_path → file record dict.
     """
+    existing: dict[str, dict] = {}
+
+    # 1. Load final JSON output as the baseline.
     json_path = output_dir / json_filename
     if json_path.exists():
         try:
             data = json.loads(json_path.read_text(encoding="utf-8"))
-            return {
+            existing = {
                 f["path"]: f
                 for f in data.get("files", [])
                 if isinstance(f, dict) and f.get("path")
             }
         except Exception:
-            return {}
+            pass  # Corrupt JSON — continue; build file / MD may still be usable.
 
-    # JSON not found — try MD fallback (MD-only users and cross-format resume).
+    # 2. Overlay build-file records — but only when the build file is genuinely
+    # newer than the final JSON.
+    #
+    # The build file is written when an MD-oriented run is interrupted or the
+    # JSON→MD conversion fails.  When it is newer than codedoc.json its records
+    # come from a *newer* incomplete run and should override same-path entries
+    # from the older final JSON, so previously completed LLM work is not
+    # re-submitted just because an older codedoc.json already exists.
+    #
+    # The reverse can also happen: a later ``--format json`` run rewrites
+    # codedoc.json but does *not* clean up a leftover build file.  In that case
+    # the build file is stale and must NOT override the fresher JSON, otherwise
+    # the newer documentation would be silently replaced by older records.  We
+    # decide freshness by modification time and remove the obsolete build file.
+    build_path = output_dir / BUILD_FILENAME
+    if build_path.exists():
+        try:
+            build_is_stale = (
+                json_path.exists()
+                and build_path.stat().st_mtime < json_path.stat().st_mtime
+            )
+            if build_is_stale:
+                logger.info(
+                    "Build file '%s' is older than '%s' — treating it as stale "
+                    "and removing it; the newer JSON takes priority.",
+                    BUILD_FILENAME,
+                    json_filename,
+                )
+                try:
+                    build_path.unlink()
+                except Exception:
+                    pass
+            else:
+                data = json.loads(build_path.read_text(encoding="utf-8"))
+                if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
+                    build_files = {
+                        f["path"]: f
+                        for f in data.get("files", [])
+                        if isinstance(f, dict) and f.get("path")
+                    }
+                    if build_files:
+                        logger.info(
+                            "Build file '%s' found (%d record(s)) — merging with "
+                            "%d existing record(s); build file takes priority per-file.",
+                            BUILD_FILENAME,
+                            len(build_files),
+                            len(existing),
+                        )
+                        existing.update(build_files)
+        except Exception:
+            pass
+
+    if existing:
+        return existing
+
+    # 3. Neither JSON source found — try MD fallback (MD-only users and cross-format resume).
     stem_sibling = output_dir / (Path(json_filename).stem + ".md")
     configured_md = output_dir / md_filename
     md_candidates: list[Path] = [stem_sibling]
@@ -249,6 +316,28 @@ def run_pipeline(
     graph, file_map = _build_graph(all_files, root, error_reporter)
     selected_rels, entry_rel = _select_files(root, config, graph, file_map)
 
+    # Recorder: SafeWriter (--safe-mode) or Checkpoint (default).
+    #
+    # SafeWriter  — writes directly to codedoc.json after every file so the
+    #               user always has readable partial output on disk.
+    # Checkpoint  — writes to a hidden .codedoc_progress.json for crash
+    #               recovery without touching the main output file.
+    if config.get("safe_mode", False):
+        recorder: Checkpoint | SafeWriter = SafeWriter(
+            output_dir,
+            config.get("output_json_filename", "codedoc.json"),
+            output_format,
+            entry_rel,
+            file_map,
+        )
+        logger.info(
+            "Safe mode enabled — partial results written to '%s' after every file.",
+            config.get("output_json_filename", "codedoc.json"),
+        )
+    else:
+        recorder = Checkpoint(output_dir, entry_file=entry_rel)
+    recorder_results = recorder.load()
+
     changed_rels = {
         rel for rel in selected_rels
         if compute_file_hash(file_map[rel]["path"]) != existing_docs.get(rel, {}).get("hash", "")
@@ -264,6 +353,7 @@ def run_pipeline(
 
     new_results: dict[str, dict] = {}
     reused = 0
+    resumed = 0
     agent_rels: set[str] = set()
     for rel_path in graph.topological_order():
         if rel_path not in process_rels:
@@ -271,6 +361,7 @@ def run_pipeline(
         descriptor = file_map[rel_path]
         content_hash = compute_file_hash(descriptor["path"])
         if content_hash in docs_by_hash:
+            # Identical content already documented in a previous completed run.
             source_doc = docs_by_hash[content_hash]
             new_results[rel_path] = source_doc
             logger.info(
@@ -279,6 +370,36 @@ def run_pipeline(
                 source_doc.get("path", "unknown"),
             )
             reused += 1
+        elif rel_path in recorder_results:
+            # File was completed in an interrupted run.
+            # Verify the file hasn't been modified since it was checkpointed.
+            checkpoint_entry = recorder_results[rel_path]
+            stored_hash = checkpoint_entry.get("_checkpoint_hash", "")
+            if not stored_hash:
+                # No hash stored — checkpoint was written by code older than
+                # 0.7.2 and cannot be verified.  Reprocess to avoid silently
+                # restoring documentation that may be stale.
+                logger.info(
+                    "Checkpoint entry for '%s' has no hash (written by an "
+                    "older version) — reprocessing to ensure correctness.",
+                    rel_path,
+                )
+                agent_rels.add(rel_path)
+            elif content_hash != stored_hash:
+                # Hash mismatch — file was modified after it was checkpointed.
+                logger.info(
+                    "File '%s' was modified after it was checkpointed — reprocessing.",
+                    rel_path,
+                )
+                agent_rels.add(rel_path)
+            else:
+                # Hash matches — checkpoint entry is current; restore it.
+                new_results[rel_path] = {
+                    k: v for k, v in checkpoint_entry.items()
+                    if k != "_checkpoint_hash"
+                }
+                logger.info("Resuming from checkpoint: %s", rel_path)
+                resumed += 1
         else:
             agent_rels.add(rel_path)
 
@@ -289,6 +410,7 @@ def run_pipeline(
             "failed": 0,
             "skipped": skipped,
             "reused": reused,
+            "resumed": resumed,
             "output_dir": str(output_dir),
         }
         output_files = write_project_outputs(
@@ -310,6 +432,7 @@ def run_pipeline(
         )
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
+        recorder.delete()
         return stats
 
     queue = ProcessingQueue()
@@ -326,7 +449,7 @@ def run_pipeline(
         raise
 
     orchestrator = Orchestrator(llm, parallel=config.get("parallel_agents", True))
-    stats = {"checked": 0, "failed": 0, "skipped": skipped, "reused": reused}
+    stats = {"checked": 0, "failed": 0, "skipped": skipped, "reused": reused, "resumed": resumed}
     max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
     retry_attempts = config.get("file_retry_attempts", 1)
     max_consecutive_failures = config.get("max_consecutive_failures", 5)
@@ -349,6 +472,7 @@ def run_pipeline(
         retry_attempts=retry_attempts,
         max_consecutive_failures=max_consecutive_failures,
         new_results=new_results,
+        recorder=recorder,
     )
 
     stats["output_dir"] = str(output_dir)
@@ -371,6 +495,7 @@ def run_pipeline(
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
+    recorder.delete()
 
     logger.info(
         "Done. checked=%d failed=%d skipped=%d output=%s",
@@ -398,6 +523,7 @@ def _process_agent_files(
     retry_attempts: int,
     max_consecutive_failures: int,
     new_results: dict,
+    recorder: Checkpoint | SafeWriter,
 ) -> None:
     descriptors = []
     while True:
@@ -416,6 +542,7 @@ def _process_agent_files(
             retry_attempts,
             max_consecutive_failures,
             new_results,
+            recorder,
         )
         return
 
@@ -444,6 +571,7 @@ def _process_agent_files(
             try:
                 result = future.result()
                 new_results[rel_path] = result
+                recorder.record(rel_path, result, _safe_file_hash(descriptor.get("path")))
                 queue.mark_checked(rel_path)
                 stats["checked"] += 1
                 consecutive_failures = 0
@@ -481,6 +609,7 @@ def _process_agent_files(
             retry_attempts,
             max_consecutive_failures,
             new_results,
+            recorder,
         )
 
 
@@ -493,6 +622,7 @@ def _process_files_sequentially(
     retry_attempts: int,
     max_consecutive_failures: int,
     new_results: dict,
+    recorder: Checkpoint | SafeWriter,
 ) -> None:
     consecutive_failures = 0
 
@@ -508,6 +638,7 @@ def _process_files_sequentially(
         try:
             result = _process_one_file_with_retries(descriptor, orchestrator, retry_attempts)
             new_results[rel_path] = result
+            recorder.record(rel_path, result, _safe_file_hash(descriptor.get("path")))
             queue.mark_checked(rel_path)
             stats["checked"] += 1
             consecutive_failures = 0
@@ -608,6 +739,16 @@ def _agent_errors(result: dict) -> list[str]:
     return errors
 
 
+def _safe_file_hash(file_path: Path | None) -> str:
+    """Return the SHA-256 hash of *file_path*, or ``""`` on any error."""
+    if not file_path:
+        return ""
+    try:
+        return compute_file_hash(file_path)
+    except Exception:
+        return ""
+
+
 def _cancel_pending(future_map: dict) -> None:
     for future in future_map:
         if not future.done():
@@ -648,13 +789,18 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
         candidate = (root / p) if not p.is_absolute() else p
         candidates: list[Path] = [candidate]
     else:
-        # Directory — probe for the configured filenames in order.
+        # Directory — probe candidates in priority order:
+        #   1. Final JSON output  (highest fidelity, complete run)
+        #   2. Internal build file (.codedoc_build.json) — present after an
+        #      interrupted MD run or a failed JSON→MD conversion
+        #   3. MD file            (MD-only users, cross-format resume)
         out_dir = (root / p) if not p.is_absolute() else p
-        candidates = []
-        if config.get("output_format") in ("json", "both"):
-            candidates.append(out_dir / config.get("output_json_filename", "codedoc.json"))
+        json_cand = out_dir / config.get("output_json_filename", "codedoc.json")
+        build_cand = out_dir / BUILD_FILENAME
+        md_cand = out_dir / config.get("output_md_filename", "codedoc.md")
+        candidates = [json_cand, build_cand]
         if config.get("output_format") in ("md", "both"):
-            candidates.append(out_dir / config.get("output_md_filename", "codedoc.md"))
+            candidates.append(md_cand)
 
     for candidate in candidates:
         if candidate.exists():

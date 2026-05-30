@@ -113,6 +113,19 @@ examples:
         ),
     )
     parser.add_argument(
+        "--safe-mode",
+        action="store_true",
+        default=False,
+        help=(
+            "Write partial output to disk after every completed file. "
+            "Guarantees that interrupting a run (Ctrl-C, crash, network failure) "
+            "always leaves a readable partial output file. "
+            "On the next run, already-documented files are detected as unchanged "
+            "and skipped automatically — no work is repeated. "
+            "Slightly slower than the default due to the per-file disk writes."
+        ),
+    )
+    parser.add_argument(
         "--no-parallel",
         action="store_true",
         default=False,
@@ -137,7 +150,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.7.1",
+        version="%(prog)s 0.7.2",
     )
 
     return parser
@@ -173,6 +186,8 @@ def main(argv: list[str] | None = None) -> None:
         overrides["output_format"] = args.format
     if args.ignore:
         overrides["ignore_paths"] = args.ignore
+    if args.safe_mode:
+        overrides["safe_mode"] = True
     if args.no_parallel:
         overrides["parallel_agents"] = False
     if args.max_parallel_files is not None:
@@ -187,6 +202,8 @@ def main(argv: list[str] | None = None) -> None:
         print(f"\ncodedoc complete.")
         print(f"  Files documented : {stats['checked']}")
         print(f"  Files reused     : {stats.get('reused', 0)}")
+        if stats.get("resumed", 0):
+            print(f"  Files resumed    : {stats['resumed']}")
         print(f"  Files failed     : {stats['failed']}")
         print(f"  Output directory : {stats['output_dir']}")
         for output_file in stats.get("output_files", []):
@@ -200,13 +217,22 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        print("\nInterrupted.", file=sys.stderr)
+        print(
+            "\nRun interrupted. Progress has been saved — "
+            "re-run the same command to resume from where it stopped.",
+            file=sys.stderr,
+        )
         sys.exit(130)
     except Exception as exc:
-        print(f"Fatal error: {exc}", file=sys.stderr)
-        if args.verbose:
-            import traceback
-            traceback.print_exc()
+        from codedoc.utils.errors import ConfigError
+        if isinstance(exc, ConfigError):
+            # Config / file-collision errors: show a clean actionable message.
+            print(f"Error: {exc}", file=sys.stderr)
+        else:
+            print(f"Fatal error: {exc}", file=sys.stderr)
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
         sys.exit(1)
 
 

@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.7.1`.
+Current release: `0.7.2`.
 
 ## What It Does
 
@@ -22,6 +22,9 @@ Current release: `0.7.1`.
 - Reuses existing documentation for unchanged files.
 - Reuses existing documentation when another file has identical content.
 - Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
+- Survives interruptions: writes a per-file progress checkpoint so a Ctrl-C, crash, or network failure can be resumed without repeating completed work.
+- Offers an opt-in `--safe-mode` that writes readable partial output to disk after every file.
+- Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
 - Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
 - Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
 - Converts public JSON to Markdown without another AI call.
@@ -40,7 +43,7 @@ codedoc run
 | Setting | Default |
 | --- | --- |
 | LLM provider | `auto` (OpenAI) |
-| API model | `gpt-4o-mini` |
+| API model | provider default (OpenAI/auto → `gpt-4o-mini`) |
 | Output directory | `codedoc` |
 | Output format | `json` |
 | Output file | `codedoc/codedoc.json` |
@@ -49,9 +52,18 @@ codedoc run
 | File retry attempts | `1` |
 | Max consecutive failures | `5` |
 | Change propagation | `true` |
+| Safe mode | `false` |
 | Max file size | `500 KB` |
 
 Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
+
+If no model is specified (neither `--model` nor `model_name` in config), each provider falls back to its own default:
+
+| Provider | Default model |
+| --- | --- |
+| OpenAI / `auto` | `gpt-4o-mini` |
+| Anthropic | `claude-haiku-4-5-20251001` |
+| Gemini | `gemini-2.5-flash` |
 
 ## Installation
 
@@ -156,6 +168,7 @@ Common commands:
 | `codedoc run --provider gemini --model gemini-2.5-flash` | Use Google Gemini. |
 | `codedoc run --provider anthropic --model claude-haiku-4-5-20251001` | Use Anthropic Claude. |
 | `codedoc run --ignore /myenv --ignore generated` | Ignore project paths. |
+| `codedoc run --safe-mode` | Write readable partial output after every file. |
 | `codedoc run --max-parallel-files 3` | Limit concurrent file processing. |
 | `codedoc .` | Legacy shorthand for documenting the current directory. |
 | `codedoc --version` | Print the installed version. |
@@ -177,7 +190,7 @@ Provider selection is deterministic:
 - `llm_provider = "auto"` with a model name starting with `claude` uses Anthropic.
 - `llm_provider = "auto"` with a model name starting with `gemini` uses Gemini.
 - `llm_provider = "auto"` with any other model uses OpenAI or an OpenAI-compatible API.
-- If no model is provided, `gpt-4o-mini` is used.
+- If OpenAI/`auto` is selected and no model is provided, `gpt-4o-mini` is used.
 - If Gemini is selected and no model is provided, `gemini-2.5-flash` is used.
 - If Anthropic is selected and no model is provided, `claude-haiku-4-5-20251001` is used.
 
@@ -286,6 +299,7 @@ Create `codedoc.config.json` in the project being documented:
   "log_level": "INFO",
   "max_file_size_kb": 500,
   "propagate_changes": true,
+  "safe_mode": false,
   "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
   "ignore_paths": ["/myenv", "services/generated"]
 }
@@ -333,6 +347,7 @@ Supported variables:
 | `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
+| `CODEDOC_SAFE_MODE` | `true` to write partial output to disk after every file. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
@@ -538,6 +553,65 @@ On each run, `codedoc` follows this process:
 
 This means repeated runs should only send new or changed code to the LLM. Unchanged code and exact duplicate content are reused.
 
+## Crash Recovery and Safe Mode
+
+`codedoc` is built so that interrupting a run — Ctrl-C, a crash, or a dropped
+network connection — never forces you to repeat work that already completed.
+
+### Default: automatic checkpoint
+
+Every run writes a hidden progress file, `.codedoc_progress.json`, into the
+output directory after **each** file completes. You do not need to enable
+anything.
+
+- If a run is interrupted, the checkpoint stays on disk.
+- Re-run the same command — already-documented files are restored from the
+  checkpoint (verified by content hash) and skipped; only the remaining files
+  are sent to the LLM.
+- After a clean run the checkpoint is deleted automatically.
+- If a file was edited between the interruption and the re-run, its hash no
+  longer matches and it is re-documented, so you never restore stale docs.
+
+The checkpoint is written atomically (to a temporary sibling, then renamed) so a
+crash mid-write can never corrupt it, and writes are thread-safe under parallel
+processing.
+
+### Opt-in: `--safe-mode` (visible partial output)
+
+```bash
+codedoc run --safe-mode --entry src/main.py
+```
+
+With `--safe-mode`, partial results are written directly to your real output file
+after every completed file, so you can open `codedoc.json` mid-run and see the
+work so far. It is slightly slower than the default because of the per-file disk
+writes.
+
+- **JSON / both:** partial results accumulate in `codedoc.json` (marked
+  `status: "in_progress"`); the final write replaces it with the polished output.
+  Existing records already on disk are preserved across the run.
+- **MD only:** an internal build file, `.codedoc_build.json`, is used as the
+  durable intermediate during the run, then deleted after the Markdown is written
+  successfully. If the Markdown conversion fails, the intermediate is kept so the
+  next run can finish the conversion with no LLM calls.
+
+You can also enable it via config (`"safe_mode": true`) or the
+`CODEDOC_SAFE_MODE` environment variable.
+
+### Ownership guard
+
+Before writing, `codedoc` checks that any existing file at the target path was
+produced by codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->`
+comment in Markdown). If the file is foreign, malformed, or empty, the run stops
+with a clear `ConfigError` instead of overwriting it. Choose a different
+`--output` directory or remove the conflicting file to proceed.
+
+### More detail
+
+[`RUN_FLOW.md`](RUN_FLOW.md) documents the full end-to-end pipeline and every
+success, interrupt/resume, and failure scenario across OpenAI, Anthropic, and
+Gemini.
+
 ## Python API
 
 The CLI is not required. You can run the same workflow from Python with `run_pipeline(...)`.
@@ -607,6 +681,7 @@ CLI flags map directly to config keys:
 | `--output` | `output_dir` |
 | `--format` | `output_format` |
 | `--ignore` | `ignore_paths` |
+| `--safe-mode` | `safe_mode: True` |
 | `--no-parallel` | `parallel_agents: False` |
 | `--max-parallel-files` | `max_parallel_files` |
 | `--verbose` | `log_level: "DEBUG"` |

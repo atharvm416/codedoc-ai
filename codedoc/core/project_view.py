@@ -298,6 +298,29 @@ def _build_meta_comment(view: dict, project: dict) -> str:
     return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
 
 
+def clean_file_record(record: dict) -> dict:
+    """Public wrapper around the internal ``_clean_file`` helper.
+
+    Converts a raw pipeline record into the clean public file entry stored
+    in the JSON / Markdown output.  Used by :class:`~codedoc.core.safe_writer.SafeWriter`
+    to produce partial file entries that are structurally identical to what
+    the final ``write_project_outputs`` call would produce.
+
+    Parameters
+    ----------
+    record:
+        Dict with keys: ``hash``, ``file_path``, ``language``, and
+        ``documentation`` (the full orchestrator result dict).
+
+    Returns
+    -------
+    dict
+        Clean public file entry with ``path``, ``language``, ``description``,
+        ``hash``, etc.
+    """
+    return _clean_file(record)
+
+
 def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
     dependencies = result.get("dependencies_analysis", {})

@@ -47,3 +47,6 @@ LOCAL_DEVELOPMENT.md
 # OS
 .DS_Store
 Thumbs.db
+
+# Claude Code local settings
+.claude/
