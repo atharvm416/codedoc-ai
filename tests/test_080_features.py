@@ -1108,6 +1108,34 @@ def test_17_hard_errors_still_appear_in_final_json(tmp_path):
 # Test — _resolve_live_backup_path helper
 # ---------------------------------------------------------------------------
 
+def test_provider_init_failure_prints_error_log_path(tmp_path, monkeypatch, capsys):
+    """Provider init failure must print error.log path to stderr before raising."""
+    (tmp_path / "main.py").write_text("x=1\n")
+
+    def boom(_config):
+        raise RuntimeError("API key not found")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", boom)
+
+    from codedoc.pipeline import run_pipeline
+
+    raised = False
+    try:
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+    except Exception:
+        raised = True
+
+    assert raised, "run_pipeline must re-raise when provider init fails"
+    captured = capsys.readouterr()
+    assert "error.log" in captured.err or "issue" in captured.err.lower(), (
+        f"Provider init failure must print error.log path to stderr; got: {captured.err!r}"
+    )
+
+
 def test_resolve_live_backup_path_scenarios(tmp_path):
     """Verify the live backup path for every output scenario."""
     from codedoc.pipeline import _resolve_live_backup_path

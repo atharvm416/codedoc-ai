@@ -30,6 +30,7 @@ from __future__ import annotations
 import concurrent.futures
 import json
 import re
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -616,7 +617,14 @@ def run_pipeline(
     except Exception as exc:
         error_reporter.record(exc, context="LLM provider init")
         error_reporter.flush()
-        _set_issue_stats({}, error_reporter, live_backup_path)
+        # The exception propagates to the CLI which never sees stats, so print
+        # the error.log path here so the user can always find diagnostics.
+        if error_reporter.has_issues():
+            print(
+                f"\n  1 issue recorded. See {error_reporter.log_path.resolve()} for details.",
+                file=sys.stderr,
+                flush=True,
+            )
         raise
 
     orchestrator = Orchestrator(llm, parallel=config.get("parallel_agents", True))
