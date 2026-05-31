@@ -1,17 +1,37 @@
-"""Output writer for codedoc."""
+"""Output writer for codedoc.
+
+0.8.0 changes
+-------------
+- The intermediate ``.codedoc_build.json`` write for ``format="md"`` has been
+  removed.  Crash safety for MD-only runs is now provided by the always-on
+  live JSON backup written by ``SafeWriter`` throughout the pipeline run.
+  ``write_project_outputs`` writes the final Markdown directly without an
+  intermediate build file.
+- ``BUILD_FILENAME`` is kept as a constant so ``_load_existing_file_docs``
+  can still read and migrate stale ``.codedoc_build.json`` files left by
+  0.7.x runs.
+- ``_check_file_ownership`` is unchanged — it still validates both ``.json``
+  and ``.md`` files before any overwrite.
+"""
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
 from codedoc.core.project_view import build_project_view, json_from_view, markdown_from_view
-from codedoc.utils.errors import OutputError
+from codedoc.utils.errors import ConfigError, OutputError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 PROJECT_JSON = "codedoc.json"
 PROJECT_MARKDOWN = "codedoc.md"
+
+# Kept for reading/migrating stale 0.7.x build files.  No longer written by
+# write_project_outputs in 0.8.0.
+BUILD_FILENAME = ".codedoc_build.json"
 
 
 def write_project_outputs(
@@ -25,37 +45,44 @@ def write_project_outputs(
     json_filename: str = PROJECT_JSON,
     md_filename: str = PROJECT_MARKDOWN,
 ) -> tuple[Path | None, Path | None]:
-    """
-    Write selected combined output file(s).
+    """Write the final combined output file(s).
 
-    Args:
-        records:        Documentation records from CodeDocDB.
-        stats:          Pipeline run statistics.
-        output_dir:     Directory to write output files into.
-        error_summary:  Optional error log summary to embed in output.
-        output_format:  One of "json", "md", or "both".
-        entry_file:     Relative path of the project entry file, if known.
-        graph_edges:    Dependency graph edge list.
-        json_filename:  Filename for JSON output (default: codedoc.json).
-        md_filename:    Filename for Markdown output (default: codedoc.md).
+    For ``format="json"`` and ``format="both"`` the JSON output also acts as
+    the live backup written throughout the run, so ``write_project_outputs``
+    simply overwrites it with the final clean payload (no ``_crash_safety``
+    banner, no ``status = "in_progress"``).
+
+    For ``format="md"`` the Markdown file is written directly without an
+    intermediate build file.  If the Markdown conversion fails the live JSON
+    backup written by ``SafeWriter`` throughout the run is preserved, so the
+    user retains their processed results and the next run can resume.
+
+    Before overwriting any output file the function checks that the existing
+    file (if any) was produced by codedoc.  A non-codedoc file at the target
+    path stops the run with a :class:`ConfigError`.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
     if output_format not in ("json", "md", "both"):
         raise OutputError(str(output_dir), f"Unsupported output format: {output_format}")
 
-    selected = _selected_output_names(output_format, json_filename, md_filename)  # noqa: F841
-
     json_path = output_dir / json_filename if output_format in ("json", "both") else None
     md_path = output_dir / md_filename if output_format in ("md", "both") else None
 
+    for path in (json_path, md_path):
+        if path:
+            _check_file_ownership(path)
+
     try:
         view = build_project_view(records, stats, entry_file, graph_edges)
+
         if json_path:
             _write_project_json(view, error_summary, json_path)
             logger.info("JSON output: %s", json_path)
+
         if md_path:
             _write_project_markdown(view, error_summary, md_path)
             logger.info("Markdown output: %s", md_path)
+
     except Exception as exc:
         raise OutputError(str(output_dir), str(exc)) from exc
 
@@ -64,6 +91,48 @@ def write_project_outputs(
     return json_path, md_path
 
 
+# ---------------------------------------------------------------------------
+# Ownership guard
+# ---------------------------------------------------------------------------
+
+def _check_file_ownership(path: Path) -> None:
+    """Verify that *path* was written by codedoc before allowing an overwrite.
+
+    Files that do not yet exist, or whose extension is not ``.json`` / ``.md``,
+    are always allowed through.  Malformed or foreign files raise
+    :class:`ConfigError`.
+    """
+    if not path.exists():
+        return
+
+    suffix = path.suffix.lower()
+    try:
+        content = path.read_text(encoding="utf-8-sig", errors="replace")
+        if suffix == ".json":
+            data = json.loads(content)
+            if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
+                return
+        elif suffix == ".md":
+            if re.search(r"<!--\s*codedoc-ai:", content):
+                return
+        else:
+            return
+    except Exception:
+        pass
+
+    raise ConfigError(
+        f"'{path.name}' already exists but does not appear to be a codedoc "
+        "output file.\n"
+        "codedoc will not overwrite it to protect your data.\n\n"
+        "To resolve this, choose one of:\n"
+        f"  • Use a different output directory:   codedoc run --output my_docs/\n"
+        f"  • Delete or rename the conflicting file:  {path}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
 
 def _write_project_json(view: dict, error_summary: str, path: Path) -> None:
     path.write_text(json_from_view(view, error_summary), encoding="utf-8")
@@ -84,20 +153,7 @@ def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Pat
         f"- Files skipped: {stats.get('skipped', 0)}\n",
         f"- Files reused from cache: {stats.get('reused', 0)}\n",
     ]
-    if error_summary and error_summary != "No errors.":
+    if error_summary:
         lines += ["\n## Errors\n\n```\n", error_summary, "\n```\n"]
     summary_path.write_text("".join(lines), encoding="utf-8")
     return summary_path
-
-
-def _selected_output_names(
-    output_format: str,
-    json_filename: str,
-    md_filename: str,
-) -> set[str]:
-    """Return the set of output filenames that should be written for this run."""
-    if output_format == "json":
-        return {json_filename}
-    if output_format == "md":
-        return {md_filename}
-    return {json_filename, md_filename}

@@ -1,5 +1,332 @@
 # Changelog
 
+## 0.8.0 - 2026-05-31
+
+### Always-on live JSON crash backup, parallel crash-safety, rate-limit adaptive parallelism, error.log overhaul
+
+0.8.0 closes the full known crash-safety/output-safety gap end to end.
+
+---
+
+#### Work Item 1 — Always-on live JSON backup (replaces hidden checkpoint)
+
+Every run now writes a visible live JSON backup that is updated after each completed file.
+`--safe-mode` is deprecated and kept only for backwards compatibility — it now prints a
+deprecation notice and has no additional effect.
+
+- **`codedoc/core/safe_writer.py`** (overhauled): `SafeWriter` is now the default recorder.
+  Constructor now accepts a pre-computed `backup_path: Path` directly.  The live backup
+  always starts with a `_crash_safety` banner as the first JSON key so interrupted files are
+  immediately recognisable as crash-recovery backups.  Three new methods:
+  `initialize_empty()` — writes the banner before any AI call;
+  `set_queue_order()` — controls the `files` array order (topological / queue order, not
+  alphabetical);  `has_record()` — deduplication check for retry logic.
+  `delete()` removes the live backup for MD-only runs after a clean Markdown conversion.
+  If deletion fails (Windows file-lock) a warning is logged and the path is reported so the
+  user knows the leftover file is safe to remove manually.
+
+- **`codedoc/pipeline.py`** — `_resolve_live_backup_path()` helper centralises all backup
+  path logic, including the named-MD sibling case (`--output docs/report.md` → live backup
+  at `docs/report.json`).  `SafeWriter` is always created regardless of `--safe-mode`.
+  `initialize_empty()` is called before `create_provider()` so the backup exists even if
+  provider initialisation fails.  The topological order is passed to `set_queue_order()`.
+  Old `.codedoc_progress.json` checkpoints are migrated on the first run that finds no live
+  backup and deleted from the rotation afterwards.  New stats keys returned:
+  `live_backup_path` (absolute path to live backup), `error_log` (absolute path, set when
+  any issue is recorded), `issues_recorded` (total count), `rate_limit_warnings` (list of
+  step-down events).
+
+- **`codedoc/core/output.py`**: removed the intermediate `.codedoc_build.json` write for
+  `--format md` runs.  Markdown is written directly from the in-memory view; crash safety
+  is provided by the live JSON backup.  `BUILD_FILENAME` is kept only for reading/migrating
+  stale 0.7.x build files.
+
+- **`codedoc/core/loader.py`**: updated `_load_existing_file_docs()` to accept
+  `live_backup_path` so the named-MD sibling (`report.json`) is probed before the default
+  `json_filename`.
+
+#### Work Item 2 — Parallel crash-safety: record in worker thread
+
+Previously a Ctrl-C or crash during parallel processing could discard a completed file's
+result because `recorder.record()` was called in the main `as_completed` loop.
+
+- **`codedoc/pipeline.py`** — `_process_and_record()` wrapper calls `recorder.record()`
+  inside the worker thread before returning, so a crash between worker completion and main
+  collection never loses a result.  The main loop no longer calls `recorder.record()` in the
+  parallel path.  `has_record()` is checked before adding a descriptor to the retry list so
+  a file that already recorded before batch cancellation is not submitted twice.
+
+#### Work Item 3 — Adaptive parallelism on rate limits
+
+When a provider signals 429 / rate-limit / too-many-requests, file concurrency is stepped
+down through a ladder instead of hammering the API at the original concurrency.
+
+- **`codedoc/pipeline.py`**:
+  - `_is_rate_limit_error()` — walks the full `__cause__`/`__context__` chain; covers
+    OpenAI (`429`, `rate_limit_exceeded`, `tpm`), Anthropic (`529`, `overloaded`), and
+    Gemini (`RESOURCE_EXHAUSTED`, `quota`).
+  - `_build_default_ladder()` — generates the step-down ladder for any
+    `max_parallel_files` value (e.g. `5 → [5, 2, 1]`, `10 → [10, 5, 1]`).
+  - `_process_descriptor_batch()` — processes one ladder level and classifies results as
+    succeeded / retry-rate-limited / failed-non-rate-limit.
+  - `_process_agent_files()` — iterates the ladder, collects step-down events into
+    `stats["rate_limit_warnings"]`, prints a provider-specific WARNING to stdout on each
+    step-down with the provider name and original `max_parallel_files` value.
+  - `_parse_retry_after()` — extracts `Retry-After` sleep delays from error messages;
+    applied in sequential mode too when `respect_retry_after = True`.
+- **`codedoc/core/loader.py`**: added `rate_limit_adaptive`, `parallel_ladder`,
+  `respect_retry_after`, `retry_after_cap_s` to `DEFAULTS`; full `parallel_ladder`
+  validation in `_validate()` (strictly decreasing, clamped to `max_parallel_files`,
+  trailing `1` appended if missing).
+
+#### Work Item 4 — `error.log` discoverability and `ErrorReporter` severity
+
+- **`codedoc/utils/errors.py`**: `ErrorReporter.record()` gains a `level` parameter
+  (`"error"` / `"warning"`).  `has_errors()` and `error_count()` count only error-level
+  entries.  `has_issues()` and `issue_count()` count all entries.  `summary()` returns `""`
+  for warning-only runs so recovered rate-limits never appear in the final `codedoc.json`
+  `errors` field or the Markdown `## Errors` section.  Log header changed from `error(s)` to
+  `issue(s)`.
+- **`codedoc/pipeline.py`**: `ErrorReporter` is now initialised with
+  `output_dir / "error.log"` instead of `root / "error.log"`.  `stats["error_log"]` and
+  `stats["issues_recorded"]` are set on every return path (not only when `failed > 0`).
+  Rate-limit health-check notes are recorded as `level="warning"` so they appear in
+  `error.log` for diagnostics but do not alarm the final output.
+- **`codedoc/cli/cli.py`**: the error log path is always printed when
+  `stats["issues_recorded"] > 0`; message distinguishes "file(s) failed" from "issue(s)
+  recorded (all recovered)".  Rate-limit step-down warnings are printed to stdout.
+  `--safe-mode` help updated to `[DEPRECATED]`.
+
+#### Version
+
+- `codedoc/__init__.py`, `pyproject.toml`, `cli.py`: `0.7.2` → `0.8.0`.
+
+#### Tests
+
+- `tests/test_scenarios.py`: updated 3 `SafeWriter` constructor calls to new `backup_path`
+  signature.
+- `tests/test_080_features.py` *(new, 38 tests)*: covers live backup creation, banner
+  presence, queue order, parallel crash-safety, ownership guard, resume, hash-change
+  reprocess, checkpoint migration, rate-limit ladder, signal detector (OpenAI/Anthropic/
+  Gemini/false-positives/cause-chain), provider notifications, error.log location and stats,
+  deprecation notice, `--format both` behaviour, stats keys, ladder validation,
+  no-files early return, and warning exclusion from final output.
+
+**All 163 tests pass** (125 existing + 38 new).
+
+---
+
+**Behaviour on interrupt and resume (0.8.0 default — always-on live backup):**
+1. User runs `codedoc run --entry src/main.py` on a 100-file project.
+2. Before the first LLM call, `codedoc/codedoc.json` is created with a `_crash_safety`
+   banner and an empty `files` array.
+3. After every completed file, `codedoc/codedoc.json` is updated atomically (`.tmp` rename).
+4. Run is interrupted (Ctrl-C, crash) after 60 files.  `codedoc/codedoc.json` contains 60
+   complete file records in topological order, clearly marked with `_crash_safety` as
+   partial output.
+5. User re-runs; `codedoc.json` is read (including in-progress entries), 60 unchanged files
+   are skipped, only the remaining 40 are sent to the LLM.
+6. On clean completion, `write_project_outputs` overwrites `codedoc.json` with a final
+   clean output (no `_crash_safety`, no `status = "in_progress"`).
+
+**MD-only and named-MD runs:**
+- `--format md`: live backup is `codedoc/codedoc.json`; removed automatically on clean
+  Markdown write.  On interrupt, the JSON sibling remains as the resume source.
+- `--output docs/report.md`: live backup is `docs/report.json` (sibling derived from the
+  Markdown stem); removed on clean success.
+
+**Rate-limit step-down example:**
+```
+[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
+reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
+```
+
+---
+
+## 0.7.2 - 2026-05-30
+
+### Added: incremental progress checkpoint + `--safe-mode` live output + MD intermediate + ownership guard
+
+This release fully solves the data-loss-on-interrupt problem for every output format and run
+mode.  It also adds the first line of defence against codedoc accidentally overwriting files
+it did not create.
+
+---
+
+#### Checkpoint (always-on, default behaviour)
+
+Reverses the 0.6.4 decision ("no per-file checkpoint writes during a run") by introducing a
+lightweight, thread-safe checkpoint file that persists each file result to disk the moment it
+completes, for all output formats (JSON, MD, and both).
+
+- `codedoc/core/checkpoint.py` *(new)*: `Checkpoint` class — writes `.codedoc_progress.json`
+  to the output directory after every file.  Writes are atomic: content is serialised to a
+  `.tmp` sibling first, then renamed into place so a crash mid-write never leaves a corrupt
+  file.  Thread-safe via a per-instance lock; safe to call from parallel worker threads.
+- `codedoc/core/__init__.py`: exported `Checkpoint` in `__all__` and the lazy `__getattr__`
+  dispatcher, consistent with all other public core exports.
+
+#### `--safe-mode` (opt-in, visible partial output)
+
+Adds a `--safe-mode` CLI flag and matching `safe_mode` config key / `CODEDOC_SAFE_MODE`
+environment variable.  When active, `Checkpoint` is replaced by `SafeWriter`, which writes
+directly to the real output file after every completed file — so the output always contains
+whatever has been documented so far, even if the run is interrupted.
+
+- `codedoc/core/safe_writer.py` *(new)*: `SafeWriter` class — same thread-safe, atomic-write
+  design as `Checkpoint`, but the target is the real output file rather than a hidden
+  intermediate.  The partial JSON embeds `_codedoc.status = "in_progress"` so subsequent runs
+  can distinguish it from a completed output and resume correctly.
+  - **JSON / both format**: target is `codedoc.json`.  The final `write_project_outputs` call
+    overwrites it with the complete, polished output — no separate cleanup required.
+  - **MD-only format**: target is `.codedoc_build.json` (internal build file, see below).
+    After a successful MD write, `SafeWriter.delete()` removes it.  On failure it is
+    preserved so the user still has partial output and a re-run resumes automatically.
+- `codedoc/core/project_view.py`: added public `clean_file_record()` wrapper around the
+  internal `_clean_file()` so `SafeWriter` can produce structurally identical file entries to
+  what `build_project_view` would produce.
+- `codedoc/core/__init__.py`: exported `SafeWriter`.
+- `codedoc/core/loader.py`: added `"safe_mode": False` to `DEFAULTS`, `"CODEDOC_SAFE_MODE"`
+  to `_ENV_KEY_MAP`, and bool-coercion in `_validate()` (env vars arrive as strings).
+- `codedoc/pipeline.py`:
+  - `run_pipeline`: creates either `SafeWriter` or `Checkpoint` depending on `safe_mode`;
+    both are referred to via the `recorder` variable.  Calls `recorder.record()` /
+    `recorder.delete()` uniformly — the recorder type determines the behaviour.
+  - `_process_agent_files` / `_process_files_sequentially`: parameter renamed
+    `checkpoint` → `recorder`; type annotation updated to `Checkpoint | SafeWriter`.
+  - `_resolve_entry_and_docs`: always probes the JSON candidate and build file before MD,
+    regardless of the current `--format` setting, enabling cross-format and build-file resume.
+- `codedoc/cli/cli.py`: added `--safe-mode` flag; `KeyboardInterrupt` message updated;
+  `Files resumed` summary line added.
+
+#### MD-only runs now always produce a JSON intermediate before converting
+
+Previously a `--format md` run held all results in RAM and wrote one file at the end — a
+crash before that point lost everything.  Now `write_project_outputs` for MD format writes
+the full result to `.codedoc_build.json` **before** starting the Markdown conversion.
+
+- On successful MD write → `.codedoc_build.json` is deleted automatically.
+- On failure (exception, crash during conversion) → `.codedoc_build.json` is preserved;
+  codedoc logs its location.  Re-running the same command loads it via the incremental hash
+  check and re-attempts the conversion without any LLM calls.
+
+`--format both` is unaffected: the JSON output itself serves as the durable intermediate.
+
+#### Internal build file (`.codedoc_build.json`)
+
+`BUILD_FILENAME = ".codedoc_build.json"` (exported from `codedoc.core.output`) names the
+internal intermediate file used by both `write_project_outputs` (MD-only runs) and
+`SafeWriter` (safe-mode MD runs).  The dot-prefix marks it as a system-managed file — not a
+final output, not user-editable.
+
+- `codedoc/pipeline.py` — `_load_existing_file_docs`: loads from both `codedoc.json`
+  (baseline) and `.codedoc_build.json` (newer-run overlay) and **merges** them.  Build-file
+  records take priority per-file so that LLM work completed in an interrupted newer run is
+  never discarded just because an older `codedoc.json` already exists.
+- `codedoc/pipeline.py` — `_resolve_entry_and_docs`: adds `.codedoc_build.json` to the
+  candidate list so the entry file is recoverable from a partial build file.
+
+#### Ownership guard before writing output files
+
+`write_project_outputs` and `SafeWriter` now verify that any existing file at the target path
+was produced by codedoc before allowing an overwrite.  If the file does **not** carry a
+`_codedoc` metadata block (JSON) or `<!-- codedoc-ai: -->` comment (Markdown), a
+`ConfigError` is raised — codedoc refuses to overwrite data it did not create.
+
+- `codedoc/core/output.py`: `_check_file_ownership(path)` — raises `ConfigError` for
+  non-codedoc files; passes silently for new files or files codedoc owns.  The check now
+  covers `json_path`, `md_path`, **and** `build_path` (`.codedoc_build.json`).
+- `codedoc/core/safe_writer.py`: `load()` now raises `ConfigError` at startup when the
+  target file exists but has no `_codedoc` block, preventing SafeWriter from ever flushing
+  over a foreign file during the run.
+- `codedoc/cli/cli.py`: `ConfigError` is surfaced with an `"Error: ..."` prefix (matching
+  `FileNotFoundError`) rather than `"Fatal error: ..."`, giving the user a clean actionable
+  message without a traceback.
+
+#### Fixed: modified files are re-documented when resuming from a checkpoint
+
+When a run is interrupted and a file is edited before the user re-runs, the checkpoint entry
+for that file is discarded and the file is re-documented rather than silently restoring stale
+documentation.
+
+- `codedoc/core/checkpoint.py`: `record()` now accepts an optional `file_hash` parameter.
+  When provided, the hash is stored inside the checkpoint entry under the reserved key
+  ``"_checkpoint_hash"``.
+- `codedoc/core/safe_writer.py`: `record()` updated with the same optional `file_hash`
+  parameter for interface consistency.
+- `codedoc/pipeline.py`:
+  - Added `_safe_file_hash()` helper.
+  - Both `_process_agent_files` (parallel path) and `_process_files_sequentially` compute
+    and forward the file hash to `recorder.record()`.
+  - The routing loop uses three explicit branches:
+    1. **No hash stored** (`stored_hash == ""`): checkpoint was written by code older than
+       0.7.2 and cannot be verified — reprocess to avoid silently restoring potentially
+       stale documentation.
+    2. **Hash mismatch** (`content_hash != stored_hash`): file was modified after it was
+       checkpointed — discard entry, reprocess.
+    3. **Hash matches**: checkpoint entry is current — restore it and skip the LLM.
+  - The ``"_checkpoint_hash"`` key is stripped before the entry is stored in
+    ``new_results``, so it never surfaces in the final output.
+
+#### Fixed: hardening of the recovery / ownership work (review follow-ups)
+
+Follow-up fixes to the recovery and ownership features above, found while
+reviewing the release.
+
+- `codedoc/core/safe_writer.py` — `SafeWriter.load()`:
+  - **No longer erases prior work on a safe-mode interrupt.**  When a *completed*
+    `codedoc.json` already exists, its records are now pre-loaded into memory, so
+    the first per-file flush preserves them.  Previously the first flush wrote
+    only the files processed in the current run, erasing previously completed
+    records if the run was then interrupted — making `--safe-mode` worse than the
+    default checkpoint.  Records are now pre-loaded for both `in_progress`
+    intermediates and completed outputs.
+  - **Refuses to overwrite malformed / unreadable target files.**  `load()` now
+    raises `ConfigError` when the target file cannot be parsed as JSON or is not a
+    JSON object with a `_codedoc` block, instead of logging a warning and starting
+    fresh (which would overwrite the foreign file on the first flush).  This brings
+    `SafeWriter` in line with `_check_file_ownership` in `output.py`, which already
+    treated malformed files as foreign.
+  - The stale module docstring describing `codedoc.json` as the MD-only
+    intermediate was corrected to `.codedoc_build.json`.
+- `codedoc/pipeline.py` — `_load_existing_file_docs()`: the `.codedoc_build.json`
+  overlay is now **freshness-gated**.  A build file is only overlaid onto
+  `codedoc.json` when it is at least as new (by modification time).  A build file
+  left behind by an earlier crashed MD run, after a later `--format json` run
+  rewrote `codedoc.json`, is now detected as stale, skipped, and removed — so older
+  build-file records can no longer silently replace newer JSON documentation (the
+  inverse of the merge case the overlay was added for).
+- `codedoc/__init__.py`: `__version__` corrected from `0.7.0` to `0.7.2` to match
+  the CLI `--version` output and `pyproject.toml`.
+- `OPENAI_RUN_FLOW.md` → `RUN_FLOW.md`: the run-flow / scenario reference was
+  renamed and generalised from OpenAI-only to cover all three providers (OpenAI,
+  Anthropic, Gemini) — correcting the API-key resolution and JSON-mode sections —
+  and four scenarios were added: newer vs. stale build-file overlay, safe-mode
+  resume with a completed output present, and malformed/foreign target files.
+- `README.md`: documented the checkpoint recovery, `--safe-mode`, the
+  `.codedoc_build.json` intermediate, the ownership guard, and the
+  `CODEDOC_SAFE_MODE` environment variable; bumped the documented release to
+  `0.7.2`.
+
+---
+
+**Behaviour on interrupt and resume (default — Checkpoint):**
+1. User runs `codedoc run --entry src/main.py` on a 100-file project.
+2. Run is interrupted (Ctrl-C, crash) after 60 files complete.
+3. `.codedoc_progress.json` in the output directory holds all 60 results.
+4. User re-runs the same command; 60 files are restored from the checkpoint (hash-verified),
+   only the remaining 40 are sent to the LLM.
+5. On clean completion the checkpoint file is deleted automatically.
+
+**Behaviour on interrupt and resume (`--safe-mode`):**
+1. User runs `codedoc run --safe-mode --entry src/main.py` on a 100-file project.
+2. After every file, the output file is updated with the results so far.
+3. Run is interrupted after 60 files; the output contains 60 complete file records.
+4. User re-runs; the existing hash-based incremental logic detects all 60 files as unchanged
+   and skips them automatically — only the remaining 40 are sent to the LLM.
+5. On clean completion `write_project_outputs` overwrites the output with the final polished
+   result (and `SafeWriter.delete()` removes the intermediate for MD-only runs).
+
 ## 0.7.1 - 2026-05-25
 
 ### Fixed: provider-specific default models not applied when `--model` is omitted (GitHub Issue #2)

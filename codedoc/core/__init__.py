@@ -9,6 +9,8 @@ __all__ = [
     "write_summary",
     "json_from_markdown",
     "markdown_from_json",
+    "Checkpoint",
+    "SafeWriter",
 ]
 
 
@@ -40,4 +42,12 @@ def __getattr__(name: str):
             "json_from_markdown": json_from_markdown,
             "markdown_from_json": markdown_from_json,
         }[name]
+    if name == "Checkpoint":
+        from codedoc.core.checkpoint import Checkpoint
+
+        return Checkpoint
+    if name == "SafeWriter":
+        from codedoc.core.safe_writer import SafeWriter
+
+        return SafeWriter
     raise AttributeError(name)

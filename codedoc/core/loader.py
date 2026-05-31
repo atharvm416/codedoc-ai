@@ -40,6 +40,7 @@ DEFAULTS: dict[str, Any] = {
         ".cs",
         ".html",
     ],
+    "safe_mode": False,
     "parallel_agents": True,
     "max_parallel_files": 5,
     "file_retry_attempts": 1,
@@ -47,6 +48,11 @@ DEFAULTS: dict[str, Any] = {
     "log_level": "INFO",
     "max_file_size_kb": 500,
     "propagate_changes": True,
+    # 0.8.0 rate-limit adaptive parallelism
+    "rate_limit_adaptive": True,
+    "parallel_ladder": None,
+    "respect_retry_after": True,
+    "retry_after_cap_s": 30,
     "skip_dirs": [
         "__pycache__",
         ".git",
@@ -86,6 +92,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_PARALLEL_FILES": "max_parallel_files",
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
+    "CODEDOC_SAFE_MODE": "safe_mode",
 }
 
 
@@ -234,6 +241,13 @@ def _validate(config: dict[str, Any]) -> None:
             "in your environment or .env file."
         )
 
+    # Coerce safe_mode to bool (env vars arrive as strings).
+    raw_safe = config.get("safe_mode", False)
+    if isinstance(raw_safe, str):
+        config["safe_mode"] = raw_safe.strip().lower() in ("true", "1", "yes")
+    else:
+        config["safe_mode"] = bool(raw_safe)
+
     if not isinstance(config.get("supported_extensions"), list):
         raise ConfigError("supported_extensions must be a list of file extensions.")
 
@@ -267,6 +281,47 @@ def _validate(config: dict[str, Any]) -> None:
 
     if config["max_consecutive_failures"] < 1:
         raise ConfigError("max_consecutive_failures must be at least 1.")
+
+    # Validate and normalise parallel_ladder (0.8.0)
+    ladder = config.get("parallel_ladder")
+    if ladder is not None:
+        if not isinstance(ladder, list) or not all(
+            isinstance(x, int) and x > 0 for x in ladder
+        ):
+            raise ConfigError(
+                "parallel_ladder must be a list of positive integers, "
+                "e.g. [5, 2, 1]."
+            )
+        if ladder != sorted(ladder, reverse=True):
+            raise ConfigError(
+                "parallel_ladder values must be strictly decreasing (highest first), "
+                "e.g. [5, 2, 1]."
+            )
+        # Clamp values exceeding max_parallel_files
+        max_p = config["max_parallel_files"]
+        if any(x > max_p for x in ladder):
+            logger.warning(
+                "parallel_ladder contains value(s) exceeding max_parallel_files (%d); "
+                "clamping ladder values.",
+                max_p,
+            )
+            seen: set[int] = set()
+            clamped: list[int] = []
+            for x in (min(v, max_p) for v in ladder):
+                if x not in seen:
+                    seen.add(x)
+                    clamped.append(x)
+            ladder = clamped
+            config["parallel_ladder"] = ladder
+        # Ensure 1 is always the last rung
+        if ladder[-1] != 1:
+            config["parallel_ladder"] = ladder + [1]
+
+    # Coerce retry_after_cap_s to int
+    try:
+        config["retry_after_cap_s"] = int(config.get("retry_after_cap_s", 30))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("retry_after_cap_s must be an integer.") from exc
 
 
 def _has_provider_api_key() -> bool:
