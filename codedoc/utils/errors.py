@@ -2,6 +2,20 @@
 Custom exceptions and error reporter for codedoc.
 All modules raise these instead of bare exceptions so the pipeline
 can catch, log, and report them uniformly.
+
+0.8.0 changes
+-------------
+- ``ErrorReporter.record()`` now accepts a ``level`` parameter (``"error"`` or
+  ``"warning"``).  Warning-level entries appear in ``error.log`` but are
+  excluded from ``summary()`` so they never leak into the final ``codedoc.json``
+  ``errors`` field or the Markdown ``## Errors`` section.
+- ``has_errors()`` / ``error_count()`` count only ``"error"``-level entries.
+- ``has_issues()`` / ``issue_count()`` count all entries.
+- ``flush()`` header changed from ``error(s)`` to ``issue(s)`` to avoid alarm
+  on warning-only logs.
+- ``summary()`` returns ``""`` (empty string) when there are no error-level
+  entries; callers that used to check ``!= "No errors."`` treat ``""`` as
+  falsy and skip the errors field.
 """
 
 from __future__ import annotations
@@ -69,44 +83,104 @@ class OutputError(CodeDocError):
 
 class ErrorReporter:
     """
-    Collects errors during a pipeline run and writes a summary
-    error.log in the project root when the run finishes.
+    Collects issues during a pipeline run and writes a summary to
+    ``error.log`` in the output directory when the run finishes.
+
+    Severity levels
+    ---------------
+    ``"error"``
+        Hard failure — shown in ``summary()`` and therefore included in the
+        final ``codedoc.json`` ``errors`` field and Markdown ``## Errors``
+        section.  Also counted by ``has_errors()`` and ``error_count()``.
+    ``"warning"``
+        Recovered issue (e.g. a rate-limit that was retried successfully).
+        Written to ``error.log`` for diagnostics but excluded from
+        ``summary()`` so the clean final output is not alarmed.
     """
 
     def __init__(self, log_path: Path):
         self.log_path = log_path
-        self._errors: list[dict] = []
+        self._entries: list[dict] = []
 
-    def record(self, error: Exception, context: str = "") -> None:
-        """Record an error without stopping execution."""
+    def record(self, error: Exception, context: str = "", level: str = "error") -> None:
+        """Record an issue without stopping execution.
+
+        Parameters
+        ----------
+        error:
+            The exception to record.
+        context:
+            Human-readable description of where in the pipeline this occurred.
+        level:
+            ``"error"`` (default) for hard failures, ``"warning"`` for
+            recovered issues that should not alarm the final output.
+        """
         entry = {
             "type": type(error).__name__,
             "message": str(error),
             "context": context,
+            "level": level,
             "traceback": traceback.format_exc(),
         }
-        self._errors.append(entry)
+        self._entries.append(entry)
+
+    # ------------------------------------------------------------------
+    # Counting helpers
+    # ------------------------------------------------------------------
 
     def has_errors(self) -> bool:
-        return len(self._errors) > 0
+        """True if any error-level (hard failure) entry was recorded."""
+        return any(e["level"] == "error" for e in self._entries)
+
+    def has_issues(self) -> bool:
+        """True if any entry (any severity) was recorded."""
+        return len(self._entries) > 0
 
     def error_count(self) -> int:
-        return len(self._errors)
+        """Number of error-level entries."""
+        return sum(1 for e in self._entries if e["level"] == "error")
+
+    def issue_count(self) -> int:
+        """Total number of entries across all severity levels."""
+        return len(self._entries)
+
+    # ------------------------------------------------------------------
+    # Output helpers
+    # ------------------------------------------------------------------
 
     def flush(self) -> None:
-        """Write all recorded errors to error.log."""
-        if not self._errors:
+        """Write all recorded issues to the log file.
+
+        Creates the log file's parent directory if needed (output_dir may
+        not exist yet when flush is called on an early-exit code path).
+        Does nothing when no issues have been recorded.
+        """
+        if not self._entries:
             return
-        lines = [f"codedoc error log — {len(self._errors)} error(s)\n", "=" * 60 + "\n"]
-        for i, e in enumerate(self._errors, 1):
-            lines.append(f"\n[{i}] {e['type']}: {e['message']}\n")
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        lines = [
+            f"codedoc issue log — {len(self._entries)} issue(s)\n",
+            "=" * 60 + "\n",
+        ]
+        for i, e in enumerate(self._entries, 1):
+            level_label = e.get("level", "error").upper()
+            lines.append(f"\n[{i}] [{level_label}] {e['type']}: {e['message']}\n")
             if e["context"]:
                 lines.append(f"    Context: {e['context']}\n")
-            lines.append(f"    Traceback:\n{e['traceback']}\n")
+            if e.get("level", "error") == "error":
+                lines.append(f"    Root cause:\n{e['traceback']}\n")
             lines.append("-" * 60 + "\n")
         self.log_path.write_text("".join(lines), encoding="utf-8")
 
     def summary(self) -> str:
-        if not self._errors:
-            return "No errors."
-        return "\n".join(f"  - [{e['type']}] {e['message']}" for e in self._errors)
+        """Return a summary string for error-level entries only.
+
+        This string is passed to ``write_project_outputs()`` and embedded in
+        the final ``codedoc.json`` / Markdown output.  Returns ``""`` (empty
+        string) when there are no hard errors so warning-only runs do not
+        produce a scary ``## Errors`` section.
+        """
+        error_entries = [e for e in self._entries if e.get("level", "error") == "error"]
+        if not error_entries:
+            return ""
+        return "\n".join(f"  - [{e['type']}] {e['message']}" for e in error_entries)

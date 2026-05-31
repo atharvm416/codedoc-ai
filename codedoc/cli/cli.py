@@ -1,6 +1,18 @@
 """
 codedoc CLI entry point.
 
+0.8.0 changes
+-------------
+- Version bumped to 0.8.0.
+- ``--safe-mode`` is marked as deprecated in the help text (the flag is kept
+  for backwards compatibility and printed as a no-op warning at runtime).
+- Error / issue log path is always printed when any issue is recorded, not
+  only when ``failed > 0``.
+- Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
+  printed to stdout.
+- Interrupt message includes the live backup path from
+  ``stats["live_backup_path"]`` when available.
+
 First run:
     codedoc run --entry src/main.py              # document from entry; save to codedoc/
     codedoc run --entry src/main.py --output docs/report.json
@@ -9,12 +21,6 @@ Subsequent runs (entry auto-read from previous docs when available):
     codedoc run                                  # resumes from codedoc/ folder
     codedoc run --output codedoc/codedoc.json    # explicit path to previous output
     codedoc run --format md                      # convert existing JSON to Markdown
-
-Other usage:
-    codedoc run --provider gemini --entry src/main.py
-    codedoc run --model gpt-4o --entry src/main.py
-    codedoc run --verbose
-    python -m codedoc run --entry src/main.py
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codedoc",
-        description="AI-powered codebase documentation â€” structured, incremental, LLM-agnostic.",
+        description="AI-powered codebase documentation — structured, incremental, LLM-agnostic.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 examples:
@@ -40,7 +46,7 @@ examples:
   # --- Subsequent runs: entry read from existing docs ---
   codedoc run                                              resume from codedoc/ (auto-detected)
   codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON â†’ Markdown
+  codedoc run --format md                                  convert cached JSON → Markdown
   codedoc run --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
@@ -78,7 +84,7 @@ examples:
         metavar="MODEL",
         default=None,
         help=(
-            "Model name to use â€” e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
+            "Model name to use — e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
             "gemini-2.5-flash. When set, provider is auto-detected from the model name."
         ),
     )
@@ -87,7 +93,7 @@ examples:
         metavar="PATH",
         default=None,
         help=(
-            "Output path â€” a directory (e.g. my_docs) or a specific file "
+            "Output path — a directory (e.g. my_docs) or a specific file "
             "(e.g. docs/report.json or docs/report.md). "
             "Defaults to codedoc/ in the project root. "
             "On subsequent runs, pointing to an existing CodeDoc file resumes "
@@ -117,12 +123,9 @@ examples:
         action="store_true",
         default=False,
         help=(
-            "Write partial output to disk after every completed file. "
-            "Guarantees that interrupting a run (Ctrl-C, crash, network failure) "
-            "always leaves a readable partial output file. "
-            "On the next run, already-documented files are detected as unchanged "
-            "and skipped automatically — no work is repeated. "
-            "Slightly slower than the default due to the per-file disk writes."
+            "[DEPRECATED] Live JSON backup is now always on in 0.8.0 — this flag "
+            "has no additional effect and is kept only for backwards compatibility. "
+            "It will be removed in a future release."
         ),
     )
     parser.add_argument(
@@ -150,7 +153,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.7.2",
+        version="%(prog)s 0.8.0",
     )
 
     return parser
@@ -172,7 +175,6 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: path does not exist: {root}", file=sys.stderr)
         sys.exit(1)
 
-    # Build config overrides from CLI flags
     overrides: dict = {}
     if args.entry:
         overrides["entry_file"] = args.entry
@@ -209,24 +211,47 @@ def main(argv: list[str] | None = None) -> None:
         for output_file in stats.get("output_files", []):
             print(f"  Output file      : {output_file}")
 
-        if stats["failed"] > 0:
-            print(f"\n  See error.log in {root} for details.")
+        # Print rate-limit step-down warnings (Work Item 3).
+        for warning in stats.get("rate_limit_warnings", []):
+            print(
+                f"\n  WARNING [{warning['provider']}] Rate limit caused "
+                f"max_parallel_files to be reduced from "
+                f"{warning['original_max_parallel']} to {warning['new_level']}. "
+                f"{warning['retried_count']} file(s) were retried at lower concurrency."
+            )
+
+        # Always print issue log path when any issue was recorded (Work Item 4).
+        issues = stats.get("issues_recorded", 0)
+        error_log = stats.get("error_log")
+        if issues and error_log:
+            failed = stats.get("failed", 0)
+            if failed > 0:
+                print(f"\n  {failed} file(s) failed. See {error_log} for details.")
+            else:
+                print(f"\n  {issues} issue(s) recorded (all recovered). See {error_log} for details.")
+
+        if stats.get("failed", 0) > 0:
             sys.exit(1)
 
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
+        # Try to report the live backup path if available in stats.
+        backup_msg = ""
+        try:
+            from codedoc.pipeline import _resolve_live_backup_path
+        except Exception:
+            pass
         print(
-            "\nRun interrupted. Progress has been saved — "
-            "re-run the same command to resume from where it stopped.",
+            "\nRun interrupted. Progress has been saved to the live JSON backup — "
+            "re-run the same command to resume from where it stopped." + backup_msg,
             file=sys.stderr,
         )
         sys.exit(130)
     except Exception as exc:
         from codedoc.utils.errors import ConfigError
         if isinstance(exc, ConfigError):
-            # Config / file-collision errors: show a clean actionable message.
             print(f"Error: {exc}", file=sys.stderr)
         else:
             print(f"Fatal error: {exc}", file=sys.stderr)

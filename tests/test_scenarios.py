@@ -823,7 +823,7 @@ def test_K1_safewriter_raises_on_malformed_target(tmp_path):
     out.mkdir()
     (out / "codedoc.json").write_text("{ not valid json", encoding="utf-8")
 
-    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    sw = SafeWriter(out / "codedoc.json", "json", "main.py", {})
     try:
         sw.load()
         assert False, "load() should have raised on a malformed target file"
@@ -840,7 +840,7 @@ def test_K2_safewriter_raises_on_foreign_target(tmp_path):
     out.mkdir()
     (out / "codedoc.json").write_text(json.dumps({"name": "not-codedoc"}), encoding="utf-8")
 
-    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    sw = SafeWriter(out / "codedoc.json", "json", "main.py", {})
     try:
         sw.load()
         assert False, "load() should have raised on a foreign file"
@@ -862,7 +862,7 @@ def test_K3_safewriter_preloads_completed_records(tmp_path):
         {"path": "b.py", "hash": "HB"},
     ])  # completed output — no in_progress status
 
-    sw = SafeWriter(out, "codedoc.json", "json", "main.py", {})
+    sw = SafeWriter(out / "codedoc.json", "json", "main.py", {})
     sw.load()
     sw.record("c.py", {"language": "python"}, file_hash="HC")  # then "interrupt"
 
