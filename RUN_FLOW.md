@@ -82,17 +82,21 @@ pipeline.py — run_pipeline()
   ├─ _build_graph()              parse imports from each file → DependencyGraph
   ├─ _select_files()             traverse graph from entry → reachable set
   │
-  ├─ _load_existing_file_docs()  no codedoc.json, no .codedoc_build.json → returns {}
-  ├─ recorder = Checkpoint(output_dir)   (or SafeWriter if --safe-mode)
-  │     recorder.load()          no prior .codedoc_progress.json
+  ├─ _load_existing_file_docs()  no codedoc.json → returns {}
+  ├─ recorder = SafeWriter(live_backup_path)   (always, since 0.8.0)
+  │     recorder.load()          no prior backup → ownership check passes
   │
   ├─ changed_rels = ALL files    (no existing docs → everything has hash mismatch)
   ├─ agent_rels = ALL files
   │
+  ├─ recorder.set_queue_order(topological order)
+  ├─ recorder.initialize_empty() → writes codedoc/codedoc.json with _crash_safety banner
+  │                                  BEFORE the LLM provider is created
+  │
   ├─ create_provider(config)     → OpenAIProvider / AnthropicProvider / GeminiProvider
   │
   ├─ _process_agent_files()      up to 5 files in parallel (default max_parallel_files)
-  │     └── for each file:
+  │     └── for each file (via _process_and_record in worker thread):
   │           _process_one_file()
   │             ├─ read file content
   │             ├─ parse imports
@@ -104,20 +108,24 @@ pipeline.py — run_pipeline()
   │                                                    receives structure + deps as context
   │           → result dict assembled by Orchestrator._merge()
   │           → recorder.record(rel_path, result, file_hash)
-  │               writes .codedoc_progress.json atomically after every file
+  │               updates codedoc/codedoc.json atomically after every file
+  │               (called inside worker thread — safe against Ctrl-C)
+  │     └── on rate-limit: step down concurrency ladder, print WARNING to stdout
   │
   ├─ write_project_outputs()
-  │     ├─ _check_file_ownership(codedoc.json)  → passes (file is new)
+  │     ├─ _check_file_ownership(codedoc.json)  → passes (codedoc owns it)
   │     ├─ build_project_view()
-  │     └─ writes codedoc/codedoc.json
+  │     └─ writes codedoc/codedoc.json (final clean — no _crash_safety banner)
   │
-  ├─ recorder.delete()           removes .codedoc_progress.json (clean run)
+  ├─ recorder.delete()           no-op for JSON format (file already overwritten above)
+  │                              removes JSON sibling for MD-only runs
   │
   └─ returns stats dict
-       Files documented: N
-       Files reused    : 0
-       Files failed    : 0
-       Output file     : codedoc/codedoc.json
+       Files documented : N
+       Files reused     : 0
+       Files failed     : 0
+       Output file      : codedoc/codedoc.json
+       live_backup_path : .../codedoc/codedoc.json
 ```
 
 **3 LLM calls per file.** A 20-file project makes 60 API requests total (the 3
@@ -159,28 +167,53 @@ Result merged → recorder.record() → .codedoc_progress.json updated
 
 ---
 
-## 4. Recovery Mechanisms at a Glance
+## 4. Recovery Mechanisms (0.8.0)
 
-`codedoc` offers two complementary crash-recovery mechanisms. Both write after
-every completed file, both are thread-safe, and both write atomically (to a
-`.tmp` sibling, then rename into place) so a crash mid-write never corrupts a
-file.
+Since 0.8.0, codedoc uses a single always-on **live JSON backup** for crash
+recovery.  The old hidden checkpoint (`Checkpoint` / `.codedoc_progress.json`)
+is no longer created for new runs.  `--safe-mode` is deprecated and has no
+additional effect.
 
-| Mechanism | Flag | Writes to | Visible partial output? | Cleanup on success |
-|---|---|---|---|---|
-| **Checkpoint** (default) | _(none — always on)_ | `.codedoc_progress.json` (hidden) | No — the real output is untouched until the end | Deleted automatically |
-| **SafeWriter** | `--safe-mode` | the real output file (`codedoc.json`), or `.codedoc_build.json` for MD-only | Yes — open the file to see progress | JSON/both: overwritten with final output. MD-only: intermediate deleted |
+| Scenario | Live backup path | Final output | On interrupt |
+|---|---|---|---|
+| `--format json` (default) | `codedoc/codedoc.json` | Same file (banner removed) | Backup kept with `_crash_safety` banner |
+| `--format both` | `codedoc/codedoc.json` | `codedoc.json` + `codedoc.md` | Backup kept |
+| `--format md` | `codedoc/codedoc.json` | `codedoc/codedoc.md` (backup removed on success) | Backup kept |
+| `--output docs/report.md` | `docs/report.json` | `docs/report.md` (backup removed on success) | `report.json` kept |
+| `--output docs/report.json` | `docs/report.json` | Same file (banner removed) | Backup kept |
 
-Key guarantees that apply to **both** mechanisms:
+**Lifecycle:**
+1. Before any AI call: backup created with `_crash_safety` banner and empty `files[]`.
+2. After each file: backup updated atomically (`.tmp` rename). Files are in topological order.
+3. On clean finish (JSON): `write_project_outputs` overwrites the backup without banner.
+4. On clean finish (MD): Markdown written, then backup deleted. If deletion fails (file lock),
+   a warning is printed and the leftover JSON can be deleted manually.
+5. On interrupt: backup remains with `_crash_safety` as the first key and `files[]` containing
+   only completed work. Re-running the same command resumes from it.
 
-- **Hash-verified resume.** Each recorded entry stores the file's SHA-256 hash.
-  On resume, a file is only restored if its current hash matches; if you edited
-  it in between, it is reprocessed.
-- **No data loss on interrupt.** Previously completed work on disk is always
-  preserved. (Checkpoint never touches the real output; SafeWriter pre-loads any
-  existing records so the first write includes them — see Scenario Q.)
-- **Ownership guard.** `codedoc` refuses to overwrite a file it did not create —
-  including malformed or empty files at the target path (see Scenarios O, P, R).
+**In parallel mode:** each worker calls `recorder.record()` before returning to the
+main thread, so a Ctrl-C or crash after a worker completes never discards that result.
+
+**Key guarantees:**
+
+- **Hash-verified resume.** On re-run, files whose hash matches the live backup are skipped;
+  files with changed hashes or no stored hash are re-documented.
+- **Queue order.** The `files` array follows topological processing order (not completion
+  order or path sorting) in both the live backup and the final output.
+- **Ownership guard.** `codedoc` refuses to overwrite a file it did not create (no `_codedoc`
+  metadata block) — including the JSON backup sibling for named-MD runs.
+
+**Rate-limit step-down (0.8.0):**
+When a rate-limit signal is detected during parallel processing, codedoc steps down the
+file concurrency ladder and prints a provider-specific notice to the terminal:
+
+```
+[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
+reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
+```
+
+Recovered rate-limit events appear in `error.log` (located in the output directory,
+not the project root) as warnings, and do not alarm the final output.
 
 ---
 
@@ -193,10 +226,11 @@ Key guarantees that apply to **both** mechanisms:
 **Command:** `codedoc run --entry src/main.py`
 
 **What happens:**
-- All files sent to the LLM (nothing cached).
-- Each file: 3 parallel LLM calls → result merged → written to checkpoint.
-- All files complete → `write_project_outputs` writes `codedoc/codedoc.json`.
-- Checkpoint deleted.
+- `codedoc/codedoc.json` created immediately with `_crash_safety` banner (before LLM starts).
+- All files sent to the LLM (nothing cached). Each file: 3 parallel LLM calls → result
+  merged → written to `codedoc.json` atomically inside the worker thread.
+- All files complete → `write_project_outputs` overwrites `codedoc.json` with final clean
+  output (no `_crash_safety`, no `status = "in_progress"`).
 
 **Output:**
 ```

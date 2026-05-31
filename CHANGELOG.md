@@ -1,5 +1,148 @@
 # Changelog
 
+## 0.8.0 - 2026-05-31
+
+### Always-on live JSON crash backup, parallel crash-safety, rate-limit adaptive parallelism, error.log overhaul
+
+0.8.0 closes the full known crash-safety/output-safety gap end to end.
+
+---
+
+#### Work Item 1 — Always-on live JSON backup (replaces hidden checkpoint)
+
+Every run now writes a visible live JSON backup that is updated after each completed file.
+`--safe-mode` is deprecated and kept only for backwards compatibility — it now prints a
+deprecation notice and has no additional effect.
+
+- **`codedoc/core/safe_writer.py`** (overhauled): `SafeWriter` is now the default recorder.
+  Constructor now accepts a pre-computed `backup_path: Path` directly.  The live backup
+  always starts with a `_crash_safety` banner as the first JSON key so interrupted files are
+  immediately recognisable as crash-recovery backups.  Three new methods:
+  `initialize_empty()` — writes the banner before any AI call;
+  `set_queue_order()` — controls the `files` array order (topological / queue order, not
+  alphabetical);  `has_record()` — deduplication check for retry logic.
+  `delete()` removes the live backup for MD-only runs after a clean Markdown conversion.
+  If deletion fails (Windows file-lock) a warning is logged and the path is reported so the
+  user knows the leftover file is safe to remove manually.
+
+- **`codedoc/pipeline.py`** — `_resolve_live_backup_path()` helper centralises all backup
+  path logic, including the named-MD sibling case (`--output docs/report.md` → live backup
+  at `docs/report.json`).  `SafeWriter` is always created regardless of `--safe-mode`.
+  `initialize_empty()` is called before `create_provider()` so the backup exists even if
+  provider initialisation fails.  The topological order is passed to `set_queue_order()`.
+  Old `.codedoc_progress.json` checkpoints are migrated on the first run that finds no live
+  backup and deleted from the rotation afterwards.  New stats keys returned:
+  `live_backup_path` (absolute path to live backup), `error_log` (absolute path, set when
+  any issue is recorded), `issues_recorded` (total count), `rate_limit_warnings` (list of
+  step-down events).
+
+- **`codedoc/core/output.py`**: removed the intermediate `.codedoc_build.json` write for
+  `--format md` runs.  Markdown is written directly from the in-memory view; crash safety
+  is provided by the live JSON backup.  `BUILD_FILENAME` is kept only for reading/migrating
+  stale 0.7.x build files.
+
+- **`codedoc/core/loader.py`**: updated `_load_existing_file_docs()` to accept
+  `live_backup_path` so the named-MD sibling (`report.json`) is probed before the default
+  `json_filename`.
+
+#### Work Item 2 — Parallel crash-safety: record in worker thread
+
+Previously a Ctrl-C or crash during parallel processing could discard a completed file's
+result because `recorder.record()` was called in the main `as_completed` loop.
+
+- **`codedoc/pipeline.py`** — `_process_and_record()` wrapper calls `recorder.record()`
+  inside the worker thread before returning, so a crash between worker completion and main
+  collection never loses a result.  The main loop no longer calls `recorder.record()` in the
+  parallel path.  `has_record()` is checked before adding a descriptor to the retry list so
+  a file that already recorded before batch cancellation is not submitted twice.
+
+#### Work Item 3 — Adaptive parallelism on rate limits
+
+When a provider signals 429 / rate-limit / too-many-requests, file concurrency is stepped
+down through a ladder instead of hammering the API at the original concurrency.
+
+- **`codedoc/pipeline.py`**:
+  - `_is_rate_limit_error()` — walks the full `__cause__`/`__context__` chain; covers
+    OpenAI (`429`, `rate_limit_exceeded`, `tpm`), Anthropic (`529`, `overloaded`), and
+    Gemini (`RESOURCE_EXHAUSTED`, `quota`).
+  - `_build_default_ladder()` — generates the step-down ladder for any
+    `max_parallel_files` value (e.g. `5 → [5, 2, 1]`, `10 → [10, 5, 1]`).
+  - `_process_descriptor_batch()` — processes one ladder level and classifies results as
+    succeeded / retry-rate-limited / failed-non-rate-limit.
+  - `_process_agent_files()` — iterates the ladder, collects step-down events into
+    `stats["rate_limit_warnings"]`, prints a provider-specific WARNING to stdout on each
+    step-down with the provider name and original `max_parallel_files` value.
+  - `_parse_retry_after()` — extracts `Retry-After` sleep delays from error messages;
+    applied in sequential mode too when `respect_retry_after = True`.
+- **`codedoc/core/loader.py`**: added `rate_limit_adaptive`, `parallel_ladder`,
+  `respect_retry_after`, `retry_after_cap_s` to `DEFAULTS`; full `parallel_ladder`
+  validation in `_validate()` (strictly decreasing, clamped to `max_parallel_files`,
+  trailing `1` appended if missing).
+
+#### Work Item 4 — `error.log` discoverability and `ErrorReporter` severity
+
+- **`codedoc/utils/errors.py`**: `ErrorReporter.record()` gains a `level` parameter
+  (`"error"` / `"warning"`).  `has_errors()` and `error_count()` count only error-level
+  entries.  `has_issues()` and `issue_count()` count all entries.  `summary()` returns `""`
+  for warning-only runs so recovered rate-limits never appear in the final `codedoc.json`
+  `errors` field or the Markdown `## Errors` section.  Log header changed from `error(s)` to
+  `issue(s)`.
+- **`codedoc/pipeline.py`**: `ErrorReporter` is now initialised with
+  `output_dir / "error.log"` instead of `root / "error.log"`.  `stats["error_log"]` and
+  `stats["issues_recorded"]` are set on every return path (not only when `failed > 0`).
+  Rate-limit health-check notes are recorded as `level="warning"` so they appear in
+  `error.log` for diagnostics but do not alarm the final output.
+- **`codedoc/cli/cli.py`**: the error log path is always printed when
+  `stats["issues_recorded"] > 0`; message distinguishes "file(s) failed" from "issue(s)
+  recorded (all recovered)".  Rate-limit step-down warnings are printed to stdout.
+  `--safe-mode` help updated to `[DEPRECATED]`.
+
+#### Version
+
+- `codedoc/__init__.py`, `pyproject.toml`, `cli.py`: `0.7.2` → `0.8.0`.
+
+#### Tests
+
+- `tests/test_scenarios.py`: updated 3 `SafeWriter` constructor calls to new `backup_path`
+  signature.
+- `tests/test_080_features.py` *(new, 38 tests)*: covers live backup creation, banner
+  presence, queue order, parallel crash-safety, ownership guard, resume, hash-change
+  reprocess, checkpoint migration, rate-limit ladder, signal detector (OpenAI/Anthropic/
+  Gemini/false-positives/cause-chain), provider notifications, error.log location and stats,
+  deprecation notice, `--format both` behaviour, stats keys, ladder validation,
+  no-files early return, and warning exclusion from final output.
+
+**All 163 tests pass** (125 existing + 38 new).
+
+---
+
+**Behaviour on interrupt and resume (0.8.0 default — always-on live backup):**
+1. User runs `codedoc run --entry src/main.py` on a 100-file project.
+2. Before the first LLM call, `codedoc/codedoc.json` is created with a `_crash_safety`
+   banner and an empty `files` array.
+3. After every completed file, `codedoc/codedoc.json` is updated atomically (`.tmp` rename).
+4. Run is interrupted (Ctrl-C, crash) after 60 files.  `codedoc/codedoc.json` contains 60
+   complete file records in topological order, clearly marked with `_crash_safety` as
+   partial output.
+5. User re-runs; `codedoc.json` is read (including in-progress entries), 60 unchanged files
+   are skipped, only the remaining 40 are sent to the LLM.
+6. On clean completion, `write_project_outputs` overwrites `codedoc.json` with a final
+   clean output (no `_crash_safety`, no `status = "in_progress"`).
+
+**MD-only and named-MD runs:**
+- `--format md`: live backup is `codedoc/codedoc.json`; removed automatically on clean
+  Markdown write.  On interrupt, the JSON sibling remains as the resume source.
+- `--output docs/report.md`: live backup is `docs/report.json` (sibling derived from the
+  Markdown stem); removed on clean success.
+
+**Rate-limit step-down example:**
+```
+[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
+reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
+```
+
+---
+
 ## 0.7.2 - 2026-05-30
 
 ### Added: incremental progress checkpoint + `--safe-mode` live output + MD intermediate + ownership guard

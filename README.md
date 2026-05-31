@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.7.2`.
+Current release: `0.8.0`.
 
 ## What It Does
 
@@ -22,8 +22,8 @@ Current release: `0.7.2`.
 - Reuses existing documentation for unchanged files.
 - Reuses existing documentation when another file has identical content.
 - Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
-- Survives interruptions: writes a per-file progress checkpoint so a Ctrl-C, crash, or network failure can be resumed without repeating completed work.
-- Offers an opt-in `--safe-mode` that writes readable partial output to disk after every file.
+- Survives interruptions: writes a live JSON backup before any AI work starts, then updates it after every completed file. A Ctrl-C or crash always leaves a readable partial output file — no results are lost, and re-running the same command resumes automatically from where it stopped.
+- Adaptive rate-limit parallelism: when a provider signals 429 / rate-limit, file concurrency is stepped down (`5 → 2 → 1`) and a provider-specific warning is printed to the terminal. No manual intervention needed.
 - Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
 - Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
 - Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
@@ -52,7 +52,8 @@ codedoc run
 | File retry attempts | `1` |
 | Max consecutive failures | `5` |
 | Change propagation | `true` |
-| Safe mode | `false` |
+| Live JSON backup | always on (0.8.0 default) |
+| Rate-limit adaptive | `true` |
 | Max file size | `500 KB` |
 
 Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
@@ -168,7 +169,7 @@ Common commands:
 | `codedoc run --provider gemini --model gemini-2.5-flash` | Use Google Gemini. |
 | `codedoc run --provider anthropic --model claude-haiku-4-5-20251001` | Use Anthropic Claude. |
 | `codedoc run --ignore /myenv --ignore generated` | Ignore project paths. |
-| `codedoc run --safe-mode` | Write readable partial output after every file. |
+| `codedoc run --safe-mode` | Deprecated (live backup is always on since 0.8.0). |
 | `codedoc run --max-parallel-files 3` | Limit concurrent file processing. |
 | `codedoc .` | Legacy shorthand for documenting the current directory. |
 | `codedoc --version` | Print the installed version. |
@@ -299,7 +300,10 @@ Create `codedoc.config.json` in the project being documented:
   "log_level": "INFO",
   "max_file_size_kb": 500,
   "propagate_changes": true,
-  "safe_mode": false,
+  "rate_limit_adaptive": true,
+  "parallel_ladder": null,
+  "respect_retry_after": true,
+  "retry_after_cap_s": 30,
   "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
   "ignore_paths": ["/myenv", "services/generated"]
 }
@@ -347,7 +351,7 @@ Supported variables:
 | `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
-| `CODEDOC_SAFE_MODE` | `true` to write partial output to disk after every file. |
+| `CODEDOC_SAFE_MODE` | Deprecated — live backup is always on since 0.8.0. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
@@ -566,37 +570,70 @@ anything.
 
 - If a run is interrupted, the checkpoint stays on disk.
 - Re-run the same command — already-documented files are restored from the
-  checkpoint (verified by content hash) and skipped; only the remaining files
+  backup (verified by content hash) and skipped; only the remaining files
   are sent to the LLM.
-- After a clean run the checkpoint is deleted automatically.
 - If a file was edited between the interruption and the re-run, its hash no
   longer matches and it is re-documented, so you never restore stale docs.
 
-The checkpoint is written atomically (to a temporary sibling, then renamed) so a
+The live backup is written atomically (to a temporary sibling, then renamed) so a
 crash mid-write can never corrupt it, and writes are thread-safe under parallel
 processing.
 
-### Opt-in: `--safe-mode` (visible partial output)
+**Files array ordering.** The `files` array in the live backup follows the
+topological (dependency-first) processing order, not completion order or
+alphabetical order. An interrupted backup is therefore structured consistently
+with the final clean output.
 
-```bash
-codedoc run --safe-mode --entry src/main.py
+**MD-only and named-MD runs.**
+- `--format md`: live backup is `codedoc/codedoc.json`; removed automatically
+  after clean Markdown conversion. If interrupted, `codedoc.json` remains as the
+  resume source and the next run converts without any LLM calls.
+- `--output docs/report.md`: live backup is `docs/report.json` (sibling derived
+  from the Markdown stem). Same lifecycle as above.
+
+**`--safe-mode` (deprecated).** This flag is kept for backwards compatibility
+and now has no effect — live backup is always on. Passing it prints a deprecation
+notice. It will be removed in a future release.
+
+### Adaptive rate-limit parallelism (0.8.0)
+
+When a provider signals 429 / rate-limit / quota-exceeded, codedoc automatically
+steps down file-level concurrency instead of hammering the API:
+
+```
+[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
+reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
 ```
 
-With `--safe-mode`, partial results are written directly to your real output file
-after every completed file, so you can open `codedoc.json` mid-run and see the
-work so far. It is slightly slower than the default because of the per-file disk
-writes.
+The default step-down ladder for `max_parallel_files = 5` is `[5, 2, 1]`.
+Customize it in config:
 
-- **JSON / both:** partial results accumulate in `codedoc.json` (marked
-  `status: "in_progress"`); the final write replaces it with the polished output.
-  Existing records already on disk are preserved across the run.
-- **MD only:** an internal build file, `.codedoc_build.json`, is used as the
-  durable intermediate during the run, then deleted after the Markdown is written
-  successfully. If the Markdown conversion fails, the intermediate is kept so the
-  next run can finish the conversion with no LLM calls.
+```json
+{
+  "rate_limit_adaptive": true,
+  "parallel_ladder": [5, 2, 1],
+  "respect_retry_after": true,
+  "retry_after_cap_s": 30
+}
+```
 
-You can also enable it via config (`"safe_mode": true`) or the
-`CODEDOC_SAFE_MODE` environment variable.
+Provider-specific rate-limit signals are recognised for OpenAI (`429`,
+`rate_limit_exceeded`, `tpm`), Anthropic (`529`, `overloaded`), and Gemini
+(`RESOURCE_EXHAUSTED`, `quota`). Non-rate-limit errors never trigger a step-down.
+
+### Issue log (`error.log`)
+
+When any issue is recorded during a run, codedoc writes `error.log` inside the
+**output directory** (e.g. `codedoc/error.log`), not in the project root.  The
+absolute path is printed at the end of the run:
+
+```
+1 issue(s) recorded (all recovered). See /path/to/codedoc/error.log for details.
+```
+
+Recovered rate-limit step-downs are recorded as warnings in `error.log` but
+**do not** appear as errors in the final `codedoc.json` or Markdown output.
+Only hard file failures are surfaced there.
 
 ### Ownership guard
 
