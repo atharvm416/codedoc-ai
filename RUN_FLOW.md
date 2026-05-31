@@ -4,7 +4,7 @@ This document describes exactly how `codedoc` runs end-to-end across all three
 supported providers — **OpenAI**, **Anthropic**, and **Gemini** — covering every
 meaningful success, interrupt/resume, and failure scenario.
 
-It is provider-agnostic: the pipeline, checkpointing, safe-mode, ownership
+It is provider-agnostic: the pipeline, live-backup crash-safety, ownership
 guard, and incremental logic are identical regardless of which LLM you use. Only
 the per-file API call and the JSON-enforcement mechanism differ per provider, as
 noted where relevant.
@@ -162,7 +162,7 @@ File: src/auth/login.py
         prompt: "Document this file. Context: [structure] [dependencies]..."
         LLM call → returns: { key_concepts: [...], usage_example: "...", role_in_system: "..." }
 
-Result merged → recorder.record() → .codedoc_progress.json updated
+Result merged → recorder.record() (inside worker thread) → live JSON backup updated atomically
 ```
 
 ---
@@ -292,29 +292,26 @@ codedoc complete.
 
 **Command:** `codedoc run --entry src/main.py` on a 20-file project, Ctrl-C after 8 files.
 
-**What happens during the run:**
-- After each of the first 8 files: `recorder.record()` → `.codedoc_progress.json` written.
-- Ctrl-C → `KeyboardInterrupt` caught in `cli.py`.
-- Message printed: "Run interrupted. Progress has been saved — re-run to resume."
+**What happens during the run (0.8.0):**
+- Before any LLM call: `codedoc/codedoc.json` created with `_crash_safety` banner and empty `files[]`.
+- After each completed file: worker thread calls `recorder.record()` → `codedoc.json` updated atomically.
+- After 8 files complete, Ctrl-C → `KeyboardInterrupt` caught in `cli.py`.
+- Message printed: "Run interrupted. Progress has been saved to the live JSON backup — re-run to resume."
 - Exit code 130.
-- `.codedoc_progress.json` remains on disk with 8 results.
+- `codedoc/codedoc.json` remains on disk with 8 file records in topological order, `_crash_safety` banner present.
 
 **On re-run:**
-- `recorder.load()` reads `.codedoc_progress.json` → `recorder_results` = 8 entries.
-- Routing loop for each file in `process_rels`:
-  - If `rel_path in recorder_results`:
-    - `stored_hash` is read from `_checkpoint_hash`.
-    - If the hash matches the current file → `resumed += 1` (no LLM call).
-    - If the hash differs (file was edited) → `agent_rels.add(rel_path)` (re-sent to the LLM).
-  - Remaining 12 files → `agent_rels` → sent to the LLM.
-- Only 12 (or fewer if some were edited) LLM calls made.
+- `_load_existing_file_docs` reads `codedoc.json` (including the in-progress backup) → `existing_docs` = 8 entries with hashes.
+- Changed files: computed → 0 (nothing changed) → `process_rels` = 12 remaining files.
+- 12 remaining files → `agent_rels` → sent to the LLM.
+- `write_project_outputs` overwrites `codedoc.json` with the final clean output (no `_crash_safety`).
 
 **Output:**
 ```
 codedoc complete.
   Files documented : 12
   Files reused     : 0
-  Files resumed    : 8
+  Files skipped    : 8
   Files failed     : 0
   Output file      : codedoc/codedoc.json
 ```
@@ -325,31 +322,30 @@ codedoc complete.
 
 **Command:** Run interrupted after 8 files. User edits `src/auth/login.py`. Then re-runs.
 
-**What happens:**
-- `recorder_results` has an entry for `src/auth/login.py` with `_checkpoint_hash = "abc123"`.
-- Current hash of `src/auth/login.py` = `"def456"` (different).
-- Routing loop: `stored_hash` exists AND `content_hash != stored_hash`.
-- Log: `"File 'src/auth/login.py' was modified after it was checkpointed — reprocessing."`
-- File added to `agent_rels` → sent to the LLM.
-- The other 7 checkpointed files (unchanged) are restored without LLM calls.
+**What happens (0.8.0):**
+- `existing_docs` loaded from `codedoc/codedoc.json` live backup; `src/auth/login.py` entry has hash `"abc123"`.
+- Current hash of `src/auth/login.py` = `"def456"` (different → in `changed_rels`).
+- File added to `agent_rels` → sent to the LLM; the new result replaces the old record in the same queue-order slot.
+- The other 7 completed files (unchanged) are skipped.
 
 **Result:** 13 files sent to the LLM (12 new + 1 re-documented due to the edit).
 
 ---
 
-### Scenario F — Old Checkpoint (No Hash Stored) 🔄
+### Scenario F — Migration from Legacy Checkpoint (0.7.x → 0.8.0) 🔄
 
-**Situation:** Checkpoint was written by a version older than 0.7.2 — no `_checkpoint_hash` key.
+**Situation:** Upgrading from 0.7.x — a `.codedoc_progress.json` exists from an interrupted run but no live JSON backup exists yet.
 
 **What happens:**
-- `stored_hash = checkpoint_entry.get("_checkpoint_hash", "")` → `""`
-- `not stored_hash` is True.
-- Log: `"Checkpoint entry for 'src/auth/login.py' has no hash (written by an older version) — reprocessing to ensure correctness."`
-- File added to `agent_rels` → re-sent to the LLM regardless.
+- `recorder.load()` — live backup (`codedoc.json`) not found → records are empty.
+- `recorder.size == 0` → pipeline loads `Checkpoint(output_dir).load()` as migration fallback.
+- `checkpoint_results` = prior entries with `_checkpoint_hash`.
+- Routing loop checks each checkpoint entry:
+  - Hash matches current file → `resumed += 1` (no LLM call).
+  - Hash missing or mismatched → `agent_rels.add(rel_path)` (reprocessed).
+- On clean finish, the new live backup (`codedoc.json`) contains all results. `.codedoc_progress.json` is NOT recreated.
 
-**Result:** All files from the old checkpoint are reprocessed once (a one-time cost
-on upgrade). After this run, all new checkpoints carry hashes and subsequent
-interrupts resume correctly.
+**Result:** One-time migration. After this run, all crash-recovery uses the live JSON backup.
 
 ---
 
@@ -375,10 +371,10 @@ codedoc complete.
   Files failed     : 1
   Output file      : codedoc/codedoc.json
 
-  See error.log in /path/to/project for details.
+  1 file(s) failed. See /path/to/project/codedoc/error.log for details.
 ```
 
-`error.log` contains the full traceback for the failed file. Exit code 1.
+`error.log` (located in the **output directory**, not the project root) contains the full traceback for the failed file. Exit code 1.
 
 ---
 
@@ -447,48 +443,42 @@ the same error. Check `error.log` for the model-not-found message.
 
 ---
 
-### Scenario K — `--safe-mode` Run Interrupted (JSON) 🔄
+### Scenario K — Live Backup Interrupted (JSON, 0.8.0 default) 🔄
 
-**Command:** `codedoc run --safe-mode --entry src/main.py`
+**Command:** `codedoc run --entry src/main.py`  *(Note: `--safe-mode` is deprecated and a no-op since 0.8.0; this is now the default behaviour for every run.)*
 
 **What happens during the run:**
-- `SafeWriter(output_dir, "codedoc.json", "json", ...)` is created.
+- `SafeWriter(backup_path, "json", ...)` is always created — no flag needed.
+- Before any LLM call: `codedoc.json` is written with `_crash_safety` banner and empty `files[]`.
 - `SafeWriter.load()` — if `codedoc.json` exists:
-  - If it is a valid codedoc file (has a `_codedoc` block) → its records are
-    pre-loaded so they are preserved in every partial write (see Scenario Q).
-  - If it is unreadable / malformed / has no `_codedoc` block → `ConfigError`
-    raised immediately (foreign file, run aborted — see Scenarios P and R).
-  - If it doesn't exist → proceed fresh.
-- After every file: `SafeWriter.record()` → `codedoc.json` updated with partial
-  results (`status = "in_progress"`). You can open `codedoc.json` and see work so far.
-- Interrupted → `codedoc.json` stays on disk with partial results.
+  - Valid codedoc file (has `_codedoc` block, including `in_progress` backup) → pre-loaded.
+  - Unreadable / malformed / no `_codedoc` block → `ConfigError` immediately (foreign file).
+  - Does not exist → proceed fresh.
+- After every file: `recorder.record()` inside the worker thread → `codedoc.json` updated atomically.
+- Interrupted → `codedoc.json` remains on disk with `_crash_safety` banner and partial `files[]`.
 
 **On re-run:**
-- `_load_existing_file_docs` reads `codedoc.json` (partial `in_progress` is fine —
-  it has a valid `_codedoc` block and `files` array).
-- Hash comparison: files already in `codedoc.json` that are unchanged → skipped.
-- Files not yet in `codedoc.json` → sent to the LLM.
-- Final `write_project_outputs` overwrites `codedoc.json` with the complete polished output.
+- `_load_existing_file_docs` reads `codedoc.json` (in-progress backup is valid — has `_codedoc` block).
+- Hash comparison: files already in backup that are unchanged → skipped; changed or missing → sent to the LLM.
+- Final `write_project_outputs` overwrites `codedoc.json` with clean final output (no `_crash_safety`).
 
 ---
 
-### Scenario L — `--safe-mode` + `--format md` Run Interrupted 🔄
+### Scenario L — Live Backup Interrupted (MD-only, 0.8.0) 🔄
 
-**Command:** `codedoc run --safe-mode --format md --entry src/main.py`
+**Command:** `codedoc run --format md --entry src/main.py`
 
 **What happens:**
-- `SafeWriter(output_dir, "codedoc.json", "md", ...)` → `self._path = .codedoc_build.json`.
-- After every file: `.codedoc_build.json` is updated (not `codedoc.json`).
-- Interrupted → `.codedoc_build.json` on disk with partial records.
+- `_resolve_live_backup_path(output_dir, "md", ...)` → backup is `codedoc/codedoc.json` (JSON sibling of `codedoc.md`).
+- Before any LLM call: `codedoc/codedoc.json` created with `_crash_safety` banner.
+- After every file: `codedoc/codedoc.json` updated atomically (inside worker thread).
+- Interrupted → `codedoc/codedoc.json` on disk with `_crash_safety` and partial records.
 
 **On re-run:**
-- `_load_existing_file_docs`:
-  1. Tries `codedoc.json` → not found (never written in MD mode).
-  2. Tries `.codedoc_build.json` → found, valid `_codedoc` block → loads records.
-  3. Merges (only the build file here) → `existing_docs` populated.
+- `_load_existing_file_docs` reads the live backup `codedoc/codedoc.json` → `existing_docs` populated.
 - Unchanged files skipped. Remaining files sent to the LLM.
-- `write_project_outputs` writes the `.codedoc_build.json` backup → then `codedoc.md`.
-- On success → `.codedoc_build.json` deleted. User sees only `codedoc.md`.
+- `write_project_outputs` writes `codedoc.md` (directly, no intermediate build file).
+- On clean success → `recorder.delete()` removes `codedoc/codedoc.json` → only `codedoc.md` remains.
 
 ---
 
@@ -497,50 +487,45 @@ the same error. Check `error.log` for the model-not-found message.
 **Command:** `codedoc run --format md --entry src/main.py` — all 20 LLM calls
 succeed, but `markdown_from_view()` throws an exception during conversion.
 
-**What happens in `write_project_outputs`:**
+**What happens in `write_project_outputs` (0.8.0):**
 ```
-Step 1: _check_file_ownership(build_path)  → passes (new file)
-Step 2: _check_file_ownership(md_path)     → passes (new file)
-Step 3: build_project_view()               → succeeds
-Step 4: _write_project_json(view, build_path)  → .codedoc_build.json written ✅
-Step 5: _write_project_markdown(view, md_path) → EXCEPTION ❌
-→ except block: logs "Output write failed — preserved at '.codedoc_build.json'"
+Step 1: _check_file_ownership(md_path)     → passes (new file)
+Step 2: build_project_view()               → succeeds
+Step 3: _write_project_markdown(view, md_path) → EXCEPTION ❌
 → raises OutputError
-→ .codedoc_build.json remains on disk (complete JSON of all 20 files)
+→ codedoc/codedoc.json (live backup) remains on disk with all 20 file records
 ```
 
+Note: in 0.8.0 there is no intermediate `.codedoc_build.json` written by `write_project_outputs`.
+The live backup (`codedoc.json`) written by `SafeWriter` throughout the run is the crash source.
+
 **On re-run:**
-- `_load_existing_file_docs`: `codedoc.json` not found → tries `.codedoc_build.json`
-  → found, valid, 20 records.
-- All 20 files unchanged (same hashes) → `agent_rels` = empty.
+- `_load_existing_file_docs` reads `codedoc/codedoc.json` → found, valid, 20 records.
+- All 20 files unchanged → `agent_rels` = empty.
 - `write_project_outputs` called immediately (no LLM calls) → re-attempts MD conversion.
-- If conversion succeeds → `.codedoc_build.json` deleted → `codedoc.md` written.
+- If conversion succeeds → `codedoc/codedoc.json` deleted → `codedoc.md` written.
 
 **No LLM cost on retry.** Only the broken conversion step is retried.
 
 ---
 
-### Scenario N — Newer `.codedoc_build.json` Overlays Older `codedoc.json` 🔄
+### Scenario N — Stale Legacy `.codedoc_build.json` After a Later JSON Run 🔄
 
-**Situation:** User ran `--format json` first (created `codedoc.json` with 5
-files), then ran `--format md`, which processed 8 files before crashing (left a
-**newer** `.codedoc_build.json`).
+**Situation (migration from 0.7.x):** A `--format md` run under 0.7.x crashed and left a
+`.codedoc_build.json`. Later, a `--format json` run under 0.8.0 rewrote `codedoc.json`.
+The build file is now **older** than `codedoc.json`.
 
 ```
-codedoc/codedoc.json         ← 5 files, from an OLDER JSON run
-codedoc/.codedoc_build.json  ← 8 files, from a NEWER interrupted MD run
+codedoc/codedoc.json         ← NEWER, from the 0.8.0 JSON run (authoritative)
+codedoc/.codedoc_build.json  ← OLDER, leftover from the 0.7.x crashed MD run
 ```
 
 **What `_load_existing_file_docs` does:**
-1. Loads `codedoc.json` → `existing` = 5 records.
-2. Compares modification times → the build file is **newer**, so it is authoritative.
-3. Loads `.codedoc_build.json` → `build_files` = 8 records.
-4. `existing.update(build_files)` → `existing` = 8 records (build file takes
-   priority per-file).
-5. Returns 8 records.
+1. Loads `codedoc.json` → `existing` = records from the newer JSON run.
+2. Detects build file is **older** than `codedoc.json` → stale; removes it.
+3. Returns records from `codedoc.json` only.
 
-**Result:** The 3 files that were processed in the interrupted MD run but NOT in
-the older JSON run are correctly reused. No unnecessary LLM calls.
+**Result:** The newer `codedoc.json` documentation is preserved; the stale build file is cleaned up.
 
 ---
 
@@ -565,15 +550,15 @@ a codedoc output (e.g. a package manifest, an API spec) — but is still valid J
 - **The user's file is never touched.**
 
 **Same protection applies to:** `codedoc.md` (checks for the `<!-- codedoc-ai: -->`
-comment) and `.codedoc_build.json` (checks for the `_codedoc` block).
+comment) and the named-MD JSON sibling (e.g. `docs/report.json` — checked before any AI call).
 
 ---
 
-### Scenario P — `--safe-mode` with a Foreign File at the Target Path ❌
+### Scenario P — Foreign File at the Live Backup Target Path ❌
 
-**Situation:** `codedoc run --safe-mode --entry src/main.py` and there is a
-pre-existing foreign `codedoc.json` — **valid JSON but with no `_codedoc`
-metadata** (e.g. a config or manifest a user happened to name `codedoc.json`).
+**Situation:** `codedoc run --entry src/main.py` and there is a pre-existing
+foreign `codedoc.json` — **valid JSON but with no `_codedoc` metadata** (e.g. a
+config or manifest a user happened to name `codedoc.json`).
 
 **What happens:**
 - `SafeWriter.load()` is called before any file processing begins.
@@ -586,30 +571,25 @@ protected even before any LLM work starts, not just at the write step.
 
 ---
 
-### Scenario Q — `--safe-mode` Resume with a Completed `codedoc.json` Present 🔄
+### Scenario Q — Resume with a Completed `codedoc.json` Plus New Files 🔄
 
-**Situation:** A previous run produced a **complete** `codedoc.json` (20 files).
-The user then adds 5 new files and re-runs with `--safe-mode`, but interrupts
-after only 3 of the new files are processed.
+**Situation:** A previous clean run produced a `codedoc.json` (20 files).
+The user adds 5 new files and re-runs, but interrupts after only 3 of the new files complete.
 
 **What happens (and why prior work is NOT lost):**
-- `SafeWriter.load()` sees a valid codedoc file. Even though its status is not
-  `in_progress` (it is a completed output), **all 20 existing records are
-  pre-loaded into memory.**
-- As each new file is processed, `SafeWriter` flushes the full set — the 20
-  original records **plus** the new ones — to `codedoc.json`.
+- `SafeWriter.load()` sees the existing codedoc JSON. Even though its status is not
+  `in_progress` (it is a completed output), **all 20 existing records are pre-loaded into memory.**
+- `initialize_empty()` writes the in-progress banner — the first flush includes all 20 old records.
+- As each new file is processed, `SafeWriter` flushes 20 original + new ones.
 - Interrupt after 3 new files → `codedoc.json` holds 23 records (20 original + 3 new).
 
 **On re-run:**
 - `_load_existing_file_docs` reads all 23 records.
-- The 20 original + 3 new are unchanged → skipped. Only the remaining 2 new files
-  are sent to the LLM.
+- 20 original + 3 new are unchanged → skipped. Only the remaining 2 new files sent to the LLM.
 
-**Why this scenario matters:** Without the pre-load, the first safe-mode flush
-would overwrite `codedoc.json` with only the newly processed files, erasing the
-20 previously completed records on interrupt — making `--safe-mode` *worse* than
-the default. The pre-load guarantees safe mode never loses work that was already
-on disk. (Fixed in 0.7.2.)
+**Why this matters:** Without the pre-load, the first live-backup flush would overwrite
+`codedoc.json` with only the newly processed files, erasing all prior completed records on
+interrupt. The pre-load guarantees the live backup never loses prior completed work.
 
 ---
 
@@ -619,40 +599,17 @@ on disk. (Fixed in 0.7.2.)
 — truncated JSON, an empty file, or binary content.
 
 **What happens:**
-- **Default mode / final write:** `_check_file_ownership` (in `output.py`) fails
-  to parse it, treats it as foreign, and raises `ConfigError` — the file is not
-  overwritten.
-- **`--safe-mode`:** `SafeWriter.load()` fails to parse it, treats it as foreign,
+- **Live backup check:** `SafeWriter.load()` fails to parse it, treats it as foreign,
   and raises `ConfigError` immediately — before any LLM work begins.
+- **Final write:** `_check_file_ownership` (in `output.py`) also raises `ConfigError`
+  if the file is not a valid codedoc output.
 
-Either way, `codedoc` refuses to overwrite an unreadable file it cannot confirm
-it created. To proceed, delete/rename the file or choose a different `--output`
-directory. (Malformed-file protection in safe mode was added in 0.7.2; prior to
-that, safe mode would start fresh and overwrite it.)
+`codedoc` refuses to overwrite an unreadable file it cannot confirm it created.
+To proceed, delete/rename the file or choose a different `--output` directory.
 
 ---
 
-### Scenario S — Stale `.codedoc_build.json` After a Later JSON Run 🔄
-
-**Situation:** A `--format md` run crashed and left a `.codedoc_build.json`.
-Later, a `--format json` run rewrote `codedoc.json` (which does **not** clean up
-the build file). The build file is now **older** than `codedoc.json`.
-
-```
-codedoc/codedoc.json         ← NEWER, from the latest JSON run (authoritative)
-codedoc/.codedoc_build.json  ← OLDER, leftover from the earlier crashed MD run
-```
-
-**What `_load_existing_file_docs` does:**
-1. Loads `codedoc.json` → `existing` records.
-2. Compares modification times → the build file is **older**, so it is **stale**.
-3. The stale build file is **not** overlaid and is **removed** so it cannot
-   interfere with future runs.
-4. Log: `"Build file '.codedoc_build.json' is older than 'codedoc.json' — treating it as stale and removing it; the newer JSON takes priority."`
-
-**Result:** The newer `codedoc.json` documentation is preserved. Without this
-freshness check, the older build-file records would silently replace the newer
-JSON records. (Fixed in 0.7.2 — the inverse of Scenario N.)
+### Scenario S — (see Scenario N — now merged with the stale build-file migration case)
 
 ---
 
@@ -665,7 +622,7 @@ JSON records. (Fixed in 0.7.2 — the inverse of Scenario N.)
 | `AgentError` | pipeline (from orchestrator result) | An agent returned `{"error": ...}` — caught per-file |
 | `ParseError` | parser, graph builder | A file could not be parsed — caught per-file |
 | `OutputError` | output.py | Writing the final output failed — fatal |
-| `KeyboardInterrupt` | cli.py | Ctrl-C — checkpoint preserved, exit 130 |
+| `KeyboardInterrupt` | cli.py | Ctrl-C — live JSON backup preserved, exit 130 |
 
 ---
 
@@ -676,9 +633,10 @@ JSON records. (Fixed in 0.7.2 — the inverse of Scenario N.)
 | Clean run (JSON) | `codedoc/codedoc.json` |
 | Clean run (MD) | `codedoc/codedoc.md` |
 | Clean run (both) | `codedoc/codedoc.json` + `codedoc/codedoc.md` |
-| Interrupted (default mode) | `codedoc/.codedoc_progress.json` |
-| Interrupted (`--safe-mode` JSON) | `codedoc/codedoc.json` (partial, `in_progress`) |
-| Interrupted (`--safe-mode` MD) | `codedoc/.codedoc_build.json` (partial, `in_progress`) |
-| MD conversion crashed | `codedoc/.codedoc_build.json` (complete JSON, no MD) |
-| Any file failed | `error.log` in project root |
-| Aborted (ConfigError, missing key, foreign/malformed file) | Nothing written |
+| Interrupted (any mode) | `codedoc/codedoc.json` (partial, `_crash_safety` banner present) |
+| Interrupted (MD-only, `--format md`) | `codedoc/codedoc.json` (live backup sibling, partial) |
+| Interrupted (`--output docs/report.md`) | `docs/report.json` (live backup sibling, partial) |
+| MD conversion crashed | `codedoc/codedoc.json` (live backup, all records — no MD written) |
+| Any file failed | `codedoc/error.log` (output directory, not project root) |
+| Any issue recorded (recovered warnings) | `codedoc/error.log` (path printed to terminal) |
+| Aborted (ConfigError, missing key, foreign/malformed file) | Live backup may exist if abort was after `initialize_empty()` |

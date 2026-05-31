@@ -562,16 +562,19 @@ This means repeated runs should only send new or changed code to the LLM. Unchan
 `codedoc` is built so that interrupting a run — Ctrl-C, a crash, or a dropped
 network connection — never forces you to repeat work that already completed.
 
-### Default: automatic checkpoint
+### Default: always-on live JSON backup
 
-Every run writes a hidden progress file, `.codedoc_progress.json`, into the
-output directory after **each** file completes. You do not need to enable
-anything.
+Every run creates a visible live JSON backup in the output directory **before
+the first AI call**, then updates it atomically after each completed file.
+You do not need to enable anything — `--safe-mode` is deprecated since 0.8.0.
 
-- If a run is interrupted, the checkpoint stays on disk.
-- Re-run the same command — already-documented files are restored from the
-  backup (verified by content hash) and skipped; only the remaining files
-  are sent to the LLM.
+- `codedoc/codedoc.json` is written immediately with a `_crash_safety` banner
+  and an empty `files` array, before any LLM request is made.
+- After every completed file the backup is updated (`.tmp` rename — atomic).
+- If a run is interrupted, the backup stays on disk with `_crash_safety` clearly
+  marking it as partial output.
+- Re-run the same command — files already in the backup are verified by content
+  hash and skipped; only the remaining files are sent to the LLM.
 - If a file was edited between the interruption and the re-run, its hash no
   longer matches and it is re-documented, so you never restore stale docs.
 
@@ -733,7 +736,7 @@ If API mode fails with an API key error:
 
 If many files fail quickly:
 
-- Check `error.log`; `codedoc` records the file and failure context.
+- Check `error.log` in the output directory (e.g. `codedoc/error.log`); `codedoc` records the file and failure context.
 - Verify API credentials and model name.
 - Check provider rate limits and network connectivity.
 - Lower `max_parallel_files`.

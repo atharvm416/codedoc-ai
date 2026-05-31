@@ -777,12 +777,31 @@ def _process_agent_files(
             stats,
             error_reporter,
             max_workers=level,
+            max_consecutive_failures=max_consecutive_failures,
             recorder=recorder,
         )
         new_results.update(succeeded)
 
-        for rel_path, result in succeeded.items():
-            pass  # already recorded in worker via _process_and_record
+        # Non-rate-limit failures are retried sequentially immediately so errors
+        # are clearly diagnosed and stats["failed"] is correctly incremented.
+        # This mirrors the sequential fallback in the old single-batch implementation.
+        if failed_non_rate_limited:
+            logger.info(
+                "Retrying %d non-rate-limit failed file(s) sequentially for clearer diagnostics.",
+                len(failed_non_rate_limited),
+            )
+            _process_files_sequentially(
+                failed_non_rate_limited,
+                orchestrator,
+                queue,
+                stats,
+                error_reporter,
+                retry_attempts,
+                max_consecutive_failures,
+                new_results,
+                recorder,
+                config,
+            )
 
         if not retry_rate_limited or not rate_limit_adaptive:
             # No rate-limited files remain, or adaptive mode is off.
@@ -858,6 +877,7 @@ def _process_descriptor_batch(
     error_reporter: ErrorReporter,
     max_workers: int,
     recorder: SafeWriter,
+    max_consecutive_failures: int = 5,
 ) -> tuple[dict[str, dict], list[dict], list[dict]]:
     """Process a batch of descriptors in parallel at *max_workers* concurrency.
 
@@ -925,7 +945,7 @@ def _process_descriptor_batch(
                     _log_file_progress("RETRY", rel_path, completed, total, str(exc))
 
                 if (
-                    consecutive_failures >= 5
+                    consecutive_failures >= max_consecutive_failures
                     and not health_reported
                 ):
                     health_reported = True

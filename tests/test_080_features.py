@@ -646,6 +646,50 @@ def test_9b_non_rate_limit_errors_do_not_step_down(tmp_path, monkeypatch):
     assert len(warnings) == 0, "Non-rate-limit errors must not cause step-down"
 
 
+def test_9c_non_rate_limit_parallel_failures_counted_in_stats(tmp_path, monkeypatch):
+    """Test 9c: non-rate-limit failures in parallel mode increment stats['failed'] and appear in error.log."""
+    # Files import each other so all 3 are reachable in parallel
+    (tmp_path / "a.py").write_text("from b import x\n")
+    (tmp_path / "b.py").write_text("from c import y\nx=1\n")
+    (tmp_path / "c.py").write_text("y=1\n")
+
+    from codedoc.utils.errors import LLMError
+
+    class AlwaysFailProvider:
+        provider_name = "openai"
+
+        def complete_json(self, prompt, system=""):
+            raise LLMError("openai", "JSON parse error: model returned garbage")
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    _patch_provider(monkeypatch, AlwaysFailProvider())
+    from codedoc.pipeline import run_pipeline
+
+    stats = run_pipeline(tmp_path, {
+        "entry_file": "a.py",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "max_parallel_files": 3,
+        "rate_limit_adaptive": True,
+        "file_retry_attempts": 0,
+        "max_consecutive_failures": 10,
+    })
+
+    # Non-rate-limit failures must be counted in stats["failed"]
+    assert stats["failed"] > 0, (
+        f"stats['failed'] must be > 0 for non-rate-limit errors, got {stats}"
+    )
+    # No rate-limit step-down warnings
+    assert len(stats.get("rate_limit_warnings", [])) == 0, (
+        "Non-rate-limit errors must not cause rate-limit step-down"
+    )
+    # error.log must be written
+    assert stats.get("error_log") is not None, "error.log must be set when files fail"
+    assert Path(stats["error_log"]).exists(), "error.log file must exist"
+
+
 # ---------------------------------------------------------------------------
 # Test 10 — Rate-limit signal detector
 # ---------------------------------------------------------------------------
