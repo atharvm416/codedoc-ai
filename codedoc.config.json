@@ -17,6 +17,14 @@
   "log_level": "INFO",
   "max_file_size_kb": 500,
   "propagate_changes": true,
+  "rate_limit_adaptive": true,
+  "parallel_ladder": null,
+  "respect_retry_after": true,
+  "retry_after_cap_s": 30,
+  "rate_limit_backoff_s": null,
+  "rate_limit_backoff_scale": null,
+  "rate_limit_signals_add": [],
+  "rate_limit_signals_remove": [],
   "skip_dirs": [
     "myenv",
     ".venv",
@@ -26,5 +34,39 @@
     "__pycache__",
     "docs_output"
   ],
+  "skip_dirs_add": [],
+  "skip_dirs_remove": [],
+  "extension_language_map": {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".dart": "dart",
+    ".java": "java",
+    ".cs": "csharp",
+    ".html": "html"
+  },
+  "extension_language_map_add": {},
+  "extension_language_map_remove": [],
+  "auto_entry_candidates": [
+    "index.html",
+    "main.tsx",
+    "main.ts",
+    "main.js",
+    "main.py",
+    "main.dart",
+    "Main.java",
+    "Program.cs"
+  ],
+  "auto_entry_candidates_add": [],
+  "auto_entry_candidates_remove": [],
+  "provider_prefixes": {
+    "anthropic": ["claude"],
+    "gemini": ["gemini"],
+    "openai": ["gpt-", "o1", "o3", "text-"]
+  },
+  "provider_prefixes_add": {},
+  "provider_prefixes_remove": {},
   "ignore_paths": []
 }

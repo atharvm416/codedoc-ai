@@ -1,9 +1,9 @@
 """
 codedoc CLI entry point.
 
-0.8.0 changes
+0.8.1 changes
 -------------
-- Version bumped to 0.8.0.
+- Version bumped to 0.8.1.
 - ``--safe-mode`` is marked as deprecated in the help text (the flag is kept
   for backwards compatibility and printed as a no-op warning at runtime).
 - Error / issue log path is always printed when any issue is recorded, not
@@ -46,7 +46,7 @@ examples:
   # --- Subsequent runs: entry read from existing docs ---
   codedoc run                                              resume from codedoc/ (auto-detected)
   codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON → Markdown
+  codedoc run --format md                                  convert cached JSON to Markdown
   codedoc run --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
@@ -119,6 +119,39 @@ examples:
         ),
     )
     parser.add_argument(
+        "--skip-dirs",
+        nargs="+",
+        metavar="DIR",
+        default=None,
+        dest="skip_dirs",
+        help=(
+            "Replace the default skip-dirs list entirely with the given names. "
+            "Use --add-skip-dir / --remove-skip-dir to extend or reduce instead."
+        ),
+    )
+    parser.add_argument(
+        "--add-skip-dir",
+        action="append",
+        default=[],
+        metavar="DIR",
+        dest="add_skip_dirs",
+        help=(
+            "Add a directory name to the skip list (repeatable). "
+            "Example: --add-skip-dir generated"
+        ),
+    )
+    parser.add_argument(
+        "--remove-skip-dir",
+        action="append",
+        default=[],
+        metavar="DIR",
+        dest="remove_skip_dirs",
+        help=(
+            "Remove a directory name from the default skip list (repeatable). "
+            "Example: --remove-skip-dir codedoc  (allows scanning the package source)"
+        ),
+    )
+    parser.add_argument(
         "--safe-mode",
         action="store_true",
         default=False,
@@ -153,7 +186,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.8.0",
+        version="%(prog)s 0.8.1",
     )
 
     return parser
@@ -188,6 +221,12 @@ def main(argv: list[str] | None = None) -> None:
         overrides["output_format"] = args.format
     if args.ignore:
         overrides["ignore_paths"] = args.ignore
+    if args.skip_dirs is not None:
+        overrides["skip_dirs"] = args.skip_dirs
+    if args.add_skip_dirs:
+        overrides["skip_dirs_add"] = args.add_skip_dirs
+    if args.remove_skip_dirs:
+        overrides["skip_dirs_remove"] = args.remove_skip_dirs
     if args.safe_mode:
         overrides["safe_mode"] = True
     if args.no_parallel:
@@ -211,13 +250,18 @@ def main(argv: list[str] | None = None) -> None:
         for output_file in stats.get("output_files", []):
             print(f"  Output file      : {output_file}")
 
-        # Print rate-limit step-down warnings (Work Item 3).
-        for warning in stats.get("rate_limit_warnings", []):
+        # 0.8.1: compact rate-limit summary — only shown when events occurred.
+        # Per-event messages were already printed in real time during the run.
+        rate_limit_warnings = stats.get("rate_limit_warnings", [])
+        if rate_limit_warnings:
+            event_count = len(rate_limit_warnings)
+            providers = sorted({w["provider"] for w in rate_limit_warnings})
+            total_sleep = sum(w.get("sleep_s", 0) or 0 for w in rate_limit_warnings)
+            sleep_note = f", {total_sleep:.1f}s total backoff" if total_sleep > 0 else ""
             print(
-                f"\n  WARNING [{warning['provider']}] Rate limit caused "
-                f"max_parallel_files to be reduced from "
-                f"{warning['original_max_parallel']} to {warning['new_level']}. "
-                f"{warning['retried_count']} file(s) were retried at lower concurrency."
+                f"\n  Rate limits: {event_count} step-down event(s) "
+                f"[{', '.join(providers)}]{sleep_note}. "
+                "Details in error.log."
             )
 
         # Always print issue log path when any issue was recorded (Work Item 4).

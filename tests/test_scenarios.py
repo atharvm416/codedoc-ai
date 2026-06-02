@@ -184,16 +184,24 @@ def test_A7_unsupported_extension_raises_error(tmp_path):
         assert "txt" in str(e).lower() or "unsupported" in str(e).lower()
 
 
-def test_A8_no_entry_no_docs_raises_error(tmp_path):
-    """A8: no --entry, no existing docs → ConfigError with clear message."""
-    from codedoc.pipeline import run_pipeline
-    from codedoc.utils.errors import ConfigError
+def test_A8_no_entry_no_docs_proceeds_to_auto_detection(tmp_path):
+    """A8 (0.8.1): no --entry, no existing docs → pipeline must NOT raise early.
+    _resolve_entry_and_docs() returns quietly; detect_entry_file() handles
+    auto-detection at scan time.  The old 'No entry point specified' error
+    was removed in 0.8.1 so first runs work without an explicit --entry flag.
+    """
+    from codedoc.core.loader import load_config
+    from codedoc.pipeline import _resolve_entry_and_docs
+
     (tmp_path / "some_file.py").write_text("x=1\n")
-    try:
-        run_pipeline(tmp_path, {"output_dir": "docs_output", "output_format": "json"})
-        assert False, "Should have raised ConfigError"
-    except ConfigError as e:
-        assert "entry" in str(e).lower()
+    config = load_config(tmp_path, {"output_dir": "docs_output", "output_format": "json"})
+    config["entry_file"] = None
+
+    # Must NOT raise — pipeline proceeds to detect_entry_file() / process-all-files fallback
+    _resolve_entry_and_docs(tmp_path, config)
+    assert config.get("entry_file") is None, (
+        "entry_file must remain None so detect_entry_file() can attempt auto-detection"
+    )
 
 
 def test_A9_format_both_named_file_raises_error(tmp_path):

@@ -29,16 +29,14 @@ DEFAULTS: dict[str, Any] = {
     "output_format": "json",
     "output_json_filename": "codedoc.json",
     "output_md_filename": "codedoc.md",
+    # supported_extensions: read-only after load_config() — always derived from
+    # the resolved extension_language_map.  The value listed here is the legacy
+    # default set and acts as the detection baseline: if a caller passes a
+    # *different* list, _apply_config_overrides() treats it as a filter on the
+    # extension_language_map (backward-compat bridge for pre-0.8.1 configs).
     "supported_extensions": [
-        ".py",
-        ".ts",
-        ".tsx",
-        ".js",
-        ".jsx",
-        ".dart",
-        ".java",
-        ".cs",
-        ".html",
+        ".py", ".ts", ".tsx", ".js", ".jsx", ".dart",
+        ".java", ".cs", ".html",
     ],
     "safe_mode": False,
     "parallel_agents": True,
@@ -53,29 +51,93 @@ DEFAULTS: dict[str, Any] = {
     "parallel_ladder": None,
     "respect_retry_after": True,
     "retry_after_cap_s": 30,
+    # -----------------------------------------------------------------------
+    # 0.8.1 skip_dirs — single source of truth (was split across loader + scanner)
+    # -----------------------------------------------------------------------
     "skip_dirs": [
-        "__pycache__",
-        ".git",
-        ".hg",
-        ".svn",
-        ".venv",
-        "venv",
-        "env",
-        "myenv",
-        ".env",
-        "node_modules",
-        "site-packages",
-        "dist-packages",
-        "dist",
-        "build",
-        ".next",
-        ".nuxt",
-        "target",
-        "codedoc",
-        ".mypy_cache",
-        ".pytest_cache",
+        "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", "myenv",
+        ".env", "node_modules", "site-packages", "dist-packages", "dist", "build",
+        ".next", ".nuxt", "target", "codedoc", ".mypy_cache", ".pytest_cache",
         ".ruff_cache",
     ],
+    # Extend skip_dirs without replacing the full list.
+    "skip_dirs_add": [],
+    # Remove entries from skip_dirs.  Use to allow scanning a package whose
+    # directory name appears in the default list (e.g. "codedoc").
+    "skip_dirs_remove": [],
+    # -----------------------------------------------------------------------
+    # 0.8.1 extension_language_map — replaces the hardcoded EXTENSION_LANGUAGE_MAP
+    # in scanner.py.  Any extension in the resolved map is automatically
+    # supported — no need to edit both this and supported_extensions.
+    # -----------------------------------------------------------------------
+    "extension_language_map": {
+        ".py":   "python",
+        ".ts":   "typescript",
+        ".tsx":  "tsx",
+        ".js":   "javascript",
+        ".jsx":  "jsx",
+        ".dart": "dart",
+        ".java": "java",
+        ".cs":   "csharp",
+        ".html": "html",
+        ".htm":  "html",
+        ".kt":   "kotlin",
+        ".swift":"swift",
+        ".go":   "go",
+        ".rb":   "ruby",
+        ".rs":   "rust",
+        ".cpp":  "cpp",
+        ".c":    "c",
+        ".h":    "c",
+        ".hpp":  "cpp",
+    },
+    # Add new extension → language entries (merged with extension_language_map).
+    "extension_language_map_add": {},
+    # Remove extensions from the map (list of extension strings, e.g. [".htm"]).
+    "extension_language_map_remove": [],
+    # -----------------------------------------------------------------------
+    # 0.8.1 auto_entry_candidates — replaces the hardcoded common_entries list
+    # in scanner.detect_entry_file().
+    # -----------------------------------------------------------------------
+    "auto_entry_candidates": [
+        "index.html",
+        "main.tsx",
+        "main.ts",
+        "main.js",
+        "main.py",
+        "main.dart",
+        "Main.java",
+        "Program.cs",
+    ],
+    "auto_entry_candidates_add": [],
+    "auto_entry_candidates_remove": [],
+    # -----------------------------------------------------------------------
+    # 0.8.1 provider_prefixes — replaces the hardcoded _*_PREFIXES tuples in
+    # factory.py.  Used by provider auto-detection and API-key lookup.
+    # -----------------------------------------------------------------------
+    "provider_prefixes": {
+        "anthropic": ["claude"],
+        "gemini":    ["gemini"],
+        "openai":    ["gpt-", "o1", "o3", "text-"],
+    },
+    # Add prefixes per provider: {"anthropic": ["claude2"], "custom": ["mymodel-"]}.
+    "provider_prefixes_add": {},
+    # Remove prefixes per provider: {"openai": ["o1"]}.
+    "provider_prefixes_remove": {},
+    # -----------------------------------------------------------------------
+    # 0.8.1 rate-limit profile config overrides
+    # -----------------------------------------------------------------------
+    # Override min_backoff_s for all providers globally (float or None).
+    # Set to 0 to disable computed inter-rung backoff entirely.
+    "rate_limit_backoff_s": None,
+    # Override backoff_scale for all providers globally (float or None).
+    "rate_limit_backoff_scale": None,
+    # Extra signal strings appended to the resolved provider profile.
+    # Useful for custom API gateways that return non-standard error messages.
+    "rate_limit_signals_add": [],
+    # Signal strings to remove from the resolved provider profile.
+    "rate_limit_signals_remove": [],
+    # -----------------------------------------------------------------------
     "ignore_paths": [],
 }
 
@@ -95,6 +157,10 @@ _ENV_KEY_MAP = {
     "CODEDOC_SAFE_MODE": "safe_mode",
 }
 
+
+# ---------------------------------------------------------------------------
+# Public entry point
+# ---------------------------------------------------------------------------
 
 def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load and merge config from JSON, .env, environment, and defaults."""
@@ -137,6 +203,11 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     if overrides:
         config.update({k: v for k, v in overrides.items() if k in DEFAULTS})
 
+    # Resolve <key> / <key>_add / <key>_remove overrides for configurable
+    # default keys.  Must run after all sources are merged so the final
+    # _add / _remove values are available.
+    _apply_config_overrides(config)
+
     # Resolve output path — must run after all sources are merged so the
     # final output_dir value is available.
     _resolve_output_spec(config, overrides or {})
@@ -144,6 +215,155 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     _validate(config)
     return config
 
+
+# ---------------------------------------------------------------------------
+# Override-resolution helpers (0.8.1)
+# ---------------------------------------------------------------------------
+
+def _resolve_list_override(
+    key: str,
+    raw_config: dict[str, Any],
+    defaults: dict[str, Any],
+) -> list:
+    """Resolve a list config key with optional ``<key>_add`` / ``<key>_remove``.
+
+    Resolution order:
+    1. ``<key>`` — replaces the default list entirely when explicitly set.
+    2. ``<key>_add`` — appends new items (duplicates suppressed, order preserved).
+    3. ``<key>_remove`` — removes specified items.
+    """
+    base = list(raw_config.get(key, defaults.get(key, [])))
+
+    add = raw_config.get(f"{key}_add") or []
+    seen = set(base)
+    for item in add:
+        if item not in seen:
+            base.append(item)
+            seen.add(item)
+
+    remove_set = set(raw_config.get(f"{key}_remove") or [])
+    if remove_set:
+        base = [item for item in base if item not in remove_set]
+
+    return base
+
+
+def _resolve_dict_override(
+    key: str,
+    raw_config: dict[str, Any],
+    defaults: dict[str, Any],
+) -> dict:
+    """Resolve a flat dict config key with optional ``<key>_add`` / ``<key>_remove``.
+
+    Resolution order:
+    1. ``<key>`` — replaces the default dict entirely when explicitly set.
+    2. ``<key>_add`` — updates with new key→value pairs (overwrites existing).
+    3. ``<key>_remove`` — removes keys listed in the value (list of strings).
+    """
+    base = dict(raw_config.get(key, defaults.get(key, {})))
+
+    add = raw_config.get(f"{key}_add") or {}
+    if isinstance(add, dict):
+        base.update(add)
+
+    remove = raw_config.get(f"{key}_remove") or []
+    for k in remove:
+        base.pop(k, None)
+
+    return base
+
+
+def _resolve_nested_list_dict_override(
+    key: str,
+    raw_config: dict[str, Any],
+    defaults: dict[str, Any],
+) -> dict[str, list[str]]:
+    """Resolve a ``dict[str, list[str]]`` config key with ``<key>_add`` / ``<key>_remove``.
+
+    Used for ``provider_prefixes`` where each value is a list of model-name
+    prefix strings.
+
+    Resolution order:
+    1. ``<key>`` — replaces defaults when explicitly set.
+    2. ``<key>_add`` — a ``dict[str, list[str]]``; appends prefixes per provider.
+    3. ``<key>_remove`` — a ``dict[str, list[str]]``; removes prefixes per provider.
+    """
+    base: dict[str, list[str]] = {
+        k: list(v)
+        for k, v in raw_config.get(key, defaults.get(key, {})).items()
+    }
+
+    add = raw_config.get(f"{key}_add") or {}
+    if isinstance(add, dict):
+        for provider, prefixes in add.items():
+            existing = base.setdefault(provider, [])
+            seen = set(existing)
+            for prefix in (prefixes or []):
+                if prefix not in seen:
+                    existing.append(prefix)
+                    seen.add(prefix)
+
+    remove = raw_config.get(f"{key}_remove") or {}
+    if isinstance(remove, dict):
+        for provider, prefixes in remove.items():
+            if provider in base:
+                remove_set = set(prefixes or [])
+                base[provider] = [p for p in base[provider] if p not in remove_set]
+
+    return base
+
+
+def _apply_config_overrides(config: dict[str, Any]) -> None:
+    """Apply ``<key>_add`` / ``<key>_remove`` resolutions for all configurable keys.
+
+    Modifies *config* in-place.  Must be called after all sources (JSON, env,
+    CLI overrides) have been merged into *config*.
+    """
+    config["skip_dirs"] = _resolve_list_override("skip_dirs", config, DEFAULTS)
+    config["extension_language_map"] = _resolve_dict_override(
+        "extension_language_map", config, DEFAULTS
+    )
+    config["auto_entry_candidates"] = _resolve_list_override(
+        "auto_entry_candidates", config, DEFAULTS
+    )
+    config["provider_prefixes"] = _resolve_nested_list_dict_override(
+        "provider_prefixes", config, DEFAULTS
+    )
+    # Backward-compat bridge for explicit supported_extensions overrides.
+    #
+    # Pre-0.8.1 users may have "supported_extensions": [".py", ".ts"] in their
+    # config file to restrict scanning.  After 0.8.1, extension_language_map is
+    # the single source of truth, but we honour an *explicit* supported_extensions
+    # override by applying it as a filter on the resolved map — so old configs
+    # keep working without migration.
+    #
+    # Detection rule: if config["supported_extensions"] differs from
+    # DEFAULTS["supported_extensions"] it was explicitly set by the user
+    # (JSON / env / CLI).  In that case intersect the resolved map with the
+    # user's list, giving them the restrictive behaviour they expected.
+    _raw_supported = config.get("supported_extensions")
+    _default_supported = set(DEFAULTS.get("supported_extensions", []))
+    if (
+        _raw_supported is not None
+        and isinstance(_raw_supported, list)
+        and set(_raw_supported) != _default_supported
+    ):
+        _user_exts = {e.lower() for e in _raw_supported}
+        config["extension_language_map"] = {
+            k: v
+            for k, v in config["extension_language_map"].items()
+            if k.lower() in _user_exts
+        }
+
+    # Derive supported_extensions from the final resolved map.
+    # extension_language_map is now the single source of truth for which
+    # extensions are scanned and what language they are labelled as.
+    config["supported_extensions"] = sorted(config["extension_language_map"].keys())
+
+
+# ---------------------------------------------------------------------------
+# Output path resolution
+# ---------------------------------------------------------------------------
 
 def _resolve_output_spec(config: dict, overrides: dict) -> None:
     """
@@ -219,6 +439,10 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# Validation
+# ---------------------------------------------------------------------------
+
 def _validate(config: dict[str, Any]) -> None:
     """Raise ConfigError for invalid values."""
     if config.get("llm_mode", "api") != "api":
@@ -256,6 +480,50 @@ def _validate(config: dict[str, Any]) -> None:
 
     if not isinstance(config.get("ignore_paths"), list):
         raise ConfigError("ignore_paths must be a list of project-relative paths.")
+
+    if not isinstance(config.get("extension_language_map"), dict):
+        raise ConfigError(
+            "extension_language_map must be a dict mapping file extensions to language tags."
+        )
+
+    if not isinstance(config.get("auto_entry_candidates"), list):
+        raise ConfigError("auto_entry_candidates must be a list of file names.")
+
+    if not isinstance(config.get("provider_prefixes"), dict):
+        raise ConfigError(
+            "provider_prefixes must be a dict mapping provider names to lists of model prefixes."
+        )
+
+    # Validate 0.8.1 rate-limit profile override keys
+    _rls = config.get("rate_limit_backoff_s")
+    if _rls is not None:
+        try:
+            _v = float(_rls)
+            if _v < 0:
+                raise ValueError
+            config["rate_limit_backoff_s"] = _v
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "rate_limit_backoff_s must be a non-negative number or null."
+            ) from exc
+
+    _rls = config.get("rate_limit_backoff_scale")
+    if _rls is not None:
+        try:
+            _v = float(_rls)
+            if _v <= 0:
+                raise ValueError
+            config["rate_limit_backoff_scale"] = _v
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "rate_limit_backoff_scale must be a positive number or null."
+            ) from exc
+
+    if not isinstance(config.get("rate_limit_signals_add", []), list):
+        raise ConfigError("rate_limit_signals_add must be a list of strings.")
+
+    if not isinstance(config.get("rate_limit_signals_remove", []), list):
+        raise ConfigError("rate_limit_signals_remove must be a list of strings.")
 
     if config.get("output_format") not in ("json", "md", "both"):
         raise ConfigError(

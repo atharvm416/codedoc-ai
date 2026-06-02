@@ -47,6 +47,7 @@ from codedoc.core.project_view import markdown_to_view, read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
 from codedoc.llm.factory import create_provider
+from codedoc.llm.rate_limit_profile import RateLimitProfile, get_rate_limit_profile
 from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import AgentError, ConfigError, ErrorReporter, LLMError, OutputError, ParseError
 from codedoc.utils.logger import get_logger, set_level
@@ -72,21 +73,69 @@ _RATE_LIMIT_SIGNALS = (
 )
 
 
-def _is_rate_limit_error(exc: BaseException) -> bool:
+def _is_rate_limit_error(
+    exc: BaseException,
+    profile: RateLimitProfile | None = None,
+) -> bool:
     """Return True if *exc* or any cause in its chain is a rate-limit signal.
 
     Inspects ``str(exc)`` and walks ``__cause__`` / ``__context__`` so that
     provider signals are not hidden by wrapper exceptions.
+
+    Parameters
+    ----------
+    exc:
+        The exception to classify.
+    profile:
+        0.8.1 — when supplied, only ``profile.signals`` are used for detection,
+        giving provider-specific accuracy.  When ``None`` (backward-compat),
+        the module-level ``_RATE_LIMIT_SIGNALS`` tuple is used so that existing
+        callers without a profile continue to work unchanged.
     """
+    signals = profile.signals if profile is not None else _RATE_LIMIT_SIGNALS
     visited: set[int] = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in visited:
         visited.add(id(current))
         msg = str(current).lower()
-        if any(sig in msg for sig in _RATE_LIMIT_SIGNALS):
+        if any(sig in msg for sig in signals):
             return True
         current = current.__cause__ or current.__context__
     return False
+
+
+# Pre-compiled patterns for _detect_limit_type.  Word boundaries ensure that
+# "tpm" inside "uptime" does not match, and parenthesised forms like "(TPM)"
+# do match because ( and ) are non-word characters.
+_DETECT_TPM_RE = re.compile(r"\btpm\b", re.IGNORECASE)
+_DETECT_RPM_RE = re.compile(r"\brpm\b", re.IGNORECASE)
+
+
+def _detect_limit_type(error_msg: str) -> str | None:
+    """Classify the kind of rate limit from an error message string.
+
+    Returns one of ``"tpm"``, ``"rpm"``, ``"quota"``, ``"overloaded"``, or
+    ``None`` when the type cannot be determined.  Patterns are checked
+    case-insensitively in priority order.
+
+    Examples that must classify correctly:
+    - ``"429 tokens per min exceeded"`` → ``"tpm"``
+    - ``"limit exceeded (TPM)"``        → ``"tpm"``
+    - ``"requests per min exceeded"``   → ``"rpm"``
+    - ``"daily quota exhausted"``       → ``"quota"``
+    - ``"529 overloaded"``              → ``"overloaded"``
+    - ``"429 too many requests"``       → ``None``
+    """
+    msg = error_msg.lower()
+    if "tokens per min" in msg or _DETECT_TPM_RE.search(error_msg):
+        return "tpm"
+    if "requests per min" in msg or _DETECT_RPM_RE.search(error_msg):
+        return "rpm"
+    if "daily" in msg or "quota" in msg or "resource_exhausted" in msg:
+        return "quota"
+    if "overloaded" in msg or "529" in msg:
+        return "overloaded"
+    return None
 
 
 def _build_default_ladder(max_p: int) -> list[int]:
@@ -294,7 +343,12 @@ def _load_existing_file_docs_from_md(md_path: Path) -> dict[str, dict]:
     for file_record in view.get("files", []):
         path = file_record.get("path")
         if path:
-            result[path] = {**file_record, "hash": file_hashes.get(path, "")}
+            # Prefer the hash from the lightweight metadata comment (authoritative
+            # for incremental reuse).  When the embedded view already contains a
+            # hash (0.8.1+ Markdown), use that as the fallback so we never
+            # overwrite a good hash with an empty string.
+            file_hash = file_hashes.get(path) or file_record.get("hash", "")
+            result[path] = {**file_record, "hash": file_hash}
     return result
 
 
@@ -453,11 +507,22 @@ def run_pipeline(
         doc["hash"]: doc for doc in existing_docs.values() if doc.get("hash")
     }
 
+    # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
+    # resolved by load_config with _add/_remove applied), then unconditionally
+    # append the output directory name so codedoc never scans its own output
+    # even when the user removes "codedoc" via --remove-skip-dir.
+    _scan_skip_dirs = list(config.get("skip_dirs", []))
+    _raw_output_dir = str(config.get("output_dir", "codedoc"))
+    if _raw_output_dir not in (".", ""):
+        _output_dir_name = Path(_raw_output_dir).name
+        if _output_dir_name and _output_dir_name not in _scan_skip_dirs:
+            _scan_skip_dirs.append(_output_dir_name)
+
     all_files = scan_files(
         root,
-        supported_extensions=config["supported_extensions"],
+        extension_language_map=config["extension_language_map"],
         max_file_size_kb=config["max_file_size_kb"],
-        skip_dirs=config.get("skip_dirs"),
+        skip_dirs=_scan_skip_dirs,
         ignore_paths=config.get("ignore_paths"),
     )
     if not all_files:
@@ -761,7 +826,7 @@ def _process_agent_files(
         )
         return
 
-    # Build the parallelism ladder (Work Item 3).
+    # Build the parallelism ladder.
     rate_limit_adaptive = config.get("rate_limit_adaptive", True)
     custom_ladder = config.get("parallel_ladder")
     if custom_ladder:
@@ -772,6 +837,12 @@ def _process_agent_files(
     provider_name = orchestrator.llm.provider_name
     original_max_workers = max_workers
     remaining = list(descriptors)
+    respect_retry_after = config.get("respect_retry_after", True)
+    retry_after_cap = config.get("retry_after_cap_s", 30)
+
+    # 0.8.1: get the provider-aware rate-limit profile (with config overrides).
+    profile = get_rate_limit_profile(provider_name, config)
+    event_number = 0  # cumulative step-down event count across all rungs
 
     for level_index, level in enumerate(ladder):
         if not remaining:
@@ -787,12 +858,12 @@ def _process_agent_files(
             max_workers=level,
             max_consecutive_failures=max_consecutive_failures,
             recorder=recorder,
+            profile=profile,
         )
         new_results.update(succeeded)
 
         # Non-rate-limit failures are retried sequentially immediately so errors
         # are clearly diagnosed and stats["failed"] is correctly incremented.
-        # This mirrors the sequential fallback in the old single-batch implementation.
         if failed_non_rate_limited:
             logger.info(
                 "Retrying %d non-rate-limit failed file(s) sequentially for clearer diagnostics.",
@@ -815,9 +886,9 @@ def _process_agent_files(
             # No rate-limited files remain, or adaptive mode is off.
             if retry_rate_limited and not rate_limit_adaptive:
                 # Treat remaining rate-limited files as sequential retry.
-                remaining = retry_rate_limited
+                remaining_descs = [d for d, _e in retry_rate_limited]
                 _process_files_sequentially(
-                    remaining,
+                    remaining_descs,
                     orchestrator,
                     queue,
                     stats,
@@ -830,27 +901,71 @@ def _process_agent_files(
                 )
             break
 
-        # Step down to next ladder rung.
+        # --- Step down to next ladder rung ---
         next_level = ladder[level_index + 1] if level_index + 1 < len(ladder) else 1
+
+        # 0.8.1: unpack descriptors and exceptions from the rate-limited list.
+        remaining_descs = [d for d, _e in retry_rate_limited]
+        exceptions = [e for _d, e in retry_rate_limited]
+
+        # 0.8.1: compute inter-rung sleep duration.
+        retry_afters = [
+            ra for ra in (_parse_retry_after(e) for e in exceptions)
+            if ra is not None
+        ]
+        retry_after_s = max(retry_afters) if retry_afters else None
+
+        if respect_retry_after and retry_after_s is not None:
+            sleep_s = min(retry_after_s, retry_after_cap)
+        elif profile.min_backoff_s > 0:
+            sleep_s = min(
+                profile.min_backoff_s * (profile.backoff_scale ** level_index),
+                retry_after_cap,
+            )
+        else:
+            sleep_s = 0.0
+
+        # 0.8.1: derive error sample and limit type from the first exception.
+        error_sample = str(exceptions[0])[:200] if exceptions else ""
+        limit_type = _detect_limit_type(error_sample) if error_sample else None
+
+        event_number += 1
         warning = {
             "provider": provider_name,
             "original_max_parallel": original_max_workers,
             "current_level": level,
             "new_level": next_level,
-            "retried_count": len(retry_rate_limited),
+            "retried_count": len(remaining_descs),
+            "retry_after_s": retry_after_s,
+            "sleep_s": sleep_s,
+            "error_sample": error_sample,
+            "limit_type": limit_type,
+            "event_number": event_number,
+            "rung_index": level_index,
         }
         stats.setdefault("rate_limit_warnings", []).append(warning)
+
         warn_msg = (
             f"[{provider_name}] Rate limit detected - your configured "
             f"max_parallel_files ({original_max_workers}) has been reduced to "
-            f"{next_level}. Retrying {len(retry_rate_limited)} remaining file(s) "
+            f"{next_level}. Retrying {len(remaining_descs)} remaining file(s) "
             f"at lower concurrency."
         )
+        if sleep_s > 0:
+            warn_msg += f" Sleeping {sleep_s:.1f}s before retry."
         print(warn_msg, flush=True)
         logger.warning(warn_msg)
         error_reporter.record(RuntimeError(warn_msg), context="rate limit step-down", level="warning")
 
-        remaining = retry_rate_limited
+        # 0.8.1: apply inter-rung backoff sleep before the next ladder level.
+        if sleep_s > 0:
+            logger.info(
+                "Rate-limit backoff: sleeping %.1fs before level %d (rung %d, event %d)",
+                sleep_s, next_level, level_index, event_number,
+            )
+            time.sleep(sleep_s)
+
+        remaining = remaining_descs
 
         # If we have exhausted the ladder, fall through to sequential.
         if level_index + 1 >= len(ladder):
@@ -886,7 +1001,8 @@ def _process_descriptor_batch(
     max_workers: int,
     recorder: SafeWriter,
     max_consecutive_failures: int = 5,
-) -> tuple[dict[str, dict], list[dict], list[dict]]:
+    profile: RateLimitProfile | None = None,
+) -> tuple[dict[str, dict], list[tuple[dict, Exception]], list[dict]]:
     """Process a batch of descriptors in parallel at *max_workers* concurrency.
 
     Returns
@@ -894,13 +1010,15 @@ def _process_descriptor_batch(
     succeeded : dict[str, dict]
         rel_path → result for files that completed without error.  These have
         already been recorded in the live backup by the worker thread.
-    retry_rate_limited : list[dict]
-        Descriptors that failed with a rate-limit signal.
+    retry_rate_limited : list[tuple[dict, Exception]]
+        (descriptor, causing_exception) pairs for files that hit a rate-limit
+        signal.  The exception is preserved so the caller can parse
+        ``Retry-After`` hints and compute appropriate inter-rung backoff.
     failed_non_rate_limited : list[dict]
         Descriptors that failed for non-rate-limit reasons.
     """
     succeeded: dict[str, dict] = {}
-    retry_rate_limited: list[dict] = []
+    retry_rate_limited: list[tuple[dict, Exception]] = []
     failed_non_rate_limited: list[dict] = []
 
     consecutive_failures = 0
@@ -935,11 +1053,13 @@ def _process_descriptor_batch(
                 _log_file_progress("OK", rel_path, completed, total)
             except Exception as exc:
                 completed += 1
-                if _is_rate_limit_error(exc):
+                if _is_rate_limit_error(exc, profile):
                     # Only retry if not already recorded (worker may have succeeded
                     # before the future was cancelled).
                     if not recorder.has_record(rel_path):
-                        retry_rate_limited.append(descriptor)
+                        # 0.8.1: preserve the causing exception alongside the
+                        # descriptor so the caller can parse Retry-After hints.
+                        retry_rate_limited.append((descriptor, exc))
                         _log_file_progress("RATE-LIMIT", rel_path, completed, total, str(exc))
                     else:
                         # Already recorded — treat as succeeded.
@@ -1190,14 +1310,14 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
                 except ConfigError:
                     pass
 
-    raise ConfigError(
-        "No entry point specified and no existing CodeDoc documentation was found.\n\n"
-        "For a first run, provide the entry file:\n"
-        "  codedoc run --entry src/main.py\n\n"
-        "For subsequent runs, point to your previously generated file:\n"
-        "  codedoc run --output path/to/codedoc.json\n"
-        "or run from the same directory so the default codedoc/ folder can be "
-        "checked automatically."
+    # No existing output was found and no --entry was provided.
+    # Leave config["entry_file"] unset so _select_files() can call
+    # detect_entry_file() with the configured auto-entry candidates.
+    # If auto-detection also finds nothing, the existing "process all
+    # supported files" behaviour from detect_entry_file() applies.
+    logger.info(
+        "No existing CodeDoc output found and no --entry provided. "
+        "Auto-detection via detect_entry_file() will be attempted."
     )
 
 
@@ -1231,7 +1351,11 @@ def _select_files(
     file_map: dict[str, dict],
 ) -> tuple[set[str], str | None]:
     all_rel_paths = set(file_map)
-    entry = detect_entry_file(root, config.get("entry_file"))
+    entry = detect_entry_file(
+        root,
+        config.get("entry_file"),
+        config.get("auto_entry_candidates"),
+    )
     if not entry:
         return all_rel_paths, None
 

@@ -257,23 +257,26 @@ def test_public_output_normalizes_external_package_names(tmp_path):
     ]
 
 
-def test_pipeline_requires_entry_when_no_existing_docs(tmp_path):
-    import pytest
-
-    from codedoc.pipeline import run_pipeline
-    from codedoc.utils.errors import ConfigError
+def test_pipeline_no_entry_no_docs_uses_auto_detection(tmp_path):
+    """0.8.1: pipeline with no --entry and no existing docs must NOT raise 'No entry point
+    specified'.  Instead _resolve_entry_and_docs() returns quietly and lets
+    detect_entry_file() handle auto-detection at scan time.
+    """
+    from codedoc.core.loader import load_config
+    from codedoc.pipeline import _resolve_entry_and_docs
 
     (tmp_path / "main.py").write_text("def main():\n    return 'ok'\n", encoding="utf-8")
 
-    with pytest.raises(ConfigError, match="No entry point specified"):
-        run_pipeline(
-            tmp_path,
-            {
-                "output_dir": "docs_output",
-                "output_format": "json",
-                "propagate_changes": False,
-            },
-        )
+    config = load_config(tmp_path, {"output_dir": "docs_output", "output_format": "json",
+                                    "propagate_changes": False})
+    config["entry_file"] = None  # simulate no --entry flag
+
+    # Must NOT raise ConfigError — leaves entry_file unset for detect_entry_file()
+    _resolve_entry_and_docs(tmp_path, config)
+    assert config.get("entry_file") is None, (
+        "_resolve_entry_and_docs() must leave entry_file unset so detect_entry_file() "
+        "can handle auto-detection later in the pipeline"
+    )
 
 
 def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch):
