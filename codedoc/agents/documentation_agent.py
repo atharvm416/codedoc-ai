@@ -89,7 +89,7 @@ class DocumentationAgent(BaseAgent):
             file_path=file_path,
             structure=_json.dumps(structure, indent=2) if structure else "{}",
             dependencies=_json.dumps(dependencies, indent=2) if dependencies else "{}",
-            content=self._truncate(content),
+            content=self._truncate(content, file_path),
         )
         raw = self._call_llm(prompt, system=_SYSTEM)
         result = self._parse_json(raw, file_path)

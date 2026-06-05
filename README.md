@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.8.1`.
+Current release: `0.9.0`.
 
 ## What It Does
 
@@ -55,6 +55,7 @@ codedoc run
 | Live JSON backup | always on (0.8.0 default) |
 | Rate-limit adaptive | `true` |
 | Max file size | `500 KB` |
+| Max content chars | `12000` |
 
 Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
 
@@ -311,6 +312,7 @@ Create `codedoc.config.json` in the project being documented:
   "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
   "skip_dirs_add": [],
   "skip_dirs_remove": [],
+  "max_content_chars": 12000,
   "extension_language_map": {
     ".py": "python",
     ".ts": "typescript",
@@ -320,7 +322,17 @@ Create `codedoc.config.json` in the project being documented:
     ".dart": "dart",
     ".java": "java",
     ".cs": "csharp",
-    ".html": "html"
+    ".html": "html",
+    ".htm": "html",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".go": "go",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp"
   },
   "extension_language_map_add": {},
   "extension_language_map_remove": [],
@@ -371,6 +383,12 @@ Configurable defaults added in 0.8.1:
 | `auto_entry_candidates`, `auto_entry_candidates_add`, `auto_entry_candidates_remove` | Control first-run entry auto-detection when `--entry` is omitted. |
 | `provider_prefixes`, `provider_prefixes_add`, `provider_prefixes_remove` | Control model-name based provider auto-detection and matching API-key lookup. |
 
+Configurable settings added in 0.9.0:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `max_content_chars` | `12000` | Maximum characters of file content sent to the LLM per file. Files longer than this are truncated and an INFO log line is emitted with the file path and character counts. Raise this for large-context providers (`60000`–`100000`). Must be at least `1000`. |
+
 ## Environment Variables
 
 Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
@@ -395,6 +413,7 @@ Supported variables:
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
 | `LOG_LEVEL` | `INFO`, `DEBUG`, etc. |
 | `CODEDOC_IGNORE_PATHS` | Semicolon-separated ignore paths. |
+| `CODEDOC_MAX_CONTENT_CHARS` | Maximum characters of file content sent to the LLM. Equivalent to `max_content_chars` in config. |
 
 Example `.env` for OpenAI:
 
@@ -703,11 +722,16 @@ Only hard file failures are surfaced there.
 
 ### Ownership guard
 
-Before writing, `codedoc` checks that any existing file at the target path was
-produced by codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->`
-comment in Markdown). If the file is foreign, malformed, or empty, the run stops
-with a clear `ConfigError` instead of overwriting it. Choose a different
-`--output` directory or remove the conflicting file to proceed.
+`codedoc` checks that any existing file at the target path was produced by
+codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->` comment
+in Markdown). If the file is foreign, malformed, or empty, the run stops with a
+clear `ConfigError`. Choose a different `--output` directory or remove the
+conflicting file to proceed.
+
+**Preflight (0.9.0).** The ownership check now runs *before* any filesystem
+changes, directory creation, scanning, or LLM calls. A foreign target that would
+block the final write is caught immediately — no tokens are spent and no output
+directory is created.
 
 ### More detail
 

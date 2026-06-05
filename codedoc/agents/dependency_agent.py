@@ -71,7 +71,7 @@ class DependencyAgent(BaseAgent):
             language=language,
             file_path=file_path,
             imports=imports,
-            content=self._truncate(content),
+            content=self._truncate(content, file_path),
         )
         raw = self._call_llm(prompt, system=_SYSTEM)
         result = self._parse_json(raw, file_path)

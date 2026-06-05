@@ -42,7 +42,7 @@ from codedoc.core.db import compute_file_hash
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
-from codedoc.core.output import BUILD_FILENAME, write_project_outputs
+from codedoc.core.output import BUILD_FILENAME, preflight_output_targets, write_project_outputs
 from codedoc.core.project_view import markdown_to_view, read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
@@ -490,15 +490,21 @@ def run_pipeline(
     logger.info("Output format: %s", output_format)
 
     output_dir = root / config["output_dir"]
+
+    json_filename = config.get("output_json_filename", "codedoc.json")
+    md_filename = config.get("output_md_filename", "codedoc.md")
+    live_backup_path = _resolve_live_backup_path(output_dir, output_format, json_filename, md_filename)
+
+    # Preflight: fail fast before any filesystem side effects, scanning, or LLM
+    # calls if any final output target is foreign-owned. Raises ConfigError
+    # immediately so no modified output directory or live backup is left behind.
+    preflight_output_targets(output_dir, output_format, json_filename, md_filename, live_backup_path)
+
     output_dir.mkdir(parents=True, exist_ok=True)
     _remove_legacy_db(output_dir)
 
     # 0.8.0: error.log lives in the output directory, not the project root.
     error_reporter = ErrorReporter(output_dir / "error.log")
-
-    json_filename = config.get("output_json_filename", "codedoc.json")
-    md_filename = config.get("output_md_filename", "codedoc.md")
-    live_backup_path = _resolve_live_backup_path(output_dir, output_format, json_filename, md_filename)
 
     existing_docs = _load_existing_file_docs(
         output_dir, json_filename, md_filename, live_backup_path
@@ -692,7 +698,11 @@ def run_pipeline(
             )
         raise
 
-    orchestrator = Orchestrator(llm, parallel=config.get("parallel_agents", True))
+    orchestrator = Orchestrator(
+        llm,
+        parallel=config.get("parallel_agents", True),
+        max_content_chars=config.get("max_content_chars", 12000),
+    )
     stats = {
         "checked": 0,
         "failed": 0,

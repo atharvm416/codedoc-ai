@@ -18,10 +18,6 @@ from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Max characters of file content sent to the LLM
-_MAX_CONTENT_CHARS = 12_000
-
-
 class BaseAgent(ABC):
     """
     Abstract agent.
@@ -32,8 +28,9 @@ class BaseAgent(ABC):
     #: Override in subclass — used in error messages and logs
     agent_name: str = "BaseAgent"
 
-    def __init__(self, llm: LLMProvider) -> None:
+    def __init__(self, llm: LLMProvider, max_content_chars: int = 12000) -> None:
         self.llm = llm
+        self._max_content_chars = max_content_chars
 
     @abstractmethod
     def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
@@ -54,14 +51,17 @@ class BaseAgent(ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _truncate(self, content: str) -> str:
+    def _truncate(self, content: str, file_path: str = "") -> str:
         """Truncate content to stay within token budget."""
-        if len(content) > _MAX_CONTENT_CHARS:
-            logger.debug(
-                "%s: truncating content from %d to %d chars for %s",
-                self.agent_name, len(content), _MAX_CONTENT_CHARS, "file"
+        if len(content) > self._max_content_chars:
+            logger.info(
+                "Content truncated: %s (%d chars -> %d chars). "
+                "Raise max_content_chars in config to include more content.",
+                file_path or "file",
+                len(content),
+                self._max_content_chars,
             )
-            return content[:_MAX_CONTENT_CHARS] + "\n... [truncated]"
+            return content[:self._max_content_chars] + "\n... [truncated]"
         return content
 
     def _call_llm(self, prompt: str, system: str = "") -> str:

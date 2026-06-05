@@ -1,5 +1,74 @@
 # Changelog
 
+## 0.9.0 - 2026-06-04
+
+### Output preflight safety, clean INFO logs, extension list fix, configurable content truncation
+
+---
+
+#### G0 — Output Preflight Safety
+
+Foreign output targets now fail immediately with a `ConfigError` before the
+scanner runs, the provider initialises, or any LLM API call is made. Previously
+a foreign file at the target path would only be detected inside
+`write_project_outputs`, after all tokens had already been spent.
+
+- **`codedoc/core/output.py`**: Added `preflight_output_targets()` which calls
+  `_check_file_ownership()` for all final public targets (JSON, MD, both) and a
+  new `_check_md_live_backup_ownership()` for the MD live-backup JSON sibling.
+- **`codedoc/pipeline.py`**: Calls `preflight_output_targets()` immediately after
+  output spec resolution, before `scan_files()` and `create_provider()`.
+- **`codedoc/core/loader.py`**: `_resolve_output_spec()` now only emits the
+  format-conflict warning when `--format` was explicitly passed by the user (not
+  when the default `"json"` value from DEFAULTS triggers a mismatch).
+
+#### G1 — Clean Log Output
+
+Third-party HTTP libraries (`httpx`, `httpcore`, `openai`, `anthropic`,
+`google.auth`) are now silenced at WARNING level by default. At `--verbose` /
+DEBUG the HTTP diagnostics are restored. Per-agent progress lines appear at INFO
+so users can see what codedoc is doing at each step.
+
+- **`codedoc/utils/logger.py`**: `_NOISY_LOGGERS` constant defines the list;
+  `_configure()` sets those loggers to WARNING; `set_level()` lowers them to
+  DEBUG when the root logger is set to DEBUG.
+- **`codedoc/agents/orchestrator.py`**: Added timing via `time.monotonic()` and
+  INFO/WARNING log lines after each agent: `[FILE] path | structure ok  0.8s`,
+  `[FILE] path | dependencies ok  0.9s`, `[FILE] path | documentation ok  1.2s`.
+  Fallbacks emit WARNING with `"fallback"` in the message.
+
+#### G5 — Extension List Consistency
+
+`_candidate_variants()` in `graph.py` used a hardcoded 9-extension list that
+was out of sync with `_KNOWN_EXTENSIONS` and `DEFAULTS["extension_language_map"]`.
+Import resolution for Go, Kotlin, Swift, Rust, Ruby, and C-family files silently
+produced no candidates.
+
+- **`codedoc/core/graph.py`**: `_KNOWN_EXTENSIONS` expanded to all 19 extensions
+  in `DEFAULTS["extension_language_map"]`. `_candidate_variants()` now uses
+  `sorted(_KNOWN_EXTENSIONS)` instead of a separate hardcoded list. A comment
+  notes the sync requirement with `loader.py`.
+
+#### G6 — Configurable Content Truncation
+
+Files above 12,000 characters were silently truncated with a DEBUG-only log.
+Users saw degraded documentation for large files with no indication why.
+
+- **`codedoc/core/loader.py`**: `max_content_chars` added to `DEFAULTS` (12000)
+  and `_ENV_KEY_MAP` (`CODEDOC_MAX_CONTENT_CHARS`). Validation requires a positive
+  integer ≥ 1000.
+- **`codedoc/agents/base_agent.py`**: Removed module-level `_MAX_CONTENT_CHARS`
+  constant. `BaseAgent.__init__` now accepts `max_content_chars: int = 12000`.
+  `_truncate()` uses `self._max_content_chars` and logs at INFO with the file
+  path and original / truncated character counts.
+- **`codedoc/agents/orchestrator.py`**: `Orchestrator.__init__` accepts
+  `max_content_chars: int = 12000` and forwards it to each agent.
+- **`codedoc/pipeline.py`**: Passes `config.get("max_content_chars", 12000)` to
+  the `Orchestrator` constructor.
+- All three agent subclasses pass `file_path` to `_truncate()` for accurate logs.
+
+---
+
 ## 0.8.1 - 2026-06-02
 
 ### Lossless Markdown, placeholder sanitization, configurable defaults, provider-aware rate-limit backoff

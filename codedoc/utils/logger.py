@@ -13,6 +13,8 @@ except ImportError:
 
 _configured = False
 
+_NOISY_LOGGERS = ("httpx", "httpcore", "openai", "anthropic", "google.auth")
+
 
 def _configure() -> None:
     global _configured
@@ -33,6 +35,11 @@ def _configure() -> None:
         datefmt="[%X]",
         handlers=handlers,
     )
+
+    third_party_floor = logging.WARNING
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(third_party_floor)
+
     _configured = True
 
 
@@ -44,4 +51,8 @@ def get_logger(name: str) -> logging.Logger:
 def set_level(level: str) -> None:
     """Change log level at runtime."""
     _configure()
-    logging.getLogger().setLevel(str(level).upper())
+    normalized = str(level).upper()
+    logging.getLogger().setLevel(normalized)
+    third_party_floor = logging.DEBUG if normalized == "DEBUG" else logging.WARNING
+    for name in _NOISY_LOGGERS:
+        logging.getLogger(name).setLevel(third_party_floor)

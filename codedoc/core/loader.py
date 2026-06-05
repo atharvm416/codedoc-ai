@@ -139,6 +139,8 @@ DEFAULTS: dict[str, Any] = {
     "rate_limit_signals_remove": [],
     # -----------------------------------------------------------------------
     "ignore_paths": [],
+    # 0.9.0: configurable per-file content limit sent to the LLM.
+    "max_content_chars": 12000,
 }
 
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
@@ -155,6 +157,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
     "CODEDOC_SAFE_MODE": "safe_mode",
+    "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
 }
 
 
@@ -414,14 +417,17 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
                 f"Provide a directory instead — e.g. '--output {parent_str or '.'}' — "
                 "and codedoc will write both codedoc.json and codedoc.md there."
             )
-        logger.warning(
-            "Output file '%s' implies format '%s', but --format '%s' was also "
-            "specified. The file extension takes precedence — '%s' will be used.",
-            p.name,
-            inferred_format,
-            current_format,
-            inferred_format,
-        )
+        # Only warn when the user explicitly set --format; the default value "json"
+        # from DEFAULTS does not warrant a warning.
+        if "output_format" in overrides:
+            logger.warning(
+                "Output file '%s' implies format '%s', but --format '%s' was also "
+                "specified. The file extension takes precedence — '%s' will be used.",
+                p.name,
+                inferred_format,
+                current_format,
+                inferred_format,
+            )
 
     config["output_dir"] = parent_str
     config["output_format"] = inferred_format
@@ -590,6 +596,13 @@ def _validate(config: dict[str, Any]) -> None:
         config["retry_after_cap_s"] = int(config.get("retry_after_cap_s", 30))
     except (TypeError, ValueError) as exc:
         raise ConfigError("retry_after_cap_s must be an integer.") from exc
+
+    try:
+        config["max_content_chars"] = int(config["max_content_chars"])
+    except (TypeError, ValueError) as exc:
+        raise ConfigError("max_content_chars must be a positive integer.") from exc
+    if config["max_content_chars"] < 1000:
+        raise ConfigError("max_content_chars must be at least 1000.")
 
 
 def _has_provider_api_key() -> bool:

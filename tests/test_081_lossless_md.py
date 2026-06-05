@@ -958,3 +958,94 @@ def test_read_embedded_view_returns_none_for_empty_string():
     from codedoc.core.project_view import read_embedded_view
 
     assert read_embedded_view("") is None
+
+
+# ---------------------------------------------------------------------------
+# A18 — Crash → resume from JSON backup → final MD embedded view is complete
+#
+# The user validated this manually (crash_report.md scenario):
+#   1. First MD run crashes mid-way → leaves a .json crash backup with K records.
+#   2. Second run starts, loads those K records from the JSON backup (incremental reuse).
+#   3. Processes the remaining files via the LLM.
+#   4. Writes the final Markdown with the embedded view containing ALL K + remaining records.
+#   5. Removes the JSON crash backup.
+#
+# This is distinct from A14 (which reads hashes from an MD embedded view) and
+# A15 (which tests a clean first run with no prior crash backup).
+# ---------------------------------------------------------------------------
+
+def test_A18_crash_resume_final_md_embedded_view_complete(tmp_path, monkeypatch):
+    """A18: After resuming from a JSON crash backup, the final MD embedded view
+    contains ALL records — both those pre-loaded from the backup and newly
+    processed ones — and the JSON backup is removed."""
+    import json as _json
+    from codedoc.core.db import compute_file_hash
+
+    # Two source files: a.py was documented in the "crashed" run, b.py was not.
+    a_py = tmp_path / "a.py"
+    b_py = tmp_path / "b.py"
+    a_py.write_text("from b import x\n")
+    b_py.write_text("x = 1\n")
+
+    h_a = compute_file_hash(a_py)
+
+    # Simulate a crashed first run: codedoc.json has a.py with a valid hash
+    # but carries _crash_safety and status=in_progress (b.py was never reached).
+    out_dir = tmp_path / "codedoc"
+    out_dir.mkdir()
+    crash_backup = out_dir / "codedoc.json"
+    crash_backup.write_text(_json.dumps({
+        "_crash_safety": "INCOMPLETE RUN - crash test",
+        "_codedoc": {"entry_file": "a.py", "schema_version": "1.4", "status": "in_progress"},
+        "files": [
+            {
+                "path": "a.py",
+                "hash": h_a,
+                "language": "python",
+                "description": "Pre-crash description for a.py.",
+                "role_in_system": "test",
+                "functions": [],
+                "classes": [],
+                "exports": [],
+                "key_concepts": ["entry point"],
+                "usage_example": "",
+                "dependencies_analysis": {},
+            }
+        ],
+    }), encoding="utf-8")
+
+    # Resume run: should load a.py from the crash backup, process b.py via LLM.
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+    from codedoc.pipeline import run_pipeline
+
+    stats = run_pipeline(tmp_path, {
+        "entry_file": "a.py",
+        "output_format": "md",
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+
+    md_path = out_dir / "codedoc.md"
+    assert md_path.exists(), "Final Markdown must be written after crash resume"
+    assert not crash_backup.exists(), (
+        "JSON crash backup must be removed after successful Markdown write"
+    )
+
+    # The embedded view must contain BOTH a.py (from crash backup) and b.py (newly processed)
+    from codedoc.core.project_view import read_embedded_view
+    md_content = md_path.read_text(encoding="utf-8")
+    embedded = read_embedded_view(md_content)
+
+    assert embedded is not None, "Embedded view must be present in resumed output"
+    assert "_crash_safety" not in embedded, "Embedded view must not contain _crash_safety"
+
+    paths = {f["path"] for f in embedded.get("files", [])}
+    assert "a.py" in paths, "a.py (from crash backup) must be in the embedded view"
+    assert "b.py" in paths, "b.py (newly processed) must be in the embedded view"
+    assert len(paths) == 2, f"Expected exactly 2 files in embedded view, got {paths}"
+
+    # Hash for a.py must be preserved from the crash backup (not regenerated)
+    file_map = {f["path"]: f for f in embedded["files"]}
+    assert file_map["a.py"]["hash"] == h_a, (
+        "a.py hash from the crash backup must be preserved in the embedded view"
+    )
