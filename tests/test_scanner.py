@@ -111,3 +111,31 @@ def test_scan_uses_extension_language_map_for_language_detection(tmp_path):
     assert "main.py" in by_rel
     assert by_rel["main.py"]["language"] == "python"
     assert "README.md" not in by_rel  # not in the map → not scanned
+
+
+def test_scanner_walker_state_is_per_scan_A6(tmp_path):
+    """A6: two sequential scans must not share state (skipped_dirs counts are
+    independent; no leakage via function attributes)."""
+    from codedoc.core.scanner import scan_files
+
+    # First tree: one skipped dir.
+    root1 = tmp_path / "p1"
+    (root1 / "pkg").mkdir(parents=True)
+    (root1 / "pkg" / "a.py").write_text("x=1\n")
+    skip1 = root1 / "node_modules"
+    skip1.mkdir()
+    (skip1 / "lib.py").write_text("y=1\n")
+
+    files1 = scan_files(root1, supported_extensions=[".py"], skip_dirs=["node_modules"])
+    rels1 = {f["rel_path"] for f in files1}
+    assert "pkg/a.py" in rels1
+    assert "node_modules/lib.py" not in rels1
+
+    # Second, independent scan with no skipped dirs must return its own files
+    # and not be influenced by the first scan's state.
+    root2 = tmp_path / "p2"
+    root2.mkdir()
+    (root2 / "main.py").write_text("z=1\n")
+    files2 = scan_files(root2, supported_extensions=[".py"], skip_dirs=["node_modules"])
+    rels2 = {f["rel_path"] for f in files2}
+    assert rels2 == {"main.py"}

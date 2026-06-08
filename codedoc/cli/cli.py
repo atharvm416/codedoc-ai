@@ -1,17 +1,18 @@
 """
 codedoc CLI entry point.
 
-0.8.1 changes
--------------
-- Version bumped to 0.8.1.
-- ``--safe-mode`` is marked as deprecated in the help text (the flag is kept
-  for backwards compatibility and printed as a no-op warning at runtime).
-- Error / issue log path is always printed when any issue is recorded, not
+Behaviour notes
+---------------
+- ``--safe-mode`` is deprecated (kept for backwards compatibility; prints a
+  no-op warning at runtime).
+- The error / issue log path is printed whenever any issue is recorded, not
   only when ``failed > 0``.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
-- Interrupt message includes the live backup path from
-  ``stats["live_backup_path"]`` when available.
+- On interrupt, a generic resume message is printed (the live JSON backup in the
+  output directory holds completed work; re-run to resume).
+- When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
+  reported in the run summary.
 
 First run:
     codedoc run --entry src/main.py              # document from entry; save to codedoc/
@@ -186,7 +187,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.9.0",
+        version="%(prog)s 0.9.1",
     )
 
     return parser
@@ -246,6 +247,12 @@ def main(argv: list[str] | None = None) -> None:
         if stats.get("resumed", 0):
             print(f"  Files resumed    : {stats['resumed']}")
         print(f"  Files failed     : {stats['failed']}")
+        excluded = stats.get("entry_excluded", 0)
+        if excluded:
+            print(
+                f"  Files excluded   : {excluded} (not reachable from --entry; "
+                "see the warning above. Run without --entry to document everything.)"
+            )
         print(f"  Output directory : {stats['output_dir']}")
         for output_file in stats.get("output_files", []):
             print(f"  Output file      : {output_file}")
@@ -281,15 +288,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        # Try to report the live backup path if available in stats.
-        backup_msg = ""
-        try:
-            from codedoc.pipeline import _resolve_live_backup_path
-        except Exception:
-            pass
         print(
-            "\nRun interrupted. Progress has been saved to the live JSON backup — "
-            "re-run the same command to resume from where it stopped." + backup_msg,
+            "\nRun interrupted. Any files completed before the interrupt are saved "
+            "in the live JSON backup in your output directory (if the run reached "
+            "file processing) — re-run the same command to resume.",
             file=sys.stderr,
         )
         sys.exit(130)

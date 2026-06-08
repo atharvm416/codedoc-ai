@@ -130,9 +130,9 @@ def scan_files(
     ignore_prefixes = _normalise_ignore_paths(ignore_paths or [])
     results: list[dict] = []
     skipped_large = 0
-    _walk.skipped_dirs = 0
 
-    for file_path in _walk(root, skip_set, ignore_prefixes, root):
+    walker = _Walker(scan_root=root, skip_dirs=skip_set, ignore_prefixes=ignore_prefixes)
+    for file_path in walker.walk(root):
         ext = file_path.suffix.lower()
         if ext not in ext_map:
             continue
@@ -157,7 +157,7 @@ def scan_files(
             "extension": ext,
         })
 
-    skipped_dirs = getattr(_walk, "skipped_dirs", 0)
+    skipped_dirs = walker.skipped_dirs
     logger.info(
         "Scanner found %d supported file(s) in %s (skipped %d directorie(s), %d large file(s))",
         len(results),
@@ -168,40 +168,49 @@ def scan_files(
     return results
 
 
-def _walk(
-    root: Path,
-    skip_dirs: set[str],
-    ignore_prefixes: set[str] | None = None,
-    scan_root: Path | None = None,
-) -> Iterator[Path]:
-    """Yield all files under root, skipping ignored directories."""
-    if ignore_prefixes is not None:
-        _walk.ignore_prefixes = ignore_prefixes
-    if scan_root is not None:
-        _walk.scan_root = scan_root
+class _Walker:
+    """Recursive directory walker with per-scan state.
 
-    try:
-        entries = list(root.iterdir())
-    except OSError as exc:
-        _walk.skipped_dirs += 1
-        logger.warning("Skipping unreadable directory %s: %s", root, exc)
-        return
+    State (``scan_root``, ``skip_dirs``, ``ignore_prefixes``, ``skipped_dirs``)
+    is held on the instance rather than on the function object, so the walk is
+    re-entrant and two concurrent or sequential scans never share state.
+    """
 
-    for item in entries:
-        rel = item.relative_to(_walk.scan_root).as_posix()
-        if item.is_dir():
-            if (
-                item.name.lower() in skip_dirs
-                or item.name.startswith(".")
-                or _is_ignored(rel, _walk.ignore_prefixes)
-            ):
-                _walk.skipped_dirs += 1
-                continue
-            yield from _walk(item, skip_dirs, _walk.ignore_prefixes, _walk.scan_root)
-        elif item.is_file():
-            if _is_ignored(rel, _walk.ignore_prefixes):
-                continue
-            yield item
+    def __init__(
+        self,
+        scan_root: Path,
+        skip_dirs: set[str],
+        ignore_prefixes: set[str],
+    ) -> None:
+        self.scan_root = scan_root
+        self.skip_dirs = skip_dirs
+        self.ignore_prefixes = ignore_prefixes
+        self.skipped_dirs = 0
+
+    def walk(self, root: Path) -> Iterator[Path]:
+        """Yield all files under *root*, skipping ignored directories."""
+        try:
+            entries = list(root.iterdir())
+        except OSError as exc:
+            self.skipped_dirs += 1
+            logger.warning("Skipping unreadable directory %s: %s", root, exc)
+            return
+
+        for item in entries:
+            rel = item.relative_to(self.scan_root).as_posix()
+            if item.is_dir():
+                if (
+                    item.name.lower() in self.skip_dirs
+                    or item.name.startswith(".")
+                    or _is_ignored(rel, self.ignore_prefixes)
+                ):
+                    self.skipped_dirs += 1
+                    continue
+                yield from self.walk(item)
+            elif item.is_file():
+                if _is_ignored(rel, self.ignore_prefixes):
+                    continue
+                yield item
 
 
 def _normalise_ignore_paths(paths: list[str]) -> set[str]:

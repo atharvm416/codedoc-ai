@@ -532,6 +532,15 @@ def run_pipeline(
         ignore_paths=config.get("ignore_paths"),
     )
     if not all_files:
+        # A2: an explicitly specified entry cannot be honoured if nothing was
+        # scanned — fail loudly rather than exit successfully having documented
+        # nothing.
+        if config.get("entry_file"):
+            raise ConfigError(
+                f"Entry file '{config['entry_file']}' was requested but no "
+                f"supported source files were found in '{root}'. Check the path "
+                "and your skip_dirs / ignore_paths / extension settings."
+            )
         logger.warning("No supported files found in %s. Done.", root)
         return {
             "checked": 0,
@@ -546,6 +555,11 @@ def run_pipeline(
 
     graph, file_map = _build_graph(all_files, root, error_reporter)
     selected_rels, entry_rel = _select_files(root, config, graph, file_map)
+
+    # Count of scanned files excluded by entry-reachability selection (A1).
+    # Zero when no entry is in effect (selected_rels == all scanned files).
+    # Surfaced in stats so the CLI can report it at the run summary.
+    entry_excluded = len(file_map) - len(selected_rels)
 
     # Queue/topological order for the selected file set (all selected, not just agent files).
     ordered_selected = [p for p in graph.topological_order() if p in selected_rels]
@@ -645,6 +659,7 @@ def run_pipeline(
             "skipped": skipped,
             "reused": reused,
             "resumed": resumed,
+            "entry_excluded": entry_excluded,
             "output_dir": str(output_dir),
             "rate_limit_warnings": rate_limit_warnings,
         }
@@ -709,6 +724,7 @@ def run_pipeline(
         "skipped": skipped,
         "reused": reused,
         "resumed": resumed,
+        "entry_excluded": entry_excluded,
         "rate_limit_warnings": rate_limit_warnings,
     }
 
@@ -1064,16 +1080,23 @@ def _process_descriptor_batch(
             except Exception as exc:
                 completed += 1
                 if _is_rate_limit_error(exc, profile):
-                    # Only retry if not already recorded (worker may have succeeded
-                    # before the future was cancelled).
-                    if not recorder.has_record(rel_path):
+                    # Only treat as done if a worker recorded it THIS run (it may
+                    # have succeeded before the future was cancelled).  A file
+                    # that is only *preloaded* from a prior output (stale) must be
+                    # retried, never restored from old documentation (A4).
+                    if not recorder.recorded_this_run(rel_path):
                         # 0.8.1: preserve the causing exception alongside the
                         # descriptor so the caller can parse Retry-After hints.
                         retry_rate_limited.append((descriptor, exc))
                         _log_file_progress("RATE-LIMIT", rel_path, completed, total, str(exc))
                     else:
-                        # Already recorded — treat as succeeded.
-                        succeeded[rel_path] = {}
+                        # Already recorded — treat as succeeded.  Recover the
+                        # real persisted record (A4) so the final output is not
+                        # overwritten with an empty placeholder.
+                        recovered = recorder.get_record(rel_path)
+                        succeeded[rel_path] = (
+                            _public_record_to_doc(recovered) if recovered else {}
+                        )
                         queue.mark_checked(rel_path)
                         stats["checked"] += 1
                         _log_file_progress("OK(late)", rel_path, completed, total)
@@ -1361,16 +1384,48 @@ def _select_files(
     file_map: dict[str, dict],
 ) -> tuple[set[str], str | None]:
     all_rel_paths = set(file_map)
+    # A2: distinguish an *explicitly specified* entry (via --entry or read from
+    # existing docs) from auto-detection.  An explicit entry that cannot be
+    # resolved or is absent from the scanned set must be a hard error — silently
+    # falling back to documenting the whole repo turns a typo into an expensive
+    # full-repo LLM run.  Auto-detection finding nothing keeps the original
+    # "document all files" behaviour.
+    explicit_entry = config.get("entry_file")
     entry = detect_entry_file(
         root,
-        config.get("entry_file"),
+        explicit_entry,
         config.get("auto_entry_candidates"),
     )
     if not entry:
+        if explicit_entry:
+            raise ConfigError(
+                f"Entry file '{explicit_entry}' was not found in '{root}'. "
+                "Provide an entry path inside the project root, or remove the "
+                "entry setting to document all files."
+            )
         return all_rel_paths, None
 
-    entry_rel = entry.relative_to(root).as_posix()
+    # An explicit entry may resolve to a path outside the project root (e.g. an
+    # absolute path or one with '..').  relative_to() would raise ValueError;
+    # surface it as an actionable ConfigError instead.
+    try:
+        entry_rel = entry.relative_to(root).as_posix()
+    except ValueError:
+        if explicit_entry:
+            raise ConfigError(
+                f"Entry file '{explicit_entry}' resolves outside the project "
+                f"root '{root}'. Provide an entry path inside the project."
+            )
+        return all_rel_paths, None
+
     if entry_rel not in file_map:
+        if explicit_entry:
+            raise ConfigError(
+                f"Entry file '{entry_rel}' exists but was not in the scanned file "
+                "set. It may be excluded by skip_dirs, ignore_paths, an "
+                "unsupported extension, or max_file_size_kb. Adjust your "
+                "configuration, or remove the entry setting to document all files."
+            )
         logger.warning(
             "Entry file '%s' was not found in the scanned file set — "
             "documenting all %d file(s) instead.",
@@ -1380,11 +1435,34 @@ def _select_files(
         return all_rel_paths, None
 
     reachable = graph.reachable_dependencies(entry_rel) or {entry_rel}
-    logger.info(
-        "Entry file: %s (%d reachable project file(s))",
-        entry_rel,
-        len(reachable),
-    )
+
+    # Visibility for the known entry-reachability limitation (A1): files that are
+    # not transitively imported from the entry are NOT documented.  Previously
+    # this exclusion was silent.  We now warn loudly and list a sample so the
+    # omission is never invisible.  The structural fix (how selection should
+    # behave) is deferred to 0.10.0; this only surfaces the current behaviour.
+    excluded = all_rel_paths - reachable
+    if excluded:
+        sample = ", ".join(sorted(excluded)[:10])
+        more = "" if len(excluded) <= 10 else f" (+{len(excluded) - 10} more)"
+        logger.warning(
+            "Entry-based selection: %d of %d scanned file(s) are NOT reachable "
+            "from entry '%s' and will NOT be documented: %s%s. "
+            "Files not imported (transitively) from the entry are skipped — this "
+            "is a known limitation. To document every scanned file, run without "
+            "--entry. Full reachability handling is planned for 0.10.0.",
+            len(excluded),
+            len(all_rel_paths),
+            entry_rel,
+            sample,
+            more,
+        )
+    else:
+        logger.info(
+            "Entry file: %s (%d reachable project file(s); all scanned files reachable)",
+            entry_rel,
+            len(reachable),
+        )
     return reachable, entry_rel
 
 

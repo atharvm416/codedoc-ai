@@ -1000,7 +1000,12 @@ def test_15_parallel_ladder_appends_1_if_missing(tmp_path):
 # ---------------------------------------------------------------------------
 
 def test_16_no_supported_files_no_backup(tmp_path, monkeypatch):
-    """Test 16: if no supported files, run returns early and no JSON is created."""
+    """Test 16: with no supported files and NO explicit entry, the run returns
+    early and no JSON is created.
+
+    (The explicit-entry-with-zero-files case is now a hard ConfigError — A2 —
+    covered by test_A2_explicit_entry_with_zero_scanned_files_raises.)
+    """
     # Write only an unsupported file
     (tmp_path / "README.txt").write_text("hello\n")
 
@@ -1008,7 +1013,6 @@ def test_16_no_supported_files_no_backup(tmp_path, monkeypatch):
     from codedoc.pipeline import run_pipeline
 
     stats = run_pipeline(tmp_path, {
-        "entry_file": "main.py",
         "supported_extensions": [".py"],
     })
 

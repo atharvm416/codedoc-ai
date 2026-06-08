@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.9.1 - 2026-06-08
+
+### Bug-fix stabilization patch (first PyPI release)
+
+Corrective-only patch. No new features or output-shape changes.
+
+- **A1 — entry-reachability is no longer silent.** When an entry is given,
+  files not reachable from it were dropped without notice. `_select_files` now
+  logs a clear WARNING listing the excluded files, records `stats["entry_excluded"]`,
+  and the CLI prints an excluded-files line. (The structural selection fix is
+  tracked for a later minor; this patch only removes the silent failure.)
+- **A2 — a wrong `--entry` no longer silently documents the whole repo.** An
+  explicitly specified entry that cannot be resolved, is not in the scanned set,
+  resolves outside the project root, or is given when **no** supported files are
+  scanned, now raises `ConfigError` instead of falling back to all files or
+  exiting successfully. Auto-detection with no entry still documents everything.
+- **A3 — parser false imports fixed.** The Go parser no longer treats arbitrary
+  string literals (e.g. `fmt.Println("hi")`) as imports — only string-literal
+  paths in `import "..."` statements and `import ( ... )` blocks are read,
+  comments are ignored, and raw-string (backtick) paths are supported.
+  Interpreted literals use Go's byte-accurate escape semantics, including
+  multi-byte UTF-8 `\xNN` / octal sequences and Unicode escapes. The HTML parser
+  no longer treats CSS `<link href>` as a code import (kept `<script src>` and
+  JS imports).
+- **A4 — no stale/empty record substituted for a real one.** In the parallel
+  batch, a rate-limited file was treated as "already recorded" using state that
+  also included records **preloaded** from a prior run, so a *changed* file could
+  be restored from stale documentation instead of retried. `SafeWriter` now
+  tracks records written *this run* (`recorded_this_run()`); a changed,
+  rate-limited file is retried, and a file genuinely recorded this run recovers
+  its real record via `get_record()` (never an empty `{}`).
+- **A5 — honest interrupt message.** Removed dead code; the Ctrl-C message is now
+  conditional ("…if the run reached file processing") so it never falsely claims
+  progress was saved when interrupted before any file was processed.
+- **A6 — scanner is re-entrant.** The directory walker no longer stores state on
+  the function object; state lives on a per-scan `_Walker` instance.
+- **Version identity.** `pyproject.toml`, `codedoc.__version__`, the CLI
+  `--version`, and the README all report `0.9.1`, and the automated test
+  (`test_version_identity_consistent`) enforces agreement across **all four**,
+  including the README "Current release" line.
+- **Reliable tests.** `tests/conftest.py` redirects the temp root into the repo
+  (`.pyt_tmp`) so a locked system temp dir does not make the suite unrunnable.
+  (This addresses the observed locked-system-temp failure; it is not a guarantee
+  for every environment.)
+
 ## 0.9.0 - 2026-06-04
 
 ### Output preflight safety, clean INFO logs, extension list fix, configurable content truncation

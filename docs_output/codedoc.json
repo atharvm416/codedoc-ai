@@ -1,0 +1,4729 @@
+{
+  "_codedoc": {
+    "entry_file": null,
+    "schema_version": "1.4",
+    "generated_at": "2026-06-08T17:21:36.143442+00:00"
+  },
+  "schema_version": "1.4",
+  "generated_at": "2026-06-08T17:21:36.143442+00:00",
+  "project": {
+    "entry_file": null,
+    "file_count": 36,
+    "languages": [
+      "python"
+    ],
+    "folders": [
+      "codedoc"
+    ]
+  },
+  "run": {
+    "files_checked": 0,
+    "files_failed": 0,
+    "files_skipped": 36,
+    "files_reused": 0,
+    "files_documented": 36
+  },
+  "tree": {
+    "codedoc": {
+      "__init__.py": {
+        "type": "file",
+        "path": "codedoc/__init__.py"
+      },
+      "__main__.py": {
+        "type": "file",
+        "path": "codedoc/__main__.py"
+      },
+      "agents": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/agents/__init__.py"
+        },
+        "base_agent.py": {
+          "type": "file",
+          "path": "codedoc/agents/base_agent.py"
+        },
+        "dependency_agent.py": {
+          "type": "file",
+          "path": "codedoc/agents/dependency_agent.py"
+        },
+        "documentation_agent.py": {
+          "type": "file",
+          "path": "codedoc/agents/documentation_agent.py"
+        },
+        "orchestrator.py": {
+          "type": "file",
+          "path": "codedoc/agents/orchestrator.py"
+        },
+        "structure_agent.py": {
+          "type": "file",
+          "path": "codedoc/agents/structure_agent.py"
+        }
+      },
+      "bootstrap.py": {
+        "type": "file",
+        "path": "codedoc/bootstrap.py"
+      },
+      "cli": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/cli/__init__.py"
+        },
+        "cli.py": {
+          "type": "file",
+          "path": "codedoc/cli/cli.py"
+        }
+      },
+      "core": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/core/__init__.py"
+        },
+        "checkpoint.py": {
+          "type": "file",
+          "path": "codedoc/core/checkpoint.py"
+        },
+        "db.py": {
+          "type": "file",
+          "path": "codedoc/core/db.py"
+        },
+        "graph.py": {
+          "type": "file",
+          "path": "codedoc/core/graph.py"
+        },
+        "loader.py": {
+          "type": "file",
+          "path": "codedoc/core/loader.py"
+        },
+        "output.py": {
+          "type": "file",
+          "path": "codedoc/core/output.py"
+        },
+        "project_view.py": {
+          "type": "file",
+          "path": "codedoc/core/project_view.py"
+        },
+        "queue.py": {
+          "type": "file",
+          "path": "codedoc/core/queue.py"
+        },
+        "safe_writer.py": {
+          "type": "file",
+          "path": "codedoc/core/safe_writer.py"
+        },
+        "scanner.py": {
+          "type": "file",
+          "path": "codedoc/core/scanner.py"
+        }
+      },
+      "llm": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/llm/__init__.py"
+        },
+        "api_provider.py": {
+          "type": "file",
+          "path": "codedoc/llm/api_provider.py"
+        },
+        "base.py": {
+          "type": "file",
+          "path": "codedoc/llm/base.py"
+        },
+        "factory.py": {
+          "type": "file",
+          "path": "codedoc/llm/factory.py"
+        },
+        "local_provider.py": {
+          "type": "file",
+          "path": "codedoc/llm/local_provider.py"
+        },
+        "rate_limit_profile.py": {
+          "type": "file",
+          "path": "codedoc/llm/rate_limit_profile.py"
+        }
+      },
+      "parser": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/parser/__init__.py"
+        },
+        "factory.py": {
+          "type": "file",
+          "path": "codedoc/parser/factory.py"
+        },
+        "generic_parser.py": {
+          "type": "file",
+          "path": "codedoc/parser/generic_parser.py"
+        },
+        "python_parser.py": {
+          "type": "file",
+          "path": "codedoc/parser/python_parser.py"
+        },
+        "react_parser.py": {
+          "type": "file",
+          "path": "codedoc/parser/react_parser.py"
+        }
+      },
+      "pipeline.py": {
+        "type": "file",
+        "path": "codedoc/pipeline.py"
+      },
+      "utils": {
+        "__init__.py": {
+          "type": "file",
+          "path": "codedoc/utils/__init__.py"
+        },
+        "errors.py": {
+          "type": "file",
+          "path": "codedoc/utils/errors.py"
+        },
+        "logger.py": {
+          "type": "file",
+          "path": "codedoc/utils/logger.py"
+        }
+      }
+    }
+  },
+  "folders": [
+    {
+      "path": "codedoc",
+      "summary": "Files under `codedoc` (36 python file(s)). Common concepts: Error handling with LLMError, Module initialization, entry point, SHA256 hashing, file handling in binary mode.",
+      "file_count": 36,
+      "languages": [
+        "python"
+      ],
+      "files": [
+        "codedoc/__init__.py",
+        "codedoc/__main__.py",
+        "codedoc/agents/__init__.py",
+        "codedoc/agents/base_agent.py",
+        "codedoc/agents/dependency_agent.py",
+        "codedoc/agents/documentation_agent.py",
+        "codedoc/agents/orchestrator.py",
+        "codedoc/agents/structure_agent.py",
+        "codedoc/bootstrap.py",
+        "codedoc/cli/__init__.py",
+        "codedoc/cli/cli.py",
+        "codedoc/core/__init__.py",
+        "codedoc/core/checkpoint.py",
+        "codedoc/core/db.py",
+        "codedoc/core/graph.py",
+        "codedoc/core/loader.py",
+        "codedoc/core/output.py",
+        "codedoc/core/project_view.py",
+        "codedoc/core/queue.py",
+        "codedoc/core/safe_writer.py",
+        "codedoc/core/scanner.py",
+        "codedoc/llm/__init__.py",
+        "codedoc/llm/api_provider.py",
+        "codedoc/llm/base.py",
+        "codedoc/llm/factory.py",
+        "codedoc/llm/local_provider.py",
+        "codedoc/llm/rate_limit_profile.py",
+        "codedoc/parser/__init__.py",
+        "codedoc/parser/factory.py",
+        "codedoc/parser/generic_parser.py",
+        "codedoc/parser/python_parser.py",
+        "codedoc/parser/react_parser.py",
+        "codedoc/pipeline.py",
+        "codedoc/utils/__init__.py",
+        "codedoc/utils/errors.py",
+        "codedoc/utils/logger.py"
+      ],
+      "key_concepts": [
+        "Error handling with LLMError",
+        "Module initialization",
+        "entry point",
+        "SHA256 hashing",
+        "file handling in binary mode"
+      ]
+    }
+  ],
+  "dependency_catalog": [
+    {
+      "name": "pathlib",
+      "type": "external",
+      "used_for": "Offers an object-oriented approach to filesystem paths",
+      "files": [
+        "codedoc/agents/base_agent.py",
+        "codedoc/bootstrap.py",
+        "codedoc/cli/cli.py",
+        "codedoc/core/checkpoint.py",
+        "codedoc/core/db.py",
+        "codedoc/core/graph.py",
+        "codedoc/core/output.py",
+        "codedoc/core/project_view.py",
+        "codedoc/core/queue.py",
+        "codedoc/core/safe_writer.py",
+        "codedoc/core/scanner.py",
+        "codedoc/parser/factory.py",
+        "codedoc/parser/generic_parser.py",
+        "codedoc/parser/python_parser.py",
+        "codedoc/pipeline.py",
+        "codedoc/utils/errors.py"
+      ],
+      "file_count": 16
+    },
+    {
+      "name": "codedoc.utils.logger",
+      "type": "internal",
+      "used_for": "Logging utilities for the CodeDoc project",
+      "files": [
+        "codedoc/agents/documentation_agent.py",
+        "codedoc/agents/structure_agent.py",
+        "codedoc/bootstrap.py",
+        "codedoc/core/checkpoint.py",
+        "codedoc/core/graph.py",
+        "codedoc/core/output.py",
+        "codedoc/core/project_view.py",
+        "codedoc/core/queue.py",
+        "codedoc/core/safe_writer.py",
+        "codedoc/core/scanner.py",
+        "codedoc/parser/python_parser.py",
+        "codedoc/utils/__init__.py"
+      ],
+      "file_count": 12
+    },
+    {
+      "name": "get_logger",
+      "type": "internal",
+      "used_for": "Utility function for logging within the codedoc project",
+      "files": [
+        "codedoc/agents/base_agent.py",
+        "codedoc/agents/dependency_agent.py",
+        "codedoc/agents/documentation_agent.py",
+        "codedoc/agents/orchestrator.py",
+        "codedoc/agents/structure_agent.py",
+        "codedoc/llm/api_provider.py",
+        "codedoc/llm/factory.py",
+        "codedoc/parser/factory.py",
+        "codedoc/parser/react_parser.py",
+        "codedoc/pipeline.py",
+        "codedoc/utils/__init__.py"
+      ],
+      "file_count": 11
+    },
+    {
+      "name": "__future__",
+      "type": "external",
+      "used_for": "Enables postponed evaluation of type annotations.",
+      "files": [
+        "codedoc/agents/dependency_agent.py",
+        "codedoc/cli/cli.py",
+        "codedoc/llm/base.py",
+        "codedoc/llm/rate_limit_profile.py",
+        "codedoc/parser/factory.py",
+        "codedoc/parser/generic_parser.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 7
+    },
+    {
+      "name": "LLMProvider",
+      "type": "internal",
+      "used_for": "Provides an interface for interacting with language models.",
+      "files": [
+        "codedoc/agents/base_agent.py",
+        "codedoc/agents/orchestrator.py",
+        "codedoc/llm/__init__.py",
+        "codedoc/llm/api_provider.py",
+        "codedoc/llm/factory.py"
+      ],
+      "file_count": 5
+    },
+    {
+      "name": "codedoc.utils.errors",
+      "type": "internal",
+      "used_for": "Defines custom error handling for the codedoc application",
+      "files": [
+        "codedoc/cli/cli.py",
+        "codedoc/core/output.py",
+        "codedoc/core/safe_writer.py",
+        "codedoc/parser/python_parser.py",
+        "codedoc/utils/__init__.py"
+      ],
+      "file_count": 5
+    },
+    {
+      "name": "AgentError",
+      "type": "internal",
+      "used_for": "Custom error handling for agent-related issues.",
+      "files": [
+        "codedoc/agents/base_agent.py",
+        "codedoc/agents/orchestrator.py",
+        "codedoc/pipeline.py",
+        "codedoc/utils/__init__.py"
+      ],
+      "file_count": 4
+    },
+    {
+      "name": "BaseAgent",
+      "type": "internal",
+      "used_for": "Base class for agents in the codedoc project",
+      "files": [
+        "codedoc/agents/__init__.py",
+        "codedoc/agents/dependency_agent.py",
+        "codedoc/agents/documentation_agent.py",
+        "codedoc/agents/structure_agent.py"
+      ],
+      "file_count": 4
+    },
+    {
+      "name": "ParseError",
+      "type": "internal",
+      "used_for": "Error handling specific to parsing operations",
+      "files": [
+        "codedoc/parser/factory.py",
+        "codedoc/parser/react_parser.py",
+        "codedoc/pipeline.py",
+        "codedoc/utils/__init__.py"
+      ],
+      "file_count": 4
+    },
+    {
+      "name": "codedoc.core.project_view",
+      "type": "internal",
+      "used_for": "Handling project schema and file records",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/core/output.py",
+        "codedoc/core/safe_writer.py"
+      ],
+      "file_count": 3
+    },
+    {
+      "name": "codedoc.utils.logger.get_logger",
+      "type": "internal",
+      "used_for": "Logging utility for the codedoc project",
+      "files": [
+        "codedoc/core/loader.py",
+        "codedoc/core/project_view.py",
+        "codedoc/parser/generic_parser.py"
+      ],
+      "file_count": 3
+    },
+    {
+      "name": "json",
+      "type": "external",
+      "used_for": "Parsing and writing JSON data for project outputs",
+      "files": [
+        "codedoc/core/output.py",
+        "codedoc/core/safe_writer.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 3
+    },
+    {
+      "name": "typing",
+      "type": "external",
+      "used_for": "providing type hints for better code clarity",
+      "files": [
+        "codedoc/core/queue.py",
+        "codedoc/core/scanner.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 3
+    },
+    {
+      "name": "Checkpoint",
+      "type": "internal",
+      "used_for": "Manages checkpointing for the documentation process",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "ConfigError",
+      "type": "internal",
+      "used_for": "Error handling for configuration issues",
+      "files": [
+        "codedoc/llm/factory.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "DependencyAgent",
+      "type": "internal",
+      "used_for": "Analyzing dependencies within code files",
+      "files": [
+        "codedoc/agents/__init__.py",
+        "codedoc/agents/orchestrator.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "DependencyGraph",
+      "type": "internal",
+      "used_for": "Representing the dependency graph of the project",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "DocumentationAgent",
+      "type": "internal",
+      "used_for": "Generating documentation based on code analysis",
+      "files": [
+        "codedoc/agents/__init__.py",
+        "codedoc/agents/orchestrator.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "LLMError",
+      "type": "internal",
+      "used_for": "Error handling for LLM-related issues",
+      "files": [
+        "codedoc/llm/factory.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "Orchestrator",
+      "type": "internal",
+      "used_for": "Manages the orchestration of agents in the codedoc pipeline",
+      "files": [
+        "codedoc/agents/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "ProcessingQueue",
+      "type": "internal",
+      "used_for": "Managing the processing queue for tasks in codedoc",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "SafeWriter",
+      "type": "internal",
+      "used_for": "Handles safe writing of output files with live backup capabilities",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "StructureAgent",
+      "type": "internal",
+      "used_for": "Handles the structure-related functionalities",
+      "files": [
+        "codedoc/agents/__init__.py",
+        "codedoc/agents/orchestrator.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "abc",
+      "type": "external",
+      "used_for": "Provides the ABC class for defining abstract base classes.",
+      "files": [
+        "codedoc/agents/base_agent.py",
+        "codedoc/llm/base.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "codedoc.pipeline",
+      "type": "internal",
+      "used_for": "Handles the main pipeline for generating documentation",
+      "files": [
+        "codedoc/__init__.py",
+        "codedoc/cli/cli.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "codedoc.utils.errors.ConfigError",
+      "type": "internal",
+      "used_for": "Error handling for configuration loading",
+      "files": [
+        "codedoc/core/loader.py",
+        "codedoc/core/project_view.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "create_provider",
+      "type": "internal",
+      "used_for": "Factory function to create instances of language model providers",
+      "files": [
+        "codedoc/llm/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "detect_entry_file",
+      "type": "internal",
+      "used_for": "Detecting the entry file for the codedoc project",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "load_config",
+      "type": "internal",
+      "used_for": "Loading configuration for the codedoc project",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "parse_file",
+      "type": "internal",
+      "used_for": "parsing files within the codedoc project",
+      "files": [
+        "codedoc/parser/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "re",
+      "type": "external",
+      "used_for": "Validating file content for ownership checks",
+      "files": [
+        "codedoc/core/output.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "scan_files",
+      "type": "internal",
+      "used_for": "Scanning files in the codedoc project",
+      "files": [
+        "codedoc/core/__init__.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "sys",
+      "type": "external",
+      "used_for": "Used for accessing command-line arguments and exiting the program",
+      "files": [
+        "codedoc/cli/cli.py",
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "traceback",
+      "type": "external",
+      "used_for": "Used for formatting exception tracebacks in error reporting.",
+      "files": [
+        "codedoc/cli/cli.py",
+        "codedoc/utils/errors.py"
+      ],
+      "file_count": 2
+    },
+    {
+      "name": "Anthropic",
+      "type": "external",
+      "used_for": "Anthropic Claude provider",
+      "files": [
+        "codedoc/llm/api_provider.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "AnthropicProvider",
+      "type": "internal",
+      "used_for": "Provider for Anthropic LLMs",
+      "files": [
+        "codedoc/llm/factory.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "Gemini",
+      "type": "external",
+      "used_for": "Google Gemini provider",
+      "files": [
+        "codedoc/llm/api_provider.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "GeminiProvider",
+      "type": "internal",
+      "used_for": "Provider for Google Gemini LLMs",
+      "files": [
+        "codedoc/llm/factory.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "OpenAI",
+      "type": "external",
+      "used_for": "OpenAI chat completions provider",
+      "files": [
+        "codedoc/llm/api_provider.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "OpenAIProvider",
+      "type": "internal",
+      "used_for": "Provider for OpenAI LLMs",
+      "files": [
+        "codedoc/llm/factory.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "RateLimitProfile",
+      "type": "internal",
+      "used_for": "Defines rate limit profiles for API interactions",
+      "files": [
+        "codedoc/pipeline.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "argparse",
+      "type": "external",
+      "used_for": "Used to build a command-line interface for the codedoc tool",
+      "files": [
+        "codedoc/cli/cli.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "ast",
+      "type": "external",
+      "used_for": "Used for parsing Python source code into an abstract syntax tree",
+      "files": [
+        "codedoc/parser/python_parser.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "codedoc",
+      "type": "internal",
+      "used_for": "Main package for the codedoc project",
+      "files": [
+        "codedoc/bootstrap.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "codedoc.cli.cli",
+      "type": "internal",
+      "used_for": "providing the main entry point for the CLI functionality",
+      "files": [
+        "codedoc/__main__.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "codedoc.core.db",
+      "type": "internal",
+      "used_for": "Database operations related to file hashing",
+      "files": [
+        "codedoc/core/safe_writer.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "codedoc.utils.errors.ParseError",
+      "type": "external",
+      "used_for": "Used for error handling when file reading fails.",
+      "files": [
+        "codedoc/parser/generic_parser.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "collections",
+      "type": "external",
+      "used_for": "using deque for efficient queue operations",
+      "files": [
+        "codedoc/core/queue.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "dataclasses",
+      "type": "external",
+      "used_for": "Provides a decorator and functions for automatically adding special methods to classes.",
+      "files": [
+        "codedoc/llm/rate_limit_profile.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "dotenv",
+      "type": "external",
+      "used_for": "Loading environment variables from .env files",
+      "files": [
+        "codedoc/core/loader.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "dotenv.load_dotenv",
+      "type": "external",
+      "used_for": "Conditionally loads environment variables if .env file exists",
+      "files": [
+        "codedoc/core/loader.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "hashlib",
+      "type": "external",
+      "used_for": "Provides secure hash functions for file content hashing",
+      "files": [
+        "codedoc/core/db.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "json_from_markdown",
+      "type": "internal",
+      "used_for": "Converting JSON to markdown format",
+      "files": [
+        "codedoc/core/__init__.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "main",
+      "type": "internal",
+      "used_for": "entry point for the CLI functionality",
+      "files": [
+        "codedoc/cli/__init__.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "markdown_from_json",
+      "type": "internal",
+      "used_for": "Converting markdown to JSON format",
+      "files": [
+        "codedoc/core/__init__.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "openai",
+      "type": "external",
+      "used_for": "Interfacing with OpenAI-compatible APIs",
+      "files": [
+        "codedoc/llm/local_provider.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "requests",
+      "type": "external",
+      "used_for": "HTTP requests to local LLM server",
+      "files": [
+        "codedoc/llm/local_provider.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "rich",
+      "type": "external",
+      "used_for": "Enhanced logging with rich formatting and console output",
+      "files": [
+        "codedoc/utils/logger.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "rich.console",
+      "type": "external",
+      "used_for": "Used for creating a rich console output for logs",
+      "files": [
+        "codedoc/utils/logger.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "rich.logging",
+      "type": "external",
+      "used_for": "Used for integrating rich formatting into the logging system",
+      "files": [
+        "codedoc/utils/logger.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "threading",
+      "type": "external",
+      "used_for": "Ensures thread safety for concurrent file writes",
+      "files": [
+        "codedoc/core/safe_writer.py"
+      ],
+      "file_count": 1
+    },
+    {
+      "name": "write_summary",
+      "type": "internal",
+      "used_for": "Writing a summary of the project dependencies",
+      "files": [
+        "codedoc/core/__init__.py"
+      ],
+      "file_count": 1
+    }
+  ],
+  "dependency_graph": [
+    {
+      "from": "codedoc/__init__.py",
+      "to": "codedoc/pipeline.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/__main__.py",
+      "to": "codedoc/cli/cli.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/__init__.py",
+      "to": "codedoc/agents/base_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/__init__.py",
+      "to": "codedoc/agents/dependency_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/__init__.py",
+      "to": "codedoc/agents/documentation_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/__init__.py",
+      "to": "codedoc/agents/orchestrator.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/__init__.py",
+      "to": "codedoc/agents/structure_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/base_agent.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/base_agent.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/base_agent.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/dependency_agent.py",
+      "to": "codedoc/agents/base_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/dependency_agent.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/documentation_agent.py",
+      "to": "codedoc/agents/base_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/documentation_agent.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/agents/dependency_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/agents/documentation_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/agents/structure_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/orchestrator.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/structure_agent.py",
+      "to": "codedoc/agents/base_agent.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/agents/structure_agent.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/bootstrap.py",
+      "to": "codedoc/__init__.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/bootstrap.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/cli/__init__.py",
+      "to": "codedoc/cli/cli.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/cli/cli.py",
+      "to": "codedoc/pipeline.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/cli/cli.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/checkpoint.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/graph.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/loader.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/output.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/project_view.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/queue.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/safe_writer.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/__init__.py",
+      "to": "codedoc/core/scanner.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/checkpoint.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/graph.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/loader.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/loader.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/output.py",
+      "to": "codedoc/core/project_view.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/output.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/output.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/project_view.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/project_view.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/queue.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/safe_writer.py",
+      "to": "codedoc/core/db.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/safe_writer.py",
+      "to": "codedoc/core/project_view.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/safe_writer.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/safe_writer.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/core/scanner.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/__init__.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/__init__.py",
+      "to": "codedoc/llm/factory.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/api_provider.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/api_provider.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/api_provider.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/factory.py",
+      "to": "codedoc/llm/api_provider.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/factory.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/factory.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/factory.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/local_provider.py",
+      "to": "codedoc/llm/base.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/local_provider.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/llm/local_provider.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/__init__.py",
+      "to": "codedoc/parser/factory.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/factory.py",
+      "to": "codedoc/parser/__init__.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/factory.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/factory.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/generic_parser.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/generic_parser.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/python_parser.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/python_parser.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/react_parser.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/parser/react_parser.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/agents/orchestrator.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/bootstrap.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/checkpoint.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/db.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/graph.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/loader.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/output.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/project_view.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/queue.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/safe_writer.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/core/scanner.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/llm/factory.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/llm/rate_limit_profile.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/parser/factory.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/pipeline.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/utils/__init__.py",
+      "to": "codedoc/utils/errors.py",
+      "type": "internal_import"
+    },
+    {
+      "from": "codedoc/utils/__init__.py",
+      "to": "codedoc/utils/logger.py",
+      "type": "internal_import"
+    }
+  ],
+  "files": [
+    {
+      "hash": "da7fafec537754ed66b8eaca5ac6406dfeaa4e16f373a94eb2ffab5e6c007fbe",
+      "path": "codedoc/core/db.py",
+      "language": "python",
+      "description": "The db.py file provides utilities for computing the SHA256 hash of file contents, which is essential for verifying the integrity of files within the codedoc system. It reads files in binary mode and processes them in chunks to efficiently compute the hash, ensuring that large files can be handled without excessive memory usage.",
+      "role_in_system": "This file serves as a utility module within the codedoc system, enabling other components to verify file integrity by providing a reliable method to compute and retrieve the SHA256 hash of files.",
+      "imports": [
+        "__future__",
+        "hashlib",
+        "pathlib"
+      ],
+      "functions": [
+        {
+          "name": "compute_file_hash",
+          "description": "Computes a SHA256 hash of the content of a specified file."
+        }
+      ],
+      "key_concepts": [
+        "SHA256 hashing",
+        "file handling in binary mode",
+        "chunked reading of files"
+      ],
+      "_deps": {
+        "external": [
+          "hashlib",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "hashlib",
+          "pathlib"
+        ],
+        "catalog_updates": [
+          {
+            "name": "hashlib",
+            "type": "external",
+            "used_for": "Provides secure hash functions for file content hashing"
+          },
+          {
+            "name": "pathlib",
+            "type": "external",
+            "used_for": "Offers an object-oriented approach to filesystem paths"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "hashlib",
+            "used_for": "Used to compute SHA256 hash of file content"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Used to handle file paths in a platform-independent way"
+          }
+        ]
+      },
+      "links": {
+        "imported_by": [
+          "codedoc/core/safe_writer.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "hashlib",
+          "pathlib"
+        ]
+      }
+    },
+    {
+      "hash": "21f291b2e4af52ad1c3853d120ec1fd3ff42ab58dc5dc252685c2db7424c51ed",
+      "path": "codedoc/llm/base.py",
+      "language": "python",
+      "description": "This file defines an abstract base class for all LLM (Large Language Model) providers, requiring them to implement specific methods for text completion. It establishes a contract that ensures all LLM providers, such as OpenAI and Anthropic, adhere to a common interface, facilitating seamless integration and swapping of providers within the system.",
+      "role_in_system": "It serves as a foundational component for the LLM system, allowing various providers to be implemented and utilized interchangeably without requiring changes to the rest of the codebase.",
+      "imports": [
+        "__future__",
+        "abc"
+      ],
+      "functions": [
+        {
+          "name": "complete",
+          "description": "An abstract method that must be implemented by subclasses to send a prompt and return a text response."
+        },
+        {
+          "name": "complete_json",
+          "description": "A convenience method that wraps the complete method to request a JSON response."
+        },
+        {
+          "name": "is_available",
+          "description": "An optional method that checks if the provider can currently accept requests, defaulting to always return True."
+        }
+      ],
+      "classes": [
+        {
+          "name": "LLMProvider",
+          "description": "An abstract class that defines the interface for LLM providers, requiring implementation of the complete method."
+        }
+      ],
+      "exports": [
+        "LLMProvider"
+      ],
+      "key_concepts": [
+        "Abstract Base Class",
+        "Method Overriding"
+      ],
+      "_deps": {
+        "external": [
+          "__future__",
+          "abc"
+        ],
+        "dependency_refs": [
+          "__future__",
+          "abc"
+        ],
+        "usage_notes": [
+          {
+            "import": "__future__",
+            "used_for": "Enables postponed evaluation of type annotations."
+          },
+          {
+            "import": "abc",
+            "used_for": "Provides the ABC class for defining abstract base classes."
+          }
+        ]
+      },
+      "links": {
+        "imported_by": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/agents/orchestrator.py",
+          "codedoc/llm/__init__.py",
+          "codedoc/llm/api_provider.py",
+          "codedoc/llm/factory.py",
+          "codedoc/llm/local_provider.py"
+        ],
+        "external_dependencies": [
+          "__future__",
+          "abc"
+        ]
+      }
+    },
+    {
+      "hash": "5336cd8c2a781a858ec72fb13f1cef90adf035b7181fad342443bd02830445ae",
+      "path": "codedoc/llm/rate_limit_profile.py",
+      "language": "python",
+      "description": "This file defines provider-aware rate-limit profiles for managing API request limits and backoff strategies based on specific providers. It allows for the extraction of provider-specific rate-limit signals and backoff parameters, enabling dynamic adjustments to API request handling without modifying the source code directly.",
+      "role_in_system": "It provides a mechanism to configure and retrieve rate-limit profiles for different API providers, allowing for dynamic adjustments based on user-defined configurations. This is essential for handling API rate limits effectively and ensuring smooth operation across various providers.",
+      "imports": [
+        "__future__",
+        "dataclasses"
+      ],
+      "functions": [
+        {
+          "name": "get_rate_limit_profile",
+          "description": "Returns the rate-limit profile for a specified provider, applying any configuration overrides."
+        }
+      ],
+      "classes": [
+        {
+          "name": "RateLimitProfile",
+          "description": "Represents the rate-limit classification and backoff policy for a single provider."
+        }
+      ],
+      "exports": [
+        "PROVIDER_PROFILES"
+      ],
+      "key_concepts": [
+        "Data classes for structured configuration",
+        "Dynamic configuration overrides for rate limits"
+      ],
+      "usage_example": "from codedoc.llm.rate_limit_profile import get_rate_limit_profile",
+      "_deps": {
+        "external": [
+          "__future__",
+          "dataclasses"
+        ],
+        "dependency_refs": [
+          "__future__",
+          "dataclasses"
+        ],
+        "usage_notes": [
+          {
+            "import": "__future__",
+            "used_for": "Enables postponed evaluation of type annotations."
+          },
+          {
+            "import": "dataclasses",
+            "used_for": "Provides a decorator and functions for automatically adding special methods to classes."
+          }
+        ]
+      },
+      "links": {
+        "imported_by": [
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "__future__",
+          "dataclasses"
+        ]
+      }
+    },
+    {
+      "hash": "e2bc031a5632b96849cf5465f30260a458672c33f1c7e3177b277938176bad4d",
+      "path": "codedoc/utils/errors.py",
+      "language": "python",
+      "description": "This file defines custom exceptions and an error reporting mechanism for the codedoc pipeline, allowing for uniform error handling and logging. It provides specific error classes for different failure scenarios, such as parsing errors, configuration issues, and output failures, ensuring that errors are raised consistently across the codebase.",
+      "role_in_system": "It serves as a centralized location for error definitions and reporting, ensuring that all modules can handle errors consistently. The ErrorReporter class collects issues during a pipeline run and writes a summary to a log file, facilitating easier debugging and monitoring of the pipeline's execution.",
+      "imports": [
+        "__future__",
+        "traceback",
+        "pathlib"
+      ],
+      "functions": [
+        {
+          "name": "record",
+          "description": "Records an issue without stopping execution, capturing the error type, message, context, level, and traceback."
+        },
+        {
+          "name": "has_errors",
+          "description": "Checks if any error-level entries have been recorded."
+        },
+        {
+          "name": "has_issues",
+          "description": "Checks if any entries have been recorded, regardless of severity."
+        },
+        {
+          "name": "error_count",
+          "description": "Counts the number of error-level entries recorded."
+        },
+        {
+          "name": "issue_count",
+          "description": "Counts the total number of recorded entries across all severity levels."
+        },
+        {
+          "name": "flush",
+          "description": "Writes all recorded issues to the log file, creating necessary directories if they do not exist."
+        },
+        {
+          "name": "summary",
+          "description": "Returns a summary string for error-level entries only, or an empty string if there are no hard errors."
+        }
+      ],
+      "classes": [
+        {
+          "name": "CodeDocError",
+          "description": "Base class for all codedoc errors."
+        },
+        {
+          "name": "ParseError",
+          "description": "Raised when a file cannot be parsed for imports."
+        },
+        {
+          "name": "LLMError",
+          "description": "Raised when an LLM call fails or returns invalid output."
+        },
+        {
+          "name": "ConfigError",
+          "description": "Raised when the config file is missing, invalid, or incomplete."
+        },
+        {
+          "name": "AgentError",
+          "description": "Raised when an agent fails to produce valid output."
+        },
+        {
+          "name": "OutputError",
+          "description": "Raised when writing output files fails."
+        },
+        {
+          "name": "ErrorReporter",
+          "description": "Collects issues during a pipeline run and writes a summary to error.log when the run finishes."
+        }
+      ],
+      "key_concepts": [
+        "Custom exceptions for specific error scenarios",
+        "Centralized error reporting mechanism"
+      ],
+      "usage_example": "from codedoc.utils.errors import ErrorReporter",
+      "_deps": {
+        "external": [
+          "traceback",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "traceback",
+          "pathlib"
+        ],
+        "usage_notes": [
+          {
+            "import": "traceback",
+            "used_for": "Used for formatting exception tracebacks in error reporting."
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Used for handling file paths in a platform-independent way."
+          }
+        ]
+      },
+      "links": {
+        "imported_by": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/agents/orchestrator.py",
+          "codedoc/cli/cli.py",
+          "codedoc/core/loader.py",
+          "codedoc/core/output.py",
+          "codedoc/core/project_view.py",
+          "codedoc/core/safe_writer.py",
+          "codedoc/llm/api_provider.py",
+          "codedoc/llm/factory.py",
+          "codedoc/llm/local_provider.py",
+          "codedoc/parser/factory.py",
+          "codedoc/parser/generic_parser.py",
+          "codedoc/parser/python_parser.py",
+          "codedoc/parser/react_parser.py",
+          "codedoc/pipeline.py",
+          "codedoc/utils/__init__.py"
+        ],
+        "external_dependencies": [
+          "pathlib",
+          "traceback"
+        ]
+      }
+    },
+    {
+      "hash": "5d24188dda7edd397db2d229aecb4c159280dc54b996b9a80e234a4de8d2e05d",
+      "path": "codedoc/utils/logger.py",
+      "language": "python",
+      "description": "This file provides centralized logging functionality for the codedoc application, allowing for configurable logging behavior and integration with the Rich library for enhanced output. It ensures that logging is consistently formatted and that log levels can be adjusted at runtime, particularly for noisy third-party libraries.",
+      "role_in_system": "It serves as a utility module to manage logging across the application, ensuring consistent log formatting and levels, especially for third-party libraries. By centralizing logging configuration, it simplifies the logging setup for the entire application.",
+      "imports": [
+        "__future__",
+        "logging",
+        "rich.console",
+        "rich.logging"
+      ],
+      "functions": [
+        {
+          "name": "_configure",
+          "description": "Sets up the logging configuration, including handlers and log levels, ensuring it is only done once."
+        },
+        {
+          "name": "get_logger",
+          "description": "Retrieves a logger instance with the specified name, ensuring logging is configured."
+        },
+        {
+          "name": "set_level",
+          "description": "Changes the logging level at runtime, affecting both the main logger and specified noisy third-party loggers."
+        }
+      ],
+      "exports": [
+        "get_logger",
+        "set_level"
+      ],
+      "key_concepts": [
+        "Logging configuration management",
+        "Integration with Rich library for enhanced logging output",
+        "Dynamic log level adjustment"
+      ],
+      "_deps": {
+        "external": [
+          "logging",
+          "rich"
+        ],
+        "dependency_refs": [
+          "logging",
+          "rich.console",
+          "rich.logging"
+        ],
+        "catalog_updates": [
+          {
+            "name": "rich",
+            "type": "external",
+            "used_for": "Enhanced logging with rich formatting and console output"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "rich.console",
+            "used_for": "Used for creating a rich console output for logs"
+          },
+          {
+            "import": "rich.logging",
+            "used_for": "Used for integrating rich formatting into the logging system"
+          }
+        ]
+      },
+      "links": {
+        "imported_by": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/agents/dependency_agent.py",
+          "codedoc/agents/documentation_agent.py",
+          "codedoc/agents/orchestrator.py",
+          "codedoc/agents/structure_agent.py",
+          "codedoc/bootstrap.py",
+          "codedoc/core/checkpoint.py",
+          "codedoc/core/graph.py",
+          "codedoc/core/loader.py",
+          "codedoc/core/output.py",
+          "codedoc/core/project_view.py",
+          "codedoc/core/queue.py",
+          "codedoc/core/safe_writer.py",
+          "codedoc/core/scanner.py",
+          "codedoc/llm/api_provider.py",
+          "codedoc/llm/factory.py",
+          "codedoc/llm/local_provider.py",
+          "codedoc/parser/factory.py",
+          "codedoc/parser/generic_parser.py",
+          "codedoc/parser/python_parser.py",
+          "codedoc/parser/react_parser.py",
+          "codedoc/pipeline.py",
+          "codedoc/utils/__init__.py"
+        ],
+        "external_dependencies": [
+          "logging",
+          "rich"
+        ]
+      }
+    },
+    {
+      "hash": "dbb6a8844e05169ebc0799a53106e488515d9ca35d0ba731c18543d4f53fe886",
+      "path": "codedoc/agents/base_agent.py",
+      "language": "python",
+      "description": "The codedoc/agents/base_agent.py file defines an abstract base class, BaseAgent, which serves as a template for various agent implementations that perform tasks such as structure analysis, dependency resolution, and documentation generation. It provides shared functionality for prompt building, JSON extraction, and error handling, ensuring that all subclasses implement a consistent interface for file analysis.",
+      "role_in_system": "This file acts as a foundational component of the codedoc framework, allowing specific agent classes to inherit common methods and properties, thereby promoting code reuse and standardization across different types of agents.",
+      "imports": [
+        "__future__",
+        "json",
+        "re",
+        "abc",
+        "pathlib",
+        "codedoc.llm.base",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "_truncate",
+          "description": "Truncates content to fit within a specified character limit and logs a warning if truncation occurs."
+        },
+        {
+          "name": "_call_llm",
+          "description": "Calls a language model to complete a prompt and handles any exceptions by raising an AgentError."
+        },
+        {
+          "name": "_parse_json",
+          "description": "Extracts and parses a JSON object from the output of the language model, handling potential formatting issues."
+        },
+        {
+          "name": "_safe_run",
+          "description": "Wraps the run method to catch errors and return a fallback dictionary instead of crashing."
+        }
+      ],
+      "classes": [
+        {
+          "name": "BaseAgent",
+          "description": "An abstract base class for agents that requires subclasses to implement a run method for file analysis."
+        }
+      ],
+      "exports": [
+        "BaseAgent"
+      ],
+      "key_concepts": [
+        "Abstract base class",
+        "Error handling with custom exceptions",
+        "JSON parsing and validation"
+      ],
+      "usage_example": "from codedoc.agents.base_agent import BaseAgent",
+      "_deps": {
+        "internal": [
+          "codedoc.llm.base",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "json",
+          "re",
+          "abc",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "LLMProvider",
+          "AgentError",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "LLMProvider",
+            "type": "internal",
+            "used_for": "Provides an interface for interacting with language models."
+          },
+          {
+            "name": "AgentError",
+            "type": "internal",
+            "used_for": "Custom error handling for agent-related issues."
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Logger setup for the agent."
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "get_logger",
+            "used_for": "Used to create a logger instance for the BaseAgent class."
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/llm/base.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/agents/__init__.py",
+          "codedoc/agents/dependency_agent.py",
+          "codedoc/agents/documentation_agent.py",
+          "codedoc/agents/structure_agent.py"
+        ],
+        "external_dependencies": [
+          "abc",
+          "json",
+          "pathlib",
+          "re"
+        ]
+      }
+    },
+    {
+      "hash": "d039eb31472ace093e1c4ab8c127cc1c17a88bf4395f17d206d7b50b66a31a82",
+      "path": "codedoc/core/checkpoint.py",
+      "language": "python",
+      "description": "This file implements a thread-safe incremental progress checkpoint for the codedoc pipeline, allowing for the resumption of processing after interruptions. It ensures that completed tasks are not repeated and that results are saved safely, writing progress to a checkpoint file in JSON format.",
+      "role_in_system": "It serves as a mechanism to track the progress of file processing within the codedoc pipeline, enabling users to skip already processed files upon re-running the pipeline after an interruption.",
+      "imports": [
+        "__future__",
+        "json",
+        "threading",
+        "datetime",
+        "pathlib",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "load",
+          "description": "Loads results from an existing checkpoint file, returning a mapping of processed files."
+        },
+        {
+          "name": "record",
+          "description": "Records the result of a completed file and flushes the state to disk immediately."
+        },
+        {
+          "name": "delete",
+          "description": "Removes the checkpoint file after a clean run completes."
+        },
+        {
+          "name": "_flush_locked",
+          "description": "Serializes the state to disk atomically while holding a lock."
+        }
+      ],
+      "classes": [
+        {
+          "name": "Checkpoint",
+          "description": "Manages the checkpointing of file processing results in a thread-safe manner."
+        }
+      ],
+      "exports": [
+        "CHECKPOINT_FILENAME",
+        "_CHECKPOINT_VERSION"
+      ],
+      "key_concepts": [
+        "Thread safety",
+        "Atomic writes"
+      ],
+      "usage_example": "from codedoc.core.checkpoint import Checkpoint",
+      "_deps": {
+        "internal": [
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "json",
+          "threading",
+          "datetime",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "json",
+          "threading",
+          "datetime",
+          "pathlib",
+          "codedoc.utils.logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging progress and errors related to checkpoint operations"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.utils.logger",
+            "used_for": "Used for logging warnings and information during checkpoint operations"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "datetime",
+          "json",
+          "pathlib",
+          "threading"
+        ]
+      }
+    },
+    {
+      "hash": "e329f45f613faa6d5592b3970417cee6a5afb6dc0a0f00af17f9dd8557d3d874",
+      "path": "codedoc/core/graph.py",
+      "language": "python",
+      "description": "This file provides a dependency graph and import resolution helpers for the codedoc project. It allows for the management of file relationships based on their import dependencies, enabling the resolution of import paths and the analysis of file dependencies within the project.",
+      "role_in_system": "It manages the relationships between files based on their import dependencies and facilitates the resolution of import paths, which is essential for understanding how files interact and depend on each other in the codedoc project.",
+      "imports": [
+        "__future__",
+        "collections",
+        "pathlib",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "resolve_import",
+          "description": "Resolves a parser import string to a known project-relative path."
+        }
+      ],
+      "classes": [
+        {
+          "name": "DependencyGraph",
+          "description": "Represents a directed graph where edges indicate file import relationships."
+        }
+      ],
+      "exports": [
+        "DependencyGraph",
+        "resolve_import"
+      ],
+      "key_concepts": [
+        "Directed graph representation of file imports",
+        "Import path resolution based on relative paths"
+      ],
+      "_deps": {
+        "external": [
+          "codedoc.utils.logger"
+        ],
+        "dependency_refs": [
+          "collections",
+          "pathlib",
+          "codedoc.utils.logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "logging utility for the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.utils.logger import get_logger",
+            "used_for": "initializes a logger for the DependencyGraph class"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "codedoc.utils.logger"
+        ]
+      }
+    },
+    {
+      "hash": "002863cca7b2f29020aa6a249bb83f74982a47a5680eaa6ddbc7df6f236d7b49",
+      "path": "codedoc/core/loader.py",
+      "language": "python",
+      "description": "This file is a configuration loader for the codedoc application, responsible for loading and merging configuration settings from various sources including JSON files, environment variables, and defaults. It ensures that the application can be configured flexibly and that settings can be overridden as needed.",
+      "role_in_system": "It serves as a central point for managing application configuration, ensuring that settings are correctly applied and can be overridden as needed. This allows for a consistent configuration experience across different environments and use cases.",
+      "imports": [
+        "__future__",
+        "json",
+        "os",
+        "pathlib",
+        "typing",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger",
+        "dotenv"
+      ],
+      "functions": [
+        {
+          "name": "load_config",
+          "description": "Loads and merges configuration from JSON, .env, environment variables, and default settings."
+        },
+        {
+          "name": "_resolve_list_override",
+          "description": "Resolves a list configuration key with optional add and remove overrides."
+        },
+        {
+          "name": "_resolve_dict_override",
+          "description": "Resolves a flat dictionary configuration key with optional add and remove overrides."
+        },
+        {
+          "name": "_resolve_nested_list_dict_override",
+          "description": "Resolves a nested dictionary configuration key with add and remove overrides for lists."
+        },
+        {
+          "name": "_apply_config_overrides",
+          "description": "Applies add and remove resolutions for all configurable keys."
+        }
+      ],
+      "exports": [
+        "load_config"
+      ],
+      "key_concepts": [
+        "Configuration merging from multiple sources",
+        "Override resolution for configuration settings"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "dotenv"
+        ],
+        "dependency_refs": [
+          "codedoc.utils.errors.ConfigError",
+          "codedoc.utils.logger.get_logger",
+          "dotenv.load_dotenv"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.errors.ConfigError",
+            "type": "internal",
+            "used_for": "Error handling for configuration loading"
+          },
+          {
+            "name": "codedoc.utils.logger.get_logger",
+            "type": "internal",
+            "used_for": "Logging utility for the codedoc project"
+          },
+          {
+            "name": "dotenv",
+            "type": "external",
+            "used_for": "Loading environment variables from .env files"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "dotenv.load_dotenv",
+            "used_for": "Conditionally loads environment variables if .env file exists"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "dotenv"
+        ]
+      }
+    },
+    {
+      "hash": "6d3da6767c973f3ecb2cf78ec987b8bdcdf288d1f5d84bf3fde2b8e74031e3e3",
+      "path": "codedoc/core/project_view.py",
+      "language": "python",
+      "description": "The project_view.py file is responsible for generating clean and structured public documentation views for software projects based on cached records. It allows for the serialization of project metadata and dependencies into both Markdown and JSON formats, facilitating easier sharing and understanding of project structures.",
+      "role_in_system": "This file acts as a crucial utility within the codedoc framework, enabling the integration and presentation of project documentation. It processes records and statistics to create a comprehensive view of the project, which can be rendered in different formats for various use cases.",
+      "imports": [
+        "__future__",
+        "base64",
+        "json",
+        "re",
+        "collections",
+        "datetime",
+        "pathlib",
+        "typing",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "build_project_view",
+          "description": "Constructs a compact view of the project based on provided records and statistics."
+        },
+        {
+          "name": "markdown_from_view",
+          "description": "Renders a public project view as Markdown."
+        },
+        {
+          "name": "json_from_view",
+          "description": "Renders a public project view as formatted JSON."
+        },
+        {
+          "name": "markdown_to_view",
+          "description": "Parses codedoc Markdown output back into the public JSON view shape."
+        },
+        {
+          "name": "json_from_markdown",
+          "description": "Converts codedoc Markdown output to formatted JSON."
+        },
+        {
+          "name": "markdown_from_json",
+          "description": "Converts codedoc JSON output to Markdown."
+        },
+        {
+          "name": "read_embedded_view",
+          "description": "Extracts and decodes the lossless embedded view from Markdown."
+        }
+      ],
+      "exports": [
+        "build_project_view",
+        "markdown_from_view",
+        "json_from_view",
+        "markdown_to_view",
+        "json_from_markdown",
+        "markdown_from_json",
+        "read_embedded_view"
+      ],
+      "key_concepts": [
+        "Serialization of project documentation",
+        "Markdown and JSON formatting",
+        "Dependency graph construction"
+      ],
+      "usage_example": "from codedoc.core.project_view import build_project_view",
+      "_deps": {
+        "external": [
+          "base64",
+          "json",
+          "re",
+          "collections",
+          "datetime",
+          "pathlib",
+          "typing",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "dependency_refs": [
+          "base64",
+          "json",
+          "re",
+          "collections",
+          "datetime",
+          "pathlib",
+          "typing",
+          "codedoc.utils.errors.ConfigError",
+          "codedoc.utils.logger.get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.errors.ConfigError",
+            "type": "internal",
+            "used_for": "Error handling for configuration issues"
+          },
+          {
+            "name": "codedoc.utils.logger.get_logger",
+            "type": "internal",
+            "used_for": "Logging utility for project"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/core/output.py",
+          "codedoc/core/safe_writer.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "base64",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger",
+          "collections",
+          "datetime",
+          "json",
+          "pathlib",
+          "re",
+          "typing"
+        ]
+      }
+    },
+    {
+      "hash": "b69ed0c43bfcd445ceff56695c8524f851b143280e98396e6484c4c727863d15",
+      "path": "codedoc/core/queue.py",
+      "language": "python",
+      "description": "This file implements a processing queue for managing files that need documentation, tracking their status and supporting dependency-aware ordering. It allows for efficient handling of files by maintaining their state throughout the documentation process.",
+      "role_in_system": "It serves as a component for handling the documentation process in the codedoc system, ensuring files are processed in the correct order based on their dependencies and statuses.",
+      "imports": [
+        "__future__",
+        "collections",
+        "pathlib",
+        "typing",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "add",
+          "description": "Adds a file descriptor to the queue if it hasn't been seen before."
+        },
+        {
+          "name": "add_many",
+          "description": "Adds multiple file descriptors to the queue."
+        },
+        {
+          "name": "next",
+          "description": "Returns the next unchecked file descriptor or None if the queue is empty."
+        },
+        {
+          "name": "has_pending",
+          "description": "Checks if there are any files pending processing."
+        },
+        {
+          "name": "mark_checked",
+          "description": "Marks a file as checked."
+        },
+        {
+          "name": "mark_failed",
+          "description": "Marks a file as failed with an optional reason."
+        },
+        {
+          "name": "status_of",
+          "description": "Returns the status of a file based on its relative path."
+        },
+        {
+          "name": "all_checked",
+          "description": "Checks if all files have been either checked or failed."
+        },
+        {
+          "name": "stats",
+          "description": "Returns a count of files in each status category."
+        },
+        {
+          "name": "iter_checked",
+          "description": "Yields descriptors of all checked files."
+        },
+        {
+          "name": "iter_failed",
+          "description": "Yields descriptors of all failed files along with their error messages."
+        },
+        {
+          "name": "snapshot",
+          "description": "Returns a dictionary mapping file paths to their statuses."
+        }
+      ],
+      "classes": [
+        {
+          "name": "ProcessingQueue",
+          "description": "Manages the ordered list of files to document, tracking their status and handling processing."
+        }
+      ],
+      "exports": [
+        "ProcessingQueue"
+      ],
+      "key_concepts": [
+        "dependency-aware ordering",
+        "file status management"
+      ],
+      "usage_example": "q = ProcessingQueue()",
+      "_deps": {
+        "internal": [
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "collections",
+          "pathlib",
+          "typing"
+        ],
+        "dependency_refs": [
+          "collections",
+          "pathlib",
+          "typing",
+          "codedoc.utils.logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "logging within the codedoc processing queue"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "collections",
+            "used_for": "using deque for efficient queue operations"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "handling file paths in a platform-independent way"
+          },
+          {
+            "import": "typing",
+            "used_for": "providing type hints for better code clarity"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "collections",
+          "pathlib",
+          "typing"
+        ]
+      }
+    },
+    {
+      "hash": "8b17c070b67136ba029485a8c1b6215239643c52559e42da1e4af58fb52277a0",
+      "path": "codedoc/core/scanner.py",
+      "language": "python",
+      "description": "This file implements a directory scanner that walks through a project root, identifies supported files, and determines their programming language based on file extensions. It enhances configurability by allowing the caller to specify directories to skip and a mapping of file extensions to languages, which can be defined in external configuration files.",
+      "role_in_system": "It serves as a utility for scanning project directories to facilitate file processing based on their types, enhancing configurability through external settings. This allows for dynamic adaptation to different project structures and requirements.",
+      "imports": [
+        "__future__",
+        "pathlib",
+        "typing",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "scan_files",
+          "description": "Recursively scans a directory for files, returning a list of file descriptors with their paths, relative paths, languages, and extensions."
+        },
+        {
+          "name": "detect_entry_file",
+          "description": "Determines the entry file for a project based on a provided hint or a list of candidate filenames."
+        }
+      ],
+      "classes": [
+        {
+          "name": "_Walker",
+          "description": "A recursive directory walker that maintains state for scanning directories while skipping specified directories and ignored paths."
+        }
+      ],
+      "exports": [
+        "scan_files",
+        "detect_entry_file"
+      ],
+      "key_concepts": [
+        "Recursive directory walking",
+        "Dynamic configuration of file handling"
+      ],
+      "usage_example": "from codedoc.core.scanner import scan_files",
+      "_deps": {
+        "internal": [
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "pathlib",
+          "typing"
+        ],
+        "dependency_refs": [
+          "codedoc.utils.logger",
+          "pathlib",
+          "typing"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging utility for the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.utils.logger",
+            "used_for": "Used for logging warnings and info during file scanning"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "pathlib",
+          "typing"
+        ]
+      }
+    },
+    {
+      "hash": "9525250929e6a58f09e6970fa1b121ac8c8d78354229316e488b49308c8b69ae",
+      "path": "codedoc/llm/api_provider.py",
+      "language": "python",
+      "description": "This file defines API-based LLM providers for OpenAI, Anthropic Claude, and Google Gemini, implementing a common interface for generating text completions. It allows for consistent interaction with different language model APIs, ensuring that developers can easily switch between providers without changing the underlying code structure.",
+      "role_in_system": "It serves as a module for interacting with various language model APIs, allowing for consistent usage across different providers. Each provider class encapsulates the logic for communicating with its respective API, handling errors, and formatting requests and responses.",
+      "imports": [
+        "__future__",
+        "codedoc.llm.base",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger",
+        "openai",
+        "anthropic",
+        "google",
+        "google.genai"
+      ],
+      "functions": [
+        {
+          "name": "complete",
+          "description": "Generates a free-text response based on a given prompt and optional system message."
+        },
+        {
+          "name": "complete_json",
+          "description": "Generates a JSON-only response using the provider's native JSON mode where available."
+        }
+      ],
+      "classes": [
+        {
+          "name": "OpenAIProvider",
+          "description": "Handles interactions with the OpenAI API and compatible endpoints."
+        },
+        {
+          "name": "AnthropicProvider",
+          "description": "Handles interactions with the Anthropic Claude API."
+        },
+        {
+          "name": "GeminiProvider",
+          "description": "Handles interactions with the Google Gemini API."
+        }
+      ],
+      "exports": [
+        "OpenAIProvider",
+        "AnthropicProvider",
+        "GeminiProvider"
+      ],
+      "key_concepts": [
+        "Common interface for LLM providers",
+        "Error handling with LLMError",
+        "Provider-specific implementation of text completion methods"
+      ],
+      "usage_example": "from codedoc.llm.api_provider import OpenAIProvider",
+      "_deps": {
+        "internal": [
+          "codedoc.llm.base",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "openai",
+          "anthropic",
+          "google",
+          "google.genai"
+        ],
+        "dependency_refs": [
+          "LLMProvider",
+          "LLMError",
+          "get_logger",
+          "OpenAI",
+          "anthropic",
+          "genai",
+          "types"
+        ],
+        "catalog_updates": [
+          {
+            "name": "OpenAI",
+            "type": "external",
+            "used_for": "OpenAI chat completions provider"
+          },
+          {
+            "name": "Anthropic",
+            "type": "external",
+            "used_for": "Anthropic Claude provider"
+          },
+          {
+            "name": "Gemini",
+            "type": "external",
+            "used_for": "Google Gemini provider"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "get_logger",
+            "used_for": "Logger instance for tracking provider readiness"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/llm/base.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/llm/factory.py"
+        ],
+        "external_dependencies": [
+          "anthropic",
+          "google",
+          "google.genai",
+          "openai"
+        ]
+      }
+    },
+    {
+      "hash": "61b4499659bc8db8daa226ac5f05ec40673cdb615bbb5e9565fc68c3ff341e39",
+      "path": "codedoc/llm/local_provider.py",
+      "language": "python",
+      "description": "This file implements a local LLM provider that connects to locally running LLMs via an OpenAI-compatible API, specifically for Ollama and LM Studio. It is designed to facilitate interactions with these local models by providing methods to generate completions and check server availability.",
+      "role_in_system": "It serves as a reserved implementation for local LLM interactions, currently dormant and not included in the active pipeline. The code is maintained for potential future use, ensuring that it can be re-enabled without significant modifications.",
+      "imports": [
+        "__future__",
+        "requests",
+        "codedoc.llm.base",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger",
+        "openai"
+      ],
+      "functions": [
+        {
+          "name": "complete",
+          "description": "Generates a completion for a given prompt using the local LLM."
+        },
+        {
+          "name": "is_available",
+          "description": "Checks if the local LLM server is running by pinging it."
+        }
+      ],
+      "classes": [
+        {
+          "name": "LocalProvider",
+          "description": "Connects to a locally running LLM via OpenAI-compatible API."
+        }
+      ],
+      "exports": [
+        "LocalProvider"
+      ],
+      "key_concepts": [
+        "OpenAI-compatible API",
+        "Local LLM interaction",
+        "Error handling with LLMError"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.llm.base",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "requests",
+          "openai"
+        ],
+        "dependency_refs": [
+          "requests",
+          "openai"
+        ],
+        "catalog_updates": [
+          {
+            "name": "requests",
+            "type": "external",
+            "used_for": "HTTP requests to local LLM server"
+          },
+          {
+            "name": "openai",
+            "type": "external",
+            "used_for": "Interfacing with OpenAI-compatible APIs"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "requests",
+            "used_for": "Checking availability of the local LLM server"
+          },
+          {
+            "import": "openai",
+            "used_for": "Creating chat completions with the local LLM"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/llm/base.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "external_dependencies": [
+          "openai",
+          "requests"
+        ]
+      }
+    },
+    {
+      "hash": "8bae20ef5591549aec8da9843057bccfe6e1d3f8e9ef88d1efb3bfae98ff4e8e",
+      "path": "codedoc/parser/generic_parser.py",
+      "language": "python",
+      "description": "This file implements a generic import parser that uses regex to extract import statements from various programming languages, including Java, Kotlin, Dart, C#, Swift, Ruby, Rust, C/C++, and Go. It serves as a fallback parser for languages not covered by dedicated parsers, ensuring that import statements can still be extracted deterministically.",
+      "role_in_system": "It acts as a fallback mechanism within the codebase, allowing for the extraction of import statements from a wide range of programming languages, thus enhancing the overall functionality of the import parsing system.",
+      "imports": [
+        "__future__",
+        "re",
+        "pathlib",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "_decode_go_interpreted",
+          "description": "Decodes Go interpreted string literals, handling various escape sequences."
+        },
+        {
+          "name": "_strip_go_comments",
+          "description": "Removes Go block and line comments from the provided text."
+        },
+        {
+          "name": "_parse_go",
+          "description": "Extracts Go import paths from the content while ignoring comments and non-import strings."
+        },
+        {
+          "name": "parse",
+          "description": "Extracts import strings from a specified file based on the programming language using regex."
+        }
+      ],
+      "exports": [
+        "parse"
+      ],
+      "key_concepts": [
+        "Regex-based parsing",
+        "Fallback parsing strategy",
+        "Handling of language-specific import formats"
+      ],
+      "_deps": {
+        "dependency_refs": [
+          "__future__",
+          "re",
+          "pathlib",
+          "codedoc.utils.errors.ParseError",
+          "codedoc.utils.logger.get_logger"
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.utils.errors.ParseError",
+            "used_for": "Used for error handling when file reading fails."
+          },
+          {
+            "import": "codedoc.utils.logger.get_logger",
+            "used_for": "Used for logging debug information about found imports."
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ]
+      }
+    },
+    {
+      "hash": "35becfda34fced1ac6aae04538d12fe3b086728f24c1b918bb095c1e2c0098e1",
+      "path": "codedoc/parser/python_parser.py",
+      "language": "python",
+      "description": "This file defines a Python import parser that utilizes the built-in `ast` module to analyze Python source code and extract import statements. It supports both standard import forms, such as `import X`, and from-import forms, like `from X import Y`. This functionality is essential for understanding module dependencies within Python files, aiding in documentation and dependency analysis tasks.",
+      "role_in_system": "The parser serves as a utility within the codedoc project, enabling the identification of imported modules in Python files. This capability is crucial for generating accurate documentation and performing dependency analysis, thereby enhancing the overall functionality of the codebase.",
+      "imports": [
+        "__future__",
+        "ast",
+        "pathlib",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "parse",
+          "description": "Extracts import strings from a Python file using AST and returns them as a list of module names."
+        }
+      ],
+      "key_concepts": [
+        "Abstract Syntax Tree (AST) parsing"
+      ],
+      "_deps": {
+        "external": [
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "dependency_refs": [
+          "ast",
+          "pathlib",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Error handling specific to the codedoc project"
+          },
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging utility for the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "ast",
+            "used_for": "Used for parsing Python source code into an abstract syntax tree"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Used for handling file paths in a platform-independent way"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "external_dependencies": [
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ]
+      }
+    },
+    {
+      "hash": "79bf264f9447500ec7fda6e8d6c71f829c0c7847a3f6eefa28935f36f06fdad2",
+      "path": "codedoc/parser/react_parser.py",
+      "language": "python",
+      "description": "The react_parser.py file is designed to efficiently parse import statements from React, TypeScript, and JavaScript files using regular expressions. It focuses on speed and minimal dependencies, allowing for quick extraction of relevant import paths while ignoring external npm packages. This functionality is crucial for tasks such as code analysis and documentation generation.",
+      "role_in_system": "This file acts as a utility within the codebase, providing a method to extract local and relative import paths from various file types. By filtering out external dependencies, it supports developers in understanding and documenting code structure without the clutter of third-party packages.",
+      "imports": [
+        "__future__",
+        "re",
+        "pathlib",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "parse",
+          "description": "Extracts local and relative import paths from a specified file, returning them as a list."
+        }
+      ],
+      "exports": [
+        "parse"
+      ],
+      "key_concepts": [
+        "Regular expressions for parsing import statements",
+        "Error handling with ParseError",
+        "Logging with get_logger"
+      ],
+      "_deps": {
+        "dependency_refs": [
+          "ParseError",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "ParseError",
+            "type": "internal",
+            "used_for": "Error handling specific to parsing operations"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Logging utility for tracking parser operations"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "get_logger",
+            "used_for": "Used to create a logger instance for debugging"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ]
+      }
+    },
+    {
+      "hash": "334d07eb105f6bb30e18e468596fdf43d29fa7f9e2b4ab501a1540416d71b28d",
+      "path": "codedoc/utils/__init__.py",
+      "language": "python",
+      "description": "This file initializes the utilities for logging and error handling in the CodeDoc application. It provides essential functions and classes that facilitate logging operations and manage exceptions specific to the application, ensuring that errors are handled gracefully and log messages are recorded appropriately.",
+      "role_in_system": "It serves as a central module for importing and exporting key functionalities related to logging and error management, allowing other parts of the CodeDoc application to utilize consistent logging practices and custom error handling mechanisms.",
+      "imports": [
+        "codedoc.utils.logger",
+        "codedoc.utils.errors"
+      ],
+      "functions": [
+        {
+          "name": "get_logger",
+          "description": "Retrieves a logger instance for logging messages."
+        },
+        {
+          "name": "set_level",
+          "description": "Sets the logging level for the logger."
+        }
+      ],
+      "classes": [
+        {
+          "name": "CodeDocError",
+          "description": "Base class for all exceptions related to CodeDoc."
+        },
+        {
+          "name": "ParseError",
+          "description": "Exception raised for parsing errors."
+        },
+        {
+          "name": "LLMError",
+          "description": "Exception raised for errors related to language model operations."
+        },
+        {
+          "name": "ConfigError",
+          "description": "Exception raised for configuration-related issues."
+        },
+        {
+          "name": "AgentError",
+          "description": "Exception raised for errors related to agents."
+        },
+        {
+          "name": "OutputError",
+          "description": "Exception raised for output-related errors."
+        },
+        {
+          "name": "ErrorReporter",
+          "description": "Class responsible for reporting errors."
+        }
+      ],
+      "exports": [
+        "get_logger",
+        "set_level",
+        "CodeDocError",
+        "ParseError",
+        "LLMError",
+        "ConfigError",
+        "AgentError",
+        "OutputError",
+        "ErrorReporter"
+      ],
+      "key_concepts": [
+        "Centralized error handling",
+        "Logging utilities"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.utils.logger",
+          "codedoc.utils.errors"
+        ],
+        "dependency_refs": [
+          "get_logger",
+          "set_level",
+          "CodeDocError",
+          "ParseError",
+          "LLMError",
+          "ConfigError",
+          "AgentError",
+          "OutputError",
+          "ErrorReporter"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging utilities for the CodeDoc project"
+          },
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Custom error handling for the CodeDoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.utils.logger import get_logger, set_level",
+            "used_for": "Provides logging functionality to manage log levels and obtain a logger instance"
+          },
+          {
+            "import": "from codedoc.utils.errors import CodeDocError, ParseError, LLMError, ConfigError, AgentError, OutputError, ErrorReporter",
+            "used_for": "Defines custom exceptions and error reporting mechanisms specific to CodeDoc"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ]
+      }
+    },
+    {
+      "hash": "7b4b8b94970d2bc6f6f8abb6581003bf4a73d770eb72bf6e12b1adb77993cf32",
+      "path": "codedoc/agents/dependency_agent.py",
+      "language": "python",
+      "description": "This file defines a DependencyAgent class that analyzes import relationships in Python files, identifying internal and external dependencies, and assessing dependency risks.",
+      "role_in_system": "The DependencyAgent serves as a tool for software architects to evaluate and manage dependencies within a codebase.",
+      "imports": [
+        "__future__",
+        "codedoc.agents.base_agent",
+        "codedoc.utils.logger"
+      ],
+      "classes": [
+        {
+          "name": "DependencyAgent",
+          "description": "A class that extends BaseAgent to perform dependency analysis on Python files."
+        }
+      ],
+      "exports": [
+        "DependencyAgent"
+      ],
+      "key_concepts": [
+        "Dependency analysis",
+        "Import relationship evaluation"
+      ],
+      "usage_example": "from codedoc.agents.dependency_agent import DependencyAgent",
+      "_deps": {
+        "internal": [
+          "codedoc.agents.base_agent",
+          "codedoc.utils.logger"
+        ],
+        "dependency_refs": [
+          "BaseAgent",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "BaseAgent",
+            "type": "internal",
+            "used_for": "Base class for agents in the codedoc project"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Utility function for logging within the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "__future__",
+            "used_for": "Enables postponed evaluation of type annotations"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/agents/__init__.py",
+          "codedoc/agents/orchestrator.py"
+        ]
+      }
+    },
+    {
+      "hash": "1853a451ff7ef5661da3b4a136e353b8300d610cb34c7de7331267b80e494b42",
+      "path": "codedoc/agents/documentation_agent.py",
+      "language": "python",
+      "description": "The DocumentationAgent is designed to generate polished documentation for code files by leveraging outputs from the StructureAgent and DependencyAgent. It processes the provided file path, content, imports, and language to create a comprehensive and human-readable summary that aids developers in understanding the codebase.",
+      "role_in_system": "As a component of the codedoc framework, the DocumentationAgent serves as a bridge between the analysis of code structure and dependencies, ensuring that developers have access to clear and detailed documentation that enhances their comprehension of the code.",
+      "imports": [
+        "__future__",
+        "codedoc.agents.base_agent",
+        "codedoc.utils.logger",
+        "json"
+      ],
+      "functions": [
+        {
+          "name": "run",
+          "description": "Executes the documentation generation process using the provided file path, content, imports, and language."
+        },
+        {
+          "name": "run_with_context",
+          "description": "Generates documentation using additional context from structure and dependencies."
+        },
+        {
+          "name": "_run_with_context",
+          "description": "Handles the core logic for generating documentation based on the provided context and prompts the language model."
+        }
+      ],
+      "classes": [
+        {
+          "name": "DocumentationAgent",
+          "description": "A class that extends BaseAgent to create documentation for code files."
+        }
+      ],
+      "exports": [
+        "DocumentationAgent"
+      ],
+      "key_concepts": [
+        "Documentation generation",
+        "Integration of structure and dependency analysis"
+      ],
+      "usage_example": "from codedoc.agents.documentation_agent import DocumentationAgent",
+      "_deps": {
+        "internal": [
+          "codedoc.agents.base_agent",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "json"
+        ],
+        "dependency_refs": [
+          "BaseAgent",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "BaseAgent",
+            "type": "internal",
+            "used_for": "Base class for agents in the codedoc framework"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Utility for logging within the codedoc framework"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.agents.base_agent",
+            "used_for": "Provides the base functionality for the DocumentationAgent"
+          },
+          {
+            "import": "codedoc.utils.logger",
+            "used_for": "Used for logging debug information during documentation generation"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/agents/__init__.py",
+          "codedoc/agents/orchestrator.py"
+        ],
+        "external_dependencies": [
+          "json"
+        ]
+      }
+    },
+    {
+      "hash": "c78ba12ce691612c15a8d5aceebfc564f2bfb4af8d9ad6d4099ee5202a2e5209",
+      "path": "codedoc/agents/structure_agent.py",
+      "language": "python",
+      "description": "The Structure Agent analyzes a file's internal structure by identifying key functions, classes, and exported symbols, as well as determining the file's role within the overall system. It formats a prompt for a language model, retrieves the analysis results, and logs the findings for debugging purposes.",
+      "role_in_system": "It serves as a tool for understanding the organization and purpose of code files within a larger codebase, facilitating better code comprehension and maintenance.",
+      "imports": [
+        "__future__",
+        "codedoc.agents.base_agent",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "run",
+          "description": "Executes the analysis process by formatting a prompt, calling a language model, and parsing the JSON result."
+        }
+      ],
+      "classes": [
+        {
+          "name": "StructureAgent",
+          "description": "Inherits from BaseAgent and implements functionality to analyze the structure of code files."
+        }
+      ],
+      "key_concepts": [
+        "Prompt engineering for language model analysis",
+        "Logging for debugging and analysis tracking"
+      ],
+      "usage_example": "from codedoc.agents.structure_agent import StructureAgent",
+      "_deps": {
+        "internal": [
+          "codedoc/agents/base_agent",
+          "codedoc/utils/logger"
+        ],
+        "dependency_refs": [
+          "BaseAgent",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "BaseAgent",
+            "type": "internal",
+            "used_for": "Base class for agents in the codedoc framework"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Utility function for logging within the codedoc framework"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.agents.base_agent",
+            "used_for": "Provides the base functionality for the StructureAgent"
+          },
+          {
+            "import": "codedoc.utils.logger",
+            "used_for": "Used to create a logger for debugging purposes"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/agents/__init__.py",
+          "codedoc/agents/orchestrator.py"
+        ]
+      }
+    },
+    {
+      "hash": "215a08a4aa6a7466c82de19d628395fc7b6daf95d2023cdeaaf70f9ee7a4df0f",
+      "path": "codedoc/core/output.py",
+      "language": "python",
+      "description": "The output.py file provides functionality for writing output in JSON and Markdown formats for the codedoc tool. It includes checks for file ownership to prevent overwriting files that are not owned by codedoc, ensuring data integrity and safety during output generation.",
+      "role_in_system": "This file acts as the output writer component of the codedoc system, facilitating the generation of correctly formatted output files while managing file ownership checks to avoid conflicts with existing files.",
+      "imports": [
+        "__future__",
+        "json",
+        "re",
+        "pathlib",
+        "codedoc.core.project_view",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "preflight_output_targets",
+          "description": "Checks if the output targets are owned by codedoc before writing to prevent overwriting foreign files."
+        },
+        {
+          "name": "_check_md_live_backup_ownership",
+          "description": "Validates the ownership of the Markdown live backup JSON file."
+        },
+        {
+          "name": "write_project_outputs",
+          "description": "Writes the final output files in the specified format and checks for file ownership before overwriting."
+        },
+        {
+          "name": "_check_file_ownership",
+          "description": "Verifies that a file was written by codedoc before allowing it to be overwritten."
+        },
+        {
+          "name": "_write_project_json",
+          "description": "Writes the project data to a JSON file."
+        },
+        {
+          "name": "_write_project_markdown",
+          "description": "Writes the project data to a Markdown file."
+        },
+        {
+          "name": "write_summary",
+          "description": "Generates a summary of the run and writes it to a Markdown file."
+        }
+      ],
+      "exports": [
+        "PROJECT_JSON",
+        "PROJECT_MARKDOWN",
+        "BUILD_FILENAME"
+      ],
+      "key_concepts": [
+        "File ownership validation",
+        "Output format handling",
+        "Error handling during file writing"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.core.project_view",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "json",
+          "re",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "json",
+          "re",
+          "pathlib",
+          "codedoc.core.project_view",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.core.project_view",
+            "type": "internal",
+            "used_for": "Building project views for output generation"
+          },
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Handling configuration and output errors"
+          },
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging output operations"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "json",
+            "used_for": "Parsing and writing JSON data for project outputs"
+          },
+          {
+            "import": "re",
+            "used_for": "Validating file content for ownership checks"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Handling file paths and directories for output management"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/core/project_view.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "json",
+          "pathlib",
+          "re"
+        ]
+      }
+    },
+    {
+      "hash": "ac8bbbc3f9a58dc7909fff8f3c1e96bc53c02422be2c45e7a078fc952588d3de",
+      "path": "codedoc/core/safe_writer.py",
+      "language": "python",
+      "description": "The safe_writer.py file implements a live JSON backup writer for the codedoc pipeline, ensuring crash safety by persisting file results immediately during processing. It creates a visible JSON backup file that is updated after each completed file and finalized at the end of a clean run, allowing for recovery in case of interruptions.",
+      "role_in_system": "This file serves as the default mechanism for maintaining a live backup of processed files within the codedoc pipeline, enabling the system to recover from crashes or interruptions without losing progress.",
+      "imports": [
+        "__future__",
+        "json",
+        "threading",
+        "datetime",
+        "pathlib",
+        "codedoc.core.db",
+        "codedoc.core.project_view",
+        "codedoc.utils.logger",
+        "codedoc.utils.errors"
+      ],
+      "functions": [
+        {
+          "name": "set_queue_order",
+          "description": "Sets the topological processing order for the files array."
+        },
+        {
+          "name": "load",
+          "description": "Pre-populates in-memory state from an existing live backup or output file."
+        },
+        {
+          "name": "initialize_empty",
+          "description": "Flushes an empty in-progress banner to disk before AI work starts."
+        },
+        {
+          "name": "record",
+          "description": "Cleans and persists one completed file result immediately."
+        },
+        {
+          "name": "has_record",
+          "description": "Returns True if the specified relative path is already recorded in memory."
+        },
+        {
+          "name": "recorded_this_run",
+          "description": "Returns True only if the specified relative path was written during the current run."
+        },
+        {
+          "name": "get_record",
+          "description": "Returns a copy of the clean record for the specified relative path, or None."
+        },
+        {
+          "name": "delete",
+          "description": "Removes the live JSON backup for Markdown-only runs after clean conversion."
+        }
+      ],
+      "classes": [
+        {
+          "name": "SafeWriter",
+          "description": "A live-output writer that persists every completed file result immediately."
+        }
+      ],
+      "key_concepts": [
+        "Thread safety for concurrent file writes",
+        "Atomic writes to prevent corruption during interruptions",
+        "Topological processing order for file results"
+      ],
+      "usage_example": "from codedoc.core.safe_writer import SafeWriter",
+      "_deps": {
+        "internal": [
+          "codedoc.core.db",
+          "codedoc.core.project_view",
+          "codedoc.utils.logger",
+          "codedoc.utils.errors"
+        ],
+        "external": [
+          "json",
+          "threading",
+          "datetime",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "json",
+          "threading",
+          "datetime",
+          "pathlib",
+          "codedoc.core.db",
+          "codedoc.core.project_view",
+          "codedoc.utils.logger",
+          "codedoc.utils.errors"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.core.db",
+            "type": "internal",
+            "used_for": "Database operations related to file hashing"
+          },
+          {
+            "name": "codedoc.core.project_view",
+            "type": "internal",
+            "used_for": "Handling project schema and file records"
+          },
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging functionality for the codedoc pipeline"
+          },
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Error handling specific to codedoc operations"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "json",
+            "used_for": "Used for reading and writing JSON data for live backups"
+          },
+          {
+            "import": "threading",
+            "used_for": "Ensures thread safety for concurrent file writes"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Handles file paths for backup operations"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/core/db.py",
+          "codedoc/core/project_view.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/core/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "datetime",
+          "json",
+          "pathlib",
+          "threading"
+        ]
+      }
+    },
+    {
+      "hash": "d52cad071c6c4fec4b329482ea3b652e2555c2e93169f15600bab7a9d6cf095c",
+      "path": "codedoc/llm/factory.py",
+      "language": "python",
+      "description": "This file defines a factory for creating instances of LLMProvider based on a configuration dictionary. It allows for the selection of different LLM providers such as OpenAI, Anthropic, and Gemini, facilitating the integration of various language models into the application. The factory reads the configuration to determine the appropriate provider and model, handling API key retrieval and provider auto-detection.",
+      "role_in_system": "It serves as a central point for instantiating various LLM providers, ensuring that the application can dynamically select and configure the appropriate language model provider based on user-defined settings.",
+      "imports": [
+        "__future__",
+        "os",
+        "codedoc.llm.base",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger",
+        "codedoc.llm.api_provider"
+      ],
+      "functions": [
+        {
+          "name": "create_provider",
+          "description": "Instantiates and returns an LLMProvider based on the provided configuration."
+        },
+        {
+          "name": "_make_api",
+          "description": "Creates an API-based LLMProvider instance based on the specified provider and model."
+        },
+        {
+          "name": "_resolve_api_provider",
+          "description": "Determines the appropriate provider name based on the model name and configuration."
+        },
+        {
+          "name": "_provider_api_key",
+          "description": "Retrieves the API key for the specified provider from environment variables."
+        }
+      ],
+      "exports": [
+        "create_provider"
+      ],
+      "key_concepts": [
+        "Factory pattern for creating provider instances",
+        "Configuration-driven provider selection",
+        "Environment variable-based API key management"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.llm.base",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger",
+          "codedoc.llm.api_provider"
+        ],
+        "external": [
+          "os"
+        ],
+        "dependency_refs": [
+          "LLMProvider",
+          "ConfigError",
+          "LLMError",
+          "get_logger",
+          "AnthropicProvider",
+          "GeminiProvider",
+          "OpenAIProvider"
+        ],
+        "catalog_updates": [
+          {
+            "name": "LLMProvider",
+            "type": "internal",
+            "used_for": "Base class for LLM providers"
+          },
+          {
+            "name": "ConfigError",
+            "type": "internal",
+            "used_for": "Error handling for configuration issues"
+          },
+          {
+            "name": "LLMError",
+            "type": "internal",
+            "used_for": "Error handling for LLM-related issues"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Logging utility for the module"
+          },
+          {
+            "name": "AnthropicProvider",
+            "type": "internal",
+            "used_for": "Provider for Anthropic LLMs"
+          },
+          {
+            "name": "GeminiProvider",
+            "type": "internal",
+            "used_for": "Provider for Google Gemini LLMs"
+          },
+          {
+            "name": "OpenAIProvider",
+            "type": "internal",
+            "used_for": "Provider for OpenAI LLMs"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "get_logger",
+            "used_for": "Used to create a logger instance for the module"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/llm/api_provider.py",
+          "codedoc/llm/base.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/llm/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "os"
+        ]
+      }
+    },
+    {
+      "hash": "83a547eb121a0190fe93dbe4b390c714afbff0e48dc2d67561530958acc90668",
+      "path": "codedoc/agents/orchestrator.py",
+      "language": "python",
+      "description": "The orchestrator.py file defines the Orchestrator class, which is responsible for coordinating the execution of multiple agents, specifically the StructureAgent, DependencyAgent, and DocumentationAgent. It allows these agents to analyze a code file's structure, dependencies, and documentation either in parallel or sequentially, depending on the configuration. This design enhances the efficiency of the analysis process by leveraging concurrent execution when possible, while also providing a fallback for environments with limited resources.",
+      "role_in_system": "The Orchestrator acts as a central controller within the codebase, managing the interactions between different agents to streamline the analysis of code files. It ensures that the results from each agent are merged into a cohesive output, facilitating a comprehensive understanding of the code being analyzed.",
+      "imports": [
+        "__future__",
+        "concurrent.futures",
+        "time",
+        "pathlib",
+        "codedoc.agents.structure_agent",
+        "codedoc.agents.dependency_agent",
+        "codedoc.agents.documentation_agent",
+        "codedoc.llm.base",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "process",
+          "description": "Runs all agents on a file and returns a merged result of their analyses."
+        },
+        {
+          "name": "_run_parallel",
+          "description": "Executes the StructureAgent and DependencyAgent concurrently using threads."
+        },
+        {
+          "name": "_run_sequential",
+          "description": "Executes the StructureAgent and DependencyAgent one after the other."
+        },
+        {
+          "name": "_log_agent_result",
+          "description": "Logs the results of agent executions, including any errors."
+        },
+        {
+          "name": "_merge",
+          "description": "Combines the outputs of all agents into a single result dictionary."
+        }
+      ],
+      "classes": [
+        {
+          "name": "Orchestrator",
+          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution of agents."
+        }
+      ],
+      "exports": [
+        "Orchestrator"
+      ],
+      "key_concepts": [
+        "Multi-agent coordination",
+        "Parallel and sequential execution"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.agents.structure_agent",
+          "codedoc.agents.dependency_agent",
+          "codedoc.agents.documentation_agent",
+          "codedoc.llm.base",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "dependency_refs": [
+          "StructureAgent",
+          "DependencyAgent",
+          "DocumentationAgent",
+          "LLMProvider",
+          "AgentError",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "StructureAgent",
+            "type": "internal",
+            "used_for": "Analyzing the structure of code files"
+          },
+          {
+            "name": "DependencyAgent",
+            "type": "internal",
+            "used_for": "Analyzing dependencies within code files"
+          },
+          {
+            "name": "DocumentationAgent",
+            "type": "internal",
+            "used_for": "Generating documentation based on code analysis"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.agents.structure_agent",
+            "used_for": "Used to analyze the structure of the code in parallel processing"
+          },
+          {
+            "import": "codedoc.agents.dependency_agent",
+            "used_for": "Used to analyze dependencies in parallel processing"
+          },
+          {
+            "import": "codedoc.agents.documentation_agent",
+            "used_for": "Used to generate documentation based on the results of other agents"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/dependency_agent.py",
+          "codedoc/agents/documentation_agent.py",
+          "codedoc/agents/structure_agent.py",
+          "codedoc/llm/base.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/agents/__init__.py",
+          "codedoc/pipeline.py"
+        ]
+      }
+    },
+    {
+      "hash": "98f1d322f523ae19b70234cc73bc885be244da7f7a579ce3258f3399d0bbc5b3",
+      "path": "codedoc/core/__init__.py",
+      "language": "python",
+      "description": "This file serves as the core module for codedoc, providing access to various components related to configuration loading, file scanning, and data processing. It acts as an interface for importing essential functionalities from different submodules within the codedoc.core package, allowing for a streamlined approach to managing documentation tasks.",
+      "role_in_system": "By centralizing the imports of key functions and classes, this file simplifies the interaction with the codedoc.core package, enabling other parts of the codebase to easily access and utilize the core functionalities without needing to manage individual imports.",
+      "imports": [
+        "codedoc.core.loader",
+        "codedoc.core.scanner",
+        "codedoc.core.queue",
+        "codedoc.core.graph",
+        "codedoc.core.output",
+        "codedoc.core.project_view",
+        "codedoc.core.checkpoint",
+        "codedoc.core.safe_writer"
+      ],
+      "functions": [
+        {
+          "name": "load_config",
+          "description": "Loads the configuration for the codedoc."
+        },
+        {
+          "name": "scan_files",
+          "description": "Scans files for documentation."
+        },
+        {
+          "name": "detect_entry_file",
+          "description": "Detects the entry file for the documentation."
+        },
+        {
+          "name": "write_summary",
+          "description": "Writes a summary of the documentation."
+        },
+        {
+          "name": "json_from_markdown",
+          "description": "Converts markdown content to JSON format."
+        },
+        {
+          "name": "markdown_from_json",
+          "description": "Converts JSON content to markdown format."
+        }
+      ],
+      "classes": [
+        {
+          "name": "ProcessingQueue",
+          "description": "Handles the processing of tasks in a queue."
+        },
+        {
+          "name": "DependencyGraph",
+          "description": "Represents the dependencies between different components."
+        },
+        {
+          "name": "Checkpoint",
+          "description": "Manages checkpoints in the processing workflow."
+        },
+        {
+          "name": "SafeWriter",
+          "description": "Ensures safe writing of output files."
+        }
+      ],
+      "exports": [
+        "load_config",
+        "scan_files",
+        "detect_entry_file",
+        "ProcessingQueue",
+        "DependencyGraph",
+        "write_summary",
+        "json_from_markdown",
+        "markdown_from_json",
+        "Checkpoint",
+        "SafeWriter"
+      ],
+      "key_concepts": [
+        "Dynamic attribute loading"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.core.loader",
+          "codedoc.core.scanner",
+          "codedoc.core.queue",
+          "codedoc.core.graph",
+          "codedoc.core.output",
+          "codedoc.core.project_view",
+          "codedoc.core.checkpoint",
+          "codedoc.core.safe_writer"
+        ],
+        "dependency_refs": [
+          "load_config",
+          "scan_files",
+          "detect_entry_file",
+          "ProcessingQueue",
+          "DependencyGraph",
+          "write_summary",
+          "json_from_markdown",
+          "markdown_from_json",
+          "Checkpoint",
+          "SafeWriter"
+        ],
+        "catalog_updates": [
+          {
+            "name": "load_config",
+            "type": "internal",
+            "used_for": "Loading configuration for the codedoc project"
+          },
+          {
+            "name": "scan_files",
+            "type": "internal",
+            "used_for": "Scanning files in the codedoc project"
+          },
+          {
+            "name": "detect_entry_file",
+            "type": "internal",
+            "used_for": "Detecting the entry file for the codedoc project"
+          },
+          {
+            "name": "ProcessingQueue",
+            "type": "internal",
+            "used_for": "Managing the processing queue for tasks in codedoc"
+          },
+          {
+            "name": "DependencyGraph",
+            "type": "internal",
+            "used_for": "Representing the dependency graph of the project"
+          },
+          {
+            "name": "write_summary",
+            "type": "internal",
+            "used_for": "Writing a summary of the project dependencies"
+          },
+          {
+            "name": "json_from_markdown",
+            "type": "internal",
+            "used_for": "Converting JSON to markdown format"
+          },
+          {
+            "name": "markdown_from_json",
+            "type": "internal",
+            "used_for": "Converting markdown to JSON format"
+          },
+          {
+            "name": "Checkpoint",
+            "type": "internal",
+            "used_for": "Managing checkpoints in the codedoc process"
+          },
+          {
+            "name": "SafeWriter",
+            "type": "internal",
+            "used_for": "Providing safe writing capabilities for files"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.core.loader",
+            "used_for": "Used to load configuration settings"
+          },
+          {
+            "import": "codedoc.core.scanner",
+            "used_for": "Used for scanning project files"
+          },
+          {
+            "import": "codedoc.core.queue",
+            "used_for": "Used to manage task processing"
+          },
+          {
+            "import": "codedoc.core.graph",
+            "used_for": "Used to represent and manipulate the dependency graph"
+          },
+          {
+            "import": "codedoc.core.output",
+            "used_for": "Used to write output summaries"
+          },
+          {
+            "import": "codedoc.core.project_view",
+            "used_for": "Used for converting between JSON and markdown formats"
+          },
+          {
+            "import": "codedoc.core.checkpoint",
+            "used_for": "Used to manage checkpoints"
+          },
+          {
+            "import": "codedoc.core.safe_writer",
+            "used_for": "Used for safe file writing operations"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/core/checkpoint.py",
+          "codedoc/core/graph.py",
+          "codedoc/core/loader.py",
+          "codedoc/core/output.py",
+          "codedoc/core/project_view.py",
+          "codedoc/core/queue.py",
+          "codedoc/core/safe_writer.py",
+          "codedoc/core/scanner.py"
+        ]
+      }
+    },
+    {
+      "hash": "e9a352f17aa03903dcd3b6138d73ae09f246f73e890d1d01b50173cfa514f1ff",
+      "path": "codedoc/llm/__init__.py",
+      "language": "python",
+      "description": "This file initializes the llm module by importing the LLMProvider class and the create_provider function, making them publicly accessible for users. It serves as the entry point for the llm module, allowing developers to easily access language model functionalities and create instances of language model providers.",
+      "role_in_system": "It connects to the rest of the codebase by providing a standard interface for language model integration through the LLMProvider class and facilitating the dynamic instantiation of language model providers via the create_provider function.",
+      "imports": [
+        "codedoc.llm.base",
+        "codedoc.llm.factory"
+      ],
+      "functions": [
+        {
+          "name": "create_provider",
+          "description": "A function that creates and returns an instance of a language model provider."
+        }
+      ],
+      "classes": [
+        {
+          "name": "LLMProvider",
+          "description": "A class that provides access to language model functionalities."
+        }
+      ],
+      "exports": [
+        "LLMProvider",
+        "create_provider"
+      ],
+      "key_concepts": [
+        "Module initialization",
+        "Public API exposure"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.llm.base",
+          "codedoc.llm.factory"
+        ],
+        "dependency_refs": [
+          "LLMProvider",
+          "create_provider"
+        ],
+        "catalog_updates": [
+          {
+            "name": "LLMProvider",
+            "type": "internal",
+            "used_for": "Provides a standard interface for language model providers"
+          },
+          {
+            "name": "create_provider",
+            "type": "internal",
+            "used_for": "Factory function to create instances of language model providers"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.llm.base import LLMProvider",
+            "used_for": "Used to define a standard interface for language model integration"
+          },
+          {
+            "import": "from codedoc.llm.factory import create_provider",
+            "used_for": "Used to instantiate language model providers dynamically"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/llm/base.py",
+          "codedoc/llm/factory.py"
+        ]
+      }
+    },
+    {
+      "hash": "1b114c34b9bcc3b00656edceb4533017b746f79d04e5ee2f99f4b782c1842bdb",
+      "path": "codedoc/agents/__init__.py",
+      "language": "python",
+      "description": "This file serves as an initializer for the agents module, importing and exposing key agent classes such as Orchestrator, BaseAgent, StructureAgent, DependencyAgent, and DocumentationAgent for use in the codedoc application. It centralizes access to these classes, allowing for streamlined integration and management of various agent functionalities.",
+      "role_in_system": "It acts as a central point for accessing various agent classes that perform different roles in the codedoc application, facilitating the coordination, structure management, dependency handling, and documentation generation within the system.",
+      "imports": [
+        "codedoc.agents.orchestrator",
+        "codedoc.agents.base_agent",
+        "codedoc.agents.structure_agent",
+        "codedoc.agents.dependency_agent",
+        "codedoc.agents.documentation_agent"
+      ],
+      "classes": [
+        {
+          "name": "Orchestrator",
+          "description": "Manages the coordination and execution of various agents."
+        },
+        {
+          "name": "BaseAgent",
+          "description": "Provides a base class for all agent types, defining common functionality."
+        },
+        {
+          "name": "StructureAgent",
+          "description": "Handles the structural aspects of the documentation."
+        },
+        {
+          "name": "DependencyAgent",
+          "description": "Manages dependencies within the documentation."
+        },
+        {
+          "name": "DocumentationAgent",
+          "description": "Facilitates the generation and management of documentation."
+        }
+      ],
+      "exports": [
+        "Orchestrator",
+        "BaseAgent",
+        "StructureAgent",
+        "DependencyAgent",
+        "DocumentationAgent"
+      ],
+      "key_concepts": [
+        "Module initialization",
+        "Class exposure"
+      ],
+      "usage_example": "from codedoc.agents import Orchestrator",
+      "_deps": {
+        "internal": [
+          "codedoc.agents.orchestrator",
+          "codedoc.agents.base_agent",
+          "codedoc.agents.structure_agent",
+          "codedoc.agents.dependency_agent",
+          "codedoc.agents.documentation_agent"
+        ],
+        "dependency_refs": [
+          "Orchestrator",
+          "BaseAgent",
+          "StructureAgent",
+          "DependencyAgent",
+          "DocumentationAgent"
+        ],
+        "catalog_updates": [
+          {
+            "name": "Orchestrator",
+            "type": "internal",
+            "used_for": "Manages the overall workflow of agents"
+          },
+          {
+            "name": "BaseAgent",
+            "type": "internal",
+            "used_for": "Base class for all agent implementations"
+          },
+          {
+            "name": "StructureAgent",
+            "type": "internal",
+            "used_for": "Handles the structure-related functionalities"
+          },
+          {
+            "name": "DependencyAgent",
+            "type": "internal",
+            "used_for": "Manages dependencies between agents"
+          },
+          {
+            "name": "DocumentationAgent",
+            "type": "internal",
+            "used_for": "Generates documentation for agents"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.agents.orchestrator import Orchestrator",
+            "used_for": "Used to coordinate the execution of various agents"
+          },
+          {
+            "import": "from codedoc.agents.base_agent import BaseAgent",
+            "used_for": "Provides a foundation for creating specific agent types"
+          },
+          {
+            "import": "from codedoc.agents.structure_agent import StructureAgent",
+            "used_for": "Utilized for managing the internal structure of the project"
+          },
+          {
+            "import": "from codedoc.agents.dependency_agent import DependencyAgent",
+            "used_for": "Facilitates the management of agent dependencies"
+          },
+          {
+            "import": "from codedoc.agents.documentation_agent import DocumentationAgent",
+            "used_for": "Responsible for creating and maintaining documentation"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/base_agent.py",
+          "codedoc/agents/dependency_agent.py",
+          "codedoc/agents/documentation_agent.py",
+          "codedoc/agents/orchestrator.py",
+          "codedoc/agents/structure_agent.py"
+        ]
+      }
+    },
+    {
+      "hash": "fb480f1846ce4c3cb07d7f3e8ba6c424e3f30d03f2d59b04eb6ff77d2feda02f",
+      "path": "codedoc/__init__.py",
+      "language": "python",
+      "description": "This file provides a lightweight interface for running the documentation pipeline of the codedoc project. It allows users to access the documentation functionality without loading unnecessary dependencies, ensuring that the initial import remains efficient.",
+      "role_in_system": "It serves as the main entry point for users to interact with the documentation pipeline, facilitating the lazy loading of the actual implementation from the codedoc.pipeline module only when needed.",
+      "imports": [
+        "codedoc.pipeline"
+      ],
+      "functions": [
+        {
+          "name": "run_pipeline",
+          "description": "Runs the documentation pipeline by importing the actual implementation lazily."
+        }
+      ],
+      "exports": [
+        "run_pipeline",
+        "__version__"
+      ],
+      "key_concepts": [
+        "Lazy loading"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.pipeline"
+        ],
+        "dependency_refs": [
+          "codedoc.pipeline"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.pipeline",
+            "type": "internal",
+            "used_for": "Documentation pipeline functionality"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "codedoc.pipeline",
+            "used_for": "Lazily imported to keep initial import lightweight"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/pipeline.py"
+        ],
+        "imported_by": [
+          "codedoc/bootstrap.py"
+        ]
+      }
+    },
+    {
+      "hash": "1bbfaa1ceb96f18f7d03c82eb9fd5f54b17fbf5144b62a3c734947358f87939c",
+      "path": "codedoc/__main__.py",
+      "language": "python",
+      "description": "This file allows the execution of the CLI when running the module with the command 'python -m codedoc'. It serves as the entry point for the codedoc application, invoking the main function from the CLI module.",
+      "role_in_system": "It connects to the codedoc codebase by serving as the main entry point for the command-line interface, facilitating user interaction with the application.",
+      "imports": [
+        "codedoc.cli.cli"
+      ],
+      "functions": [
+        {
+          "name": "main",
+          "description": "This function is the main entry point for the command-line interface."
+        }
+      ],
+      "exports": [
+        "main"
+      ],
+      "key_concepts": [
+        "entry point",
+        "command-line interface"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.cli.cli"
+        ],
+        "dependency_refs": [
+          "codedoc.cli.cli"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.cli.cli",
+            "type": "internal",
+            "used_for": "providing the main entry point for the CLI functionality"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.cli.cli import main",
+            "used_for": "invoking the main function of the CLI when the module is run as a script"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/cli/cli.py"
+        ]
+      }
+    },
+    {
+      "hash": "19fb34759d25e354de0860566db71c69d8ed2edf4600f2d3fc43358048700710",
+      "path": "codedoc/bootstrap.py",
+      "language": "python",
+      "description": "The bootstrap.py file performs runtime checks to ensure that the codedoc library is installed and can be imported in the current Python environment. It is designed to prevent the execution of further operations that depend on the codedoc package if it is not available, thereby maintaining the integrity of the application.",
+      "role_in_system": "This file acts as a preliminary check before any codedoc functionalities are utilized, ensuring that the necessary dependencies are met and providing logging for both successful imports and errors.",
+      "imports": [
+        "__future__",
+        "pathlib",
+        "codedoc.utils.logger",
+        "codedoc"
+      ],
+      "functions": [
+        {
+          "name": "ensure_codedoc_installed",
+          "description": "Checks if the codedoc package can be imported, logging the result."
+        }
+      ],
+      "key_concepts": [
+        "Runtime checks",
+        "Logging"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.utils.logger",
+          "codedoc"
+        ],
+        "external": [
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "codedoc.utils.logger",
+          "codedoc",
+          "pathlib"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc",
+            "type": "internal",
+            "used_for": "Main package for the codedoc project"
+          },
+          {
+            "name": "codedoc.utils.logger",
+            "type": "internal",
+            "used_for": "Logging utility for the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "pathlib",
+            "used_for": "Used for handling filesystem paths in a cross-platform way"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/__init__.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "pathlib"
+        ]
+      }
+    },
+    {
+      "hash": "45eb59ffb4a403fe6b0105c56ad7ab50e70fe4af30bc5bd0adf67e64339a7dd4",
+      "path": "codedoc/cli/__init__.py",
+      "language": "python",
+      "description": "This file serves as an entry point for the CLI functionality of the codedoc package by importing the main function from the cli module. It is designed to facilitate the execution of command-line operations related to the codedoc application.",
+      "role_in_system": "It acts as a bridge to expose the main command-line interface functionality of the codedoc application, allowing users to interact with the application through the command line.",
+      "imports": [
+        "codedoc.cli.cli"
+      ],
+      "exports": [
+        "main"
+      ],
+      "key_concepts": [
+        "entry point"
+      ],
+      "usage_example": "from codedoc.cli import main",
+      "_deps": {
+        "internal": [
+          "codedoc.cli.cli"
+        ],
+        "dependency_refs": [
+          "main"
+        ],
+        "catalog_updates": [
+          {
+            "name": "main",
+            "type": "internal",
+            "used_for": "entry point for the CLI functionality"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.cli.cli import main",
+            "used_for": "imports the main function to be used as the CLI entry point"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/cli/cli.py"
+        ]
+      }
+    },
+    {
+      "hash": "86c655d9cf5a93f24f356c606eb11030375cc2fcc3cba23c9bcf64733190371d",
+      "path": "codedoc/cli/cli.py",
+      "language": "python",
+      "description": "This file serves as the command-line interface (CLI) entry point for the codedoc tool, which generates documentation for codebases using AI. It provides a structured way for users to interact with the documentation generation process by parsing command-line arguments and executing the necessary functions to create documentation based on the specified parameters.",
+      "role_in_system": "It facilitates user interaction with the codedoc functionality by parsing command-line arguments, validating the project root, and initiating the documentation generation pipeline. This file acts as the main entry point for users to execute the codedoc tool, ensuring that all necessary configurations and options are handled correctly.",
+      "imports": [
+        "__future__",
+        "argparse",
+        "sys",
+        "pathlib",
+        "codedoc.pipeline",
+        "codedoc.utils.errors",
+        "traceback"
+      ],
+      "functions": [
+        {
+          "name": "build_parser",
+          "description": "Creates and configures an argument parser for handling command-line options."
+        },
+        {
+          "name": "main",
+          "description": "Processes command-line arguments, validates the project root, and initiates the documentation generation pipeline."
+        }
+      ],
+      "exports": [
+        "main"
+      ],
+      "key_concepts": [
+        "Argument parsing using argparse",
+        "Error handling for file operations",
+        "Configuration overrides for documentation generation"
+      ],
+      "usage_example": "from codedoc.cli import main",
+      "_deps": {
+        "internal": [
+          "codedoc.pipeline",
+          "codedoc.utils.errors"
+        ],
+        "external": [
+          "__future__",
+          "argparse",
+          "sys",
+          "pathlib",
+          "traceback"
+        ],
+        "dependency_refs": [
+          "__future__",
+          "argparse",
+          "sys",
+          "pathlib",
+          "codedoc.pipeline",
+          "codedoc.utils.errors",
+          "traceback"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.pipeline",
+            "type": "internal",
+            "used_for": "Handles the main pipeline for generating documentation"
+          },
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Defines custom error handling for the codedoc application"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "argparse",
+            "used_for": "Used to build a command-line interface for the codedoc tool"
+          },
+          {
+            "import": "sys",
+            "used_for": "Used for accessing command-line arguments and exiting the program"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Used for handling file system paths in a cross-platform manner"
+          },
+          {
+            "import": "traceback",
+            "used_for": "Used for printing stack traces in case of exceptions"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/pipeline.py",
+          "codedoc/utils/errors.py"
+        ],
+        "imported_by": [
+          "codedoc/__main__.py",
+          "codedoc/cli/__init__.py"
+        ],
+        "external_dependencies": [
+          "__future__",
+          "argparse",
+          "pathlib",
+          "sys",
+          "traceback"
+        ]
+      }
+    },
+    {
+      "hash": "75842151bbdf5d6cd9754e01eca04316be15f329563948f2111ab2f7937aa2db",
+      "path": "codedoc/parser/__init__.py",
+      "language": "python",
+      "description": "This file serves as an interface for the parser module, specifically exposing the functionality to parse files. It imports the 'parse_file' function from the factory module, allowing for the extraction of relevant information from files within the codedoc application.",
+      "role_in_system": "It acts as a central point for importing parsing capabilities from the factory module, facilitating file parsing operations within the codedoc application.",
+      "imports": [
+        "codedoc.parser.factory"
+      ],
+      "functions": [
+        {
+          "name": "parse_file",
+          "description": "Parses a file and extracts relevant information."
+        }
+      ],
+      "exports": [
+        "parse_file"
+      ],
+      "key_concepts": [
+        "module interface",
+        "file parsing"
+      ],
+      "usage_example": "from codedoc.parser import parse_file",
+      "_deps": {
+        "internal": [
+          "codedoc.parser.factory"
+        ],
+        "dependency_refs": [
+          "parse_file"
+        ],
+        "catalog_updates": [
+          {
+            "name": "parse_file",
+            "type": "internal",
+            "used_for": "parsing files within the codedoc project"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.parser.factory import parse_file",
+            "used_for": "used to parse files in the codedoc project"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/parser/factory.py"
+        ],
+        "imported_by": [
+          "codedoc/parser/factory.py"
+        ]
+      }
+    },
+    {
+      "hash": "80f20f2b9e314db774f3127bfdc1e968031fcb287a8083e63ec0fa0fd8fb2ce4",
+      "path": "codedoc/parser/factory.py",
+      "language": "python",
+      "description": "This file defines a parser factory that selects the appropriate parser module based on the file descriptor provided by the scanner and returns a list of extracted import strings. It is designed to handle various programming languages by mapping language tags to their corresponding parser modules, ensuring a deterministic parsing process without reliance on machine learning models.",
+      "role_in_system": "It serves as a central point for determining which parser to use for different programming languages, facilitating the parsing process in the broader application. By abstracting the parser selection logic, it allows for easy extension and maintenance of the parsing capabilities.",
+      "imports": [
+        "__future__",
+        "pathlib",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger",
+        "codedoc.parser"
+      ],
+      "functions": [
+        {
+          "name": "parse_file",
+          "description": "Parses a file based on its descriptor and returns a list of import strings."
+        }
+      ],
+      "key_concepts": [
+        "Parser mapping based on language tags",
+        "Error handling with custom ParseError"
+      ],
+      "_deps": {
+        "internal": [
+          "codedoc.utils.errors",
+          "codedoc.utils.logger",
+          "codedoc.parser"
+        ],
+        "external": [
+          "__future__",
+          "pathlib"
+        ],
+        "dependency_refs": [
+          "ParseError",
+          "get_logger"
+        ],
+        "catalog_updates": [
+          {
+            "name": "ParseError",
+            "type": "internal",
+            "used_for": "Error handling specific to parsing operations"
+          },
+          {
+            "name": "get_logger",
+            "type": "internal",
+            "used_for": "Logging functionality for the parser factory"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "__future__",
+            "used_for": "Enables postponed evaluation of type annotations"
+          },
+          {
+            "import": "pathlib",
+            "used_for": "Used for handling file paths in a platform-independent way"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/parser/__init__.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/parser/__init__.py",
+          "codedoc/pipeline.py"
+        ],
+        "external_dependencies": [
+          "__future__",
+          "pathlib"
+        ]
+      }
+    },
+    {
+      "hash": "73ba1a60b312b7410a055d278c1dceff05beacd3e04c6ddfd360dc55af40ae8f",
+      "path": "codedoc/pipeline.py",
+      "language": "python",
+      "description": "The pipeline.py file implements the main documentation generation pipeline for the codedoc project. It orchestrates the processing and recording of documentation outputs, ensuring data integrity and error handling throughout the execution process. The file includes various helper functions for detecting rate limits, managing live backups, and loading existing documentation files.",
+      "role_in_system": "This file serves as a core component of the codedoc project, connecting various modules such as the orchestrator, checkpoint management, and safe writing of output files. It facilitates the overall workflow of documentation generation, handling errors and ensuring that documentation outputs are correctly recorded and retrievable.",
+      "imports": [
+        "__future__",
+        "concurrent.futures",
+        "json",
+        "re",
+        "sys",
+        "time",
+        "pathlib",
+        "typing",
+        "codedoc.agents.orchestrator",
+        "codedoc.bootstrap",
+        "codedoc.core.checkpoint",
+        "codedoc.core.db",
+        "codedoc.core.safe_writer",
+        "codedoc.core.graph",
+        "codedoc.core.loader",
+        "codedoc.core.output",
+        "codedoc.core.project_view",
+        "codedoc.core.queue",
+        "codedoc.core.scanner",
+        "codedoc.llm.factory",
+        "codedoc.llm.rate_limit_profile",
+        "codedoc.parser.factory",
+        "codedoc.utils.errors",
+        "codedoc.utils.logger"
+      ],
+      "functions": [
+        {
+          "name": "_is_rate_limit_error",
+          "description": "Determines if an exception indicates a rate limit error by inspecting the exception message and its causes."
+        },
+        {
+          "name": "_detect_limit_type",
+          "description": "Classifies the type of rate limit from an error message string."
+        },
+        {
+          "name": "_build_default_ladder",
+          "description": "Constructs a step-down ladder for parallelism based on the maximum number of workers."
+        },
+        {
+          "name": "_parse_retry_after",
+          "description": "Extracts a Retry-After delay from the exception message chain."
+        },
+        {
+          "name": "_resolve_live_backup_path",
+          "description": "Returns the absolute path for the live JSON backup based on the output scenario."
+        },
+        {
+          "name": "_load_existing_file_docs",
+          "description": "Loads documentation from existing output files, prioritizing live backups and final JSON outputs."
+        }
+      ],
+      "classes": [
+        {
+          "name": "Orchestrator",
+          "description": "Manages the overall workflow of the documentation generation process."
+        },
+        {
+          "name": "Checkpoint",
+          "description": "Handles the saving and loading of checkpoints during the documentation process."
+        },
+        {
+          "name": "SafeWriter",
+          "description": "Ensures safe writing of output files, providing backup capabilities."
+        },
+        {
+          "name": "RateLimitProfile",
+          "description": "Defines the rate limit profile for managing API request limits."
+        },
+        {
+          "name": "ErrorReporter",
+          "description": "Handles error reporting and logging during the documentation process."
+        }
+      ],
+      "exports": [
+        "Orchestrator",
+        "Checkpoint",
+        "SafeWriter",
+        "RateLimitProfile",
+        "ErrorReporter"
+      ],
+      "key_concepts": [
+        "Rate limit detection",
+        "Checkpoint management",
+        "Safe writing of output files"
+      ],
+      "usage_example": "from codedoc.pipeline import Orchestrator",
+      "_deps": {
+        "internal": [
+          "codedoc.agents.orchestrator",
+          "codedoc.bootstrap",
+          "codedoc.core.checkpoint",
+          "codedoc.core.db",
+          "codedoc.core.safe_writer",
+          "codedoc.core.graph",
+          "codedoc.core.loader",
+          "codedoc.core.output",
+          "codedoc.core.project_view",
+          "codedoc.core.queue",
+          "codedoc.core.scanner",
+          "codedoc.llm.factory",
+          "codedoc.llm.rate_limit_profile",
+          "codedoc.parser.factory",
+          "codedoc.utils.errors",
+          "codedoc.utils.logger"
+        ],
+        "external": [
+          "__future__",
+          "concurrent.futures",
+          "json",
+          "re",
+          "sys",
+          "time",
+          "pathlib",
+          "typing"
+        ],
+        "dependency_refs": [
+          "Orchestrator",
+          "ensure_codedoc_installed",
+          "Checkpoint",
+          "compute_file_hash",
+          "SafeWriter",
+          "DependencyGraph",
+          "resolve_import",
+          "load_config",
+          "BUILD_FILENAME",
+          "preflight_output_targets",
+          "write_project_outputs",
+          "markdown_to_view",
+          "read_codedoc_meta",
+          "ProcessingQueue",
+          "detect_entry_file",
+          "scan_files",
+          "create_provider",
+          "RateLimitProfile",
+          "get_rate_limit_profile",
+          "parse_file",
+          "AgentError",
+          "ConfigError",
+          "ErrorReporter",
+          "LLMError",
+          "OutputError",
+          "ParseError",
+          "get_logger",
+          "set_level"
+        ],
+        "catalog_updates": [
+          {
+            "name": "Orchestrator",
+            "type": "internal",
+            "used_for": "Manages the orchestration of agents in the codedoc pipeline"
+          },
+          {
+            "name": "SafeWriter",
+            "type": "internal",
+            "used_for": "Handles safe writing of output files with live backup capabilities"
+          },
+          {
+            "name": "Checkpoint",
+            "type": "internal",
+            "used_for": "Manages checkpointing for the documentation process"
+          },
+          {
+            "name": "RateLimitProfile",
+            "type": "internal",
+            "used_for": "Defines rate limit profiles for API interactions"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "get_logger",
+            "used_for": "Used to initialize a logger for tracking events and errors in the pipeline"
+          }
+        ]
+      },
+      "links": {
+        "internal_dependencies": [
+          "codedoc/agents/orchestrator.py",
+          "codedoc/bootstrap.py",
+          "codedoc/core/checkpoint.py",
+          "codedoc/core/db.py",
+          "codedoc/core/graph.py",
+          "codedoc/core/loader.py",
+          "codedoc/core/output.py",
+          "codedoc/core/project_view.py",
+          "codedoc/core/queue.py",
+          "codedoc/core/safe_writer.py",
+          "codedoc/core/scanner.py",
+          "codedoc/llm/factory.py",
+          "codedoc/llm/rate_limit_profile.py",
+          "codedoc/parser/factory.py",
+          "codedoc/utils/errors.py",
+          "codedoc/utils/logger.py"
+        ],
+        "imported_by": [
+          "codedoc/__init__.py",
+          "codedoc/cli/cli.py"
+        ],
+        "external_dependencies": [
+          "__future__",
+          "concurrent.futures",
+          "json",
+          "pathlib",
+          "re",
+          "sys",
+          "time",
+          "typing"
+        ]
+      }
+    }
+  ]
+}
