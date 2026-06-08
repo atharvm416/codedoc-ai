@@ -94,3 +94,217 @@ class TestParserFactory:
         descriptor = {"path": p, "rel_path": "Main.java", "language": "java", "extension": ".java"}
         result = parse_file(descriptor)
         assert isinstance(result, list)
+
+class TestGoParserA3:
+    """A3: Go parser must not treat arbitrary string literals as imports."""
+
+    def test_single_and_block_imports_only(self, tmp_path):
+        f = tmp_path / "main.go"
+        f.write_text(
+            'package main\n'
+            'import "fmt"\n'
+            'import (\n'
+            '    "os"\n'
+            '    alias "github.com/x/y"\n'
+            '    _ "github.com/z/driver"\n'
+            ')\n'
+            'func main() {\n'
+            '    fmt.Println("hello world")\n'  # must NOT become an import
+            '    s := "not/an/import"\n'        # must NOT become an import
+            '}\n',
+            encoding="utf-8",
+        )
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert "fmt" in result
+        assert "os" in result
+        assert "github.com/x/y" in result
+        assert "github.com/z/driver" in result
+        assert "hello world" not in result
+        assert "not/an/import" not in result
+
+
+class TestHtmlParserA3:
+    """A3: HTML parser must not treat CSS <link href> as a code import."""
+
+    def test_script_src_kept_link_href_dropped(self, tmp_path):
+        f = tmp_path / "index.html"
+        f.write_text(
+            '<html><head>\n'
+            '<link rel="stylesheet" href="styles/app.css">\n'
+            '<link rel="icon" href="favicon.ico">\n'
+            '<script src="js/app.js"></script>\n'
+            '</head></html>\n',
+            encoding="utf-8",
+        )
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "html")
+        assert "js/app.js" in result
+        assert "styles/app.css" not in result
+        assert "favicon.ico" not in result
+
+
+class TestGoParserA3Comments:
+    """A3 follow-up: Go comments must not yield false imports; raw-string
+    (backtick) import paths are accepted."""
+
+    def test_comments_inside_import_block_ignored(self, tmp_path):
+        f = tmp_path / "main.go"
+        f.write_text(
+            'package main\n'
+            'import (\n'
+            '    "fmt" // formatting\n'
+            '    // "os" is intentionally commented out\n'
+            '    /* "net/http" disabled */\n'
+            '    "strings"\n'
+            ')\n',
+            encoding="utf-8",
+        )
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert "fmt" in result
+        assert "strings" in result
+        assert "os" not in result
+        assert "net/http" not in result
+
+    def test_commented_out_import_block_ignored(self, tmp_path):
+        f = tmp_path / "main.go"
+        f.write_text(
+            'package main\n'
+            '// import (\n'
+            '//     "fmt"\n'
+            '// )\n'
+            'import "strings"\n',
+            encoding="utf-8",
+        )
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert "strings" in result
+        assert "fmt" not in result
+
+    def test_backtick_import_path_supported(self, tmp_path):
+        f = tmp_path / "main.go"
+        f.write_text(
+            'package main\n'
+            'import `fmt`\n'
+            'import (\n'
+            '    `strings`\n'
+            ')\n',
+            encoding="utf-8",
+        )
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert "fmt" in result
+        assert "strings" in result
+
+
+class TestGoParserA3Escapes:
+    """Finding 3: interpreted Go string escapes are decoded; raw (backtick)
+    strings are left literal per the Go spec. The .go content is built from
+    chr() so Python's own parser cannot pre-decode the escape under test."""
+
+    def test_hex_escape_decoded(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        content = "package main" + nl + "import " + q + "f" + bs + "x6dt" + q + nl
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert "fmt" in result
+        assert ("f" + bs + "x6dt") not in result
+
+    def test_unicode_escape_decoded(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        content = "package main" + nl + "import " + q + bs + "u0066mt" + q + nl
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        assert "fmt" in parse(f, "go")
+
+    def test_utf8_hex_bytes_equal_unicode_escape_and_literal(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        escaped_bytes = "caf" + bs + "xc3" + bs + "xa9"
+        unicode_escape = "caf" + bs + "u00e9"
+        literal = "caf" + chr(0xE9)
+        content = (
+            "package main" + nl
+            + "import (" + nl
+            + q + escaped_bytes + q + nl
+            + q + unicode_escape + q + nl
+            + q + literal + q + nl
+            + ")" + nl
+        )
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        assert parse(f, "go") == [literal]
+
+    def test_utf8_hex_bytes_equal_unicode_escape_for_multibyte_rune(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        escaped_bytes = bs + "xe6" + bs + "x97" + bs + "xa5"
+        unicode_escape = bs + "u65e5"
+        literal = chr(0x65E5)
+        content = (
+            "package main" + nl
+            + "import (" + nl
+            + q + escaped_bytes + q + nl
+            + q + unicode_escape + q + nl
+            + q + literal + q + nl
+            + ")" + nl
+        )
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        assert parse(f, "go") == [literal]
+
+    def test_utf8_octal_bytes_equal_unicode_literal(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        escaped_bytes = "caf" + bs + "303" + bs + "251"
+        literal = "caf" + chr(0xE9)
+        content = (
+            "package main" + nl
+            + "import (" + nl
+            + q + escaped_bytes + q + nl
+            + q + literal + q + nl
+            + ")" + nl
+        )
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        assert parse(f, "go") == [literal]
+
+    def test_escaped_unicode_import_resolves_local_file(self, tmp_path):
+        nl, bs, q = chr(10), chr(92), chr(34)
+        name = "caf" + chr(0xE9)
+        source = "package main" + nl + "import " + q + "pkg/caf" + bs + "xc3" + bs + "xa9" + q + nl
+        main_go = tmp_path / "main.go"
+        main_go.write_text(source, encoding="utf-8")
+        (tmp_path / "pkg").mkdir()
+        (tmp_path / "pkg" / f"{name}.go").write_text("package cafe\n", encoding="utf-8")
+
+        from codedoc.core.graph import resolve_import
+        from codedoc.parser.generic_parser import parse
+
+        imports = parse(main_go, "go")
+        all_files = {"main.go", f"pkg/{name}.go"}
+        assert imports == [f"pkg/{name}"]
+        assert resolve_import(imports[0], "main.go", all_files, tmp_path) == f"pkg/{name}.go"
+
+    def test_normal_path_with_no_escape_unchanged(self, tmp_path):
+        nl, q = chr(10), chr(34)
+        content = "package main" + nl + "import " + q + "github.com/x/y" + q + nl
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        assert "github.com/x/y" in parse(f, "go")
+
+    def test_raw_backtick_string_is_literal(self, tmp_path):
+        nl, bs, bt = chr(10), chr(92), chr(96)
+        body = bt + "f" + bs + "x6dt" + bt
+        content = "package main" + nl + "import " + body + nl
+        f = tmp_path / "main.go"
+        f.write_text(content, encoding="utf-8")
+        from codedoc.parser.generic_parser import parse
+        result = parse(f, "go")
+        assert ("f" + bs + "x6dt") in result
+        assert "fmt" not in result

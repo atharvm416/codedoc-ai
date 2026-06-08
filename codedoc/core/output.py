@@ -34,6 +34,56 @@ PROJECT_MARKDOWN = "codedoc.md"
 BUILD_FILENAME = ".codedoc_build.json"
 
 
+def preflight_output_targets(
+    output_dir: Path,
+    output_format: str,
+    json_filename: str,
+    md_filename: str,
+    live_backup_path: Path | None = None,
+) -> None:
+    """Raise ConfigError if any final output target is foreign-owned.
+
+    Call this before scan_files() and create_provider() so a foreign file
+    that would block the final write fails immediately without wasting tokens.
+    When the output directory does not yet exist all targets are new — returns
+    immediately without raising.
+    """
+    if not output_dir.exists():
+        return
+
+    if output_format in ("json", "both"):
+        _check_file_ownership(output_dir / json_filename)
+    if output_format in ("md", "both"):
+        _check_file_ownership(output_dir / md_filename)
+
+    # For md-only runs the live backup is a JSON sibling of the MD file.
+    # A foreign sibling would block SafeWriter.initialize_empty() after scanning,
+    # so preflight it now with the same acceptance rules as SafeWriter.load():
+    # the file is accepted if it does not exist, or if it contains a _codedoc key.
+    if output_format == "md" and live_backup_path is not None:
+        _check_md_live_backup_ownership(live_backup_path)
+
+
+def _check_md_live_backup_ownership(path: Path) -> None:
+    """Accept the MD live-backup JSON sibling if it is CodeDoc-owned or absent."""
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
+        if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
+            return
+    except Exception:
+        pass
+    raise ConfigError(
+        f"'{path.name}' already exists but does not appear to be a codedoc "
+        "output file.\n"
+        "codedoc will not overwrite it to protect your data.\n\n"
+        "To resolve this, choose one of:\n"
+        f"  • Use a different output directory:   codedoc run --output my_docs/\n"
+        f"  • Delete or rename the conflicting file:  {path}"
+    )
+
+
 def write_project_outputs(
     records: list[dict],
     stats: dict,

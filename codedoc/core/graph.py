@@ -126,6 +126,13 @@ def resolve_import(
     return None
 
 
+# Must stay in sync with DEFAULTS["extension_language_map"] in loader.py.
+_KNOWN_EXTENSIONS = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html", ".htm",
+    ".kt", ".swift", ".go", ".rb", ".rs", ".cpp", ".c", ".h", ".hpp",
+}
+
+
 def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
     current = PurePosixPath(_to_posix(current_file))
     current_dir = current.parent
@@ -142,7 +149,7 @@ def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
         candidates.append(_normalize_posix(str(current_dir / import_str)))
     elif import_str.startswith("."):
         candidates.append(_resolve_python_relative(import_str, current_dir))
-    elif suffix:
+    elif suffix and suffix in _KNOWN_EXTENSIONS:
         candidates.append(_normalize_posix(import_str))
         candidates.append(_normalize_posix(str(current_dir / import_str)))
     elif "/" in import_str or "\\" in import_str:
@@ -186,7 +193,7 @@ def _match_candidate(candidate: str, known: dict[str, str]) -> str | None:
 
 
 def _candidate_variants(candidate: str) -> list[str]:
-    extensions = [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"]
+    extensions = sorted(_KNOWN_EXTENSIONS)
     variants = [candidate]
 
     suffix = PurePosixPath(candidate).suffix

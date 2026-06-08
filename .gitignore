@@ -18,12 +18,13 @@ env/
 .env
 
 # codedoc output
-docs_output/
 error.log
 codedoc_db.json
 
 # Testing
 .pytest_cache/
+.pytest_tmp/
+.pyt_tmp/
 tmp/
 .tmp/
 .tmp*/

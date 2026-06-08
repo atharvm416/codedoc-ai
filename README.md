@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.8.0`.
+Current release: `0.9.1`.
 
 ## What It Does
 
@@ -55,6 +55,7 @@ codedoc run
 | Live JSON backup | always on (0.8.0 default) |
 | Rate-limit adaptive | `true` |
 | Max file size | `500 KB` |
+| Max content chars | `12000` |
 
 Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
 
@@ -304,7 +305,47 @@ Create `codedoc.config.json` in the project being documented:
   "parallel_ladder": null,
   "respect_retry_after": true,
   "retry_after_cap_s": 30,
+  "rate_limit_backoff_s": null,
+  "rate_limit_backoff_scale": null,
+  "rate_limit_signals_add": [],
+  "rate_limit_signals_remove": [],
   "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
+  "skip_dirs_add": [],
+  "skip_dirs_remove": [],
+  "max_content_chars": 12000,
+  "extension_language_map": {
+    ".py": "python",
+    ".ts": "typescript",
+    ".tsx": "tsx",
+    ".js": "javascript",
+    ".jsx": "jsx",
+    ".dart": "dart",
+    ".java": "java",
+    ".cs": "csharp",
+    ".html": "html",
+    ".htm": "html",
+    ".kt": "kotlin",
+    ".swift": "swift",
+    ".go": "go",
+    ".rb": "ruby",
+    ".rs": "rust",
+    ".cpp": "cpp",
+    ".c": "c",
+    ".h": "c",
+    ".hpp": "cpp"
+  },
+  "extension_language_map_add": {},
+  "extension_language_map_remove": [],
+  "auto_entry_candidates": ["index.html", "main.tsx", "main.ts", "main.js", "main.py", "main.dart", "Main.java", "Program.cs"],
+  "auto_entry_candidates_add": [],
+  "auto_entry_candidates_remove": [],
+  "provider_prefixes": {
+    "anthropic": ["claude"],
+    "gemini": ["gemini"],
+    "openai": ["gpt-", "o1", "o3", "text-"]
+  },
+  "provider_prefixes_add": {},
+  "provider_prefixes_remove": {},
   "ignore_paths": ["/myenv", "services/generated"]
 }
 ```
@@ -333,6 +374,21 @@ Parallelism settings:
 | `file_retry_attempts` | Number of sequential retries for a failed file. Default: `1`. |
 | `max_consecutive_failures` | Stops the run after repeated failures so provider/API problems are visible quickly. Default: `5`. |
 
+Configurable defaults added in 0.8.1:
+
+| Setting | Purpose |
+| --- | --- |
+| `skip_dirs`, `skip_dirs_add`, `skip_dirs_remove` | Replace, extend, or reduce directory names skipped anywhere in the tree. Use `--remove-skip-dir codedoc` to document this package source while codedoc still skips its output directory. |
+| `extension_language_map`, `extension_language_map_add`, `extension_language_map_remove` | Control which extensions are scanned and what language label each gets. Any extension in the resolved map is supported. |
+| `auto_entry_candidates`, `auto_entry_candidates_add`, `auto_entry_candidates_remove` | Control first-run entry auto-detection when `--entry` is omitted. |
+| `provider_prefixes`, `provider_prefixes_add`, `provider_prefixes_remove` | Control model-name based provider auto-detection and matching API-key lookup. |
+
+Configurable settings added in 0.9.0:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `max_content_chars` | `12000` | Maximum characters of file content sent to the LLM per file. Files longer than this are truncated and an INFO log line is emitted with the file path and character counts. Raise this for large-context providers (`60000`–`100000`). Must be at least `1000`. |
+
 ## Environment Variables
 
 Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
@@ -357,6 +413,7 @@ Supported variables:
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
 | `LOG_LEVEL` | `INFO`, `DEBUG`, etc. |
 | `CODEDOC_IGNORE_PATHS` | Semicolon-separated ignore paths. |
+| `CODEDOC_MAX_CONTENT_CHARS` | Maximum characters of file content sent to the LLM. Equivalent to `max_content_chars` in config. |
 
 Example `.env` for OpenAI:
 
@@ -598,7 +655,7 @@ with the final clean output.
 and now has no effect — live backup is always on. Passing it prints a deprecation
 notice. It will be removed in a future release.
 
-### Adaptive rate-limit parallelism (0.8.0)
+### Adaptive rate-limit parallelism (0.8.1)
 
 When a provider signals 429 / rate-limit / quota-exceeded, codedoc automatically
 steps down file-level concurrency instead of hammering the API:
@@ -620,9 +677,34 @@ Customize it in config:
 }
 ```
 
-Provider-specific rate-limit signals are recognised for OpenAI (`429`,
-`rate_limit_exceeded`, `tpm`), Anthropic (`529`, `overloaded`), and Gemini
-(`RESOURCE_EXHAUSTED`, `quota`). Non-rate-limit errors never trigger a step-down.
+Provider-specific rate-limit signals are recognised for OpenAI (`429`, `rate limit`,
+`rate_limit`, `too many requests`, `tokens per min`, `tpm`, `quota`), Anthropic
+(`529`, `overloaded`, `rate_limit`, `429`), and Gemini (`resource_exhausted`,
+`quota`, `429`, `503`). Non-rate-limit errors never trigger a step-down.
+
+In 0.8.1, codedoc sleeps between parallel step-down rungs using provider-aware
+backoff. You can tune this in config:
+
+```json
+{
+  "rate_limit_backoff_s": null,
+  "rate_limit_backoff_scale": null,
+  "rate_limit_signals_add": ["capacity exceeded", "throttled"],
+  "rate_limit_signals_remove": ["503"]
+}
+```
+
+Set `rate_limit_backoff_s` to `0` to disable computed inter-rung backoff.
+`Retry-After` hints are still honored when `respect_retry_after` is true.
+
+### Lossless Markdown regeneration (0.8.1)
+
+Markdown output remains human-readable, but codedoc now embeds a hidden
+base64-encoded public JSON view in a `<!-- codedoc-ai-view-base64 ... -->`
+comment. This lets later Markdown-to-JSON conversion and incremental re-runs
+recover dependency catalogs, per-file dependency metadata, links, and hashes
+without another LLM call. Legacy Markdown without the embedded view still uses
+the best-effort visible Markdown parser.
 
 ### Issue log (`error.log`)
 
@@ -640,11 +722,16 @@ Only hard file failures are surfaced there.
 
 ### Ownership guard
 
-Before writing, `codedoc` checks that any existing file at the target path was
-produced by codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->`
-comment in Markdown). If the file is foreign, malformed, or empty, the run stops
-with a clear `ConfigError` instead of overwriting it. Choose a different
-`--output` directory or remove the conflicting file to proceed.
+`codedoc` checks that any existing file at the target path was produced by
+codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->` comment
+in Markdown). If the file is foreign, malformed, or empty, the run stops with a
+clear `ConfigError`. Choose a different `--output` directory or remove the
+conflicting file to proceed.
+
+**Preflight (0.9.0).** The ownership check now runs *before* any filesystem
+changes, directory creation, scanning, or LLM calls. A foreign target that would
+block the final write is caught immediately — no tokens are spent and no output
+directory is created.
 
 ### More detail
 

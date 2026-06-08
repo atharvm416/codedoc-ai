@@ -184,16 +184,24 @@ def test_A7_unsupported_extension_raises_error(tmp_path):
         assert "txt" in str(e).lower() or "unsupported" in str(e).lower()
 
 
-def test_A8_no_entry_no_docs_raises_error(tmp_path):
-    """A8: no --entry, no existing docs → ConfigError with clear message."""
-    from codedoc.pipeline import run_pipeline
-    from codedoc.utils.errors import ConfigError
+def test_A8_no_entry_no_docs_proceeds_to_auto_detection(tmp_path):
+    """A8 (0.8.1): no --entry, no existing docs → pipeline must NOT raise early.
+    _resolve_entry_and_docs() returns quietly; detect_entry_file() handles
+    auto-detection at scan time.  The old 'No entry point specified' error
+    was removed in 0.8.1 so first runs work without an explicit --entry flag.
+    """
+    from codedoc.core.loader import load_config
+    from codedoc.pipeline import _resolve_entry_and_docs
+
     (tmp_path / "some_file.py").write_text("x=1\n")
-    try:
-        run_pipeline(tmp_path, {"output_dir": "docs_output", "output_format": "json"})
-        assert False, "Should have raised ConfigError"
-    except ConfigError as e:
-        assert "entry" in str(e).lower()
+    config = load_config(tmp_path, {"output_dir": "docs_output", "output_format": "json"})
+    config["entry_file"] = None
+
+    # Must NOT raise — pipeline proceeds to detect_entry_file() / process-all-files fallback
+    _resolve_entry_and_docs(tmp_path, config)
+    assert config.get("entry_file") is None, (
+        "entry_file must remain None so detect_entry_file() can attempt auto-detection"
+    )
 
 
 def test_A9_format_both_named_file_raises_error(tmp_path):
@@ -541,33 +549,50 @@ def test_E3_entry_not_found_no_docs_raises(tmp_path):
         pass
 
 
-def test_E4_entry_unsupported_extension_warns_all_files(tmp_path, monkeypatch, caplog):
-    """E4: --entry entry.txt (exists, unsupported ext) → warning logged, all files documented."""
-    import logging
+def test_E4_entry_unsupported_extension_raises(tmp_path, monkeypatch):
+    """E4 (A2): --entry entry.txt (exists, unsupported ext, so not scanned) must
+    raise ConfigError, not silently document the whole repo."""
+    import pytest
+
+    from codedoc.utils.errors import ConfigError
     patch_provider(monkeypatch)
     (tmp_path / "other.py").write_text("x=1\n")
     (tmp_path / "entry.txt").write_text("entrypoint\n")
     from codedoc.pipeline import run_pipeline
-    with caplog.at_level(logging.WARNING, logger="codedoc.pipeline"):
-        stats = run_pipeline(tmp_path, {"entry_file": "entry.txt",
-                                         "output_format": "json",
-                                         "propagate_changes": False,
-                                         "parallel_agents": False})
-    assert stats["checked"] >= 1
-    assert any("not found in the scanned file set" in r.message for r in caplog.records)
+    with pytest.raises(ConfigError) as exc_info:
+        run_pipeline(tmp_path, {"entry_file": "entry.txt",
+                                "output_format": "json",
+                                "propagate_changes": False,
+                                "parallel_agents": False})
+    assert "scanned file set" in str(exc_info.value)
 
 
-def test_E5_entry_missing_file_all_files_documented(tmp_path, monkeypatch):
-    """E5: --entry nonexistent.py → scanner warns, detect_entry_file returns None,
-    pipeline falls back to documenting all files."""
+def test_E5_entry_missing_file_raises(tmp_path, monkeypatch):
+    """E5 (A2): --entry nonexistent.py must raise ConfigError instead of falling
+    back to documenting all files."""
+    import pytest
+
+    from codedoc.utils.errors import ConfigError
     patch_provider(monkeypatch)
     (tmp_path / "other.py").write_text("x=1\n")
     from codedoc.pipeline import run_pipeline
-    stats = run_pipeline(tmp_path, {"entry_file": "nonexistent.py",
-                                     "output_format": "json",
-                                     "propagate_changes": False,
-                                     "parallel_agents": False})
-    # Should not raise — documents all found files
+    with pytest.raises(ConfigError) as exc_info:
+        run_pipeline(tmp_path, {"entry_file": "nonexistent.py",
+                                "output_format": "json",
+                                "propagate_changes": False,
+                                "parallel_agents": False})
+    assert "was not found" in str(exc_info.value)
+
+
+def test_E6_no_entry_still_documents_all_files(tmp_path, monkeypatch):
+    """E6 (A2 guard): with NO entry specified, auto-detection finding nothing must
+    still fall back to documenting all files (the legitimate path)."""
+    patch_provider(monkeypatch)
+    (tmp_path / "other.py").write_text("x=1\n")
+    from codedoc.pipeline import run_pipeline
+    stats = run_pipeline(tmp_path, {"output_format": "json",
+                                    "propagate_changes": False,
+                                    "parallel_agents": False})
     assert stats["checked"] >= 1
 
 

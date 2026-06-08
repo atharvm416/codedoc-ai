@@ -1,5 +1,255 @@
 # Changelog
 
+## 0.9.1 - 2026-06-08
+
+### Bug-fix stabilization patch (first PyPI release)
+
+Corrective-only patch. No new features or output-shape changes.
+
+- **A1 — entry-reachability is no longer silent.** When an entry is given,
+  files not reachable from it were dropped without notice. `_select_files` now
+  logs a clear WARNING listing the excluded files, records `stats["entry_excluded"]`,
+  and the CLI prints an excluded-files line. (The structural selection fix is
+  tracked for a later minor; this patch only removes the silent failure.)
+- **A2 — a wrong `--entry` no longer silently documents the whole repo.** An
+  explicitly specified entry that cannot be resolved, is not in the scanned set,
+  resolves outside the project root, or is given when **no** supported files are
+  scanned, now raises `ConfigError` instead of falling back to all files or
+  exiting successfully. Auto-detection with no entry still documents everything.
+- **A3 — parser false imports fixed.** The Go parser no longer treats arbitrary
+  string literals (e.g. `fmt.Println("hi")`) as imports — only string-literal
+  paths in `import "..."` statements and `import ( ... )` blocks are read,
+  comments are ignored, and raw-string (backtick) paths are supported.
+  Interpreted literals use Go's byte-accurate escape semantics, including
+  multi-byte UTF-8 `\xNN` / octal sequences and Unicode escapes. The HTML parser
+  no longer treats CSS `<link href>` as a code import (kept `<script src>` and
+  JS imports).
+- **A4 — no stale/empty record substituted for a real one.** In the parallel
+  batch, a rate-limited file was treated as "already recorded" using state that
+  also included records **preloaded** from a prior run, so a *changed* file could
+  be restored from stale documentation instead of retried. `SafeWriter` now
+  tracks records written *this run* (`recorded_this_run()`); a changed,
+  rate-limited file is retried, and a file genuinely recorded this run recovers
+  its real record via `get_record()` (never an empty `{}`).
+- **A5 — honest interrupt message.** Removed dead code; the Ctrl-C message is now
+  conditional ("…if the run reached file processing") so it never falsely claims
+  progress was saved when interrupted before any file was processed.
+- **A6 — scanner is re-entrant.** The directory walker no longer stores state on
+  the function object; state lives on a per-scan `_Walker` instance.
+- **Version identity.** `pyproject.toml`, `codedoc.__version__`, the CLI
+  `--version`, and the README all report `0.9.1`, and the automated test
+  (`test_version_identity_consistent`) enforces agreement across **all four**,
+  including the README "Current release" line.
+- **Reliable tests.** `tests/conftest.py` redirects the temp root into the repo
+  (`.pyt_tmp`) so a locked system temp dir does not make the suite unrunnable.
+  (This addresses the observed locked-system-temp failure; it is not a guarantee
+  for every environment.)
+
+## 0.9.0 - 2026-06-04
+
+### Output preflight safety, clean INFO logs, extension list fix, configurable content truncation
+
+---
+
+#### G0 — Output Preflight Safety
+
+Foreign output targets now fail immediately with a `ConfigError` before the
+scanner runs, the provider initialises, or any LLM API call is made. Previously
+a foreign file at the target path would only be detected inside
+`write_project_outputs`, after all tokens had already been spent.
+
+- **`codedoc/core/output.py`**: Added `preflight_output_targets()` which calls
+  `_check_file_ownership()` for all final public targets (JSON, MD, both) and a
+  new `_check_md_live_backup_ownership()` for the MD live-backup JSON sibling.
+- **`codedoc/pipeline.py`**: Calls `preflight_output_targets()` immediately after
+  output spec resolution, before `scan_files()` and `create_provider()`.
+- **`codedoc/core/loader.py`**: `_resolve_output_spec()` now only emits the
+  format-conflict warning when `--format` was explicitly passed by the user (not
+  when the default `"json"` value from DEFAULTS triggers a mismatch).
+
+#### G1 — Clean Log Output
+
+Third-party HTTP libraries (`httpx`, `httpcore`, `openai`, `anthropic`,
+`google.auth`) are now silenced at WARNING level by default. At `--verbose` /
+DEBUG the HTTP diagnostics are restored. Per-agent progress lines appear at INFO
+so users can see what codedoc is doing at each step.
+
+- **`codedoc/utils/logger.py`**: `_NOISY_LOGGERS` constant defines the list;
+  `_configure()` sets those loggers to WARNING; `set_level()` lowers them to
+  DEBUG when the root logger is set to DEBUG.
+- **`codedoc/agents/orchestrator.py`**: Added timing via `time.monotonic()` and
+  INFO/WARNING log lines after each agent: `[FILE] path | structure ok  0.8s`,
+  `[FILE] path | dependencies ok  0.9s`, `[FILE] path | documentation ok  1.2s`.
+  Fallbacks emit WARNING with `"fallback"` in the message.
+
+#### G5 — Extension List Consistency
+
+`_candidate_variants()` in `graph.py` used a hardcoded 9-extension list that
+was out of sync with `_KNOWN_EXTENSIONS` and `DEFAULTS["extension_language_map"]`.
+Import resolution for Go, Kotlin, Swift, Rust, Ruby, and C-family files silently
+produced no candidates.
+
+- **`codedoc/core/graph.py`**: `_KNOWN_EXTENSIONS` expanded to all 19 extensions
+  in `DEFAULTS["extension_language_map"]`. `_candidate_variants()` now uses
+  `sorted(_KNOWN_EXTENSIONS)` instead of a separate hardcoded list. A comment
+  notes the sync requirement with `loader.py`.
+
+#### G6 — Configurable Content Truncation
+
+Files above 12,000 characters were silently truncated with a DEBUG-only log.
+Users saw degraded documentation for large files with no indication why.
+
+- **`codedoc/core/loader.py`**: `max_content_chars` added to `DEFAULTS` (12000)
+  and `_ENV_KEY_MAP` (`CODEDOC_MAX_CONTENT_CHARS`). Validation requires a positive
+  integer ≥ 1000.
+- **`codedoc/agents/base_agent.py`**: Removed module-level `_MAX_CONTENT_CHARS`
+  constant. `BaseAgent.__init__` now accepts `max_content_chars: int = 12000`.
+  `_truncate()` uses `self._max_content_chars` and logs at INFO with the file
+  path and original / truncated character counts.
+- **`codedoc/agents/orchestrator.py`**: `Orchestrator.__init__` accepts
+  `max_content_chars: int = 12000` and forwards it to each agent.
+- **`codedoc/pipeline.py`**: Passes `config.get("max_content_chars", 12000)` to
+  the `Orchestrator` constructor.
+- All three agent subclasses pass `file_path` to `_truncate()` for accurate logs.
+
+---
+
+## 0.8.1 - 2026-06-02
+
+### Lossless Markdown, placeholder sanitization, configurable defaults, provider-aware rate-limit backoff
+
+---
+
+#### Workstream A — Lossless Markdown View
+
+Markdown output now embeds the complete public JSON view as a hidden base64
+comment so `json_from_markdown()` (and incremental re-runs that read a `.md`
+file) recover the full dependency catalog, per-file hashes, and all dependency
+metadata without any information loss.
+
+- **`codedoc/core/project_view.py`**:
+  - `markdown_from_view()` writes a `<!-- codedoc-ai-view-base64 ... -->` block
+    immediately after the legacy `<!-- codedoc-ai: ... -->` metadata comment.
+    The block is standard base64-encoded UTF-8 JSON, which avoids comment-safety
+    issues with raw `--` or `-->` sequences in generated text.
+  - `markdown_to_view()` now tries the embedded view first (fast, lossless path);
+    falls back to the existing visible Markdown parser for pre-0.8.1 files.
+  - New public helper `read_embedded_view(markdown)` decodes and validates the
+    embedded block; returns `None` on any failure so callers fall back safely.
+  - `read_codedoc_meta()` no longer raises `ConfigError` when `entry_file` is
+    `null`; a valid CodeDoc file with no entry point is now correctly identified
+    as owned rather than foreign.
+- **`codedoc/pipeline.py`**:
+  - `_load_existing_file_docs_from_md()` preserves file hashes from the embedded
+    view when the lightweight metadata comment has no hash for a path.
+  - `_resolve_entry_and_docs()` no longer raises unconditionally when no existing
+    output is found; first runs without `--entry` now reach `detect_entry_file()`
+    for auto-detection instead of failing immediately.
+
+#### Workstream B — Placeholder Usage Example Sanitization
+
+LLM-generated usage examples that contain placeholder package names (e.g.
+`import 'package:your_package/...'`) are now removed before any output is
+written or cached.
+
+- **`codedoc/core/project_view.py`**: `_clean_file()` calls the new
+  `_sanitize_usage_example()` helper, which checks against `_PLACEHOLDER_PATTERN`
+  (a compiled `re.IGNORECASE` regex with word-boundary guards).  Covered
+  placeholders: `your_package_name`, `your_package`, `your_project`, `your_app`,
+  `example_package`, `my_package`, and Dart-style `package:example/`.
+  Sanitization is idempotent and applies to both freshly generated records and
+  cached/reused records loaded from prior output files.
+
+#### Workstream C — Configurable Hardcoded Defaults
+
+All previously hardcoded scanner and provider defaults are now driven by a
+single source of truth in `DEFAULTS` (`loader.py`) and support `_add` / `_remove`
+override keys.
+
+- **`codedoc/core/loader.py`**:
+  - `DEFAULTS` gains eleven new keys: `skip_dirs_add`, `skip_dirs_remove`,
+    `extension_language_map` (full 18-entry map), `extension_language_map_add`,
+    `extension_language_map_remove`, `auto_entry_candidates`,
+    `auto_entry_candidates_add`, `auto_entry_candidates_remove`,
+    `provider_prefixes`, `provider_prefixes_add`, `provider_prefixes_remove`.
+  - Three resolver helpers implement the resolution order (replace → `_add` →
+    `_remove`): `_resolve_list_override`, `_resolve_dict_override`,
+    `_resolve_nested_list_dict_override`.
+  - `_apply_config_overrides()` is called after all config sources are merged;
+    it resolves all four configurable keys and derives `supported_extensions`
+    from the resolved `extension_language_map`.
+  - Backward-compat bridge: if `supported_extensions` was explicitly set to a
+    value different from the defaults, it is used as a filter on
+    `extension_language_map` so old configs continue to restrict scanning as
+    intended.
+- **`codedoc/core/scanner.py`**:
+  - Hardcoded `SKIP_DIRS` and `EXTENSION_LANGUAGE_MAP` removed.
+  - `scan_files()` receives `extension_language_map` (primary) instead of
+    `supported_extensions`.  A positional-list guard handles legacy callers
+    that pass a list as the second argument.
+  - `detect_entry_file()` receives the resolved `auto_entry_candidates` list;
+    falls back to a module-level default for direct callers.
+- **`codedoc/pipeline.py`**: passes `extension_language_map` and
+  `auto_entry_candidates` to the scanner; always appends the output directory
+  name to the scan skip list (even when the user removed it via
+  `--remove-skip-dir`) to prevent codedoc from documenting its own output.
+- **`codedoc/cli/cli.py`**: three new flags: `--skip-dirs DIR [...]`,
+  `--add-skip-dir DIR` (repeatable), `--remove-skip-dir DIR` (repeatable).
+- **`codedoc/llm/factory.py`**: `create_provider()`, `_make_api()`,
+  `_resolve_api_provider()`, and `_provider_api_key()` all accept and use
+  `provider_prefixes` from config; module-level tuples kept as fallbacks.
+
+#### Workstream D — Provider-Aware Rate-Limit Backoff
+
+Parallel ladder step-downs now sleep between rungs using provider-aware
+exponential backoff, with optional `Retry-After` hint parsing.
+
+- **`codedoc/llm/rate_limit_profile.py`** *(new)*:
+  - `RateLimitProfile` dataclass — `provider`, `signals`, `min_backoff_s`,
+    `backoff_scale`.
+  - `PROVIDER_PROFILES` — preconfigured profiles for `openai`, `anthropic`,
+    `gemini`, and `default`.
+  - `get_rate_limit_profile(provider_name, config)` — returns the resolved
+    profile with `rate_limit_backoff_s`, `rate_limit_backoff_scale`,
+    `rate_limit_signals_add`, and `rate_limit_signals_remove` applied without
+    mutating module defaults.
+- **`codedoc/pipeline.py`**:
+  - `_is_rate_limit_error(exc, profile=None)` — when a `profile` is supplied,
+    checks only `profile.signals`; falls back to `_RATE_LIMIT_SIGNALS` for
+    backward compatibility with callers without a profile.
+  - `_detect_limit_type(error_msg)` — classifies errors as `"tpm"`, `"rpm"`,
+    `"quota"`, `"overloaded"`, or `None`.
+  - `_process_descriptor_batch()` return type changed:
+    `retry_rate_limited` is now `list[tuple[dict, Exception]]` so the causing
+    exception is preserved for `Retry-After` parsing and error sampling.
+  - `_process_agent_files()`: fetches the provider profile, passes it to
+    `_process_descriptor_batch()`, and sleeps between rungs using:
+    - `min(Retry-After, retry_after_cap_s)` when a hint is present and
+      `respect_retry_after = True`,
+    - `min(min_backoff_s × backoff_scale ^ rung, retry_after_cap_s)` otherwise,
+    - no sleep when `rate_limit_backoff_s = 0`.
+  - Rate-limit warning dicts now include: `retry_after_s`, `sleep_s`,
+    `error_sample`, `limit_type`, `event_number`, `rung_index`.
+- **`codedoc/core/loader.py`**: four new `DEFAULTS` keys:
+  `rate_limit_backoff_s`, `rate_limit_backoff_scale`, `rate_limit_signals_add`,
+  `rate_limit_signals_remove`.
+- **`codedoc/cli/cli.py`**: compact rate-limit summary line printed only when
+  step-down events occurred; shows event count, providers, and total sleep time.
+
+#### Version
+
+- `codedoc/__init__.py`, `pyproject.toml`, `cli.py`: `0.8.0` → `0.8.1`.
+
+#### Validation
+
+- Added regression coverage for lossless Markdown regeneration, placeholder
+  sanitization, configurable defaults, provider-aware rate-limit backoff, and
+  rate-limit edge cases.
+- Full test suite passes.
+- Built sdist/wheel and verified release metadata with `twine check`.
+
+---
+
 ## 0.8.0 - 2026-05-31
 
 ### Always-on live JSON crash backup, parallel crash-safety, rate-limit adaptive parallelism, error.log overhaul

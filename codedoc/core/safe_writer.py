@@ -106,6 +106,11 @@ class SafeWriter:
         self._file_map: dict[str, dict] = file_map
         self._lock: threading.Lock = threading.Lock()
         self._clean_records: dict[str, dict] = {}
+        # rel_paths actually written via record() during THIS run, as opposed to
+        # records preloaded from a prior output by load().  Used to decide whether
+        # a rate-limited file may be treated as "already done" (only if a worker
+        # recorded it this run) or must be retried (A4).
+        self._recorded_this_run: set[str] = set()
         self._queue_order: list[str] = []
         self._created_at: str = datetime.now(timezone.utc).isoformat()
 
@@ -229,6 +234,7 @@ class SafeWriter:
 
         with self._lock:
             self._clean_records[rel_path] = clean
+            self._recorded_this_run.add(rel_path)
             self._flush_locked()
 
     def has_record(self, rel_path: str) -> bool:
@@ -239,6 +245,29 @@ class SafeWriter:
         """
         with self._lock:
             return rel_path in self._clean_records
+
+    def recorded_this_run(self, rel_path: str) -> bool:
+        """Return True only if *rel_path* was written via ``record()`` this run.
+
+        Unlike :meth:`has_record`, this excludes records preloaded by
+        :meth:`load` from a prior output.  The rate-limit retry logic uses this
+        so a *changed* file that was merely preloaded (stale) is retried rather
+        than silently restored from old documentation (A4).
+        """
+        with self._lock:
+            return rel_path in self._recorded_this_run
+
+    def get_record(self, rel_path: str) -> dict | None:
+        """Return a copy of the clean record for *rel_path*, or ``None``.
+
+        Lets the pipeline recover the already-persisted result for a file that
+        was recorded by a worker but whose future later surfaced a (now moot)
+        rate-limit error — so the final output reflects the real record instead
+        of an empty placeholder.
+        """
+        with self._lock:
+            record = self._clean_records.get(rel_path)
+            return dict(record) if record is not None else None
 
     def delete(self) -> None:
         """Remove the live JSON backup for MD-only runs after clean conversion.

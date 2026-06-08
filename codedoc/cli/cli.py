@@ -1,17 +1,18 @@
 """
 codedoc CLI entry point.
 
-0.8.0 changes
--------------
-- Version bumped to 0.8.0.
-- ``--safe-mode`` is marked as deprecated in the help text (the flag is kept
-  for backwards compatibility and printed as a no-op warning at runtime).
-- Error / issue log path is always printed when any issue is recorded, not
+Behaviour notes
+---------------
+- ``--safe-mode`` is deprecated (kept for backwards compatibility; prints a
+  no-op warning at runtime).
+- The error / issue log path is printed whenever any issue is recorded, not
   only when ``failed > 0``.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
-- Interrupt message includes the live backup path from
-  ``stats["live_backup_path"]`` when available.
+- On interrupt, a generic resume message is printed (the live JSON backup in the
+  output directory holds completed work; re-run to resume).
+- When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
+  reported in the run summary.
 
 First run:
     codedoc run --entry src/main.py              # document from entry; save to codedoc/
@@ -46,7 +47,7 @@ examples:
   # --- Subsequent runs: entry read from existing docs ---
   codedoc run                                              resume from codedoc/ (auto-detected)
   codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON → Markdown
+  codedoc run --format md                                  convert cached JSON to Markdown
   codedoc run --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
@@ -119,6 +120,39 @@ examples:
         ),
     )
     parser.add_argument(
+        "--skip-dirs",
+        nargs="+",
+        metavar="DIR",
+        default=None,
+        dest="skip_dirs",
+        help=(
+            "Replace the default skip-dirs list entirely with the given names. "
+            "Use --add-skip-dir / --remove-skip-dir to extend or reduce instead."
+        ),
+    )
+    parser.add_argument(
+        "--add-skip-dir",
+        action="append",
+        default=[],
+        metavar="DIR",
+        dest="add_skip_dirs",
+        help=(
+            "Add a directory name to the skip list (repeatable). "
+            "Example: --add-skip-dir generated"
+        ),
+    )
+    parser.add_argument(
+        "--remove-skip-dir",
+        action="append",
+        default=[],
+        metavar="DIR",
+        dest="remove_skip_dirs",
+        help=(
+            "Remove a directory name from the default skip list (repeatable). "
+            "Example: --remove-skip-dir codedoc  (allows scanning the package source)"
+        ),
+    )
+    parser.add_argument(
         "--safe-mode",
         action="store_true",
         default=False,
@@ -153,7 +187,7 @@ examples:
     parser.add_argument(
         "--version",
         action="version",
-        version="%(prog)s 0.8.0",
+        version="%(prog)s 0.9.1",
     )
 
     return parser
@@ -188,6 +222,12 @@ def main(argv: list[str] | None = None) -> None:
         overrides["output_format"] = args.format
     if args.ignore:
         overrides["ignore_paths"] = args.ignore
+    if args.skip_dirs is not None:
+        overrides["skip_dirs"] = args.skip_dirs
+    if args.add_skip_dirs:
+        overrides["skip_dirs_add"] = args.add_skip_dirs
+    if args.remove_skip_dirs:
+        overrides["skip_dirs_remove"] = args.remove_skip_dirs
     if args.safe_mode:
         overrides["safe_mode"] = True
     if args.no_parallel:
@@ -207,17 +247,28 @@ def main(argv: list[str] | None = None) -> None:
         if stats.get("resumed", 0):
             print(f"  Files resumed    : {stats['resumed']}")
         print(f"  Files failed     : {stats['failed']}")
+        excluded = stats.get("entry_excluded", 0)
+        if excluded:
+            print(
+                f"  Files excluded   : {excluded} (not reachable from --entry; "
+                "see the warning above. Run without --entry to document everything.)"
+            )
         print(f"  Output directory : {stats['output_dir']}")
         for output_file in stats.get("output_files", []):
             print(f"  Output file      : {output_file}")
 
-        # Print rate-limit step-down warnings (Work Item 3).
-        for warning in stats.get("rate_limit_warnings", []):
+        # 0.8.1: compact rate-limit summary — only shown when events occurred.
+        # Per-event messages were already printed in real time during the run.
+        rate_limit_warnings = stats.get("rate_limit_warnings", [])
+        if rate_limit_warnings:
+            event_count = len(rate_limit_warnings)
+            providers = sorted({w["provider"] for w in rate_limit_warnings})
+            total_sleep = sum(w.get("sleep_s", 0) or 0 for w in rate_limit_warnings)
+            sleep_note = f", {total_sleep:.1f}s total backoff" if total_sleep > 0 else ""
             print(
-                f"\n  WARNING [{warning['provider']}] Rate limit caused "
-                f"max_parallel_files to be reduced from "
-                f"{warning['original_max_parallel']} to {warning['new_level']}. "
-                f"{warning['retried_count']} file(s) were retried at lower concurrency."
+                f"\n  Rate limits: {event_count} step-down event(s) "
+                f"[{', '.join(providers)}]{sleep_note}. "
+                "Details in error.log."
             )
 
         # Always print issue log path when any issue was recorded (Work Item 4).
@@ -237,15 +288,10 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Error: {exc}", file=sys.stderr)
         sys.exit(1)
     except KeyboardInterrupt:
-        # Try to report the live backup path if available in stats.
-        backup_msg = ""
-        try:
-            from codedoc.pipeline import _resolve_live_backup_path
-        except Exception:
-            pass
         print(
-            "\nRun interrupted. Progress has been saved to the live JSON backup — "
-            "re-run the same command to resume from where it stopped." + backup_msg,
+            "\nRun interrupted. Any files completed before the interrupt are saved "
+            "in the live JSON backup in your output directory (if the run reached "
+            "file processing) — re-run the same command to resume.",
             file=sys.stderr,
         )
         sys.exit(130)

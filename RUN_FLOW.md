@@ -203,14 +203,37 @@ main thread, so a Ctrl-C or crash after a worker completes never discards that r
 - **Ownership guard.** `codedoc` refuses to overwrite a file it did not create (no `_codedoc`
   metadata block) — including the JSON backup sibling for named-MD runs.
 
-**Rate-limit step-down (0.8.0):**
+**Rate-limit step-down (0.8.1):**
 When a rate-limit signal is detected during parallel processing, codedoc steps down the
-file concurrency ladder and prints a provider-specific notice to the terminal:
+file concurrency ladder, sleeps using provider-aware exponential backoff, and prints a
+notice to the terminal:
 
 ```
-[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
-reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
+[anthropic] Rate limit detected - your configured max_parallel_files (5) has been
+reduced to 2. Retrying 4 remaining file(s) at lower concurrency. Sleeping 10.0s before retry.
 ```
+
+At the end of the run, a compact summary line is printed only when step-down events
+occurred:
+
+```
+  Rate limits: 1 step-down event(s) [anthropic], 10.0s total backoff. Details in error.log.
+```
+
+Backoff behavior (provider defaults, all overridable via config):
+
+| Provider  | Signals                                               | Min backoff | Scale |
+|-----------|-------------------------------------------------------|------------:|------:|
+| openai    | 429, rate limit, tpm, quota, ...                      | 5 s         | 1.5×  |
+| anthropic | 529, overloaded, rate_limit, 429                      | 10 s        | 2.0×  |
+| gemini    | resource_exhausted, quota, 429, 503                   | 8 s         | 1.5×  |
+| default   | (union of all above)                                  | 5 s         | 1.5×  |
+
+Config overrides:
+- `rate_limit_backoff_s` — override min backoff globally (`0` disables sleep).
+- `rate_limit_backoff_scale` — override exponential scale globally.
+- `rate_limit_signals_add` — add extra signal strings (for custom gateways).
+- `rate_limit_signals_remove` — remove signals from the resolved profile.
 
 Recovered rate-limit events appear in `error.log` (located in the output directory,
 not the project root) as warnings, and do not alarm the final output.

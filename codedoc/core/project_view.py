@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from collections import Counter, defaultdict
@@ -10,15 +11,42 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from codedoc.utils.errors import ConfigError
+from codedoc.utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.4"
 
-# Regex that matches the metadata comment embedded in Markdown output:
+# Regex that matches the lightweight metadata comment embedded in Markdown output:
 #   <!-- codedoc-ai: { ... } -->
 _CODEDOC_META_COMMENT_RE = re.compile(
     r"<!--\s*codedoc-ai:\s*(\{.*?\})\s*-->", re.DOTALL
 )
 
+# Regex that matches the lossless base64-encoded full view comment added in 0.8.1:
+#   <!-- codedoc-ai-view-base64
+#   eyJ...
+#   -->
+_CODEDOC_VIEW_BASE64_RE = re.compile(
+    r"<!--\s*codedoc-ai-view-base64\s*([\s\S]*?)\s*-->"
+)
+
+# Placeholder import/package names that LLMs emit in usage examples.
+# These are never meaningful to end-users and must be stripped before output.
+# Uses \b word boundaries so 'example_package' does NOT match inside a longer
+# real path like 'my_real_example_package_utils' (since '_' is a \w character,
+# there is no word boundary between the prefix and the suffix).
+_PLACEHOLDER_PATTERN = re.compile(
+    r"\b(?:your_package_name|your_package|your_project|your_app"
+    r"|example_package|my_package)\b"
+    r"|package:example/",
+    re.IGNORECASE,
+)
+
+
+# ---------------------------------------------------------------------------
+# Public view construction
+# ---------------------------------------------------------------------------
 
 def build_project_view(
     records: list[dict],
@@ -72,10 +100,25 @@ def build_project_view(
     return {key: value for key, value in view.items() if value not in (None, "", [], {})}
 
 
+# ---------------------------------------------------------------------------
+# Markdown serialisation
+# ---------------------------------------------------------------------------
+
 def markdown_from_view(view: dict, error_summary: str = "") -> str:
-    """Render a public project view as Markdown."""
+    """Render a public project view as Markdown.
+
+    0.8.1: A lossless ``<!-- codedoc-ai-view-base64 ... -->`` block is written
+    immediately after the lightweight metadata comment.  The visible Markdown
+    sections are unchanged; they remain human-readable.  The hidden base64
+    block allows :func:`markdown_to_view` to reconstruct the full public JSON
+    view without any information loss on subsequent runs.
+    """
     project = view.get("project", {})
-    lines: list[str] = [_build_meta_comment(view, project), "# codedoc project documentation\n\n"]
+    lines: list[str] = [
+        _build_meta_comment(view, project),
+        _build_full_view_comment(view),
+        "# codedoc project documentation\n\n",
+    ]
     run = view.get("run", {})
 
     lines += [
@@ -140,6 +183,10 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
     return "".join(lines)
 
 
+# ---------------------------------------------------------------------------
+# JSON serialisation
+# ---------------------------------------------------------------------------
+
 def json_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as formatted JSON."""
     payload = dict(view)
@@ -158,8 +205,28 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
     return json.dumps(ordered, indent=2, ensure_ascii=False)
 
 
+# ---------------------------------------------------------------------------
+# Markdown → view (with lossless embedded-view fast path)
+# ---------------------------------------------------------------------------
+
 def markdown_to_view(markdown: str) -> dict:
-    """Parse codedoc Markdown output back into the public JSON view shape."""
+    """Parse codedoc Markdown output back into the public JSON view shape.
+
+    0.8.1 fast path: when the Markdown contains a ``codedoc-ai-view-base64``
+    block (written by :func:`markdown_from_view` since 0.8.1), the embedded
+    view is decoded and returned directly — this is a lossless round-trip.
+
+    Legacy fallback: for Markdown produced before 0.8.1 (no embedded block),
+    the visible Markdown sections are parsed as before.  This path is lossy
+    (dependency metadata and some internal fields are not recoverable from the
+    visible text alone) but still produces a best-effort result.
+    """
+    # Fast path: lossless embedded view takes precedence over the visible parser.
+    embedded = read_embedded_view(markdown)
+    if embedded is not None:
+        return embedded
+
+    # Legacy visible-text parser (pre-0.8.1 Markdown).
     project = _parse_project_overview(markdown)
     run = _parse_run_summary(markdown)
     files = _parse_markdown_files(markdown)
@@ -220,13 +287,122 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
     return markdown_from_view(view, error_summary)
 
 
+# ---------------------------------------------------------------------------
+# Embedded lossless view helpers (0.8.1)
+# ---------------------------------------------------------------------------
+
+def read_embedded_view(markdown: str) -> dict | None:
+    """Extract and decode the lossless embedded view from Markdown.
+
+    Looks for the ``<!-- codedoc-ai-view-base64 ... -->`` block written by
+    :func:`markdown_from_view` since 0.8.1, decodes the standard base64
+    payload as UTF-8 JSON, and validates the result.
+
+    Returns the decoded dict when the block is present and valid.
+    Returns ``None`` when the block is absent, corrupt, or flagged as an
+    in-progress/crash-safety snapshot (so callers can fall back to the
+    legacy visible-text parser).
+    """
+    match = _CODEDOC_VIEW_BASE64_RE.search(markdown)
+    if not match:
+        return None
+
+    raw = match.group(1).strip()
+    try:
+        json_bytes = base64.b64decode(raw)
+        data = json.loads(json_bytes.decode("utf-8"))
+    except Exception as exc:
+        logger.warning(
+            "codedoc-ai-view-base64 block could not be decoded and will be ignored "
+            "(falling back to visible Markdown parser): %s",
+            exc,
+        )
+        return None
+
+    if not isinstance(data, dict):
+        logger.warning(
+            "codedoc-ai-view-base64 decoded to %s, expected dict; "
+            "falling back to visible Markdown parser.",
+            type(data).__name__,
+        )
+        return None
+
+    # Reject crash-safety or in-progress snapshots — these must never be
+    # embedded, but guard against it defensively.
+    if "_crash_safety" in data:
+        logger.warning(
+            "codedoc-ai-view-base64 contains a _crash_safety banner; "
+            "treating as an incomplete snapshot and ignoring."
+        )
+        return None
+    codedoc_meta = data.get("_codedoc", {})
+    if isinstance(codedoc_meta, dict) and codedoc_meta.get("status") == "in_progress":
+        logger.warning(
+            "codedoc-ai-view-base64 is an in-progress snapshot; ignoring."
+        )
+        return None
+
+    # Structural validation: require the three fields that make the view useful.
+    required = {"schema_version", "project", "files"}
+    missing = required - data.keys()
+    if missing:
+        logger.warning(
+            "codedoc-ai-view-base64 is missing required fields %s; "
+            "falling back to visible Markdown parser.",
+            sorted(missing),
+        )
+        return None
+
+    return data
+
+
+def _public_view_for_embedding(view: dict) -> dict:
+    """Return a sanitized copy of *view* safe to embed in Markdown.
+
+    Strips crash-safety markers and the ``_codedoc`` wrapper (which is added
+    by :func:`json_from_view` at JSON render time and must not appear in the
+    embedded block).
+    """
+    excluded = {"_crash_safety", "_codedoc"}
+    return {k: v for k, v in view.items() if k not in excluded}
+
+
+def _build_full_view_comment(view: dict) -> str:
+    """Encode *view* as a standard base64 UTF-8 JSON hidden comment block.
+
+    The base64 encoding is necessary because raw generated summaries or
+    dependency text can contain ``--`` or ``-->`` which would prematurely
+    close an HTML comment and expose or corrupt the hidden metadata.
+
+    The block format is::
+
+        <!-- codedoc-ai-view-base64
+        eyJzY2hlbWFfdmVyc2lvbiI6...
+        -->
+    """
+    sanitized = _public_view_for_embedding(view)
+    json_bytes = json.dumps(sanitized, ensure_ascii=False).encode("utf-8")
+    b64 = base64.b64encode(json_bytes).decode("ascii")
+    return f"<!-- codedoc-ai-view-base64\n{b64}\n-->\n"
+
+
+# ---------------------------------------------------------------------------
+# Metadata comment reader
+# ---------------------------------------------------------------------------
+
 def read_codedoc_meta(file_path: Path) -> dict:
     """
     Read CodeDoc metadata from a previously generated .json or .md output file.
 
-    Returns a dict containing at least ``entry_file`` and ``schema_version``.
+    Returns a dict containing at least ``schema_version``.  ``entry_file`` may
+    be ``None`` — callers must handle that case (a valid CodeDoc file can have
+    a null entry when auto-detection was used or when no entry was specified on
+    the first run).
+
     Raises :class:`~codedoc.utils.errors.ConfigError` when the file cannot be
-    read, is not a recognised CodeDoc output, or is missing required metadata.
+    read, is not a recognised CodeDoc output, or is missing structural metadata
+    (e.g. the ``_codedoc`` block for JSON, or the ``<!-- codedoc-ai: ... -->``
+    comment for Markdown).
     """
     try:
         content = file_path.read_text(encoding="utf-8-sig", errors="replace")
@@ -243,10 +419,10 @@ def read_codedoc_meta(file_path: Path) -> dict:
                 f"'{file_path}' is not a valid CodeDoc file: JSON parse error."
             ) from exc
         meta = data.get("_codedoc")
-        if not isinstance(meta, dict) or not meta.get("entry_file"):
+        if not isinstance(meta, dict):
             raise ConfigError(
                 f"'{file_path}' does not appear to be a valid CodeDoc file. "
-                "The '_codedoc' metadata block is missing or has no entry_file. "
+                "The '_codedoc' metadata block is missing or malformed. "
                 "Re-run with --entry to generate a fresh document."
             )
         return meta
@@ -265,10 +441,7 @@ def read_codedoc_meta(file_path: Path) -> dict:
             raise ConfigError(
                 f"'{file_path}' has a malformed CodeDoc metadata comment."
             ) from exc
-        if not meta.get("entry_file"):
-            raise ConfigError(
-                f"'{file_path}' CodeDoc metadata is missing the entry_file field."
-            )
+        # Note: entry_file may be None — callers must not require it to be set.
         return meta
 
     raise ConfigError(
@@ -276,6 +449,10 @@ def read_codedoc_meta(file_path: Path) -> dict:
         "CodeDoc output files must end in .json or .md."
     )
 
+
+# ---------------------------------------------------------------------------
+# Internal helpers — metadata comment builder
+# ---------------------------------------------------------------------------
 
 def _build_meta_comment(view: dict, project: dict) -> str:
     """Return a one-line HTML comment embedding CodeDoc metadata for Markdown output.
@@ -297,6 +474,10 @@ def _build_meta_comment(view: dict, project: dict) -> str:
     }
     return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
 
+
+# ---------------------------------------------------------------------------
+# Public wrapper for pipeline record conversion
+# ---------------------------------------------------------------------------
 
 def clean_file_record(record: dict) -> dict:
     """Public wrapper around the internal ``_clean_file`` helper.
@@ -320,6 +501,10 @@ def clean_file_record(record: dict) -> dict:
     """
     return _clean_file(record)
 
+
+# ---------------------------------------------------------------------------
+# Internal file record cleaner
+# ---------------------------------------------------------------------------
 
 def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
@@ -351,7 +536,7 @@ def _clean_file(record: dict) -> dict:
         "classes": result.get("classes", []),
         "exports": result.get("exports", []),
         "key_concepts": result.get("key_concepts", []),
-        "usage_example": result.get("usage_example", ""),
+        "usage_example": _sanitize_usage_example(result.get("usage_example", "")),
         "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
         "external_dependencies": external,
         "dependency_refs": dependency_refs,
@@ -360,6 +545,44 @@ def _clean_file(record: dict) -> dict:
     }
     return {key: value for key, value in file.items() if value not in (None, "", [], {})}
 
+
+# ---------------------------------------------------------------------------
+# Usage-example sanitizer (0.8.1 — Workstream B)
+# ---------------------------------------------------------------------------
+
+def _sanitize_usage_example(usage_example: str) -> str:
+    """Remove usage examples that contain LLM placeholder package/import names.
+
+    LLMs sometimes emit template strings like::
+
+        import 'package:your_package/core/theme/app_theme.dart';
+
+    or::
+
+        from your_project import MyClass
+
+    These are never meaningful to users.  When a placeholder is detected the
+    whole ``usage_example`` is discarded (returned as an empty string) so it
+    does not appear in JSON or Markdown output.
+
+    The check is case-insensitive and uses word boundaries (``\\b``) so that
+    ``example_package`` only matches as a standalone word and does NOT trigger
+    on real paths like ``my_real_example_package_helper`` where ``_`` acts as a
+    word character and prevents the boundary from forming.
+
+    No LLM call is made.  If the example cannot be deterministically fixed, it
+    is silently removed rather than kept incorrect.
+    """
+    if not usage_example:
+        return usage_example
+    if _PLACEHOLDER_PATTERN.search(usage_example):
+        return ""
+    return usage_example
+
+
+# ---------------------------------------------------------------------------
+# Visible Markdown section parsers (legacy path)
+# ---------------------------------------------------------------------------
 
 def _parse_project_overview(markdown: str) -> dict:
     section = _section(markdown, "Project Overview")
@@ -462,6 +685,10 @@ def _parse_dependency_catalog(markdown: str) -> list[dict]:
         dependencies.append(dependency)
     return dependencies
 
+
+# ---------------------------------------------------------------------------
+# Visible Markdown parsing utilities
+# ---------------------------------------------------------------------------
 
 def _section(markdown: str, title: str) -> str:
     match = re.search(
@@ -577,6 +804,10 @@ def _prune_empty(value: Any) -> Any:
         ]
     return value
 
+
+# ---------------------------------------------------------------------------
+# Dependency helpers
+# ---------------------------------------------------------------------------
 
 def _dependency_usage_map(usage_notes: list) -> dict[str, str]:
     usage: dict[str, str] = {}
@@ -738,7 +969,7 @@ def _merge_dependency_type(existing: str | None, candidate: str | None) -> str:
 def _normalize_dependency_name(name: Any, dependency_type_hint: str = "") -> str:
     value = str(name or "").strip()
     if value.startswith("package:"):
-        value = value[len("package:") :]
+        value = value[len("package:"):]
     if dependency_type_hint == "external":
         return _external_package_name(value)
     return value
