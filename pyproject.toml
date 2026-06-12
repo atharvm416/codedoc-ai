@@ -4,17 +4,31 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.9.1"
+version = "0.9.2"
 description = "Generate structured, incremental documentation for any codebase using OpenAI, Anthropic, or Gemini"
 readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Atharv Mannur" }]
 requires-python = ">=3.9"
-keywords = ["documentation", "ai", "llm", "codebase", "agents", "codegen"]
+keywords = [
+    "ai",
+    "anthropic",
+    "cli",
+    "code-analysis",
+    "codebase",
+    "developer-tools",
+    "documentation",
+    "gemini",
+    "llm",
+    "openai",
+    "python",
+]
 classifiers = [
     "Development Status :: 3 - Alpha",
+    "Environment :: Console",
     "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
@@ -22,6 +36,7 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
     "Topic :: Software Development :: Documentation",
     "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: Utilities",
 ]
 dependencies = [
     "requests~=2.33",
@@ -47,11 +62,18 @@ codedoc = "codedoc.cli.cli:main"
 
 [project.urls]
 Homepage = "https://github.com/atharvm416/codedoc-ai"
+PyPI = "https://pypi.org/project/codedoc-ai/"
+Documentation = "https://github.com/atharvm416/codedoc-ai#readme"
+Source = "https://github.com/atharvm416/codedoc-ai"
 Issues = "https://github.com/atharvm416/codedoc-ai/issues"
+Changelog = "https://github.com/atharvm416/codedoc-ai/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["codedoc*"]
+
+[tool.setuptools.package-data]
+codedoc = ["templates/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

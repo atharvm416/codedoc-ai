@@ -141,6 +141,17 @@ DEFAULTS: dict[str, Any] = {
     "ignore_paths": [],
     # 0.9.0: configurable per-file content limit sent to the LLM.
     "max_content_chars": 12000,
+    # -----------------------------------------------------------------------
+    # 0.9.2 planning / CI safety
+    # -----------------------------------------------------------------------
+    # Read-only planning run: no filesystem mutation, no provider creation.
+    "dry_run": False,
+    # Maximum number of files allowed to make LLM calls. 0 means unlimited.
+    "max_files": 0,
+    # Project-relative paths to reprocess even when their hash is unchanged.
+    "force_files": [],
+    # Exit 0 even when some files failed (completed runs only).
+    "allow_partial": False,
 }
 
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
@@ -158,7 +169,14 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
     "CODEDOC_SAFE_MODE": "safe_mode",
     "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
+    "CODEDOC_DRY_RUN": "dry_run",
+    "CODEDOC_MAX_FILES": "max_files",
+    "CODEDOC_FORCE_FILES": "force_files",
+    "CODEDOC_ALLOW_PARTIAL": "allow_partial",
 }
+
+# Config keys whose environment values are parsed as semicolon-separated lists.
+_ENV_LIST_KEYS = {"ignore_paths", "force_files"}
 
 
 # ---------------------------------------------------------------------------
@@ -197,7 +215,7 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     for env_key, config_key in _ENV_KEY_MAP.items():
         val = os.environ.get(env_key)
         if val:
-            if config_key == "ignore_paths":
+            if config_key in _ENV_LIST_KEYS:
                 config[config_key] = [p.strip() for p in val.split(";") if p.strip()]
             else:
                 config[config_key] = val
@@ -449,6 +467,13 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
 # Validation
 # ---------------------------------------------------------------------------
 
+def _coerce_bool(value: Any) -> bool:
+    """Normalize a config value (possibly an env-var string) to a boolean."""
+    if isinstance(value, str):
+        return value.strip().lower() in ("true", "1", "yes")
+    return bool(value)
+
+
 def _validate(config: dict[str, Any]) -> None:
     """Raise ConfigError for invalid values."""
     if config.get("llm_mode", "api") != "api":
@@ -462,8 +487,14 @@ def _validate(config: dict[str, Any]) -> None:
             "llm_provider must be one of: 'auto', 'openai', 'anthropic', or 'gemini'."
         )
 
-    if config["llm_mode"] == "api" and not (
-        config.get("api_key") or _has_provider_api_key()
+    # 0.9.2: normalize booleans early — dry_run gates the API-key warning below.
+    config["dry_run"] = _coerce_bool(config.get("dry_run", False))
+    config["allow_partial"] = _coerce_bool(config.get("allow_partial", False))
+
+    if (
+        config["llm_mode"] == "api"
+        and not config["dry_run"]
+        and not (config.get("api_key") or _has_provider_api_key())
     ):
         logger.warning(
             "llm_mode is 'api' but no API key was found. Set LLM_API_KEY, "
@@ -603,6 +634,35 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("max_content_chars must be a positive integer.") from exc
     if config["max_content_chars"] < 1000:
         raise ConfigError("max_content_chars must be at least 1000.")
+
+    # 0.9.2: max_files — integer >= 0; 0 means unlimited; booleans rejected.
+    raw_max_files = config.get("max_files", 0)
+    if isinstance(raw_max_files, bool):
+        raise ConfigError("max_files must be an integer greater than or equal to 0.")
+    if isinstance(raw_max_files, int):
+        parsed_max_files = raw_max_files
+    elif isinstance(raw_max_files, str):
+        try:
+            parsed_max_files = int(raw_max_files.strip())
+        except ValueError:
+            raise ConfigError(
+                "max_files must be an integer greater than or equal to 0."
+            )
+    else:
+        raise ConfigError(
+            "max_files must be an integer greater than or equal to 0."
+        )
+    config["max_files"] = parsed_max_files
+    if config["max_files"] < 0:
+        raise ConfigError("max_files must be an integer greater than or equal to 0.")
+
+    # 0.9.2: force_files — a list of non-empty path strings.
+    force_files = config.get("force_files", [])
+    if not isinstance(force_files, list) or not all(
+        isinstance(p, str) and p.strip() for p in force_files
+    ):
+        raise ConfigError("force_files must be a list of non-empty path strings.")
+    config["force_files"] = [p.strip() for p in force_files]
 
 
 def _has_provider_api_key() -> bool:

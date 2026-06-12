@@ -34,6 +34,52 @@ PROJECT_MARKDOWN = "codedoc.md"
 BUILD_FILENAME = ".codedoc_build.json"
 
 
+def inspect_output_ownership(
+    output_dir: Path,
+    output_format: str,
+    json_filename: str,
+    md_filename: str,
+    live_backup_path: Path | None = None,
+) -> list[dict]:
+    """Read-only ownership inspection of every final output target.
+
+    Returns a list of conflict dicts — ``{"path": str, "message": str}`` — one
+    per foreign-owned target.  Never raises and never touches the filesystem
+    beyond reading, so dry-run can report conflicts as warnings while a real
+    run converts the first conflict into a :class:`ConfigError` via
+    :func:`preflight_output_targets`.
+
+    When the output directory does not yet exist all targets are new and the
+    list is empty.
+    """
+    if not output_dir.exists():
+        return []
+
+    conflicts: list[dict] = []
+
+    def _add_conflict(path: Path) -> None:
+        conflicts.append({"path": str(path), "message": _foreign_file_message(path)})
+
+    if output_format in ("json", "both"):
+        target = output_dir / json_filename
+        if not _is_codedoc_owned(target):
+            _add_conflict(target)
+    if output_format in ("md", "both"):
+        target = output_dir / md_filename
+        if not _is_codedoc_owned(target):
+            _add_conflict(target)
+
+    # For md-only runs the live backup is a JSON sibling of the MD file.
+    # A foreign sibling would block SafeWriter.initialize_empty() after
+    # scanning — same acceptance rules as SafeWriter.load(): the file is
+    # accepted if it does not exist or contains a _codedoc key.
+    if output_format == "md" and live_backup_path is not None:
+        if not _is_codedoc_owned(live_backup_path):
+            _add_conflict(live_backup_path)
+
+    return conflicts
+
+
 def preflight_output_targets(
     output_dir: Path,
     output_format: str,
@@ -48,40 +94,34 @@ def preflight_output_targets(
     When the output directory does not yet exist all targets are new — returns
     immediately without raising.
     """
-    if not output_dir.exists():
-        return
-
-    if output_format in ("json", "both"):
-        _check_file_ownership(output_dir / json_filename)
-    if output_format in ("md", "both"):
-        _check_file_ownership(output_dir / md_filename)
-
-    # For md-only runs the live backup is a JSON sibling of the MD file.
-    # A foreign sibling would block SafeWriter.initialize_empty() after scanning,
-    # so preflight it now with the same acceptance rules as SafeWriter.load():
-    # the file is accepted if it does not exist, or if it contains a _codedoc key.
-    if output_format == "md" and live_backup_path is not None:
-        _check_md_live_backup_ownership(live_backup_path)
+    conflicts = inspect_output_ownership(
+        output_dir, output_format, json_filename, md_filename, live_backup_path
+    )
+    if conflicts:
+        raise ConfigError(conflicts[0]["message"])
 
 
-def _check_md_live_backup_ownership(path: Path) -> None:
-    """Accept the MD live-backup JSON sibling if it is CodeDoc-owned or absent."""
+def read_existing_records(path: Path) -> dict[str, dict] | None:
+    """Read per-file records from a codedoc JSON output file, read-only.
+
+    Returns ``{rel_path: record}`` for a codedoc-owned JSON file, an empty
+    dict for an owned file with no records, and ``None`` when the file is
+    missing, unreadable, or not codedoc-owned.  Never writes or deletes
+    anything — safe for planning and dry-run.
+    """
     if not path.exists():
-        return
+        return None
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
-        if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
-            return
     except Exception:
-        pass
-    raise ConfigError(
-        f"'{path.name}' already exists but does not appear to be a codedoc "
-        "output file.\n"
-        "codedoc will not overwrite it to protect your data.\n\n"
-        "To resolve this, choose one of:\n"
-        f"  • Use a different output directory:   codedoc run --output my_docs/\n"
-        f"  • Delete or rename the conflicting file:  {path}"
-    )
+        return None
+    if not isinstance(data, dict) or not isinstance(data.get("_codedoc"), dict):
+        return None
+    return {
+        f["path"]: f
+        for f in data.get("files", [])
+        if isinstance(f, dict) and f.get("path")
+    }
 
 
 def write_project_outputs(
@@ -145,32 +185,30 @@ def write_project_outputs(
 # Ownership guard
 # ---------------------------------------------------------------------------
 
-def _check_file_ownership(path: Path) -> None:
-    """Verify that *path* was written by codedoc before allowing an overwrite.
+def _is_codedoc_owned(path: Path) -> bool:
+    """Read-only check that *path* may be overwritten by codedoc.
 
     Files that do not yet exist, or whose extension is not ``.json`` / ``.md``,
-    are always allowed through.  Malformed or foreign files raise
-    :class:`ConfigError`.
+    are always allowed through.  Malformed or foreign files return ``False``.
     """
     if not path.exists():
-        return
+        return True
 
     suffix = path.suffix.lower()
     try:
         content = path.read_text(encoding="utf-8-sig", errors="replace")
         if suffix == ".json":
             data = json.loads(content)
-            if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
-                return
-        elif suffix == ".md":
-            if re.search(r"<!--\s*codedoc-ai:", content):
-                return
-        else:
-            return
+            return isinstance(data, dict) and isinstance(data.get("_codedoc"), dict)
+        if suffix == ".md":
+            return bool(re.search(r"<!--\s*codedoc-ai:", content))
+        return True
     except Exception:
-        pass
+        return False
 
-    raise ConfigError(
+
+def _foreign_file_message(path: Path) -> str:
+    return (
         f"'{path.name}' already exists but does not appear to be a codedoc "
         "output file.\n"
         "codedoc will not overwrite it to protect your data.\n\n"
@@ -178,6 +216,17 @@ def _check_file_ownership(path: Path) -> None:
         f"  • Use a different output directory:   codedoc run --output my_docs/\n"
         f"  • Delete or rename the conflicting file:  {path}"
     )
+
+
+def _check_file_ownership(path: Path) -> None:
+    """Verify that *path* was written by codedoc before allowing an overwrite.
+
+    Malformed or foreign files raise :class:`ConfigError`.  This is the
+    mutation-time guard used by :func:`write_project_outputs`; the read-only
+    variant for planning/dry-run is :func:`inspect_output_ownership`.
+    """
+    if not _is_codedoc_owned(path):
+        raise ConfigError(_foreign_file_message(path))
 
 
 # ---------------------------------------------------------------------------

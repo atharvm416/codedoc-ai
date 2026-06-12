@@ -63,17 +63,31 @@ Rules:
 """
 
 
+def build_prompt(
+    file_path: str, content: str, imports: list[str], language: str
+) -> tuple[str, str]:
+    """Return ``(system, prompt)`` exactly as sent to the provider.
+
+    *content* must already be truncated by the caller.  Used by ``run()`` and
+    by dry-run usage estimation so estimates match real prompts.
+    """
+    prompt = _PROMPT_TEMPLATE.format(
+        language=language,
+        file_path=file_path,
+        imports=imports,
+        content=content,
+    )
+    return _SYSTEM, prompt
+
+
 class DependencyAgent(BaseAgent):
     agent_name = "DependencyAgent"
 
     def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
-        prompt = _PROMPT_TEMPLATE.format(
-            language=language,
-            file_path=file_path,
-            imports=imports,
-            content=self._truncate(content, file_path),
+        system, prompt = build_prompt(
+            file_path, self._truncate(content, file_path), imports, language
         )
-        raw = self._call_llm(prompt, system=_SYSTEM)
+        raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
 
         dep_analysis = result.get("dependencies_analysis", {})

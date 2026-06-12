@@ -58,6 +58,15 @@ class ConfigError(CodeDocError):
         super().__init__(f"ConfigError: {reason}")
 
 
+class ProviderInitError(ConfigError):
+    """Raised when an LLM provider cannot be constructed (import, auth
+    configuration, or SDK initialization failure).
+
+    Subclasses :class:`ConfigError` so existing setup-error handling — and the
+    CLI's exit-code 2 contract — applies without special-casing.
+    """
+
+
 class AgentError(CodeDocError):
     """Raised when an agent fails to produce valid output."""
 
