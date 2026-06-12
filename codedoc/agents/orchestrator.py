@@ -10,13 +10,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
-from pathlib import Path
 
+from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.structure_agent import StructureAgent
 from codedoc.agents.dependency_agent import DependencyAgent
 from codedoc.agents.documentation_agent import DocumentationAgent
+from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import AgentError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,12 +34,19 @@ class Orchestrator:
         DocumentationAgent receives structure + dependency results as context.
     """
 
-    def __init__(self, llm: LLMProvider, parallel: bool = True, max_content_chars: int = 12000) -> None:
+    def __init__(
+        self,
+        llm: LLMProvider,
+        parallel: bool = True,
+        max_content_chars: int = 12000,
+        usage: UsageAccumulator | None = None,
+    ) -> None:
         self.llm = llm
         self.parallel = parallel
-        self._structure_agent = StructureAgent(llm, max_content_chars=max_content_chars)
-        self._dependency_agent = DependencyAgent(llm, max_content_chars=max_content_chars)
-        self._doc_agent = DocumentationAgent(llm, max_content_chars=max_content_chars)
+        self.max_content_chars = max_content_chars
+        self._structure_agent = StructureAgent(llm, max_content_chars=max_content_chars, usage=usage)
+        self._dependency_agent = DependencyAgent(llm, max_content_chars=max_content_chars, usage=usage)
+        self._doc_agent = DocumentationAgent(llm, max_content_chars=max_content_chars, usage=usage)
 
     def process(
         self,
@@ -60,6 +67,22 @@ class Orchestrator:
         """
         file_path = descriptor["rel_path"]
         language = descriptor.get("language", "generic")
+
+        # 0.9.2: truncate once here so all three agents receive the exact same
+        # string and the marker stays inside the configured ceiling.  One
+        # WARNING per processed file — the agents' own fallback is DEBUG.
+        original_chars = len(content)
+        if original_chars > self.max_content_chars:
+            content = truncate_for_llm(content, self.max_content_chars)
+            logger.warning(
+                "Content truncated: %s (%d chars -> %d chars sent; configured "
+                "ceiling max_content_chars=%d). Raise max_content_chars in "
+                "config to include more content.",
+                file_path,
+                original_chars,
+                len(content),
+                self.max_content_chars,
+            )
 
         logger.debug("Running agents for %s with %s", file_path, self.llm.provider_name)
 

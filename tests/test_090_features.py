@@ -404,8 +404,12 @@ class TestConfigurableContentTruncation:
         assert len(result) < 2000
         assert "[truncated]" in result
 
-    def test_truncation_logged_at_info_with_filename(self, caplog):
-        """Truncation emits an INFO log containing the filename and char counts."""
+    def test_truncation_logged_at_debug_with_filename(self, caplog):
+        """Defensive truncation logs at DEBUG (0.9.2) with filename and char counts.
+
+        Orchestrated runs warn once in Orchestrator.process(); the agents'
+        fallback stays quiet so one file never emits three warnings.
+        """
         from codedoc.agents.base_agent import BaseAgent
         from codedoc.llm.base import LLMProvider
 
@@ -419,7 +423,7 @@ class TestConfigurableContentTruncation:
             def complete(self, *a, **kw): return ""
 
         agent = ConcreteAgent(DummyProvider(), max_content_chars=1000)
-        with caplog.at_level(logging.INFO, logger="codedoc.agents.base_agent"):
+        with caplog.at_level(logging.DEBUG, logger="codedoc.agents.base_agent"):
             agent._truncate("x" * 5000, "large_file.py")
 
         assert "large_file.py" in caplog.text

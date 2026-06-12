@@ -1,0 +1,96 @@
+# codedoc-ai — example GitHub Actions workflow (manual-by-default)
+#
+# WARNING — external data and cost:
+#   This workflow sends the selected source files of your repository to an
+#   external LLM provider (OpenAI, Anthropic, or Gemini), and API usage may
+#   cost money. Review the dry-run output before approving a paid run, and
+#   keep the max-files cap as low as practical.
+#
+# Setup:
+#   1. Copy this file to .github/workflows/codedoc.yml in your repository.
+#   2. Add your provider API key as a repository secret named CODEDOC_API_KEY
+#      (Settings → Secrets and variables → Actions).
+#   3. Trigger it manually from the Actions tab (workflow_dispatch).
+#
+# Safety properties of this template:
+#   - manual triggering only (workflow_dispatch) — no push/PR/schedule trigger;
+#   - a free dry-run prints the plan before the paid run;
+#   - the paid run is capped with --max-files and fails nonzero on errors;
+#   - generated documentation is uploaded as an artifact — nothing is
+#     committed or pushed back to the repository;
+#   - secrets are passed through environment variables, never command
+#     arguments;
+#   - least-privilege permissions (contents: read).
+
+name: codedoc documentation
+
+on:
+  workflow_dispatch:
+    inputs:
+      project_root:
+        description: "Project root to document (relative to the repository)"
+        required: false
+        default: "."
+      output_path:
+        description: "Output directory or file path for the generated docs"
+        required: false
+        default: "codedoc"
+      max_files:
+        description: "Maximum number of files allowed to make paid LLM calls"
+        required: false
+        default: "25"
+
+permissions:
+  contents: read
+
+jobs:
+  codedoc:
+    runs-on: ubuntu-latest
+    env:
+      # Map your repository secret to the provider key codedoc expects.
+      # LLM_API_KEY is the provider-agnostic fallback; you can use
+      # OPENAI_API_KEY / ANTHROPIC_API_KEY / GEMINI_API_KEY instead.
+      LLM_API_KEY: ${{ secrets.CODEDOC_API_KEY }}
+      CODEDOC_PROJECT_ROOT: ${{ inputs.project_root }}
+      CODEDOC_OUTPUT_PATH: ${{ inputs.output_path }}
+      CODEDOC_MAX_FILES: ${{ inputs.max_files }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install codedoc-ai
+        run: python -m pip install --upgrade pip codedoc-ai
+
+      - name: Dry run (free) — review the plan
+        run: |
+          args=(
+            run
+            "$CODEDOC_PROJECT_ROOT"
+            --output "$CODEDOC_OUTPUT_PATH"
+            --max-files "$CODEDOC_MAX_FILES"
+            --dry-run
+          )
+          codedoc "${args[@]}"
+
+      - name: Generate documentation (paid LLM calls)
+        run: |
+          args=(
+            run
+            "$CODEDOC_PROJECT_ROOT"
+            --output "$CODEDOC_OUTPUT_PATH"
+            --max-files "$CODEDOC_MAX_FILES"
+          )
+          codedoc "${args[@]}"
+
+      - name: Upload documentation artifact
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: codedoc-documentation
+          path: ${{ env.CODEDOC_OUTPUT_PATH }}
+          if-no-files-found: warn

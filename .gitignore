@@ -16,6 +16,7 @@ MANIFEST
 venv/
 env/
 .env
+myenv/
 
 # codedoc output
 error.log

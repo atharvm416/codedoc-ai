@@ -1,4 +1,36 @@
-# codedoc-ai — Full Run Flow & Scenarios
+# codedoc-ai - Full Run Flow & Scenarios
+
+## 0.9.2 Planning and Mutation Boundary
+
+Every run computes one immutable `PipelinePlan` before persistent mutation or
+provider creation. It records scanned, selected, changed, forced, unchanged,
+identical-reuse, checkpoint-reuse, and paid-agent file sets. Dry-run and real
+execution consume this same plan.
+
+The phase order is:
+
+1. Resolve root and validated configuration.
+2. Resolve output paths and inspect ownership read-only.
+3. Scan, parse, build the graph, select files, normalize forced paths, and read
+   existing output/live-backup/checkpoint state.
+4. Build the shared plan and approximate planned usage.
+5. Return dry-run stats, or enforce ownership and `max_files`.
+6. Only then create the output directory, clean legacy files, initialize
+   `SafeWriter`, create the provider, process planned files, and write output.
+
+`--dry-run` never creates an output directory, writer, provider, checkpoint,
+temporary output, or `error.log`. Ownership conflicts and cap excesses are
+reported as warnings and dry-run exits `0`; the matching real run exits `2`.
+
+Usage accounting is per run and thread-safe. Every provider attempt counts the
+system and user prompts immediately before the call. Provider successes and
+failures are separate, retries count as new attempts, and all token values are
+approximate character-based estimates rather than tokenizer or currency
+calculations.
+
+CLI exit codes are `0` for success/dry-run/allowed partial output, `1` for file
+or output failures and unexpected fatal errors, `2` for invalid input/config,
+ownership, cap, or provider initialization failures, and `130` for interrupt.
 
 This document describes exactly how `codedoc` runs end-to-end across all three
 supported providers — **OpenAI**, **Anthropic**, and **Gemini** — covering every
@@ -443,8 +475,9 @@ WARNING  Stopping sequential processing after 5 consecutive file failures. Check
   or GEMINI_API_KEY (or GOOGLE_API_KEY) in your .env file, or pass LLM_API_KEY as a
   generic fallback.
   ```
-- `cli.py` catches `ConfigError` → prints `"Error: ..."` → exit code 1.
-- **No files are processed. No output is written.**
+- `cli.py` catches `ConfigError` -> prints `"Error: ..."` -> exit code 2.
+- **No files are processed.** Provider creation occurs after the mutation
+  boundary, so the in-progress live backup and `error.log` may exist.
 
 ---
 
@@ -569,7 +602,7 @@ a codedoc output (e.g. a package manifest, an API spec) — but is still valid J
     • Use a different output directory:   codedoc run --output my_docs/
     • Delete or rename the conflicting file:  /path/to/codedoc/codedoc.json
   ```
-- `cli.py` catches `ConfigError` → prints `"Error: ..."` → exit code 1.
+- `cli.py` catches `ConfigError` -> prints `"Error: ..."` -> exit code 2.
 - **The user's file is never touched.**
 
 **Same protection applies to:** `codedoc.md` (checks for the `<!-- codedoc-ai: -->`

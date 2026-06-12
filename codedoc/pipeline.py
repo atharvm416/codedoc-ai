@@ -35,6 +35,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.checkpoint import Checkpoint
@@ -42,14 +43,25 @@ from codedoc.core.db import compute_file_hash
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
-from codedoc.core.output import BUILD_FILENAME, preflight_output_targets, write_project_outputs
+from codedoc.core.output import (
+    BUILD_FILENAME,
+    inspect_output_ownership,
+    read_existing_records,
+    write_project_outputs,
+)
+from codedoc.core.planning import (
+    PipelinePlan,
+    build_pipeline_plan,
+    normalize_force_files,
+)
 from codedoc.core.project_view import markdown_to_view, read_codedoc_meta
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.scanner import detect_entry_file, scan_files
+from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider
 from codedoc.llm.rate_limit_profile import RateLimitProfile, get_rate_limit_profile
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import AgentError, ConfigError, ErrorReporter, LLMError, OutputError, ParseError
+from codedoc.utils.errors import AgentError, ConfigError, ErrorReporter, OutputError, ParseError
 from codedoc.utils.logger import get_logger, set_level
 
 logger = get_logger(__name__)
@@ -214,8 +226,14 @@ def _load_existing_file_docs(
     json_filename: str,
     md_filename: str = "codedoc.md",
     live_backup_path: Path | None = None,
+    read_only: bool = False,
 ) -> dict[str, dict]:
     """Load per-file documentation from existing output files.
+
+    With ``read_only=True`` (planning / dry-run) a stale 0.7.x build file is
+    skipped without being unlinked; routing results are identical.  Real runs
+    delete the stale file later, behind the mutation boundary, via
+    :func:`_cleanup_stale_build_file`.
 
     Priority order
     --------------
@@ -275,15 +293,23 @@ def _load_existing_file_docs(
                 and build_path.stat().st_mtime < json_path.stat().st_mtime
             )
             if build_is_stale:
-                logger.info(
-                    "Build file '%s' is older than '%s' — treating as stale and removing it.",
-                    BUILD_FILENAME,
-                    json_filename,
-                )
-                try:
-                    build_path.unlink()
-                except Exception:
-                    pass
+                if read_only:
+                    logger.info(
+                        "Build file '%s' is older than '%s' — treating as stale "
+                        "(read-only mode: not removed).",
+                        BUILD_FILENAME,
+                        json_filename,
+                    )
+                else:
+                    logger.info(
+                        "Build file '%s' is older than '%s' — treating as stale and removing it.",
+                        BUILD_FILENAME,
+                        json_filename,
+                    )
+                    try:
+                        build_path.unlink()
+                    except Exception:
+                        pass
             else:
                 data = json.loads(build_path.read_text(encoding="utf-8"))
                 if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
@@ -416,6 +442,27 @@ def _build_documentation_records(
     return records
 
 
+def _cleanup_stale_build_file(output_dir: Path, json_filename: str) -> None:
+    """Remove a stale 0.7.x build file — mutation-phase counterpart of the
+    skip in ``_load_existing_file_docs(read_only=True)``."""
+    build_path = output_dir / BUILD_FILENAME
+    json_path = output_dir / json_filename
+    try:
+        if (
+            build_path.exists()
+            and json_path.exists()
+            and build_path.stat().st_mtime < json_path.stat().st_mtime
+        ):
+            build_path.unlink()
+            logger.info(
+                "Removed stale build file '%s' (older than '%s').",
+                BUILD_FILENAME,
+                json_filename,
+            )
+    except Exception:
+        pass
+
+
 def _remove_legacy_db(output_dir: Path) -> None:
     """Remove codedoc_db.json left over from earlier versions."""
     legacy = output_dir / "codedoc_db.json"
@@ -489,29 +536,44 @@ def run_pipeline(
     output_format = config.get("output_format", "json")
     logger.info("Output format: %s", output_format)
 
+    dry_run = bool(config.get("dry_run", False))
+    if dry_run:
+        logger.info("Dry run: planning only — no writes, no provider, no LLM calls.")
+
     output_dir = root / config["output_dir"]
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
     live_backup_path = _resolve_live_backup_path(output_dir, output_format, json_filename, md_filename)
 
-    # Preflight: fail fast before any filesystem side effects, scanning, or LLM
-    # calls if any final output target is foreign-owned. Raises ConfigError
-    # immediately so no modified output directory or live backup is left behind.
-    preflight_output_targets(output_dir, output_format, json_filename, md_filename, live_backup_path)
+    # Read-only ownership inspection (0.9.2).  A real run fails fast before any
+    # filesystem side effect, scanning, or LLM call when a final output target
+    # is foreign-owned; a dry run records the conflicts and reports them.
+    ownership_conflicts = inspect_output_ownership(
+        output_dir, output_format, json_filename, md_filename, live_backup_path
+    )
+    if ownership_conflicts and not dry_run:
+        raise ConfigError(ownership_conflicts[0]["message"])
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    _remove_legacy_db(output_dir)
+    # 0.8.0: --safe-mode is deprecated; print at most one notice when it was
+    # explicitly enabled, then continue normally.
+    if config.get("safe_mode", False):
+        print(
+            "WARNING: --safe-mode is now the default behaviour in 0.8.0 and this "
+            "flag has no additional effect.  It is kept for backwards compatibility "
+            "and will be removed in a future release.",
+            flush=True,
+        )
+        logger.info("--safe-mode flag noted; live backup is always on in 0.8.0.")
 
     # 0.8.0: error.log lives in the output directory, not the project root.
+    # Construction is in-memory only; nothing is written until flush(), which
+    # dry-run never calls.
     error_reporter = ErrorReporter(output_dir / "error.log")
 
     existing_docs = _load_existing_file_docs(
-        output_dir, json_filename, md_filename, live_backup_path
+        output_dir, json_filename, md_filename, live_backup_path, read_only=True
     )
-    docs_by_hash: dict[str, dict] = {
-        doc["hash"]: doc for doc in existing_docs.values() if doc.get("hash")
-    }
 
     # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
     # resolved by load_config with _add/_remove applied), then unconditionally
@@ -542,6 +604,29 @@ def run_pipeline(
                 "and your skip_dirs / ignore_paths / extension settings."
             )
         logger.warning("No supported files found in %s. Done.", root)
+        if dry_run:
+            return {
+                "dry_run": True,
+                "scanned": 0,
+                "selected": 0,
+                "entry_excluded": 0,
+                "would_process": 0,
+                "would_call_llm_for": 0,
+                "unchanged": 0,
+                "would_reuse": 0,
+                "would_resume": 0,
+                "forced": 0,
+                "estimated_calls": 0,
+                "estimated_input_tokens": 0,
+                "estimate_is_lower_bound": True,
+                "max_files": int(config.get("max_files", 0) or 0),
+                "max_files_exceeded": False,
+                "ownership_conflicts": ownership_conflicts,
+                "output_dir": str(output_dir),
+                "output_files": [],
+            }
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _remove_legacy_db(output_dir)
         return {
             "checked": 0,
             "failed": 0,
@@ -564,26 +649,16 @@ def run_pipeline(
     # Queue/topological order for the selected file set (all selected, not just agent files).
     ordered_selected = [p for p in graph.topological_order() if p in selected_rels]
 
-    # 0.8.0: --safe-mode is deprecated; print a notice and continue normally.
-    if config.get("safe_mode", False):
-        print(
-            "WARNING: --safe-mode is now the default behaviour in 0.8.0 and this "
-            "flag has no additional effect.  It is kept for backwards compatibility "
-            "and will be removed in a future release.",
-            flush=True,
-        )
-        logger.info("--safe-mode flag noted; live backup is always on in 0.8.0.")
+    # 0.9.2: normalize forced paths against the project root (raises
+    # ConfigError for paths outside the root).
+    forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
-    # Always-on live backup writer (Work Item 1).
-    recorder = SafeWriter(live_backup_path, output_format, entry_rel, file_map)
-    recorder.set_queue_order(ordered_selected)
-
-    # Ownership check + pre-load existing records (raises ConfigError for foreign files).
-    recorder.load()
-
-    # Migration: load old Checkpoint entries when no live backup exists.
+    # Migration eligibility: legacy Checkpoint entries may be used only when
+    # the live backup contains no records — read-only equivalent of the
+    # ``SafeWriter.size == 0`` check.
+    live_records = read_existing_records(live_backup_path)
     checkpoint_results: dict[str, dict] = {}
-    if recorder.size == 0:
+    if not live_records:
         cp = Checkpoint(output_dir, entry_file=entry_rel)
         checkpoint_results = cp.load()
         if checkpoint_results:
@@ -593,61 +668,70 @@ def run_pipeline(
                 len(checkpoint_results),
             )
 
-    changed_rels = {
-        rel for rel in selected_rels
-        if compute_file_hash(file_map[rel]["path"]) != existing_docs.get(rel, {}).get("hash", "")
-    }
-    if config.get("propagate_changes", True):
-        process_rels = graph.affected_by_changes(changed_rels) & selected_rels
-    else:
-        process_rels = changed_rels
+    # 0.9.2: one shared plan drives both dry-run and real execution.
+    plan, materials = build_pipeline_plan(
+        file_map=file_map,
+        graph=graph,
+        selected_rels=selected_rels,
+        entry_rel=entry_rel,
+        existing_docs=existing_docs,
+        checkpoint_records=checkpoint_results,
+        forced_paths=forced_paths,
+        config=config,
+    )
 
-    skipped = len(selected_rels) - len(process_rels)
+    if dry_run:
+        return _build_dry_run_stats(
+            plan, file_map, config, output_dir, ownership_conflicts
+        )
+
+    # Paid-file safety cap: enforced after the complete plan exists and before
+    # any mutation, writer initialization, or provider creation.
+    if plan.max_files_exceeded:
+        raise ConfigError(
+            f"This run would send {len(plan.agent_rels)} file(s) to the LLM, "
+            f"which exceeds the configured max_files limit of {plan.max_files}. "
+            "Inspect the plan first with --dry-run, and raise --max-files only "
+            "after reviewing it."
+        )
+
+    # ------------------------------------------------------------------
+    # Mutation boundary — everything below may write to the filesystem.
+    # ------------------------------------------------------------------
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _remove_legacy_db(output_dir)
+    _cleanup_stale_build_file(output_dir, json_filename)
+
+    # Always-on live backup writer (Work Item 1).
+    recorder = SafeWriter(live_backup_path, output_format, entry_rel, file_map)
+    recorder.set_queue_order(ordered_selected)
+
+    # Ownership check + pre-load existing records (raises ConfigError for foreign files).
+    recorder.load()
+
+    skipped = len(plan.unchanged_rels)
     if skipped > 0:
         logger.info("Incremental mode: skipping %d unchanged file(s)", skipped)
 
+    # Materialize reuse/resume records exactly as the plan routed them.
     new_results: dict[str, dict] = {}
-    reused = 0
-    resumed = 0
-    agent_rels: set[str] = set()
+    for rel_path in plan.identical_reuse_rels:
+        source_doc = materials.identical_reuse_docs[rel_path]
+        new_results[rel_path] = source_doc
+        logger.info(
+            "Reusing cached documentation for %s from identical content in %s",
+            rel_path,
+            source_doc.get("path", "unknown"),
+        )
+    reused = len(plan.identical_reuse_rels)
 
-    for rel_path in graph.topological_order():
-        if rel_path not in process_rels:
-            continue
-        descriptor = file_map[rel_path]
-        content_hash = compute_file_hash(descriptor["path"])
-        if content_hash in docs_by_hash:
-            source_doc = docs_by_hash[content_hash]
-            new_results[rel_path] = source_doc
-            logger.info(
-                "Reusing cached documentation for %s from identical content in %s",
-                rel_path,
-                source_doc.get("path", "unknown"),
-            )
-            reused += 1
-        elif rel_path in checkpoint_results:
-            # Migration: verify and restore checkpoint entry.
-            checkpoint_entry = checkpoint_results[rel_path]
-            stored_hash = checkpoint_entry.get("_checkpoint_hash", "")
-            if not stored_hash:
-                logger.info(
-                    "Checkpoint entry for '%s' has no hash — reprocessing.", rel_path
-                )
-                agent_rels.add(rel_path)
-            elif content_hash != stored_hash:
-                logger.info(
-                    "File '%s' was modified after it was checkpointed — reprocessing.",
-                    rel_path,
-                )
-                agent_rels.add(rel_path)
-            else:
-                new_results[rel_path] = {
-                    k: v for k, v in checkpoint_entry.items() if k != "_checkpoint_hash"
-                }
-                logger.info("Migrating from checkpoint: %s", rel_path)
-                resumed += 1
-        else:
-            agent_rels.add(rel_path)
+    for rel_path in plan.checkpoint_reuse_rels:
+        new_results[rel_path] = materials.checkpoint_reuse_docs[rel_path]
+        logger.info("Migrating from checkpoint: %s", rel_path)
+    resumed = len(plan.checkpoint_reuse_rels)
+
+    agent_rels = set(plan.agent_rels)
+    usage = UsageAccumulator()
 
     rate_limit_warnings: list[dict] = []
 
@@ -684,6 +768,7 @@ def run_pipeline(
         error_reporter.flush()
         recorder.delete()
         _set_issue_stats(stats, error_reporter, live_backup_path)
+        _set_usage_stats(stats, usage, plan, config)
         return stats
 
     # Build the agent-file queue in topological order.
@@ -717,6 +802,7 @@ def run_pipeline(
         llm,
         parallel=config.get("parallel_agents", True),
         max_content_chars=config.get("max_content_chars", 12000),
+        usage=usage,
     )
     stats = {
         "checked": 0,
@@ -777,6 +863,7 @@ def run_pipeline(
     # For MD-only runs, remove the live JSON backup after clean MD conversion.
     recorder.delete()
     _set_issue_stats(stats, error_reporter, live_backup_path)
+    _set_usage_stats(stats, usage, plan, config)
 
     logger.info(
         "Done. checked=%d failed=%d skipped=%d output=%s",
@@ -812,6 +899,97 @@ def _set_issue_stats(
         stats["live_backup_path"] = str(live_backup_path.resolve())
     else:
         stats["live_backup_path"] = None
+
+
+def _set_usage_stats(
+    stats: dict,
+    usage: UsageAccumulator,
+    plan: PipelinePlan,
+    config: dict,
+) -> None:
+    """Populate planned/actual usage keys on *stats* in-place (0.9.2).
+
+    Token figures are character-heuristic estimates, not tokenizer counts.
+    """
+    stats.update(usage.snapshot())
+    stats["planned_calls"] = len(plan.agent_rels) * 3
+    stats["planned_files"] = len(plan.agent_rels)
+    # Files the plan routed to the LLM that were neither completed nor failed
+    # (e.g. a run aborted early by the consecutive-failure health check).
+    stats["unattempted_files"] = max(
+        0, len(plan.agent_rels) - stats.get("checked", 0) - stats.get("failed", 0)
+    )
+    # Resolved from config so env/config-enabled partial mode reaches the CLI.
+    stats["allow_partial"] = bool(config.get("allow_partial", False))
+
+
+def _build_dry_run_stats(
+    plan: PipelinePlan,
+    file_map: dict[str, dict],
+    config: dict,
+    output_dir: Path,
+    ownership_conflicts: list[dict],
+) -> dict:
+    """Build the read-only dry-run stats dict from the shared plan."""
+    return {
+        "dry_run": True,
+        "scanned": len(plan.scanned_rels),
+        "selected": len(plan.selected_rels),
+        "entry_excluded": len(plan.scanned_rels - plan.selected_rels),
+        "would_process": len(plan.process_rels),
+        "would_call_llm_for": len(plan.agent_rels),
+        "unchanged": len(plan.unchanged_rels),
+        "would_reuse": len(plan.identical_reuse_rels),
+        "would_resume": len(plan.checkpoint_reuse_rels),
+        "forced": len(plan.forced_rels),
+        "estimated_calls": len(plan.agent_rels) * 3,
+        "estimated_input_tokens": _estimate_planned_input_tokens(plan, file_map, config),
+        "estimate_is_lower_bound": True,
+        "max_files": plan.max_files,
+        "max_files_exceeded": plan.max_files_exceeded,
+        "ownership_conflicts": ownership_conflicts,
+        "output_dir": str(output_dir),
+        "output_files": [],
+    }
+
+
+def _estimate_planned_input_tokens(
+    plan: PipelinePlan,
+    file_map: dict[str, dict],
+    config: dict,
+) -> int:
+    """Estimate input tokens for the planned LLM calls — a lower bound.
+
+    The structure and dependency prompts are built from known inputs.  The
+    documentation prompt embeds the other agents' responses, which do not
+    exist yet, so it is estimated with empty analysis objects.  Uses the same
+    centralized truncation helper as real execution so the estimated source
+    size matches what would actually be sent.
+    """
+    from codedoc.agents import dependency_agent, documentation_agent, structure_agent
+
+    max_chars = config.get("max_content_chars", 12000)
+    total = 0
+    for rel_path in plan.agent_rels:
+        descriptor = file_map[rel_path]
+        try:
+            content = descriptor["path"].read_text(encoding="utf-8-sig", errors="replace")
+        except Exception:
+            content = ""
+        try:
+            imports = parse_file(descriptor)
+        except Exception:
+            imports = []
+        language = descriptor.get("language", "generic")
+        content = truncate_for_llm(content, max_chars)
+        prompts = (
+            structure_agent.build_prompt(rel_path, content, imports, language),
+            dependency_agent.build_prompt(rel_path, content, imports, language),
+            documentation_agent.build_prompt(rel_path, content, language, {}, {}),
+        )
+        for system, prompt in prompts:
+            total += estimate_tokens(system) + estimate_tokens(prompt)
+    return total
 
 
 # ---------------------------------------------------------------------------

@@ -10,13 +10,30 @@ from __future__ import annotations
 import json
 import re
 from abc import ABC, abstractmethod
-from pathlib import Path
 
+from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.errors import AgentError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+TRUNCATION_MARKER = "\n... [truncated]"
+
+
+def truncate_for_llm(content: str, max_chars: int) -> str:
+    """Truncate *content* so the result — marker included — never exceeds
+    *max_chars*.
+
+    This is the single truncation helper shared by the orchestrator, the
+    agents' defensive fallback, and dry-run prompt estimation, so estimated
+    source size always matches what real execution sends.
+    """
+    if len(content) <= max_chars:
+        return content
+    keep = max(0, max_chars - len(TRUNCATION_MARKER))
+    return content[:keep] + TRUNCATION_MARKER[: max_chars - keep]
+
 
 class BaseAgent(ABC):
     """
@@ -28,9 +45,15 @@ class BaseAgent(ABC):
     #: Override in subclass — used in error messages and logs
     agent_name: str = "BaseAgent"
 
-    def __init__(self, llm: LLMProvider, max_content_chars: int = 12000) -> None:
+    def __init__(
+        self,
+        llm: LLMProvider,
+        max_content_chars: int = 12000,
+        usage: UsageAccumulator | None = None,
+    ) -> None:
         self.llm = llm
         self._max_content_chars = max_content_chars
+        self._usage = usage
 
     @abstractmethod
     def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
@@ -52,24 +75,53 @@ class BaseAgent(ABC):
     # ------------------------------------------------------------------
 
     def _truncate(self, content: str, file_path: str = "") -> str:
-        """Truncate content to stay within token budget."""
+        """Defensive truncation fallback for direct agent callers.
+
+        Orchestrated runs truncate once in ``Orchestrator.process()`` before
+        the content reaches any agent, so this is a no-op there.  The message
+        is DEBUG so a normal orchestrated run never emits three warnings for
+        one file.  The marker fits inside the ceiling.
+        """
         if len(content) > self._max_content_chars:
-            logger.info(
+            logger.debug(
                 "Content truncated: %s (%d chars -> %d chars). "
                 "Raise max_content_chars in config to include more content.",
                 file_path or "file",
                 len(content),
                 self._max_content_chars,
             )
-            return content[:self._max_content_chars] + "\n... [truncated]"
+            return truncate_for_llm(content, self._max_content_chars)
         return content
 
     def _call_llm(self, prompt: str, system: str = "") -> str:
-        """Call the LLM and return raw text. Wraps errors as AgentError."""
+        """Call the LLM and return raw text. Wraps errors as AgentError.
+
+        When a :class:`UsageAccumulator` is attached, every provider attempt
+        records estimated input tokens immediately before the call, then a
+        success (with estimated output tokens) or a failure.  Accounting
+        problems never change the outcome of the provider call itself.
+        """
+        usage = self._usage
+        if usage is not None:
+            try:
+                usage.record_input(system, prompt)
+            except Exception:
+                logger.debug("Usage accounting failed for input estimate", exc_info=True)
         try:
-            return self.llm.complete_json(prompt, system=system)
+            raw = self.llm.complete_json(prompt, system=system)
         except Exception as exc:
+            if usage is not None:
+                try:
+                    usage.record_failure()
+                except Exception:
+                    logger.debug("Usage accounting failed for failed call", exc_info=True)
             raise AgentError(self.agent_name, "unknown", str(exc)) from exc
+        if usage is not None:
+            try:
+                usage.record_success(raw)
+            except Exception:
+                logger.debug("Usage accounting failed for successful call", exc_info=True)
+        return raw
 
     def _parse_json(self, raw: str, file_path: str) -> dict:
         """

@@ -31,7 +31,7 @@ from __future__ import annotations
 import os
 
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import ConfigError, LLMError
+from codedoc.utils.errors import ConfigError, ProviderInitError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,7 +70,17 @@ def create_provider(config: dict) -> LLMProvider:
     base_url = config.get("api_base_url") or None
 
     if mode == "api":
-        return _make_api(provider, model, api_key, base_url, provider_prefixes)
+        # 0.9.2: provider-initialization error boundary.  Construction, import,
+        # and auth-configuration failures from provider SDKs are classified as
+        # ProviderInitError (a ConfigError subclass → CLI exit code 2).
+        try:
+            return _make_api(provider, model, api_key, base_url, provider_prefixes)
+        except ConfigError:
+            raise
+        except Exception as exc:
+            raise ProviderInitError(
+                f"LLM provider initialization failed: {exc}"
+            ) from exc
 
     raise ConfigError(
         f"Unsupported llm_mode '{mode}'. The only supported mode is 'api'."

@@ -52,6 +52,31 @@ Rules:
 """
 
 
+def build_prompt(
+    file_path: str,
+    content: str,
+    language: str,
+    structure: dict,
+    dependencies: dict,
+) -> tuple[str, str]:
+    """Return ``(system, prompt)`` exactly as sent to the provider.
+
+    *content* must already be truncated by the caller.  Dry-run estimation
+    calls this with empty *structure* / *dependencies* objects (those agent
+    responses do not exist yet), which makes the estimate a lower bound.
+    """
+    import json as _json
+
+    prompt = _PROMPT_TEMPLATE.format(
+        language=language,
+        file_path=file_path,
+        structure=_json.dumps(structure, indent=2) if structure else "{}",
+        dependencies=_json.dumps(dependencies, indent=2) if dependencies else "{}",
+        content=content,
+    )
+    return _SYSTEM, prompt
+
+
 class DocumentationAgent(BaseAgent):
     agent_name = "DocumentationAgent"
 
@@ -82,16 +107,14 @@ class DocumentationAgent(BaseAgent):
         structure: dict,
         dependencies: dict,
     ) -> dict:
-        import json as _json
-
-        prompt = _PROMPT_TEMPLATE.format(
-            language=language,
-            file_path=file_path,
-            structure=_json.dumps(structure, indent=2) if structure else "{}",
-            dependencies=_json.dumps(dependencies, indent=2) if dependencies else "{}",
-            content=self._truncate(content, file_path),
+        system, prompt = build_prompt(
+            file_path,
+            self._truncate(content, file_path),
+            language,
+            structure,
+            dependencies,
         )
-        raw = self._call_llm(prompt, system=_SYSTEM)
+        raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
 
         logger.debug("DocumentationAgent: completed %s", file_path)

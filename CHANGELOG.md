@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.9.2 - 2026-06-12
+
+### Safe planning and CI ergonomics
+
+- Added a filesystem-read-only, provider-free `--dry-run` driven by the same
+  immutable routing plan as real execution.
+- Added `--max-files`, repeatable `--force-files`, and `--allow-partial`, with
+  matching config and environment-variable support.
+- Added stable CLI exit codes for success, file/output failures, setup errors,
+  and interrupts.
+- Added approximate planned and actual LLM call/token reporting. Dry-run totals
+  are explicitly lower bounds and no monetary accuracy is claimed.
+- Centralized per-file truncation so all three agents receive the same bounded
+  source string and only one warning is emitted.
+- Added read-only ownership inspection and moved the paid-file cap ahead of
+  filesystem mutation, writer initialization, and provider creation.
+- Added a packaged, manual-only GitHub Actions workflow with a dry-run, paid
+  cap, least-privilege permissions, and artifact upload.
+- Kept `--safe-mode` accepted but hidden for backward compatibility.
+- Added focused 0.9.2 regression coverage and synchronized release identity.
+
 ## 0.9.1 - 2026-06-08
 
 ### Bug-fix stabilization patch (first PyPI release)

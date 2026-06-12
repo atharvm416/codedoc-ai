@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.1`.
+Current release: `0.9.2`.
 
 ## What It Does
 
@@ -25,6 +25,9 @@ Current release: `0.9.1`.
 - Survives interruptions: writes a live JSON backup before any AI work starts, then updates it after every completed file. A Ctrl-C or crash always leaves a readable partial output file — no results are lost, and re-running the same command resumes automatically from where it stopped.
 - Adaptive rate-limit parallelism: when a provider signals 429 / rate-limit, file concurrency is stepped down (`5 → 2 → 1`) and a provider-specific warning is printed to the terminal. No manual intervention needed.
 - Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
+- Provides a filesystem-read-only `--dry-run` with approximate lower-bound call and token estimates.
+- Supports a pre-call `--max-files` cap and repeatable `--force-files` reprocessing.
+- Reports stable CI-oriented exit codes and optional `--allow-partial` behavior.
 - Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
 - Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
 - Converts public JSON to Markdown without another AI call.
@@ -56,6 +59,10 @@ codedoc run
 | Rate-limit adaptive | `true` |
 | Max file size | `500 KB` |
 | Max content chars | `12000` |
+| Dry run | `false` |
+| Maximum paid files | `0` (unlimited) |
+| Forced files | `[]` |
+| Allow partial output | `false` |
 
 Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
 
@@ -170,7 +177,10 @@ Common commands:
 | `codedoc run --provider gemini --model gemini-2.5-flash` | Use Google Gemini. |
 | `codedoc run --provider anthropic --model claude-haiku-4-5-20251001` | Use Anthropic Claude. |
 | `codedoc run --ignore /myenv --ignore generated` | Ignore project paths. |
-| `codedoc run --safe-mode` | Deprecated (live backup is always on since 0.8.0). |
+| `codedoc run --dry-run --max-files 25` | Inspect the plan without writes, provider creation, or API calls. |
+| `codedoc run --max-files 25` | Stop before mutation or API calls if more than 25 files need LLM work. |
+| `codedoc run --force-files src/a.py --force-files src/b.py` | Explicitly reprocess selected files. |
+| `codedoc run --allow-partial` | Exit 0 for completed partial runs, with a prominent warning. |
 | `codedoc run --max-parallel-files 3` | Limit concurrent file processing. |
 | `codedoc .` | Legacy shorthand for documenting the current directory. |
 | `codedoc --version` | Print the installed version. |
@@ -387,7 +397,16 @@ Configurable settings added in 0.9.0:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `max_content_chars` | `12000` | Maximum characters of file content sent to the LLM per file. Files longer than this are truncated and an INFO log line is emitted with the file path and character counts. Raise this for large-context providers (`60000`–`100000`). Must be at least `1000`. |
+| `max_content_chars` | `12000` | Maximum characters sent to the LLM per file. Long files are truncated once, one WARNING reports the path and counts, and the marker stays inside the ceiling. Must be at least `1000`. |
+
+Planning and CI settings added in 0.9.2:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `dry_run` | `false` | Compute the real routing plan without filesystem mutation or provider/API interaction. |
+| `max_files` | `0` | Maximum files allowed to make LLM calls after reuse and resume decisions. `0` is unlimited. |
+| `force_files` | `[]` | Selected project paths to reprocess explicitly before dependency propagation. |
+| `allow_partial` | `false` | Exit 0 only for completed runs that produced partial output after file failures. |
 
 ## Environment Variables
 
@@ -414,6 +433,10 @@ Supported variables:
 | `LOG_LEVEL` | `INFO`, `DEBUG`, etc. |
 | `CODEDOC_IGNORE_PATHS` | Semicolon-separated ignore paths. |
 | `CODEDOC_MAX_CONTENT_CHARS` | Maximum characters of file content sent to the LLM. Equivalent to `max_content_chars` in config. |
+| `CODEDOC_DRY_RUN` | Boolean planning-only mode. |
+| `CODEDOC_MAX_FILES` | Non-negative paid-file cap; `0` is unlimited. |
+| `CODEDOC_FORCE_FILES` | Semicolon-separated forced project paths. |
+| `CODEDOC_ALLOW_PARTIAL` | Boolean partial-output exit-code override. |
 
 Example `.env` for OpenAI:
 
@@ -603,14 +626,13 @@ On each run, `codedoc` follows this process:
 3. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
 4. Build a dependency graph from parsed imports.
 5. Select files reachable from the entry point.
-6. Compute each selected file's SHA-256 hash.
-7. Skip files whose path and hash already match the existing output.
-8. Reuse existing documentation if another file has the same content hash.
-9. If `propagate_changes` is true, reprocess files that depend on changed files.
-10. Send only remaining files to the selected LLM, up to `max_parallel_files` at a time.
-11. Retry failed parallel files sequentially so errors are easier to diagnose.
-12. Stop early if repeated failures suggest the API or provider is unavailable.
-13. Rebuild the selected output file from processed records, embedding metadata for the next run.
+6. Normalize forced paths and add valid forced files before dependency propagation.
+7. Compute one immutable plan covering changed, unchanged, reused, resumed, and paid-agent files.
+8. In `--dry-run`, return that plan and approximate lower-bound usage without writing or creating a provider.
+9. In a real run, enforce ownership and `max_files` before creating directories, writers, logs, or providers.
+10. Materialize identical-content and checkpoint reuse exactly as planned.
+11. Send only paid-agent files to the LLM, retry failures, and write final output.
+12. Report actual call attempts and approximate input/output token totals.
 
 This means repeated runs should only send new or changed code to the LLM. Unchanged code and exact duplicate content are reused.
 
@@ -733,6 +755,54 @@ changes, directory creation, scanning, or LLM calls. A foreign target that would
 block the final write is caught immediately — no tokens are spent and no output
 directory is created.
 
+## Planning, Cost Guardrails, and CI
+
+Use `codedoc run --dry-run --max-files 25` to inspect a run safely. Dry-run
+uses the same routing plan as real execution. It may read source, existing
+outputs, live backups, and legacy checkpoints, but it does not create an output
+directory, write `error.log`, initialize `SafeWriter`, create a provider, or
+call an API. It works without an API key.
+
+Token figures use a simple character heuristic. Dry-run input totals are
+explicitly lower bounds because the documentation prompt includes earlier
+agent responses that do not exist during planning. No monetary estimate is
+provided.
+
+`--max-files N` counts only files that would actually make LLM calls after
+unchanged skipping, identical-content reuse, and eligible checkpoint reuse. A
+real run exceeding the cap exits `2` before persistent mutation or provider
+creation. Dry-run still exits `0` and reports that the equivalent real run
+would fail.
+
+Force selected files with repeatable options:
+
+```bash
+codedoc run --force-files src/a.py --force-files src/b.py
+```
+
+Explicitly forced files bypass unchanged, identical-content, and checkpoint
+reuse. They are added before normal dependency propagation; propagated
+dependents retain normal reuse behavior.
+
+CLI exit codes:
+
+| Code | Meaning |
+| --- | --- |
+| `0` | Success, dry-run success, or explicitly allowed partial output. |
+| `1` | File-processing failure, output/write failure, or unexpected fatal error. |
+| `2` | Invalid input/config/path, ownership conflict, cap exceeded, or provider initialization failure. |
+| `130` | Keyboard interrupt. |
+
+`--allow-partial` changes only completed runs with file-level failures. Setup,
+ownership, cap, provider initialization, write, and unexpected fatal errors
+remain nonzero.
+
+A packaged manual-only GitHub Actions example is installed at
+`codedoc/templates/github-actions-codedoc.yml`. It performs a dry-run before
+the paid run, applies the same cap to both, uploads documentation as an
+artifact, uses `contents: read`, and never commits or pushes. Selected source
+is sent to an external provider and API usage may cost money.
+
 ### More detail
 
 [`RUN_FLOW.md`](RUN_FLOW.md) documents the full end-to-end pipeline and every
@@ -808,7 +878,10 @@ CLI flags map directly to config keys:
 | `--output` | `output_dir` |
 | `--format` | `output_format` |
 | `--ignore` | `ignore_paths` |
-| `--safe-mode` | `safe_mode: True` |
+| `--dry-run` | `dry_run: True` |
+| `--max-files` | `max_files` |
+| `--force-files` | `force_files` |
+| `--allow-partial` | `allow_partial: True` |
 | `--no-parallel` | `parallel_agents: False` |
 | `--max-parallel-files` | `max_parallel_files` |
 | `--verbose` | `log_level: "DEBUG"` |
