@@ -250,11 +250,11 @@ def test_public_output_normalizes_external_package_names(tmp_path):
     )
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    assert payload["files"][0]["links"]["external_dependencies"] == [
-        "dart:async",
-        "flutter",
-        "provider",
-    ]
+    # 0.9.3: SDK/standard-library names are separated from third-party packages.
+    # `dart:async` is a Dart SDK library, so it moves to `sdk_dependencies`.
+    links = payload["files"][0]["links"]
+    assert links["external_dependencies"] == ["flutter", "provider"]
+    assert links["sdk_dependencies"] == ["dart:async"]
 
 
 def test_pipeline_no_entry_no_docs_uses_auto_detection(tmp_path):

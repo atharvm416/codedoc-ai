@@ -148,6 +148,7 @@ class SafeWriter:
         if not self._path.exists():
             return {}
 
+        from codedoc.core.document import read_codedoc_document
         from codedoc.utils.errors import ConfigError
 
         def _foreign_file_error() -> ConfigError:
@@ -160,22 +161,23 @@ class SafeWriter:
                 f"  • Delete or rename the conflicting file:  {self._path}"
             )
 
+        # 0.9.3: ownership + parsing via the centralized reader.  A foreign or
+        # malformed file raises before any LLM work begins.
         try:
-            data = json.loads(self._path.read_text(encoding="utf-8-sig"))
-        except Exception:
+            document = read_codedoc_document(self._path)
+        except (ConfigError, FileNotFoundError):
             raise _foreign_file_error()
 
-        if not isinstance(data, dict) or not isinstance(data.get("_codedoc"), dict):
-            raise _foreign_file_error()
-
-        meta = data["_codedoc"]
+        meta = document.metadata
         self._created_at = (
-            meta.get("generated_at") or meta.get("created_at") or self._created_at
+            meta.get("created_at")
+            or meta.get("generated_at")
+            or self._created_at
         )
 
-        for f in data.get("files", []):
+        for f in document.files:
             if isinstance(f, dict) and f.get("path"):
-                self._clean_records[f["path"]] = f
+                self._clean_records[f["path"]] = dict(f)
 
         if self._clean_records:
             logger.info(
@@ -364,7 +366,7 @@ class SafeWriter:
             "_codedoc": {
                 "entry_file": self._entry_file,
                 "schema_version": SCHEMA_VERSION,
-                "generated_at": self._created_at,
+                "created_at": self._created_at,
                 "updated_at": now,
                 "status": _STATUS_IN_PROGRESS,
                 "live_backup": True,

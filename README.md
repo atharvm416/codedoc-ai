@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.2`.
+Current release: `0.9.3`.
 
 ## What It Does
 
@@ -539,12 +539,13 @@ In JSON files the block is the first key in the document:
 {
   "_codedoc": {
     "entry_file": "src/main.py",
-    "schema_version": "1.4",
-    "generated_at": "2025-..."
+    "schema_version": "1.4"
   },
   ...
 }
 ```
+
+Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (Live crash-safety backups keep `created_at` / `updated_at` diagnostics.)
 
 In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
 
@@ -571,7 +572,9 @@ The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readabl
 - Project-level dependency catalog with deduplicated dependency purpose.
 - Flattened file summaries (no nested duplication).
 - Imports, exports, functions, classes.
-- Internal, external, and reverse dependencies (`imported_by`).
+- Internal, external, SDK/standard-library, and reverse dependencies (`imported_by`).
+
+Since 0.9.3, third-party packages and language standard-library / SDK modules are separated: each file's `links` carry `external_dependencies` (third-party) and `sdk_dependencies` (e.g. Python stdlib, Dart `dart:*`, Node built-ins). The `SDK / Standard Library` Markdown section is rendered only when non-empty, and `internal_dependencies` / `imported_by` are derived **only** from resolved project-graph edges — unresolved agent text can never become an internal link. Missing `sdk_dependencies` loads as an empty list for older outputs.
 
 They exclude internal processing data such as raw LLM responses and per-file history.
 
@@ -596,12 +599,15 @@ Example public JSON:
     {
       "path": "schemas/userschema.py",
       "links": {
-        "external_dependencies": ["pydantic"]
+        "external_dependencies": ["pydantic"],
+        "sdk_dependencies": ["typing"]
       }
     }
   ]
 }
 ```
+
+The catalog is grouped by `(type, canonical_name)`, so the same package seen across files merges into one entry, while `external` and `sdk` entries stay distinct. An `internal` catalog hint from the model is kept only when it exactly matches a resolved internal path for that file; otherwise it is reclassified as a third-party / SDK dependency.
 
 The file still says what it uses. The shared explanation lives once in the catalog. This keeps JSON smaller, Markdown cleaner, and later agent analysis less noisy.
 

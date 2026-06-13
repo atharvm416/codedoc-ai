@@ -6,16 +6,42 @@ import base64
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codedoc.core.dependency_kind import (
+    KIND_EXTERNAL,
+    KIND_SDK,
+    classify_non_project_dependency,
+)
+from codedoc.core.record_meta import carry_private_keys
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.4"
+
+
+@dataclass(frozen=True)
+class EmbeddedViewResult:
+    """Tri-state result of attempting to read a Markdown embedded view.
+
+    ``state`` is one of:
+
+    - ``"absent"``  — no ``codedoc-ai-view-base64`` block is present;
+    - ``"valid"``   — a block is present and decoded to a usable view;
+    - ``"invalid"`` — a block is present but corrupt / structurally invalid.
+
+    The strict document reader rejects ``"invalid"`` (a corrupt embedded block
+    means the document must not be silently trusted via visible prose), while
+    the tolerant public ``read_embedded_view()`` collapses both ``"absent"``
+    and ``"invalid"`` to ``None`` for conversion compatibility.
+    """
+
+    state: str  # "absent", "valid", or "invalid"
+    view: dict | None
 
 # Regex that matches the lightweight metadata comment embedded in Markdown output:
 #   <!-- codedoc-ai: { ... } -->
@@ -66,6 +92,7 @@ def build_project_view(
             "internal_dependencies": internal_by_from.get(path, []),
             "imported_by": imported_by.get(path, []),
             "external_dependencies": file.pop("external_dependencies", []),
+            "sdk_dependencies": file.pop("sdk_dependencies", []),
         }
         links = {key: value for key, value in links.items() if value}
         if links:
@@ -77,7 +104,6 @@ def build_project_view(
 
     view = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "project": {
             "entry_file": entry_file,
             "file_count": len(files),
@@ -198,9 +224,12 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
         "_codedoc": {
             "entry_file": project.get("entry_file"),
             "schema_version": view.get("schema_version", SCHEMA_VERSION),
-            "generated_at": view.get("generated_at", ""),
         }
     }
+    # Determinism (0.9.3): completed output carries no run-varying timestamp.
+    # A caller-provided legacy view may still contain ``generated_at`` — never
+    # propagate it into the completed payload.
+    payload.pop("generated_at", None)
     ordered = {**meta_block, **payload}
     return json.dumps(ordered, indent=2, ensure_ascii=False)
 
@@ -242,6 +271,7 @@ def markdown_to_view(markdown: str) -> dict:
             "imported_by": existing_links.get("imported_by")
             or sorted(edge["from"] for edge in edges if edge["to"] == path),
             "external_dependencies": existing_links.get("external_dependencies", []),
+            "sdk_dependencies": existing_links.get("sdk_dependencies", []),
         }
         links = _prune_empty(links)
         if links:
@@ -253,7 +283,6 @@ def markdown_to_view(markdown: str) -> dict:
 
     view = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "project": {
             "entry_file": None if entry_file in (None, "not specified") else entry_file,
             "file_count": project.get("file_count", len(files)),
@@ -291,25 +320,21 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
 # Embedded lossless view helpers (0.8.1)
 # ---------------------------------------------------------------------------
 
-def read_embedded_view(markdown: str) -> dict | None:
-    """Extract and decode the lossless embedded view from Markdown.
+def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
+    """Tri-state read of the ``codedoc-ai-view-base64`` embedded view.
 
-    Looks for the ``<!-- codedoc-ai-view-base64 ... -->`` block written by
-    :func:`markdown_from_view` since 0.8.1, decodes the standard base64
-    payload as UTF-8 JSON, and validates the result.
-
-    Returns the decoded dict when the block is present and valid.
-    Returns ``None`` when the block is absent, corrupt, or flagged as an
-    in-progress/crash-safety snapshot (so callers can fall back to the
-    legacy visible-text parser).
+    Returns an :class:`EmbeddedViewResult` distinguishing ``"absent"`` (no
+    block) from ``"invalid"`` (block present but corrupt / structurally bad)
+    from ``"valid"`` (usable view).  The strict document reader uses this to
+    reject ``"invalid"`` rather than silently falling back to visible prose.
     """
     match = _CODEDOC_VIEW_BASE64_RE.search(markdown)
     if not match:
-        return None
+        return EmbeddedViewResult(state="absent", view=None)
 
     raw = match.group(1).strip()
     try:
-        json_bytes = base64.b64decode(raw)
+        json_bytes = base64.b64decode(raw, validate=True)
         data = json.loads(json_bytes.decode("utf-8"))
     except Exception as exc:
         logger.warning(
@@ -317,7 +342,7 @@ def read_embedded_view(markdown: str) -> dict | None:
             "(falling back to visible Markdown parser): %s",
             exc,
         )
-        return None
+        return EmbeddedViewResult(state="invalid", view=None)
 
     if not isinstance(data, dict):
         logger.warning(
@@ -325,7 +350,7 @@ def read_embedded_view(markdown: str) -> dict | None:
             "falling back to visible Markdown parser.",
             type(data).__name__,
         )
-        return None
+        return EmbeddedViewResult(state="invalid", view=None)
 
     # Reject crash-safety or in-progress snapshots — these must never be
     # embedded, but guard against it defensively.
@@ -334,13 +359,13 @@ def read_embedded_view(markdown: str) -> dict | None:
             "codedoc-ai-view-base64 contains a _crash_safety banner; "
             "treating as an incomplete snapshot and ignoring."
         )
-        return None
+        return EmbeddedViewResult(state="invalid", view=None)
     codedoc_meta = data.get("_codedoc", {})
     if isinstance(codedoc_meta, dict) and codedoc_meta.get("status") == "in_progress":
         logger.warning(
             "codedoc-ai-view-base64 is an in-progress snapshot; ignoring."
         )
-        return None
+        return EmbeddedViewResult(state="invalid", view=None)
 
     # Structural validation: require the three fields that make the view useful.
     required = {"schema_version", "project", "files"}
@@ -351,19 +376,32 @@ def read_embedded_view(markdown: str) -> dict | None:
             "falling back to visible Markdown parser.",
             sorted(missing),
         )
-        return None
+        return EmbeddedViewResult(state="invalid", view=None)
 
-    return data
+    return EmbeddedViewResult(state="valid", view=data)
+
+
+def read_embedded_view(markdown: str) -> dict | None:
+    """Extract and decode the lossless embedded view from Markdown.
+
+    Tolerant compatibility wrapper around :func:`read_embedded_view_result`:
+    returns the decoded dict only when the block is present and valid, and
+    ``None`` for both absent and invalid blocks so existing conversion callers
+    fall back to the legacy visible-text parser unchanged.
+    """
+    result = read_embedded_view_result(markdown)
+    return result.view if result.state == "valid" else None
 
 
 def _public_view_for_embedding(view: dict) -> dict:
     """Return a sanitized copy of *view* safe to embed in Markdown.
 
-    Strips crash-safety markers and the ``_codedoc`` wrapper (which is added
-    by :func:`json_from_view` at JSON render time and must not appear in the
-    embedded block).
+    Strips crash-safety markers, the ``_codedoc`` wrapper (which is added by
+    :func:`json_from_view` at JSON render time and must not appear in the
+    embedded block), and the deprecated run-varying ``generated_at`` field
+    (0.9.3 determinism).
     """
-    excluded = {"_crash_safety", "_codedoc"}
+    excluded = {"_crash_safety", "_codedoc", "generated_at"}
     return {k: v for k, v in view.items() if k not in excluded}
 
 
@@ -403,51 +441,20 @@ def read_codedoc_meta(file_path: Path) -> dict:
     read, is not a recognised CodeDoc output, or is missing structural metadata
     (e.g. the ``_codedoc`` block for JSON, or the ``<!-- codedoc-ai: ... -->``
     comment for Markdown).
+
+    0.9.3: parsing and structural ownership are delegated to the centralized
+    read-only document reader.  A function-local import keeps the dependency
+    acyclic (``document`` imports low-level helpers from this module at module
+    load time).
     """
+    from codedoc.core.document import read_codedoc_document
+
     try:
-        content = file_path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError as exc:
-        raise ConfigError(f"Cannot read '{file_path}': {exc}") from exc
+        document = read_codedoc_document(file_path)
+    except FileNotFoundError as exc:
+        raise ConfigError(f"Cannot read '{file_path}': file does not exist.") from exc
 
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".json":
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ConfigError(
-                f"'{file_path}' is not a valid CodeDoc file: JSON parse error."
-            ) from exc
-        meta = data.get("_codedoc")
-        if not isinstance(meta, dict):
-            raise ConfigError(
-                f"'{file_path}' does not appear to be a valid CodeDoc file. "
-                "The '_codedoc' metadata block is missing or malformed. "
-                "Re-run with --entry to generate a fresh document."
-            )
-        return meta
-
-    if suffix == ".md":
-        match = _CODEDOC_META_COMMENT_RE.search(content)
-        if not match:
-            raise ConfigError(
-                f"'{file_path}' does not appear to be a valid CodeDoc file. "
-                "The metadata comment (<!-- codedoc-ai: ... -->) is missing. "
-                "Re-run with --entry to generate a fresh document."
-            )
-        try:
-            meta = json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            raise ConfigError(
-                f"'{file_path}' has a malformed CodeDoc metadata comment."
-            ) from exc
-        # Note: entry_file may be None — callers must not require it to be set.
-        return meta
-
-    raise ConfigError(
-        f"'{file_path}' has unsupported extension '{suffix}'. "
-        "CodeDoc output files must end in .json or .md."
-    )
+    return dict(document.metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -469,7 +476,6 @@ def _build_meta_comment(view: dict, project: dict) -> str:
     meta = {
         "entry_file": project.get("entry_file"),
         "schema_version": view.get("schema_version", SCHEMA_VERSION),
-        "generated_at": view.get("generated_at", ""),
         "file_hashes": file_hashes,
     }
     return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
@@ -508,15 +514,26 @@ def clean_file_record(record: dict) -> dict:
 
 def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
+    language = result.get("language") or record.get("language", "")
     dependencies = result.get("dependencies_analysis", {})
-    external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
-    external = sorted(
-        {
-            _normalize_dependency_name(name, "external")
-            for name in external
-            if _normalize_dependency_name(name, "external")
-        }
-    )
+    raw_external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
+
+    # 0.9.3: classify each non-project import as external (third-party) or sdk
+    # (standard library / language SDK), threading the file's language through.
+    # Internal links are never produced here — they come only from graph edges.
+    external_set: set[str] = set()
+    sdk_set: set[str] = set()
+    for name in raw_external:
+        dep = classify_non_project_dependency(name, language)
+        if not dep.canonical:
+            continue
+        if dep.kind == KIND_SDK:
+            sdk_set.add(dep.canonical)
+        else:
+            external_set.add(dep.canonical)
+    external = sorted(external_set)
+    sdk = sorted(sdk_set)
+
     usage_notes = dependencies.get("usage_notes", []) if isinstance(dependencies, dict) else []
     dependency_refs = (
         dependencies.get("dependency_refs", []) if isinstance(dependencies, dict) else []
@@ -528,7 +545,7 @@ def _clean_file(record: dict) -> dict:
     file = {
         "hash": record.get("hash", ""),
         "path": record.get("file_path") or result.get("file_path", ""),
-        "language": result.get("language") or record.get("language", ""),
+        "language": language,
         "description": result.get("description", ""),
         "role_in_system": result.get("role_in_system", ""),
         "imports": result.get("imports", []),
@@ -539,11 +556,19 @@ def _clean_file(record: dict) -> dict:
         "usage_example": _sanitize_usage_example(result.get("usage_example", "")),
         "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
         "external_dependencies": external,
+        "sdk_dependencies": sdk,
         "dependency_refs": dependency_refs,
         "dependency_usage": _dependency_usage_map(usage_notes),
         "dependency_catalog_updates": _clean_catalog_updates(catalog_updates),
     }
-    return {key: value for key, value in file.items() if value not in (None, "", [], {})}
+    cleaned = {key: value for key, value in file.items() if value not in (None, "", [], {})}
+
+    # 0.9.3: registered private keys survive empty-value pruning.  Carry from the
+    # nested orchestrator result first, then the top-level record so a persisted
+    # top-level value wins when both layers contain the same key.
+    carry_private_keys(result, cleaned)
+    carry_private_keys(record, cleaned)
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -651,6 +676,11 @@ def _parse_markdown_files(markdown: str) -> list[dict]:
             "external_dependencies": _list_after_label(
                 body,
                 "External Dependencies",
+                code=True,
+            ),
+            "sdk_dependencies": _list_after_label(
+                body,
+                "SDK / Standard Library",
                 code=True,
             ),
         }
@@ -810,113 +840,158 @@ def _prune_empty(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 def _dependency_usage_map(usage_notes: list) -> dict[str, str]:
+    """Map each raw usage-note import to its ``used_for`` text.
+
+    0.9.3: names are kept *raw* here; classification (external vs sdk) and
+    canonicalization are deferred to :func:`_dependency_catalog`, which knows
+    each file's language.
+    """
     usage: dict[str, str] = {}
     for note in usage_notes:
         if not isinstance(note, dict):
             continue
-        name = _normalize_dependency_name(note.get("import", ""), "external")
+        name = str(note.get("import", "") or "").strip()
         used_for = str(note.get("used_for", "")).strip()
         if name and used_for and name not in usage:
             usage[name] = used_for
     return usage
 
 
+_RECOGNIZED_TYPE_HINTS = ("internal", "external", "sdk")
+
+
 def _clean_catalog_updates(catalog_updates: list) -> list[dict]:
+    """Shape-clean agent catalog updates only.
+
+    0.9.3: runs *before* graph links are attached, so it cannot validate
+    internal hints or classify names.  It retains the trimmed raw name, a
+    recognized raw type hint, and the trimmed ``used_for``.  All
+    classification and internal-hint validation happen later in
+    :func:`_dependency_catalog`, after links exist.
+    """
     updates = []
     for item in catalog_updates:
         if not isinstance(item, dict):
             continue
-        type_hint = item.get("type") if item.get("type") in ("internal", "external") else ""
-        name = _normalize_dependency_name(item.get("name", ""), type_hint)
+        name = str(item.get("name", "") or "").strip()
         if not name:
             continue
+        type_hint = item.get("type") if item.get("type") in _RECOGNIZED_TYPE_HINTS else ""
         update = {
             "name": name,
-            "type": type_hint or _dependency_type(name),
+            "type": type_hint,
             "used_for": str(item.get("used_for", "")).strip(),
         }
         updates.append({key: value for key, value in update.items() if value not in ("", None)})
     return updates
 
 
+def _normalize_internal_candidate(name: Any) -> str:
+    """Normalize an agent-provided internal hint for exact-path comparison."""
+    value = str(name or "").strip()
+    if value.startswith("package:"):
+        value = value[len("package:"):]
+    return value.replace("\\", "/")
+
+
 def _dependency_catalog(files: list[dict]) -> list[dict]:
-    catalog: dict[str, dict] = {}
+    """Build the deduplicated dependency catalog, grouped by (type, name).
+
+    0.9.3: internal catalog entries are accepted only when the agent hint's
+    normalized name exactly matches a resolved ``links.internal_dependencies``
+    path for that file — unresolved agent text can never create an internal
+    entry.  Non-project names are classified into ``external`` / ``sdk`` via
+    the pure language-aware classifier.
+    """
+    # Keyed by (type, canonical_name) so external/sdk/internal never collide.
+    catalog: dict[tuple[str, str], dict] = {}
+
+    def _entry(type_: str, canonical: str) -> dict:
+        key = (type_, canonical)
+        item = catalog.get(key)
+        if item is None:
+            item = {"name": canonical, "type": type_, "used_for": "", "files": set()}
+            catalog[key] = item
+        return item
 
     for file in files:
         path = file.get("path", "")
-        usage = file.pop("dependency_usage", {})
+        language = file.get("language", "")
+        usage_raw = file.pop("dependency_usage", {})
         catalog_updates = file.pop("dependency_catalog_updates", [])
-        dependency_refs = [
-            _normalize_dependency_name(name, "external")
-            for name in file.pop("dependency_refs", [])
-            if _normalize_dependency_name(name, "external")
-        ]
+        dependency_refs = file.pop("dependency_refs", [])
         links = file.get("links", {})
+        internal_paths = set(links.get("internal_dependencies", []))
+        external_links = links.get("external_dependencies", [])
+        sdk_links = links.get("sdk_dependencies", [])
 
+        # Classify usage notes into (kind, canonical) -> used_for for this file.
+        usage: dict[tuple[str, str], str] = {}
+        for raw_name, used_for in usage_raw.items():
+            dep = classify_non_project_dependency(raw_name, language)
+            if dep.canonical and (dep.kind, dep.canonical) not in usage:
+                usage[(dep.kind, dep.canonical)] = used_for
+
+        # 1. Agent catalog updates (may carry used_for text + a type hint).
         for update in catalog_updates:
-            name = update["name"]
-            item = catalog.setdefault(
-                name,
-                {
-                    "name": name,
-                    "type": update.get("type", _dependency_type(name)),
-                    "used_for": update.get("used_for", ""),
-                    "files": set(),
-                },
-            )
-            item["files"].add(path)
-            item["type"] = _merge_dependency_type(item.get("type"), update.get("type"))
-            if _should_replace_catalog_text(item.get("used_for", ""), update.get("used_for", "")):
-                item["used_for"] = update["used_for"]
-
-        for dependency in dependency_refs:
-            name = _normalize_dependency_name(dependency, "external")
-            if not name:
+            raw_name = update.get("name", "")
+            type_hint = update.get("type", "")
+            used_for = update.get("used_for", "")
+            if not used_for:
                 continue
-            item = catalog.get(name)
-            if not item:
-                if name not in usage:
+            if type_hint == "internal":
+                norm = _normalize_internal_candidate(raw_name)
+                if norm and norm in internal_paths:
+                    item = _entry("internal", norm)
+                    item["files"].add(path)
+                    if _should_replace_catalog_text(item["used_for"], used_for):
+                        item["used_for"] = used_for
                     continue
-                item = catalog.setdefault(
-                    name,
-                    {
-                        "name": name,
-                        "type": _dependency_type(name),
-                        "used_for": "",
-                        "files": set(),
-                    },
-                )
-            item["files"].add(path)
-            if not item["used_for"] and usage.get(name):
-                item["used_for"] = usage[name]
-
-        for dependency in links.get("external_dependencies", []):
-            name = _normalize_dependency_name(dependency, "external")
-            if not name:
+                # Discard the unresolved internal hint and reclassify as non-project.
+            dep = classify_non_project_dependency(raw_name, language)
+            if not dep.canonical:
                 continue
-            item = catalog.get(name)
-            if not item:
-                if name not in usage:
+            item = _entry(dep.kind, dep.canonical)
+            item["files"].add(path)
+            if _should_replace_catalog_text(item["used_for"], used_for):
+                item["used_for"] = used_for
+
+        # 2. Resolved external / SDK links from this file's classification.
+        for canonical, kind in (
+            [(n, KIND_EXTERNAL) for n in external_links]
+            + [(n, KIND_SDK) for n in sdk_links]
+        ):
+            key = (kind, canonical)
+            item = catalog.get(key)
+            if item is None:
+                if key not in usage:
                     continue
-                item = catalog.setdefault(
-                    name,
-                    {
-                        "name": name,
-                        "type": "external",
-                        "used_for": "",
-                        "files": set(),
-                    },
-                )
+                item = _entry(kind, canonical)
             item["files"].add(path)
-            item["type"] = _merge_dependency_type(item.get("type"), "external")
-            if not item["used_for"] and usage.get(name):
-                item["used_for"] = usage[name]
+            if not item["used_for"] and usage.get(key):
+                item["used_for"] = usage[key]
 
-        for dependency, used_for in usage.items():
-            if not dependency:
+        # 3. Dependency references — attach only to an existing entry or when
+        #    the agent provided usage text (keeps the catalog from filling with
+        #    bare, purposeless names).
+        for raw_ref in dependency_refs:
+            dep = classify_non_project_dependency(raw_ref, language)
+            if not dep.canonical:
                 continue
-            item = catalog.get(dependency)
-            if not item:
+            key = (dep.kind, dep.canonical)
+            item = catalog.get(key)
+            if item is None:
+                if key not in usage:
+                    continue
+                item = _entry(dep.kind, dep.canonical)
+            item["files"].add(path)
+            if not item["used_for"] and usage.get(key):
+                item["used_for"] = usage[key]
+
+        # 4. Remaining usage notes that match an existing entry.
+        for key, used_for in usage.items():
+            item = catalog.get(key)
+            if item is None:
                 continue
             item["files"].add(path)
             if not item["used_for"]:
@@ -924,12 +999,12 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
 
     result = []
     for item in catalog.values():
-        files_used = sorted(path for path in item.pop("files") if path)
+        files_used = sorted(p for p in item.pop("files") if p)
         item["files"] = files_used
         item["file_count"] = len(files_used)
         result.append(item)
 
-    return sorted(result, key=lambda item: (-item["file_count"], item["name"]))
+    return sorted(result, key=lambda item: (-item["file_count"], item["name"], item["type"]))
 
 
 def _should_replace_catalog_text(existing: str, candidate: str) -> bool:
@@ -956,42 +1031,6 @@ def _specificity_score(text: str) -> tuple[int, int]:
     )
     lowered = text.lower()
     return (sum(1 for word in project_words if word in lowered), len(text))
-
-
-def _merge_dependency_type(existing: str | None, candidate: str | None) -> str:
-    if existing == "internal" or candidate == "internal":
-        return "internal"
-    if existing == "external" or candidate == "external":
-        return "external"
-    return candidate or existing or "unknown"
-
-
-def _normalize_dependency_name(name: Any, dependency_type_hint: str = "") -> str:
-    value = str(name or "").strip()
-    if value.startswith("package:"):
-        value = value[len("package:"):]
-    if dependency_type_hint == "external":
-        return _external_package_name(value)
-    return value
-
-
-def _dependency_type(name: str) -> str:
-    if name.startswith(".") or "/" in name:
-        return "internal"
-    return "external"
-
-
-def _external_package_name(name: str) -> str:
-    value = name.strip()
-    if not value:
-        return ""
-    if value.startswith("dart:"):
-        return value
-    if value.startswith(("./", "../")):
-        return value
-    if "/" in value:
-        return value.split("/", 1)[0]
-    return value
 
 
 def _edge_indexes(graph_edges: list[dict]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
@@ -1089,6 +1128,7 @@ def _append_file_markdown(lines: list[str], file: dict) -> None:
     _append_list(lines, "Internal Dependencies", links.get("internal_dependencies", []), code=True)
     _append_list(lines, "Imported By", links.get("imported_by", []), code=True)
     _append_list(lines, "External Dependencies", links.get("external_dependencies", []), code=True)
+    _append_list(lines, "SDK / Standard Library", links.get("sdk_dependencies", []), code=True)
     _append_named_items(lines, "Functions", file.get("functions", []))
     _append_named_items(lines, "Classes", file.get("classes", []))
     _append_list(lines, "Exports", file.get("exports", []), code=True)

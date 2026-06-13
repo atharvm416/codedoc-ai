@@ -1,0 +1,32 @@
+{
+  "_codedoc": {
+    "entry_file": "main.py",
+    "schema_version": "1.3",
+    "generated_at": "2026-01-01T00:00:00+00:00"
+  },
+  "schema_version": "1.3",
+  "project": {
+    "entry_file": "main.py",
+    "file_count": 2,
+    "languages": ["python"],
+    "folders": ["."]
+  },
+  "files": [
+    {
+      "path": "main.py",
+      "hash": "hash-main-13",
+      "language": "python",
+      "description": "Entry point.",
+      "links": {
+        "internal_dependencies": ["utils.py"],
+        "external_dependencies": ["requests"]
+      }
+    },
+    {
+      "path": "utils.py",
+      "hash": "hash-utils-13",
+      "language": "python",
+      "description": "Helpers."
+    }
+  ]
+}

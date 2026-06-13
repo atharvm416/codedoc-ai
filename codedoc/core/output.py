@@ -16,10 +16,9 @@
 
 from __future__ import annotations
 
-import json
-import re
 from pathlib import Path
 
+from codedoc.core.document import read_codedoc_document, records_by_path
 from codedoc.core.project_view import build_project_view, json_from_view, markdown_from_view
 from codedoc.utils.errors import ConfigError, OutputError
 from codedoc.utils.logger import get_logger
@@ -108,20 +107,18 @@ def read_existing_records(path: Path) -> dict[str, dict] | None:
     dict for an owned file with no records, and ``None`` when the file is
     missing, unreadable, or not codedoc-owned.  Never writes or deletes
     anything — safe for planning and dry-run.
+
+    0.9.3: parsing/validation is delegated to the centralized document reader.
+    Malformed or foreign files return ``None`` for this optional discovery use;
+    ownership is enforced separately by :func:`inspect_output_ownership`.
     """
     if not path.exists():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8-sig", errors="replace"))
-    except Exception:
+        document = read_codedoc_document(path)
+    except (ConfigError, FileNotFoundError):
         return None
-    if not isinstance(data, dict) or not isinstance(data.get("_codedoc"), dict):
-        return None
-    return {
-        f["path"]: f
-        for f in data.get("files", [])
-        if isinstance(f, dict) and f.get("path")
-    }
+    return records_by_path(document)
 
 
 def write_project_outputs(
@@ -190,20 +187,23 @@ def _is_codedoc_owned(path: Path) -> bool:
 
     Files that do not yet exist, or whose extension is not ``.json`` / ``.md``,
     are always allowed through.  Malformed or foreign files return ``False``.
+
+    0.9.3: ownership is decided by the centralized document reader.  This
+    intentionally tightens the old behaviour — Markdown that merely *contains*
+    a ``<!-- codedoc-ai:`` marker but whose metadata is malformed is now treated
+    as foreign and will not be overwritten.
     """
     if not path.exists():
         return True
 
     suffix = path.suffix.lower()
-    try:
-        content = path.read_text(encoding="utf-8-sig", errors="replace")
-        if suffix == ".json":
-            data = json.loads(content)
-            return isinstance(data, dict) and isinstance(data.get("_codedoc"), dict)
-        if suffix == ".md":
-            return bool(re.search(r"<!--\s*codedoc-ai:", content))
+    if suffix not in (".json", ".md"):
+        # Non-CodeDoc target extensions are not ours to guard.
         return True
-    except Exception:
+    try:
+        read_codedoc_document(path)
+        return True
+    except (ConfigError, FileNotFoundError):
         return False
 
 

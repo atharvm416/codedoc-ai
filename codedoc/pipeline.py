@@ -28,7 +28,6 @@
 from __future__ import annotations
 
 import concurrent.futures
-import json
 import re
 import sys
 import time
@@ -40,6 +39,8 @@ from codedoc.agents.orchestrator import Orchestrator
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.db import compute_file_hash
+from codedoc.core.document import read_codedoc_document, records_by_path
+from codedoc.core.record_meta import carry_private_keys
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.loader import load_config
@@ -256,12 +257,7 @@ def _load_existing_file_docs(
     if live_backup_path and live_backup_path.resolve() != json_path.resolve():
         if live_backup_path.exists():
             try:
-                data = json.loads(live_backup_path.read_text(encoding="utf-8"))
-                existing = {
-                    f["path"]: f
-                    for f in data.get("files", [])
-                    if isinstance(f, dict) and f.get("path")
-                }
+                existing = records_by_path(read_codedoc_document(live_backup_path))
                 if existing:
                     logger.info(
                         "Loaded %d existing record(s) from live backup '%s'.",
@@ -269,20 +265,23 @@ def _load_existing_file_docs(
                         live_backup_path.name,
                     )
                     return existing
-            except Exception:
-                pass
+            except (ConfigError, FileNotFoundError) as exc:
+                logger.debug(
+                    "Optional resume candidate '%s' rejected: %s",
+                    live_backup_path.name,
+                    exc,
+                )
 
     # 2. Final JSON output (also the live backup for JSON/both and default-MD runs).
     if json_path.exists():
         try:
-            data = json.loads(json_path.read_text(encoding="utf-8"))
-            existing = {
-                f["path"]: f
-                for f in data.get("files", [])
-                if isinstance(f, dict) and f.get("path")
-            }
-        except Exception:
-            pass
+            existing = records_by_path(read_codedoc_document(json_path))
+        except (ConfigError, FileNotFoundError) as exc:
+            logger.debug(
+                "Optional resume candidate '%s' rejected: %s",
+                json_path.name,
+                exc,
+            )
 
     # 3. Stale 0.7.x build file migration fallback.
     build_path = output_dir / BUILD_FILENAME
@@ -311,20 +310,18 @@ def _load_existing_file_docs(
                     except Exception:
                         pass
             else:
-                data = json.loads(build_path.read_text(encoding="utf-8"))
-                if isinstance(data, dict) and isinstance(data.get("_codedoc"), dict):
-                    build_files = {
-                        f["path"]: f
-                        for f in data.get("files", [])
-                        if isinstance(f, dict) and f.get("path")
-                    }
-                    if build_files:
-                        logger.info(
-                            "Build file '%s' found (%d record(s)) — merging (migration from 0.7.x).",
-                            BUILD_FILENAME,
-                            len(build_files),
-                        )
-                        existing.update(build_files)
+                # The reader parses only; age comparison, merge policy, and
+                # deletion remain here in the pipeline (legacy stale-build role).
+                build_files = records_by_path(
+                    read_codedoc_document(build_path, legacy_role="stale_build")
+                )
+                if build_files:
+                    logger.info(
+                        "Build file '%s' found (%d record(s)) — merging (migration from 0.7.x).",
+                        BUILD_FILENAME,
+                        len(build_files),
+                    )
+                    existing.update(build_files)
         except Exception:
             pass
 
@@ -397,7 +394,11 @@ def _public_record_to_doc(file_record: dict) -> dict:
         "usage_example": file_record.get("usage_example", ""),
         "dependencies_analysis": deps,
     }
-    return {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
+    cleaned = {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
+    # 0.9.3: carry registered private keys from the public record into the
+    # reconstructed flat documentation result so they survive resume/reuse.
+    carry_private_keys(file_record, cleaned)
+    return cleaned
 
 
 def _build_documentation_records(

@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.9.3 - 2026-06-13
+
+### Deterministic output, dependency categories, and centralized reading
+
+- **SDK/standard-library separation.** A new pure, deterministic, language-aware
+  classifier (`codedoc/core/dependency_kind.py`) splits non-project imports into
+  third-party `external_dependencies` and standard-library / SDK
+  `sdk_dependencies` (additive field). Dart `dart:*`, Python stdlib (via
+  `sys.stdlib_module_names` with a committed Python 3.9 fallback), and Node
+  built-ins / `node:*` are recognized as SDK; package subpaths and scoped npm
+  packages are canonicalized to their package root. Importability is never used
+  to classify modules.
+- **Internal links only from the graph.** `links.internal_dependencies` /
+  `links.imported_by` now come exclusively from resolved dependency-graph edges.
+  Unresolved agent text can no longer create an internal link, and an `internal`
+  catalog hint is accepted only when it exactly matches a resolved internal path
+  for that file; otherwise it is reclassified as non-project data. The catalog is
+  grouped by `(type, canonical_name)`.
+- **Centralized document reader.** A single read-only parser
+  (`codedoc/core/document.py`, `read_codedoc_document`) owns CodeDoc JSON /
+  Markdown parsing and structural ownership. Output ownership, `SafeWriter`,
+  metadata reads, existing-record reads, resume candidates, and stale-build
+  migration all route through it while keeping their own missing/malformed
+  policy. It reads UTF-8 with optional BOM, rejects invalid UTF-8, validates
+  collection types, rejects duplicate paths, prefers a valid embedded view, and
+  fails closed on unknown/missing-schema completed output and unsupported
+  extensions.
+- **Ownership tightening (intentional).** Markdown that merely contains a
+  `<!-- codedoc-ai:` marker but whose metadata is malformed (and which has no
+  valid embedded view) is now treated as foreign and is never overwritten. Valid
+  legacy Markdown remains accepted.
+- **Deterministic, timestamp-free completed output.** `generated_at` is removed
+  from the completed JSON `_codedoc` block, the Markdown metadata comment, and
+  the embedded lossless view. Two runs with identical sources, documentation,
+  configuration, and stats now produce byte-identical JSON and Markdown. Old
+  outputs containing `generated_at` remain readable. Live backups keep
+  `created_at` / `updated_at` diagnostics (new backups write `created_at`).
+- **Private record metadata plumbing.** A registry
+  (`codedoc/core/record_meta.py`) preserves explicitly registered private keys
+  through JSON, Markdown (embedded view only — never visible prose), live backup,
+  and resume reconstruction. The production registry is empty in this release;
+  arbitrary underscore-prefixed model output is not preserved.
+- No schema bump: `sdk_dependencies` and private keys are additive; missing
+  `sdk_dependencies` loads as an empty list.
+
 ## 0.9.2 - 2026-06-12
 
 ### Safe planning and CI ergonomics

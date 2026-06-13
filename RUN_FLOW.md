@@ -663,6 +663,24 @@ interrupt. The pre-load guarantees the live backup never loses prior completed w
 `codedoc` refuses to overwrite an unreadable file it cannot confirm it created.
 To proceed, delete/rename the file or choose a different `--output` directory.
 
+**0.9.3 — one reader, stricter ownership.** All of the parsing/validation above
+is now performed by a single read-only parser, `read_codedoc_document` in
+`codedoc/core/document.py`. Ownership checks, `SafeWriter.load()`,
+`read_existing_records`, resume-candidate reads, metadata reads, and the
+stale-build migration all route through it (each keeping its own
+missing/malformed policy). It reads UTF-8 with an optional BOM, rejects invalid
+UTF-8, validates collection types, rejects duplicate file paths, and fails
+closed on completed output with a missing/unknown schema. Ownership is
+intentionally tightened: a Markdown file that contains a `<!-- codedoc-ai:`
+marker but whose metadata is malformed — and which has no valid embedded view —
+is now treated as **foreign** and is never overwritten. Valid legacy Markdown
+(schema 1.3 / 1.4, with or without an embedded view) is still accepted.
+
+**0.9.3 — deterministic output.** Completed JSON and Markdown no longer carry a
+run-varying `generated_at`; two runs over identical inputs produce
+byte-identical output. Live backups still record `created_at` / `updated_at`.
+Old outputs that contain `generated_at` remain readable.
+
 ---
 
 ### Scenario S — (see Scenario N — now merged with the stale build-file migration case)
