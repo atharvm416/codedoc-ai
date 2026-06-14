@@ -1,5 +1,49 @@
 # Changelog
 
+## 0.9.4 - 2026-06-14
+
+### Internal decomposition (structural only — no behavior change)
+
+This release reorganizes two oversized modules into cohesive,
+single-responsibility units. It does **not** change file selection, provider
+calls, prompts, retries, the output schema, output contents, the dependency
+catalog, configuration defaults, or the CLI. For the same inputs the run
+behaves identically and the serialized JSON/Markdown is byte-identical to
+0.9.3 output.
+
+- **Pipeline decomposition.** `codedoc/pipeline.py` is now a thin lifecycle
+  coordinator. Its internals moved into three modules behind the unchanged
+  `run_pipeline()` facade and phase ordering:
+  - `codedoc/core/resume.py` — live-backup path resolution, existing JSON/MD
+    record loading, public→internal record reconstruction, final
+    documentation-record construction, and stale-build / legacy-db cleanup.
+  - `codedoc/core/discovery.py` — entry recovery from existing CodeDoc
+    metadata, dependency-graph construction, entry-reachability selection, and
+    graph-edge serialization (selection behavior moved unchanged).
+  - `codedoc/core/execution.py` — rate-limit / retry-after classification, the
+    adaptive-parallelism ladder, and sequential/parallel processing behind a
+    new `ExecutionContext` / `ExecutionOptions` boundary and the
+    `execute_agent_files()` entry point. The provider-aware `RateLimitProfile`
+    and execution policy are built by the pipeline and passed in; execution no
+    longer reads the configuration dictionary.
+- **Serializer extraction.** Markdown serialization/parsing moved from
+  `codedoc/core/project_view.py` into `codedoc/core/markdown_view.py`
+  (`markdown_from_view`, `markdown_to_view`, `json_from_markdown`,
+  `markdown_from_json`, the embedded-view readers, and the visible-Markdown
+  parsers/render helpers). `project_view.py` retains view assembly, the
+  dependency catalog, pruning, usage-example sanitization, and
+  `read_codedoc_meta`.
+- **Compatibility.** The moved private helpers remain importable from their
+  previous modules for one release: pipeline helpers from `codedoc.pipeline`,
+  and the serializer helpers from `codedoc.core.project_view` (forwarded
+  lazily to `codedoc.core.markdown_view`). These re-exports are deprecated and
+  emit no runtime warning. No schema change; `SCHEMA_VERSION` stays `1.4`.
+- **Tests.** Added `tests/test_094_pipeline_boundaries.py` and
+  `tests/test_094_project_view_split.py`, including byte-identical
+  golden-output fixtures (`tests/fixtures/golden_094_*`). One existing
+  monkeypatch target (`codedoc.pipeline.time.sleep`) was retargeted to the
+  defining module (`codedoc.core.execution.time.sleep`).
+
 ## 0.9.3 - 2026-06-13
 
 ### Deterministic output, dependency categories, and centralized reading

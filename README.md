@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.3`.
+Current release: `0.9.4`.
 
 ## What It Does
 
@@ -808,12 +808,6 @@ A packaged manual-only GitHub Actions example is installed at
 the paid run, applies the same cap to both, uploads documentation as an
 artifact, uses `contents: read`, and never commits or pushes. Selected source
 is sent to an external provider and API usage may cost money.
-
-### More detail
-
-[`RUN_FLOW.md`](RUN_FLOW.md) documents the full end-to-end pipeline and every
-success, interrupt/resume, and failure scenario across OpenAI, Anthropic, and
-Gemini.
 
 ## Python API
 

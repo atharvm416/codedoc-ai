@@ -30,12 +30,12 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
-from codedoc.core.project_view import (
-    SCHEMA_VERSION,
+from codedoc.core.markdown_view import (
     _CODEDOC_META_COMMENT_RE,
     markdown_to_view,
     read_embedded_view_result,
 )
+from codedoc.core.project_view import SCHEMA_VERSION
 from codedoc.utils.errors import ConfigError
 
 # Schema versions this release reads.  Parsed as integer components, never

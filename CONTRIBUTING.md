@@ -45,6 +45,19 @@ python -m twine check dist/*
 - Improve documentation examples.
 - Add provider support for another OpenAI-compatible local server.
 
+## Module Size and Cohesion
+
+File size is a review *signal*, not a hard gate. Production modules should
+normally stay cohesive and under roughly 700 lines; a module that grows well
+past that is usually doing too many jobs and is a good candidate for
+extraction into single-responsibility modules (as the pipeline and the
+project-view serializer were split in 0.9.4).
+
+There is no CI line-count rule, and you should never split code merely to hit
+a number. Generated files, large data tables, parsers, and tightly coupled
+serializers may legitimately justify more lines. Prefer splitting along clear
+responsibilities (and one-way import boundaries) rather than by line count.
+
 ## Pull Request Guidelines
 
 - Keep changes focused.

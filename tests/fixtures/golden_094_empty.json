@@ -1,0 +1,20 @@
+{
+  "_codedoc": {
+    "entry_file": null,
+    "schema_version": "1.4"
+  },
+  "schema_version": "1.4",
+  "project": {
+    "entry_file": null,
+    "file_count": 0,
+    "languages": [],
+    "folders": []
+  },
+  "run": {
+    "files_checked": 0,
+    "files_failed": 0,
+    "files_skipped": 0,
+    "files_reused": 0,
+    "files_documented": 0
+  }
+}

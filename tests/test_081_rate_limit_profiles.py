@@ -23,7 +23,6 @@ Plan acceptance criteria:
 from __future__ import annotations
 
 import json
-from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
@@ -300,7 +299,6 @@ def test_D7_detect_limit_type_unknown_returns_none():
 
 def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatch):
     """D8: retry_rate_limited contains (descriptor, exception) tuples."""
-    from pathlib import Path
     from codedoc.utils.errors import LLMError
     from codedoc.pipeline import _process_descriptor_batch
     from codedoc.core.queue import ProcessingQueue
@@ -361,8 +359,6 @@ def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatc
 def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
     """D9: When Retry-After hint is present, sleep uses that value."""
     from codedoc.utils.errors import LLMError
-    import codedoc.pipeline as pipeline_mod
-
     # Files must be >= 2 so we go parallel
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
@@ -391,10 +387,10 @@ def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RetryAfterProvider())
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
 
     from codedoc.pipeline import run_pipeline
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "a.py",
         "parallel_agents": False,
         "propagate_changes": False,
@@ -448,10 +444,10 @@ def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: NoRetryAfterProvider())
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
 
     from codedoc.pipeline import run_pipeline
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "a.py",
         "parallel_agents": False,
         "propagate_changes": False,
@@ -503,10 +499,10 @@ def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda s: sleep_calls.append(s))
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
 
     from codedoc.pipeline import run_pipeline
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "a.py",
         "parallel_agents": False,
         "propagate_changes": False,
@@ -558,7 +554,7 @@ def test_D12_warning_dict_has_all_required_fields(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda _: None)
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
 
     from codedoc.pipeline import run_pipeline
     stats = run_pipeline(tmp_path, {
@@ -624,7 +620,7 @@ def test_D13_cli_summary_shows_compact_line_when_events(tmp_path, monkeypatch, c
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda _: None)
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
 
     from codedoc.cli.cli import main
     try:
@@ -690,7 +686,7 @@ def test_D14_no_files_dropped_after_step_down(tmp_path, monkeypatch):
         fail_calls=3, provider_name="openai",
     )
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: provider)
-    monkeypatch.setattr("codedoc.pipeline.time.sleep", lambda _: None)
+    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
 
     from codedoc.pipeline import run_pipeline
     stats = run_pipeline(tmp_path, {

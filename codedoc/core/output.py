@@ -19,7 +19,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from codedoc.core.document import read_codedoc_document, records_by_path
-from codedoc.core.project_view import build_project_view, json_from_view, markdown_from_view
+from codedoc.core.markdown_view import markdown_from_view
+from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.utils.errors import ConfigError, OutputError
 from codedoc.utils.logger import get_logger
 
