@@ -98,6 +98,29 @@ class DocumentationAgent(BaseAgent):
             file_path, content, imports, language, structure, dependencies
         )
 
+    def _safe_run_with_context(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        structure: dict,
+        dependencies: dict,
+    ) -> dict:
+        """Run with upstream agent context and return the standard fallback."""
+        try:
+            return self.run_with_context(
+                file_path,
+                content,
+                imports,
+                language,
+                structure,
+                dependencies,
+            )
+        except Exception as exc:
+            logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
+            return {"error": str(exc), "agent": self.agent_name}
+
     def _run_with_context(
         self,
         file_path: str,

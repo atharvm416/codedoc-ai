@@ -122,26 +122,27 @@ def test_internal_catalog_hint_accepted_only_for_exact_resolved_path():
     assert catalog[("internal", "utils.py")]["used_for"] == "helpers"
 
 
-def test_unresolved_internal_hint_is_reclassified_not_internal():
+def test_unresolved_internal_hint_is_discarded_not_reclassified():
+    # An internal hint with no resolved graph link and no finalized external
+    # link for the same name carries no authoritative evidence — it is discarded
+    # entirely, never reclassified into a fabricated external entry.
     view = build_project_view(
         [_record("main.py", "python", catalog_updates=[
             {"name": "requests", "type": "internal", "used_for": "http"},
         ])],
         {"checked": 1},
     )
-    types = {c["type"] for c in view.get("dependency_catalog", [])}
-    assert "internal" not in types
-    # Reclassified as a third-party package.
-    catalog = {(c["type"], c["name"]): c for c in view.get("dependency_catalog", [])}
-    assert ("external", "requests") in catalog
+    assert "dependency_catalog" not in view
 
 
 def test_catalog_groups_by_type_and_canonical_name():
+    # Entries are evidence-backed: each file declares the finalized external
+    # link, and the catalog_update only supplies used_for text.
     view = build_project_view(
         [
-            _record("a.py", "python", catalog_updates=[
+            _record("a.py", "python", external=["requests"], catalog_updates=[
                 {"name": "requests", "type": "external", "used_for": "http"}]),
-            _record("b.py", "python", catalog_updates=[
+            _record("b.py", "python", external=["requests"], catalog_updates=[
                 {"name": "requests.adapters", "type": "external", "used_for": "http"}]),
         ],
         {"checked": 2},
@@ -154,11 +155,13 @@ def test_catalog_groups_by_type_and_canonical_name():
 
 def test_external_and_sdk_same_name_are_distinct_catalog_entries():
     # `typing` is python-sdk; in an unknown language the same name is external.
+    # Each entry must be backed by that file's finalized link, not the
+    # catalog_update text alone.
     view = build_project_view(
         [
-            _record("a.py", "python", catalog_updates=[
+            _record("a.py", "python", external=["typing"], catalog_updates=[
                 {"name": "typing", "used_for": "hints"}]),
-            _record("b.rb", "ruby", catalog_updates=[
+            _record("b.rb", "ruby", external=["typing"], catalog_updates=[
                 {"name": "typing", "used_for": "thing"}]),
         ],
         {"checked": 2},

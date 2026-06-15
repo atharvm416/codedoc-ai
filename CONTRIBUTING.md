@@ -27,15 +27,39 @@ On macOS/Linux:
 source .venv/bin/activate
 ```
 
+## Supported Python versions
+
+`codedoc-ai` supports Python 3.10, 3.11, and 3.12. The declared
+`requires-python` range, the package classifiers, and the CI test matrix are
+kept in agreement; CI tests every interpreter the package claims to support.
+
 ## Verification
 
 Run these before opening a pull request:
 
 ```bash
 python -m pytest
+python -m ruff check codedoc
+python -m ruff check tests/test_095_*.py tests/test_093_dependency_view.py tests/test_graph.py tests/test_agents.py
 python -m build
 python -m twine check dist/*
 ```
+
+Continuous integration (`.github/workflows/ci.yml`) runs the full test suite on
+Python 3.10–3.12, Ruff over production and the release-touched tests, and a
+packaging job that builds the sdist and wheel, runs `twine check`, installs the
+wheel into a clean environment, and smoke-tests `import codedoc`,
+`codedoc --version`, and `codedoc --help`. The older test files still have known
+Ruff findings, so the lint gate is intentionally scoped until those are cleaned
+in a dedicated behavior-free change. CI never publishes, makes paid provider
+calls, or requires provider secrets.
+
+## Run lifecycle
+
+The verified phase ordering of a run — read-only preflight, scan/plan, the
+mutation boundary, live-backup initialization before provider creation,
+execution, atomic finalization, diagnostics, and cleanup — is documented in
+[`RUN_FLOW.md`](RUN_FLOW.md).
 
 ## Good First Contributions
 

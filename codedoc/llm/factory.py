@@ -23,7 +23,8 @@ Active providers
 
 Reserved (not exposed in this release)
 ---------------------------------------
-  local     — Ollama / LM Studio via OpenAI-compatible endpoint.
+  ``codedoc.llm.local_provider`` remains importable for compatibility, but the
+  factory and CLI do not expose a local-provider choice.
 """
 
 from __future__ import annotations
@@ -185,20 +186,3 @@ def _provider_api_key(
         os.environ.get("OPENAI_API_KEY", "")
         or os.environ.get("LLM_API_KEY", "")
     )
-
-
-# ---------------------------------------------------------------------------
-# Reserved — local provider helper (not called in this release).
-#
-# def _make_local(model: str, base_url: str | None) -> LLMProvider:
-#     from codedoc.llm.local_provider import LocalProvider, DEFAULT_OLLAMA_URL
-#     url = base_url or DEFAULT_OLLAMA_URL
-#     provider = LocalProvider(model=model or "qwen2.5-coder:7b", base_url=url)
-#     if not provider.is_available():
-#         raise LLMError(
-#             "Local",
-#             f"Local LLM server is not reachable at {url}. "
-#             "Make sure Ollama or LM Studio is running.",
-#         )
-#     return provider
-# ---------------------------------------------------------------------------

@@ -1,6 +1,5 @@
 """Tests for DependencyGraph."""
 
-import pytest
 from codedoc.core.graph import DependencyGraph, resolve_import, _KNOWN_EXTENSIONS, _candidate_variants
 from pathlib import Path
 
@@ -124,6 +123,42 @@ class TestResolveImport:
             Path("."),
         )
         assert result == "lib/screens/home.dart"
+
+    def test_case_mismatch_follows_platform_filesystem_semantics(self):
+        all_files = {"main.py", "foo.py"}
+        result = resolve_import("FOO", "main.py", all_files, Path("."))
+        import codedoc.core.graph as graph
+
+        if graph._filesystem_is_case_insensitive(Path(".")):
+            assert result == "foo.py"
+        else:
+            assert result is None
+
+    def test_case_mismatch_is_rejected_on_case_sensitive_platform(self, monkeypatch):
+        import codedoc.core.graph as graph
+
+        monkeypatch.setattr(graph, "_filesystem_is_case_insensitive", lambda _path: False)
+        result = resolve_import("FOO", "main.py", {"main.py", "foo.py"}, Path("."))
+        assert result is None
+
+    def test_case_mismatch_is_accepted_on_case_insensitive_platform(self, monkeypatch):
+        import codedoc.core.graph as graph
+
+        monkeypatch.setattr(graph, "_filesystem_is_case_insensitive", lambda _path: True)
+        result = resolve_import("FOO", "main.py", {"main.py", "foo.py"}, Path("."))
+        assert result == "foo.py"
+
+    def test_case_detection_uses_the_supplied_project_root(self, tmp_path, monkeypatch):
+        import codedoc.core.graph as graph
+
+        observed = []
+        monkeypatch.setattr(
+            graph,
+            "_filesystem_is_case_insensitive",
+            lambda path: observed.append(path) or False,
+        )
+        resolve_import("FOO", "main.py", {"main.py", "foo.py"}, tmp_path)
+        assert observed == [tmp_path]
 
 
 class TestCandidateVariants:

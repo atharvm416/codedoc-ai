@@ -86,6 +86,18 @@ class OutputError(CodeDocError):
         super().__init__(f"OutputError for '{file_path}': {reason}")
 
 
+class LiveBackupWriteError(OutputError):
+    """Raised when the live crash-safety backup cannot be persisted.
+
+    This is a fatal output failure, not a recoverable agent or rate-limit
+    failure: once the live backup cannot be written, codedoc's crash-recovery
+    guarantee no longer holds, so execution must stop scheduling new work rather
+    than continue under a false guarantee.  Carries the target path only — never
+    source, prompt, or credential data — and retains the original SDK/OS
+    exception as ``__cause__``.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Error Reporter
 # ---------------------------------------------------------------------------

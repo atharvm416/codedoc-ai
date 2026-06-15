@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.9.5 - 2026-06-15
+
+### Correctness and reliability (behavior changes are bounded and listed below)
+
+A corrective patch release. The only intentional change to successful output is
+the dependency-catalog correction; all other changes harden persistence,
+packaging, and CI without altering successful serialized contents. No schema
+bump, no new configuration, CLI feature, prompt, provider, or output artifact.
+
+- **Evidence-based dependency catalog.** A catalog entry is now admitted only
+  when its `(type, canonical_name)` key is authorized by a file's finalized
+  links (graph-resolved `internal_dependencies`, or deterministically classified
+  `external_dependencies` / `sdk_dependencies`). Model `catalog_updates`,
+  `dependency_refs`, and `usage_notes` may enrich a proven dependency with
+  `used_for` text but can no longer create or retype one; unresolved hints are
+  discarded rather than reclassified. A Python external whose canonical root is
+  the project's own package and is resolved internally by the graph is dropped as
+  a false external. Every emitted entry now carries non-empty `used_for` text and
+  a backing file. Deterministic output remains byte-identical except where an
+  entry lacked authoritative evidence.
+- **Atomic completed output.** Final JSON and Markdown are written through a
+  single canonical `atomic_write_text` helper (unique temp sibling, flush +
+  fsync, rename) so a completed artifact can never be truncated in place. In
+  `both` mode both payloads are rendered before any target is mutated, Markdown
+  is replaced first and JSON last (the JSON path is also the live backup), giving
+  per-artifact atomicity.
+- **Fatal live-backup persistence.** A failed live-backup write now raises
+  `LiveBackupWriteError` (an `OutputError`) instead of being silently swallowed.
+  `SafeWriter.record()` rolls back all in-memory markers on failure, and the
+  execution layer treats persistence failure as fatal on both the sequential and
+  parallel paths — no retry, no rate-limit reclassification, pending work
+  cancelled — so the run never continues under a false crash-safety guarantee.
+- **Artifact-path collision rejection.** Distinct generated artifacts that would
+  target the same normalized path are rejected before scanning or mutation, while
+  the intentional final-JSON / live-backup phase alias is accepted.
+- **Three-provider contract matrix.** OpenAI, Anthropic, and Gemini are verified
+  through one shared contract using injected fake SDK clients (no network or
+  credentials in normal tests).
+- **Active CI and metadata honesty.** Added a least-privilege CI workflow
+  (tests, lint, build, `twine check`, clean-wheel smoke). The declared
+  `requires-python` is now `>=3.10,<3.13`, the classifiers drop Python 3.9, and
+  the CI matrix tests exactly 3.10, 3.11, and 3.12.
+- **Release hygiene.** Import resolution now follows the actual target
+  filesystem's case
+  semantics instead of folding case unconditionally. Documentation-agent
+  fallback handling is defined on the agent class rather than installed by a
+  runtime monkey-patch. The dormant local-provider compatibility module now
+  uses the standard library for its optional liveness check, so `requests` is
+  no longer a runtime dependency, and repository tests are no longer bundled
+  into the source distribution.
+
 ## 0.9.4 - 2026-06-14
 
 ### Internal decomposition (structural only — no behavior change)
@@ -880,7 +931,7 @@ reviewing the release.
   - Cache history
   - Raw agent responses
   - Redundant description fields
-  
+
 ## 0.1.3 - 2026-05-02
 
 - Changed generated docs to one combined JSON file by default.

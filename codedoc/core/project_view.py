@@ -369,17 +369,99 @@ def _normalize_internal_candidate(name: Any) -> str:
     return value.replace("\\", "/")
 
 
+# Catalog type tag for graph-resolved internal dependencies.  External / SDK
+# tags come from the deterministic classifier (KIND_EXTERNAL / KIND_SDK).
+KIND_INTERNAL = "internal"
+
+
+def _project_import_roots(files: list[dict]) -> set[str]:
+    """Return exact Python import roots represented by project file paths.
+
+    Python modules contribute their filename stem (except ``__init__``), and
+    package paths contribute each directory segment. This represents root-level
+    modules, conventional packages, and ``src`` layouts. Admission still
+    requires matching finalized internal-link evidence for the same importing
+    file.
+    """
+    roots: set[str] = set()
+    for file in files:
+        if str(file.get("language", "") or "").lower() != "python":
+            continue
+        roots.update(_python_import_roots_for_path(file.get("path", "")))
+    return roots
+
+
+def _python_import_roots_for_path(path: Any) -> set[str]:
+    """Return exact import-root candidates represented by one Python path."""
+    normalized = str(path or "").strip().replace("\\", "/")
+    if not normalized:
+        return set()
+    parts = PurePosixPath(normalized).parts
+    if not parts:
+        return set()
+    roots = {part for part in parts[:-1] if part not in ("", ".", "..")}
+    stem = PurePosixPath(parts[-1]).stem
+    if stem and stem != "__init__":
+        roots.add(stem)
+    return roots
+
+
+def _eligible_catalog_keys(
+    file: dict,
+    project_import_roots: set[str],
+) -> set[tuple[str, str]]:
+    """Return the ``(type, canonical_name)`` keys this file's finalized links
+    authorize for the dependency catalog.
+
+    Only graph-resolved internal links and deterministically classified
+    external / SDK links produce eligible keys.  A Python external candidate
+    whose canonical root is a project package root is dropped as a false
+    external — project code resolved internally via the graph, not a third-party
+    package.  Model ``catalog_updates``, ``dependency_refs``, and ``usage_notes``
+    can never widen this set; they may only supply ``used_for`` text for a key
+    that is already eligible.
+    """
+    links = file.get("links", {})
+    if not isinstance(links, dict):
+        return set()
+    keys: set[tuple[str, str]] = set()
+    for internal_path in links.get("internal_dependencies", []):
+        if internal_path:
+            keys.add((KIND_INTERNAL, internal_path))
+    internal_roots: set[str] = set()
+    for path in links.get("internal_dependencies", []):
+        internal_roots.update(_python_import_roots_for_path(path))
+    language = str(file.get("language", "") or "").lower()
+    for name in links.get("external_dependencies", []):
+        if not name:
+            continue
+        is_resolved_python_project_root = (
+            language == "python"
+            and name in project_import_roots
+            and name in internal_roots
+        )
+        if not is_resolved_python_project_root:
+            keys.add((KIND_EXTERNAL, name))
+    for name in links.get("sdk_dependencies", []):
+        if name:
+            keys.add((KIND_SDK, name))
+    return keys
+
+
 def _dependency_catalog(files: list[dict]) -> list[dict]:
     """Build the deduplicated dependency catalog, grouped by (type, name).
 
-    0.9.3: internal catalog entries are accepted only when the agent hint's
-    normalized name exactly matches a resolved ``links.internal_dependencies``
-    path for that file — unresolved agent text can never create an internal
-    entry.  Non-project names are classified into ``external`` / ``sdk`` via
-    the pure language-aware classifier.
+    Admission is evidence-based: an entry's ``(type, canonical_name)`` key must
+    be authorized by at least one file's finalized links
+    (:func:`_eligible_catalog_keys`).  Graph resolution and deterministic
+    classification are authoritative; model ``catalog_updates``,
+    ``dependency_refs``, and ``usage_notes`` may enrich an eligible dependency
+    with ``used_for`` text but can never create or retype one.  Every emitted
+    entry carries non-empty ``used_for`` text and at least one backing file.
     """
     # Keyed by (type, canonical_name) so external/sdk/internal never collide.
     catalog: dict[tuple[str, str], dict] = {}
+    project_import_roots = _project_import_roots(files)
 
     def _entry(type_: str, canonical: str) -> dict:
         key = (type_, canonical)
@@ -395,75 +477,84 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
         usage_raw = file.pop("dependency_usage", {})
         catalog_updates = file.pop("dependency_catalog_updates", [])
         dependency_refs = file.pop("dependency_refs", [])
-        links = file.get("links", {})
-        internal_paths = set(links.get("internal_dependencies", []))
-        external_links = links.get("external_dependencies", [])
-        sdk_links = links.get("sdk_dependencies", [])
 
-        # Classify usage notes into (kind, canonical) -> used_for for this file.
+        eligible = _eligible_catalog_keys(file, project_import_roots)
+        if not eligible:
+            continue
+
+        # Classify this file's usage notes into used_for text, restricted to
+        # eligible external/SDK keys.  First note wins per key within a file.
         usage: dict[tuple[str, str], str] = {}
         for raw_name, used_for in usage_raw.items():
+            if not used_for:
+                continue
             dep = classify_non_project_dependency(raw_name, language)
-            if dep.canonical and (dep.kind, dep.canonical) not in usage:
-                usage[(dep.kind, dep.canonical)] = used_for
+            key = (dep.kind, dep.canonical)
+            if dep.canonical and key in eligible and key not in usage:
+                usage[key] = used_for
 
-        # 1. Agent catalog updates (may carry used_for text + a type hint).
+        # 1. Agent catalog updates may carry used_for text + a type hint, but
+        #    only for an eligible key.  An unresolved internal hint, or a name
+        #    with no matching finalized link, is discarded — never reclassified
+        #    into a fabricated entry.
         for update in catalog_updates:
             raw_name = update.get("name", "")
             type_hint = update.get("type", "")
             used_for = update.get("used_for", "")
             if not used_for:
                 continue
-            if type_hint == "internal":
-                norm = _normalize_internal_candidate(raw_name)
-                if norm and norm in internal_paths:
-                    item = _entry("internal", norm)
-                    item["files"].add(path)
-                    if _should_replace_catalog_text(item["used_for"], used_for):
-                        item["used_for"] = used_for
+            matched: tuple[str, str] | None = None
+            norm = _normalize_internal_candidate(raw_name)
+            if norm and (KIND_INTERNAL, norm) in eligible:
+                matched = (KIND_INTERNAL, norm)
+            if matched is None:
+                # An unresolved internal hint is discarded rather than
+                # reclassified. For other hints, deterministic external/SDK
+                # classification wins over the model-provided type.
+                if type_hint == "internal":
                     continue
-                # Discard the unresolved internal hint and reclassify as non-project.
-            dep = classify_non_project_dependency(raw_name, language)
-            if not dep.canonical:
+                dep = classify_non_project_dependency(raw_name, language)
+                if dep.canonical and (dep.kind, dep.canonical) in eligible:
+                    matched = (dep.kind, dep.canonical)
+            if matched is None:
                 continue
-            item = _entry(dep.kind, dep.canonical)
+            item = _entry(*matched)
             item["files"].add(path)
             if _should_replace_catalog_text(item["used_for"], used_for):
                 item["used_for"] = used_for
 
-        # 2. Resolved external / SDK links from this file's classification.
-        for canonical, kind in (
-            [(n, KIND_EXTERNAL) for n in external_links]
-            + [(n, KIND_SDK) for n in sdk_links]
-        ):
-            key = (kind, canonical)
+        # 2. Resolved external / SDK links from this file's classification are
+        #    the authority for membership.  Attach the file and any usage text,
+        #    but never create a text-less entry (A4 drops those below anyway).
+        for key in eligible:
+            if key[0] == KIND_INTERNAL:
+                continue
             item = catalog.get(key)
             if item is None:
                 if key not in usage:
                     continue
-                item = _entry(kind, canonical)
+                item = _entry(*key)
             item["files"].add(path)
             if not item["used_for"] and usage.get(key):
                 item["used_for"] = usage[key]
 
-        # 3. Dependency references — attach only to an existing entry or when
-        #    the agent provided usage text (keeps the catalog from filling with
-        #    bare, purposeless names).
+        # 3. Dependency references — attach only to an eligible key, and only to
+        #    an existing entry or one the agent gave usage text for.
         for raw_ref in dependency_refs:
             dep = classify_non_project_dependency(raw_ref, language)
-            if not dep.canonical:
-                continue
             key = (dep.kind, dep.canonical)
+            if not dep.canonical or key not in eligible:
+                continue
             item = catalog.get(key)
             if item is None:
                 if key not in usage:
                     continue
-                item = _entry(dep.kind, dep.canonical)
+                item = _entry(*key)
             item["files"].add(path)
             if not item["used_for"] and usage.get(key):
                 item["used_for"] = usage[key]
 
-        # 4. Remaining usage notes that match an existing entry.
+        # 4. Remaining usage notes that match an existing eligible entry.
         for key, used_for in usage.items():
             item = catalog.get(key)
             if item is None:
@@ -475,6 +566,10 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
     result = []
     for item in catalog.values():
         files_used = sorted(p for p in item.pop("files") if p)
+        # A4: every emitted entry needs non-empty used_for text and at least one
+        # backing file whose finalized links contain the key.
+        if not item["used_for"] or not files_used:
+            continue
         item["files"] = files_used
         item["file_count"] = len(files_used)
         result.append(item)

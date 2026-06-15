@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.document import read_codedoc_document, records_by_path
 from codedoc.core.markdown_view import markdown_from_view
 from codedoc.core.project_view import build_project_view, json_from_view
@@ -163,13 +164,26 @@ def write_project_outputs(
     try:
         view = build_project_view(records, stats, entry_file, graph_edges)
 
-        if json_path:
-            _write_project_json(view, error_summary, json_path)
-            logger.info("JSON output: %s", json_path)
+        # Render both complete payloads before mutating any final target, so a
+        # render failure can never leave one artifact rewritten and the other
+        # stale.  ``both`` mode guarantees per-artifact atomicity, not a
+        # cross-file transaction.
+        json_text = json_from_view(view, error_summary) if json_path else None
+        md_text = markdown_from_view(view, error_summary) if md_path else None
 
-        if md_path:
-            _write_project_markdown(view, error_summary, md_path)
+        # Markdown first, JSON last: the JSON path is also the live backup, so
+        # it must remain the prior valid backup until Markdown has succeeded.
+        # If Markdown fails, the previous JSON live backup is untouched.  If the
+        # final JSON replacement fails after Markdown, no target is partially
+        # truncated — Markdown holds the new document and JSON holds the prior
+        # complete live backup.
+        if md_path is not None and md_text is not None:
+            atomic_write_text(md_path, md_text)
             logger.info("Markdown output: %s", md_path)
+
+        if json_path is not None and json_text is not None:
+            atomic_write_text(json_path, json_text)
+            logger.info("JSON output: %s", json_path)
 
     except Exception as exc:
         raise OutputError(str(output_dir), str(exc)) from exc
@@ -231,16 +245,72 @@ def _check_file_ownership(path: Path) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Internal helpers
+# Artifact-path collision validation
 # ---------------------------------------------------------------------------
 
-def _write_project_json(view: dict, error_summary: str, path: Path) -> None:
-    path.write_text(json_from_view(view, error_summary), encoding="utf-8")
+def validate_distinct_artifact_paths(paths: dict[str, Path | None]) -> None:
+    """Reject two distinct generated artifacts targeting the same path.
+
+    *paths* maps a logical artifact name (e.g. ``"json_live_backup"``,
+    ``"markdown"``, ``"live_backup"``, ``"error_log"``) to its target ``Path``.
+    ``None`` values are ignored.  The check is read-only: targets are normalized
+    to absolute paths without being created, existing aliases are resolved where
+    possible, and case behavior is detected from the target filesystem without
+    creating probe files. Raises :class:`ConfigError` naming both
+    logical artifacts when two of them resolve to the same path.
+
+    The intentional final-JSON / live-backup phase alias is expressed by passing
+    that single path once under one logical name (``"json_live_backup"``), so it
+    is never mistaken for a collision.  The helper is generic: any future
+    generated artifact can join the same validation call.
+    """
+    seen: dict[str, tuple[str, Path]] = {}
+    for name, path in paths.items():
+        if path is None:
+            continue
+        resolved = Path(path).resolve()
+        case_insensitive = _filesystem_is_case_insensitive(resolved.parent)
+        key = str(resolved).casefold() if case_insensitive else str(resolved)
+        if key in seen:
+            other, _other_path = seen[key]
+            raise ConfigError(
+                f"Output artifacts '{other}' and '{name}' would be written to "
+                f"the same path:\n  {Path(path).resolve()}\n"
+                "Choose distinct output targets so one cannot overwrite the other."
+            )
+        seen[key] = (name, resolved)
 
 
-def _write_project_markdown(view: dict, error_summary: str, path: Path) -> None:
-    path.write_text(markdown_from_view(view, error_summary), encoding="utf-8")
+def _filesystem_is_case_insensitive(path: Path) -> bool:
+    """Detect case behavior from an existing ancestor without writing probes."""
+    candidate = Path(path).resolve()
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
 
+    for current in (candidate, *candidate.parents):
+        swapped = _swap_case_letter(current.name)
+        if not swapped:
+            continue
+        alternate = current.with_name(swapped)
+        try:
+            return alternate.exists() and alternate.samefile(current)
+        except OSError:
+            continue
+    return False
+
+
+def _swap_case_letter(value: str) -> str:
+    for index, char in enumerate(value):
+        if "a" <= char <= "z":
+            return value[:index] + char.upper() + value[index + 1:]
+        if "A" <= char <= "Z":
+            return value[:index] + char.lower() + value[index + 1:]
+    return ""
+
+
+# ---------------------------------------------------------------------------
+# Backward-compatible summary writer
+# ---------------------------------------------------------------------------
 
 def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Path:
     """Backward compatible summary writer for older callers."""

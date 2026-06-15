@@ -53,8 +53,10 @@ import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
+from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.db import compute_file_hash
 from codedoc.core.project_view import SCHEMA_VERSION, clean_file_record
+from codedoc.utils.errors import LiveBackupWriteError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -235,9 +237,26 @@ class SafeWriter:
         clean = clean_file_record(raw_record)
 
         with self._lock:
+            # Transactional: persist to disk first, then keep the in-memory
+            # markers only if the flush succeeded.  After a failed flush,
+            # size/get_record/has_record/recorded_this_run must expose exactly
+            # the state that existed before this call.
+            had_record = rel_path in self._clean_records
+            prior_record = self._clean_records.get(rel_path)
+            was_recorded_this_run = rel_path in self._recorded_this_run
+
             self._clean_records[rel_path] = clean
             self._recorded_this_run.add(rel_path)
-            self._flush_locked()
+            try:
+                self._flush_locked()
+            except LiveBackupWriteError:
+                if had_record:
+                    self._clean_records[rel_path] = prior_record
+                else:
+                    self._clean_records.pop(rel_path, None)
+                if not was_recorded_this_run:
+                    self._recorded_this_run.discard(rel_path)
+                raise
 
     def has_record(self, rel_path: str) -> bool:
         """Return True if *rel_path* is already recorded in memory.
@@ -334,9 +353,13 @@ class SafeWriter:
     def _flush_locked(self) -> None:
         """Serialize current state to disk atomically.
 
-        Must be called while ``self._lock`` is held.
-        Writes to a ``.tmp`` sibling first, then renames into place so a
-        crash mid-write never leaves a corrupt output file.
+        Must be called while ``self._lock`` is held.  Delegates the physical
+        write to the canonical :func:`atomic_write_text` helper (unique temp
+        sibling, flush + close, then rename) so a crash mid-write never leaves a
+        corrupt output file.  A write failure is fatal: the prior valid backup
+        is preserved and a :class:`LiveBackupWriteError` is raised so the
+        pipeline stops rather than continue under a false crash-safety
+        guarantee.
 
         Files in ``files`` are written in queue/topological order when
         ``set_queue_order()`` has been called.  Completed records whose
@@ -374,22 +397,16 @@ class SafeWriter:
             "files": files_list,
         }
 
-        tmp: Path = self._path.with_suffix(".tmp")
         try:
-            self._path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(
+            atomic_write_text(
+                self._path,
                 json.dumps(payload, indent=2, ensure_ascii=False),
-                encoding="utf-8",
             )
-            tmp.replace(self._path)
         except Exception as exc:
-            logger.warning(
-                "LiveBackup: flush failed — partial results may not be saved. "
-                "Cause: %s",
-                exc,
-            )
-            try:
-                if tmp.exists():
-                    tmp.unlink()
-            except Exception:
-                pass
+            # The prior valid backup is left intact by atomic_write_text.  A
+            # serialization or persistence failure is fatal — surface it so
+            # execution stops and record() can roll back its in-memory markers.
+            raise LiveBackupWriteError(
+                str(self._path),
+                f"could not persist live backup '{self._path.name}'",
+            ) from exc

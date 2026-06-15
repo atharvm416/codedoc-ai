@@ -59,6 +59,7 @@ from codedoc.core.loader import load_config
 from codedoc.core.output import (
     inspect_output_ownership,
     read_existing_records,
+    validate_distinct_artifact_paths,
     write_project_outputs,
 )
 from codedoc.core.planning import (
@@ -157,6 +158,21 @@ def run_pipeline(
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
     live_backup_path = _resolve_live_backup_path(output_dir, output_format, json_filename, md_filename)
+
+    # Reject generated-artifact path collisions before any scan or mutation.
+    # JSON and both modes intentionally alias the final JSON and its live-backup
+    # phase to one path, represented here as a single ``json_live_backup``
+    # artifact so the alias is never mistaken for a collision.  Markdown-only
+    # mode submits separate ``markdown`` and ``live_backup`` artifacts.  The
+    # diagnostic log is ``error_log``.
+    artifact_paths: dict[str, Path | None] = {"error_log": output_dir / "error.log"}
+    if output_format in ("json", "both"):
+        artifact_paths["json_live_backup"] = output_dir / json_filename
+    if output_format in ("md", "both"):
+        artifact_paths["markdown"] = output_dir / md_filename
+    if output_format == "md":
+        artifact_paths["live_backup"] = live_backup_path
+    validate_distinct_artifact_paths(artifact_paths)
 
     # Read-only ownership inspection (0.9.2).  A real run fails fast before any
     # filesystem side effect, scanning, or LLM call when a final output target

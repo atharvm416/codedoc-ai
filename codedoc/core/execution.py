@@ -33,7 +33,13 @@ from codedoc.core.resume import _public_record_to_doc
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.llm.rate_limit_profile import RateLimitProfile
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import AgentError, ErrorReporter, OutputError, ParseError
+from codedoc.utils.errors import (
+    AgentError,
+    ErrorReporter,
+    LiveBackupWriteError,
+    OutputError,
+    ParseError,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -470,6 +476,7 @@ def _process_descriptor_batch(
     health_reported = False
     total = len(descriptors)
     completed = 0
+    fatal_error: LiveBackupWriteError | None = None
 
     logger.info(
         "Parallel batch: %d file(s) at max_workers=%d, provider=%s",
@@ -496,6 +503,16 @@ def _process_descriptor_batch(
                 consecutive_failures = 0
                 completed += 1
                 _log_file_progress("OK", rel_path, completed, total)
+            except LiveBackupWriteError as exc:
+                # Fatal output failure raised inside a worker.  Identify it
+                # before any rate-limit / ordinary-failure classification: cancel
+                # work not yet started, let already-running workers finish or
+                # fail without scheduling retries, and re-raise the original
+                # error after the executor shuts down.  Never enter the retry or
+                # rate-limit lists.
+                fatal_error = exc
+                _cancel_pending(future_map)
+                break
             except Exception as exc:
                 completed += 1
                 if _is_rate_limit_error(exc, profile):
@@ -540,6 +557,12 @@ def _process_descriptor_batch(
                         level="warning",
                     )
 
+    # The executor's context manager has now shut down (wait=True), so all
+    # running workers have completed or failed and no new work was scheduled.
+    # Propagate the fatal persistence failure as the original error.
+    if fatal_error is not None:
+        raise fatal_error
+
     return succeeded, retry_rate_limited, failed_non_rate_limited
 
 
@@ -581,6 +604,13 @@ def _process_files_sequentially(
             stats["checked"] += 1
             consecutive_failures = 0
             _log_file_progress("OK", rel_path, index, total)
+        except LiveBackupWriteError:
+            # Fatal: the crash-safety backup could not be persisted, so the
+            # resume guarantee no longer holds.  Do not retry, do not mark the
+            # file failed — stop scheduling work and propagate immediately.
+            # (LiveBackupWriteError subclasses OutputError, so this clause must
+            # precede the recoverable OutputError handler below.)
+            raise
         except (ParseError, OutputError, AgentError) as exc:
             error_reporter.record(exc, context=rel_path)
             queue.mark_failed(rel_path, str(exc))

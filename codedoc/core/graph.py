@@ -113,14 +113,13 @@ def resolve_import(
     root: Path,
 ) -> str | None:
     """Resolve a parser import string to a known project-relative path."""
-    _ = root
     if not import_str:
         return None
 
     known = {_to_posix(path): path for path in all_files}
     candidates = _candidate_import_paths(import_str.strip(), current_file)
     for candidate in candidates:
-        match = _match_candidate(candidate, known)
+        match = _match_candidate(candidate, known, root)
         if match:
             return match
     return None
@@ -177,19 +176,58 @@ def _resolve_python_relative(import_str: str, current_dir: PurePosixPath) -> str
     return _normalize_posix(str(base / module)) if module else _normalize_posix(str(base))
 
 
-def _match_candidate(candidate: str, known: dict[str, str]) -> str | None:
+def _match_candidate(
+    candidate: str,
+    known: dict[str, str],
+    root: Path,
+) -> str | None:
     candidate = _normalize_posix(candidate)
     variants = _candidate_variants(candidate)
 
-    known_lower = {key.lower(): original for key, original in known.items()}
+    case_insensitive = _filesystem_is_case_insensitive(root)
+    known_folded = (
+        {key.casefold(): original for key, original in known.items()}
+        if case_insensitive
+        else {}
+    )
     for variant in variants:
         if variant in known:
             return known[variant]
-        lower = variant.lower()
-        if lower in known_lower:
-            return known_lower[lower]
+        if case_insensitive:
+            folded = variant.casefold()
+            if folded in known_folded:
+                return known_folded[folded]
 
     return None
+
+
+def _filesystem_is_case_insensitive(path: Path) -> bool:
+    """Detect case behavior from an existing path without mutating the disk."""
+    candidate = Path(path).resolve()
+    while not candidate.exists() and candidate != candidate.parent:
+        candidate = candidate.parent
+
+    for current in (candidate, *candidate.parents):
+        name = current.name
+        swapped = _swap_case_letter(name)
+        if not swapped:
+            continue
+        alternate = current.with_name(swapped)
+        try:
+            return alternate.exists() and alternate.samefile(current)
+        except OSError:
+            continue
+    return False
+
+
+def _swap_case_letter(value: str) -> str:
+    """Return *value* with one ASCII letter's case changed, or ``""``."""
+    for index, char in enumerate(value):
+        if "a" <= char <= "z":
+            return value[:index] + char.upper() + value[index + 1:]
+        if "A" <= char <= "Z":
+            return value[:index] + char.lower() + value[index + 1:]
+    return ""
 
 
 def _candidate_variants(candidate: str) -> list[str]:
