@@ -1,7 +1,6 @@
 """Agent integration tests — offline using MockLLMProvider."""
 
 import json
-import pytest
 from pathlib import Path
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -98,6 +97,11 @@ class TestDocumentationAgentIntegration:
         )
         assert "description" in result
         assert "key_concepts" in result
+
+    def test_safe_context_runner_is_defined_on_agent_class(self):
+        from codedoc.agents.documentation_agent import DocumentationAgent
+
+        assert "_safe_run_with_context" in DocumentationAgent.__dict__
 
 
 class TestOrchestratorIntegration:

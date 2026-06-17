@@ -1,14 +1,12 @@
 include README.md
-include RUN_FLOW.md
 include LICENSE
 include CHANGELOG.md
 include CONTRIBUTING.md
+include RUN_FLOW.md
 include SECURITY.md
 include CODE_OF_CONDUCT.md
 include .env.example
 recursive-include codedoc/templates *.yml
-recursive-include tests *.py
-recursive-include tests/fixtures *
-recursive-include .github *.md
+prune tests
 global-exclude __pycache__/*
 global-exclude *.py[cod]

@@ -9,7 +9,6 @@ files whose imports have already been processed are prioritised.
 from __future__ import annotations
 
 from collections import deque
-from pathlib import Path
 from typing import Iterator
 
 from codedoc.utils.logger import get_logger

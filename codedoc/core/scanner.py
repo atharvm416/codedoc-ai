@@ -21,6 +21,7 @@ No LLM is involved here.
 
 from __future__ import annotations
 
+import stat as stat_module
 from pathlib import Path
 from typing import Iterator
 
@@ -70,6 +71,13 @@ def scan_files(
     skip_dirs: list[str] | None = None,
     ignore_paths: list[str] | None = None,
     *,
+    # Safety control (0.9.6).  Keyword-only so existing positional callers stay
+    # compatible.  When False (the default) every symlinked directory and file
+    # is skipped, which prevents both symlink cycles and escapes outside the
+    # project root.  When True, links are followed only when their resolved
+    # target exists, has the expected type, and is contained by the resolved
+    # project root.
+    follow_symlinks: bool = False,
     # Deprecated keyword-only parameter kept for backward compatibility.
     # When provided without extension_language_map, a map is built from
     # _FALLBACK_LANGUAGE_MAP for the listed extensions.
@@ -96,6 +104,11 @@ def scan_files(
         skipped regardless of this list.
     ignore_paths:
         Project-relative paths (files or directory subtrees) to exclude.
+    follow_symlinks:
+        When *False* (default) symlinked directories and files are skipped, so
+        the scan never follows a link cycle and never escapes the project root.
+        When *True* links are resolved strictly and followed only when the
+        target exists, has the expected type, and resolves inside *root*.
     supported_extensions:
         **Deprecated.** Kept for callers that do not supply
         ``extension_language_map``.  Language is set to the fallback map value
@@ -131,7 +144,12 @@ def scan_files(
     results: list[dict] = []
     skipped_large = 0
 
-    walker = _Walker(scan_root=root, skip_dirs=skip_set, ignore_prefixes=ignore_prefixes)
+    walker = _Walker(
+        scan_root=root,
+        skip_dirs=skip_set,
+        ignore_prefixes=ignore_prefixes,
+        follow_symlinks=follow_symlinks,
+    )
     for file_path in walker.walk(root):
         ext = file_path.suffix.lower()
         if ext not in ext_map:
@@ -169,11 +187,19 @@ def scan_files(
 
 
 class _Walker:
-    """Recursive directory walker with per-scan state.
+    """Iterative, symlink-safe directory walker with per-scan state.
 
-    State (``scan_root``, ``skip_dirs``, ``ignore_prefixes``, ``skipped_dirs``)
-    is held on the instance rather than on the function object, so the walk is
-    re-entrant and two concurrent or sequential scans never share state.
+    State (``scan_root``, ``skip_dirs``, ``ignore_prefixes``, ``skipped_dirs``,
+    and the visited-identity sets) is held on the instance rather than on the
+    function object, so the walk is re-entrant and two concurrent or sequential
+    scans never share state.
+
+    The walk uses an explicit stack instead of recursion, so a deep but acyclic
+    tree cannot raise :class:`RecursionError`.  Every traversed directory's
+    resolved identity is recorded, so a symlink/junction cycle or two aliases to
+    the same real directory are visited at most once.  When ``follow_symlinks``
+    is True, resolved file identities are tracked the same way so two aliases to
+    one real file produce at most one descriptor.
     """
 
     def __init__(
@@ -181,24 +207,48 @@ class _Walker:
         scan_root: Path,
         skip_dirs: set[str],
         ignore_prefixes: set[str],
+        follow_symlinks: bool = False,
     ) -> None:
         self.scan_root = scan_root
         self.skip_dirs = skip_dirs
         self.ignore_prefixes = ignore_prefixes
+        self.follow_symlinks = follow_symlinks
         self.skipped_dirs = 0
+        self._resolved_root: Path = scan_root
+        self._visited_dirs: set = set()
+        self._visited_files: set = set()
 
     def walk(self, root: Path) -> Iterator[Path]:
-        """Yield all files under *root*, skipping ignored directories."""
-        try:
-            entries = list(root.iterdir())
-        except OSError as exc:
-            self.skipped_dirs += 1
-            logger.warning("Skipping unreadable directory %s: %s", root, exc)
-            return
+        """Yield all files under *root*, skipping ignored/foreign directories.
 
-        for item in entries:
-            rel = item.relative_to(self.scan_root).as_posix()
-            if item.is_dir():
+        Directories are pushed onto the stack in reverse ``iterdir()`` order so
+        that popping reproduces the depth-first encounter order of the previous
+        recursive walk for normal trees.
+        """
+        try:
+            self._resolved_root = Path(root).resolve(strict=False)
+        except OSError:
+            self._resolved_root = Path(root)
+
+        root_identity = self._identity(root)
+        if root_identity is not None:
+            self._visited_dirs.add(root_identity)
+
+        stack: list[Path] = self._expand(root)
+        while stack:
+            item = stack.pop()
+            kind = _classify(item)
+            is_link = _is_link_like(item)
+
+            try:
+                rel = item.relative_to(self.scan_root).as_posix()
+            except ValueError:
+                rel = item.name
+
+            if kind == "dir":
+                # Apply the lexical skip/dot/ignore rules to the in-root alias
+                # *before* resolving or descending, so a link cannot smuggle in
+                # an otherwise-ignored path.
                 if (
                     item.name.lower() in self.skip_dirs
                     or item.name.startswith(".")
@@ -206,11 +256,160 @@ class _Walker:
                 ):
                     self.skipped_dirs += 1
                     continue
-                yield from self.walk(item)
-            elif item.is_file():
+                if is_link:
+                    if not self.follow_symlinks:
+                        self.skipped_dirs += 1
+                        logger.debug("Skipping symlinked directory %s", item)
+                        continue
+                    target = _safe_resolve(item)
+                    if (
+                        target is None
+                        or not target.is_dir()
+                        or not self._within_root(target)
+                    ):
+                        self.skipped_dirs += 1
+                        logger.debug(
+                            "Skipping symlinked directory (broken, type-mismatched, "
+                            "or out-of-root) %s",
+                            item,
+                        )
+                        continue
+                # Visited-identity guard for *every* directory (not only links):
+                # stops cycles through symlinks/junctions and dedups aliases.
+                identity = self._identity(item)
+                if identity is not None:
+                    if identity in self._visited_dirs:
+                        logger.debug("Skipping already-visited directory %s", item)
+                        continue
+                    self._visited_dirs.add(identity)
+                for child in self._expand(item):
+                    stack.append(child)
+
+            elif kind == "file":
                 if _is_ignored(rel, self.ignore_prefixes):
                     continue
+                if is_link:
+                    if not self.follow_symlinks:
+                        logger.debug("Skipping symlinked file %s", item)
+                        continue
+                    target = _safe_resolve(item)
+                    if (
+                        target is None
+                        or not target.is_file()
+                        or not self._within_root(target)
+                    ):
+                        logger.debug(
+                            "Skipping symlinked file (broken, type-mismatched, "
+                            "or out-of-root) %s",
+                            item,
+                        )
+                        continue
+                # The first in-root alias of a real file owns the descriptor;
+                # later aliases resolve to the same identity and are skipped.
+                if self.follow_symlinks:
+                    file_identity = self._identity(item)
+                    if file_identity is not None:
+                        if file_identity in self._visited_files:
+                            continue
+                        self._visited_files.add(file_identity)
                 yield item
+
+            elif is_link:
+                # Broken or inaccessible link: skip without aborting the scan.
+                logger.debug("Skipping broken or inaccessible symlink %s", item)
+
+    def _expand(self, directory: Path) -> list[Path]:
+        """Return *directory*'s entries reversed, so popping restores order."""
+        try:
+            entries = list(directory.iterdir())
+        except OSError as exc:
+            self.skipped_dirs += 1
+            logger.warning("Skipping unreadable directory %s: %s", directory, exc)
+            return []
+        entries.reverse()
+        return entries
+
+    def _within_root(self, resolved: Path) -> bool:
+        """True when *resolved* (an already-resolved path) is inside the root."""
+        try:
+            resolved.relative_to(self._resolved_root)
+            return True
+        except ValueError:
+            return False
+
+    def _identity(self, path: Path):
+        """Return a stable identity for *path* (follows links).
+
+        Prefers ``(st_dev, st_ino)`` when meaningful and falls back to the
+        normalized resolved path on platforms/filesystems where the inode is
+        unavailable (e.g. some Windows configurations report ``st_ino == 0``).
+        """
+        try:
+            st = path.stat()
+        except OSError:
+            return self._resolved_path_identity(path)
+        if getattr(st, "st_ino", 0):
+            return ("inode", st.st_dev, st.st_ino)
+        return self._resolved_path_identity(path)
+
+    @staticmethod
+    def _resolved_path_identity(path: Path):
+        try:
+            return ("path", str(Path(path).resolve(strict=False)))
+        except OSError:
+            return None
+
+
+def _classify(path: Path) -> str | None:
+    """Classify *path* as ``"dir"``, ``"file"`` or ``None`` (following links)."""
+    try:
+        if path.is_dir():
+            return "dir"
+        if path.is_file():
+            return "file"
+    except OSError:
+        return None
+    return None
+
+
+def _is_link_like(path: Path) -> bool:
+    """True for symlinks and, on Windows, junctions / reparse points.
+
+    Centralizes link detection so version/platform checks are not scattered
+    through the traversal loop.  Uses :meth:`Path.is_symlink`, then
+    :meth:`Path.is_junction` where available (Python 3.12+), and finally the
+    reparse-point file attribute on older Windows runtimes.
+    """
+    try:
+        if path.is_symlink():
+            return True
+    except OSError:
+        pass
+
+    is_junction = getattr(path, "is_junction", None)
+    if callable(is_junction):
+        try:
+            if is_junction():
+                return True
+        except OSError:
+            pass
+    else:
+        try:
+            attrs = getattr(path.lstat(), "st_file_attributes", 0)
+        except (OSError, AttributeError):
+            attrs = 0
+        reparse = getattr(stat_module, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        if attrs & reparse:
+            return True
+    return False
+
+
+def _safe_resolve(path: Path) -> Path | None:
+    """Strictly resolve *path*; return ``None`` for broken/cyclic/missing links."""
+    try:
+        return Path(path).resolve(strict=True)
+    except (OSError, RuntimeError):
+        return None
 
 
 def _normalise_ignore_paths(paths: list[str]) -> set[str]:

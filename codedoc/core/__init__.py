@@ -36,7 +36,7 @@ def __getattr__(name: str):
 
         return write_summary
     if name in {"json_from_markdown", "markdown_from_json"}:
-        from codedoc.core.project_view import json_from_markdown, markdown_from_json
+        from codedoc.core.markdown_view import json_from_markdown, markdown_from_json
 
         return {
             "json_from_markdown": json_from_markdown,

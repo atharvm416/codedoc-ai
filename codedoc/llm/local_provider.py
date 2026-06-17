@@ -18,7 +18,8 @@ Do not delete or modify without updating factory.py accordingly.
 
 from __future__ import annotations
 
-import requests
+import urllib.error
+import urllib.request
 
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.errors import LLMError
@@ -71,9 +72,9 @@ class LocalProvider(LLMProvider):
     def is_available(self) -> bool:
         """Ping the local server to check it's running."""
         try:
-            resp = requests.get(f"{self._base_url}/models", timeout=3)
-            return resp.status_code == 200
-        except requests.exceptions.ConnectionError:
+            with urllib.request.urlopen(f"{self._base_url}/models", timeout=3) as response:
+                return response.status == 200
+        except (OSError, urllib.error.URLError):
             return False
 
     @property

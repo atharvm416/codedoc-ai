@@ -129,14 +129,23 @@ class TestPreflightOutputTargets:
         assert stats is not None
 
     def test_codedoc_owned_md_passes_preflight(self, tmp_path, monkeypatch):
-        """An existing CodeDoc-owned Markdown passes preflight."""
+        """An existing CodeDoc-owned Markdown passes preflight.
+
+        0.9.3: ownership requires structurally valid metadata.  A marker-only
+        Markdown with malformed metadata is now treated as foreign (the
+        centralized reader fails closed), so the owned fixture must carry a
+        well-formed ``<!-- codedoc-ai: {...} -->`` comment.
+        """
+        import json as _json
+
         patch_provider(monkeypatch)
         src = tmp_path / "src.py"
         write_py(src)
         out_dir = tmp_path / "out"
         out_dir.mkdir()
+        meta = {"entry_file": "src.py", "schema_version": "1.4", "file_hashes": {}}
         (out_dir / "codedoc.md").write_text(
-            "<!-- codedoc-ai: meta -->\n# docs\n", encoding="utf-8"
+            f"<!-- codedoc-ai: {_json.dumps(meta)} -->\n# docs\n", encoding="utf-8"
         )
 
         from codedoc.pipeline import run_pipeline

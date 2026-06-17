@@ -1,35 +1,38 @@
-"""Build clean public project documentation views from cached records."""
+"""Build clean public project documentation views from cached records.
+
+0.9.4 — Markdown serialization and parsing were extracted into
+:mod:`codedoc.core.markdown_view`.  This module retains project-view
+*assembly*: ``build_project_view``, ``json_from_view``, ``clean_file_record`` /
+``_clean_file``, folder/tree/graph-index construction, dependency-catalog
+assembly, empty-value pruning, usage-example sanitization, and
+``read_codedoc_meta`` (which delegates to the centralized document reader).
+
+The serializer helpers that moved are still importable from this module as a
+deprecated one-release compatibility shim (see ``__getattr__`` at the bottom),
+which forwards lazily to :mod:`codedoc.core.markdown_view` to avoid an import
+cycle.  Import them from ``codedoc.core.markdown_view`` directly in new code.
+"""
 
 from __future__ import annotations
 
-import base64
 import json
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from codedoc.core.dependency_kind import (
+    KIND_EXTERNAL,
+    KIND_SDK,
+    classify_non_project_dependency,
+)
+from codedoc.core.record_meta import carry_private_keys
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.4"
-
-# Regex that matches the lightweight metadata comment embedded in Markdown output:
-#   <!-- codedoc-ai: { ... } -->
-_CODEDOC_META_COMMENT_RE = re.compile(
-    r"<!--\s*codedoc-ai:\s*(\{.*?\})\s*-->", re.DOTALL
-)
-
-# Regex that matches the lossless base64-encoded full view comment added in 0.8.1:
-#   <!-- codedoc-ai-view-base64
-#   eyJ...
-#   -->
-_CODEDOC_VIEW_BASE64_RE = re.compile(
-    r"<!--\s*codedoc-ai-view-base64\s*([\s\S]*?)\s*-->"
-)
 
 # Placeholder import/package names that LLMs emit in usage examples.
 # These are never meaningful to end-users and must be stripped before output.
@@ -66,6 +69,7 @@ def build_project_view(
             "internal_dependencies": internal_by_from.get(path, []),
             "imported_by": imported_by.get(path, []),
             "external_dependencies": file.pop("external_dependencies", []),
+            "sdk_dependencies": file.pop("sdk_dependencies", []),
         }
         links = {key: value for key, value in links.items() if value}
         if links:
@@ -77,7 +81,6 @@ def build_project_view(
 
     view = {
         "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
         "project": {
             "entry_file": entry_file,
             "file_count": len(files),
@@ -101,89 +104,6 @@ def build_project_view(
 
 
 # ---------------------------------------------------------------------------
-# Markdown serialisation
-# ---------------------------------------------------------------------------
-
-def markdown_from_view(view: dict, error_summary: str = "") -> str:
-    """Render a public project view as Markdown.
-
-    0.8.1: A lossless ``<!-- codedoc-ai-view-base64 ... -->`` block is written
-    immediately after the lightweight metadata comment.  The visible Markdown
-    sections are unchanged; they remain human-readable.  The hidden base64
-    block allows :func:`markdown_to_view` to reconstruct the full public JSON
-    view without any information loss on subsequent runs.
-    """
-    project = view.get("project", {})
-    lines: list[str] = [
-        _build_meta_comment(view, project),
-        _build_full_view_comment(view),
-        "# codedoc project documentation\n\n",
-    ]
-    run = view.get("run", {})
-
-    lines += [
-        "## Project Overview\n\n",
-        f"- Entry file: `{project.get('entry_file') or 'not specified'}`\n",
-        f"- Files documented: {project.get('file_count', 0)}\n",
-        f"- Languages: {', '.join(project.get('languages', [])) or 'unknown'}\n",
-        f"- Folders: {', '.join(f'`{f}`' for f in project.get('folders', [])) or 'none'}\n\n",
-        "## Run Summary\n\n",
-        f"- Files checked: {run.get('files_checked', 0)}\n",
-        f"- Files failed: {run.get('files_failed', 0)}\n",
-        f"- Files skipped: {run.get('files_skipped', 0)}\n",
-        f"- Files reused from cache: {run.get('files_reused', 0)}\n\n",
-    ]
-
-    lines += ["## Project Tree\n\n", "```text\n"]
-    lines.extend(_render_tree_lines(view.get("tree", {})))
-    lines += ["```\n\n"]
-
-    folders = view.get("folders", [])
-    if folders:
-        lines.append("## Folder Map\n\n")
-        for folder in folders:
-            lines += [
-                f"### {folder['path']}\n\n",
-                f"{folder['summary']}\n\n",
-                f"- Files: {folder['file_count']}\n",
-            ]
-            if folder.get("languages"):
-                lines.append(f"- Languages: {', '.join(folder['languages'])}\n")
-            lines.append("\n")
-
-    edges = view.get("dependency_graph", [])
-    if edges:
-        lines.append("## Dependency Map\n\n")
-        for edge in edges:
-            lines.append(f"- `{edge['from']}` -> `{edge['to']}`\n")
-        lines.append("\n")
-
-    catalog = view.get("dependency_catalog", [])
-    if catalog:
-        lines.append("## Dependency Catalog\n\n")
-        for dependency in catalog:
-            lines += [
-                f"### {dependency['name']}\n\n",
-                f"- Type: {dependency.get('type', 'unknown')}\n",
-                f"- Used by: {dependency.get('file_count', 0)} file(s)\n",
-            ]
-            if dependency.get("used_for"):
-                lines.append(f"- Used for: {dependency['used_for']}\n")
-            lines.append("\n")
-
-    files = view.get("files", [])
-    if files:
-        lines.append("## Files\n\n")
-        for file in files:
-            _append_file_markdown(lines, file)
-
-    if error_summary and error_summary != "No errors.":
-        lines += ["## Errors\n\n```text\n", error_summary, "\n```\n"]
-
-    return "".join(lines)
-
-
-# ---------------------------------------------------------------------------
 # JSON serialisation
 # ---------------------------------------------------------------------------
 
@@ -198,192 +118,14 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
         "_codedoc": {
             "entry_file": project.get("entry_file"),
             "schema_version": view.get("schema_version", SCHEMA_VERSION),
-            "generated_at": view.get("generated_at", ""),
         }
     }
+    # Determinism (0.9.3): completed output carries no run-varying timestamp.
+    # A caller-provided legacy view may still contain ``generated_at`` — never
+    # propagate it into the completed payload.
+    payload.pop("generated_at", None)
     ordered = {**meta_block, **payload}
     return json.dumps(ordered, indent=2, ensure_ascii=False)
-
-
-# ---------------------------------------------------------------------------
-# Markdown → view (with lossless embedded-view fast path)
-# ---------------------------------------------------------------------------
-
-def markdown_to_view(markdown: str) -> dict:
-    """Parse codedoc Markdown output back into the public JSON view shape.
-
-    0.8.1 fast path: when the Markdown contains a ``codedoc-ai-view-base64``
-    block (written by :func:`markdown_from_view` since 0.8.1), the embedded
-    view is decoded and returned directly — this is a lossless round-trip.
-
-    Legacy fallback: for Markdown produced before 0.8.1 (no embedded block),
-    the visible Markdown sections are parsed as before.  This path is lossy
-    (dependency metadata and some internal fields are not recoverable from the
-    visible text alone) but still produces a best-effort result.
-    """
-    # Fast path: lossless embedded view takes precedence over the visible parser.
-    embedded = read_embedded_view(markdown)
-    if embedded is not None:
-        return embedded
-
-    # Legacy visible-text parser (pre-0.8.1 Markdown).
-    project = _parse_project_overview(markdown)
-    run = _parse_run_summary(markdown)
-    files = _parse_markdown_files(markdown)
-    edges = _parse_dependency_edges(markdown)
-    dependency_catalog = _parse_dependency_catalog(markdown)
-
-    for file in files:
-        path = file["path"]
-        existing_links = file.pop("links", {})
-        links = {
-            "internal_dependencies": existing_links.get("internal_dependencies")
-            or sorted(edge["to"] for edge in edges if edge["from"] == path),
-            "imported_by": existing_links.get("imported_by")
-            or sorted(edge["from"] for edge in edges if edge["to"] == path),
-            "external_dependencies": existing_links.get("external_dependencies", []),
-        }
-        links = _prune_empty(links)
-        if links:
-            file["links"] = links
-
-    folders = _folder_view(files) if files else []
-    languages = sorted({file["language"] for file in files if file.get("language")})
-    entry_file = project.get("entry_file")
-
-    view = {
-        "schema_version": SCHEMA_VERSION,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "project": {
-            "entry_file": None if entry_file in (None, "not specified") else entry_file,
-            "file_count": project.get("file_count", len(files)),
-            "languages": project.get("languages") or languages,
-            "folders": project.get("folders") or [folder["path"] for folder in folders],
-        },
-        "run": {
-            "files_checked": run.get("files_checked", 0),
-            "files_failed": run.get("files_failed", 0),
-            "files_skipped": run.get("files_skipped", 0),
-            "files_reused": run.get("files_reused", 0),
-            "files_documented": len(files),
-        },
-        "tree": _tree([file["path"] for file in files]),
-        "folders": folders,
-        "dependency_catalog": dependency_catalog,
-        "dependency_graph": edges,
-        "files": files,
-    }
-    return _prune_empty(view)
-
-
-def json_from_markdown(markdown: str) -> str:
-    """Convert codedoc Markdown output to formatted JSON without using an LLM."""
-    return json_from_view(markdown_to_view(markdown))
-
-
-def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
-    """Convert codedoc JSON output to Markdown without using an LLM."""
-    view = json.loads(data) if isinstance(data, str) else data
-    return markdown_from_view(view, error_summary)
-
-
-# ---------------------------------------------------------------------------
-# Embedded lossless view helpers (0.8.1)
-# ---------------------------------------------------------------------------
-
-def read_embedded_view(markdown: str) -> dict | None:
-    """Extract and decode the lossless embedded view from Markdown.
-
-    Looks for the ``<!-- codedoc-ai-view-base64 ... -->`` block written by
-    :func:`markdown_from_view` since 0.8.1, decodes the standard base64
-    payload as UTF-8 JSON, and validates the result.
-
-    Returns the decoded dict when the block is present and valid.
-    Returns ``None`` when the block is absent, corrupt, or flagged as an
-    in-progress/crash-safety snapshot (so callers can fall back to the
-    legacy visible-text parser).
-    """
-    match = _CODEDOC_VIEW_BASE64_RE.search(markdown)
-    if not match:
-        return None
-
-    raw = match.group(1).strip()
-    try:
-        json_bytes = base64.b64decode(raw)
-        data = json.loads(json_bytes.decode("utf-8"))
-    except Exception as exc:
-        logger.warning(
-            "codedoc-ai-view-base64 block could not be decoded and will be ignored "
-            "(falling back to visible Markdown parser): %s",
-            exc,
-        )
-        return None
-
-    if not isinstance(data, dict):
-        logger.warning(
-            "codedoc-ai-view-base64 decoded to %s, expected dict; "
-            "falling back to visible Markdown parser.",
-            type(data).__name__,
-        )
-        return None
-
-    # Reject crash-safety or in-progress snapshots — these must never be
-    # embedded, but guard against it defensively.
-    if "_crash_safety" in data:
-        logger.warning(
-            "codedoc-ai-view-base64 contains a _crash_safety banner; "
-            "treating as an incomplete snapshot and ignoring."
-        )
-        return None
-    codedoc_meta = data.get("_codedoc", {})
-    if isinstance(codedoc_meta, dict) and codedoc_meta.get("status") == "in_progress":
-        logger.warning(
-            "codedoc-ai-view-base64 is an in-progress snapshot; ignoring."
-        )
-        return None
-
-    # Structural validation: require the three fields that make the view useful.
-    required = {"schema_version", "project", "files"}
-    missing = required - data.keys()
-    if missing:
-        logger.warning(
-            "codedoc-ai-view-base64 is missing required fields %s; "
-            "falling back to visible Markdown parser.",
-            sorted(missing),
-        )
-        return None
-
-    return data
-
-
-def _public_view_for_embedding(view: dict) -> dict:
-    """Return a sanitized copy of *view* safe to embed in Markdown.
-
-    Strips crash-safety markers and the ``_codedoc`` wrapper (which is added
-    by :func:`json_from_view` at JSON render time and must not appear in the
-    embedded block).
-    """
-    excluded = {"_crash_safety", "_codedoc"}
-    return {k: v for k, v in view.items() if k not in excluded}
-
-
-def _build_full_view_comment(view: dict) -> str:
-    """Encode *view* as a standard base64 UTF-8 JSON hidden comment block.
-
-    The base64 encoding is necessary because raw generated summaries or
-    dependency text can contain ``--`` or ``-->`` which would prematurely
-    close an HTML comment and expose or corrupt the hidden metadata.
-
-    The block format is::
-
-        <!-- codedoc-ai-view-base64
-        eyJzY2hlbWFfdmVyc2lvbiI6...
-        -->
-    """
-    sanitized = _public_view_for_embedding(view)
-    json_bytes = json.dumps(sanitized, ensure_ascii=False).encode("utf-8")
-    b64 = base64.b64encode(json_bytes).decode("ascii")
-    return f"<!-- codedoc-ai-view-base64\n{b64}\n-->\n"
 
 
 # ---------------------------------------------------------------------------
@@ -403,76 +145,20 @@ def read_codedoc_meta(file_path: Path) -> dict:
     read, is not a recognised CodeDoc output, or is missing structural metadata
     (e.g. the ``_codedoc`` block for JSON, or the ``<!-- codedoc-ai: ... -->``
     comment for Markdown).
+
+    0.9.3: parsing and structural ownership are delegated to the centralized
+    read-only document reader.  A function-local import keeps the dependency
+    acyclic (``document`` imports low-level helpers from this module at module
+    load time).
     """
+    from codedoc.core.document import read_codedoc_document
+
     try:
-        content = file_path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError as exc:
-        raise ConfigError(f"Cannot read '{file_path}': {exc}") from exc
+        document = read_codedoc_document(file_path)
+    except FileNotFoundError as exc:
+        raise ConfigError(f"Cannot read '{file_path}': file does not exist.") from exc
 
-    suffix = file_path.suffix.lower()
-
-    if suffix == ".json":
-        try:
-            data = json.loads(content)
-        except json.JSONDecodeError as exc:
-            raise ConfigError(
-                f"'{file_path}' is not a valid CodeDoc file: JSON parse error."
-            ) from exc
-        meta = data.get("_codedoc")
-        if not isinstance(meta, dict):
-            raise ConfigError(
-                f"'{file_path}' does not appear to be a valid CodeDoc file. "
-                "The '_codedoc' metadata block is missing or malformed. "
-                "Re-run with --entry to generate a fresh document."
-            )
-        return meta
-
-    if suffix == ".md":
-        match = _CODEDOC_META_COMMENT_RE.search(content)
-        if not match:
-            raise ConfigError(
-                f"'{file_path}' does not appear to be a valid CodeDoc file. "
-                "The metadata comment (<!-- codedoc-ai: ... -->) is missing. "
-                "Re-run with --entry to generate a fresh document."
-            )
-        try:
-            meta = json.loads(match.group(1))
-        except json.JSONDecodeError as exc:
-            raise ConfigError(
-                f"'{file_path}' has a malformed CodeDoc metadata comment."
-            ) from exc
-        # Note: entry_file may be None — callers must not require it to be set.
-        return meta
-
-    raise ConfigError(
-        f"'{file_path}' has unsupported extension '{suffix}'. "
-        "CodeDoc output files must end in .json or .md."
-    )
-
-
-# ---------------------------------------------------------------------------
-# Internal helpers — metadata comment builder
-# ---------------------------------------------------------------------------
-
-def _build_meta_comment(view: dict, project: dict) -> str:
-    """Return a one-line HTML comment embedding CodeDoc metadata for Markdown output.
-
-    Includes ``file_hashes`` so that subsequent ``--format md`` runs can perform
-    incremental hash checks without requiring a sibling JSON file.
-    """
-    files = view.get("files", [])
-    file_hashes = {
-        f["path"]: f["hash"]
-        for f in files
-        if isinstance(f, dict) and f.get("path") and f.get("hash")
-    }
-    meta = {
-        "entry_file": project.get("entry_file"),
-        "schema_version": view.get("schema_version", SCHEMA_VERSION),
-        "generated_at": view.get("generated_at", ""),
-        "file_hashes": file_hashes,
-    }
-    return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"
+    return dict(document.metadata)
 
 
 # ---------------------------------------------------------------------------
@@ -508,15 +194,26 @@ def clean_file_record(record: dict) -> dict:
 
 def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
+    language = result.get("language") or record.get("language", "")
     dependencies = result.get("dependencies_analysis", {})
-    external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
-    external = sorted(
-        {
-            _normalize_dependency_name(name, "external")
-            for name in external
-            if _normalize_dependency_name(name, "external")
-        }
-    )
+    raw_external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
+
+    # 0.9.3: classify each non-project import as external (third-party) or sdk
+    # (standard library / language SDK), threading the file's language through.
+    # Internal links are never produced here — they come only from graph edges.
+    external_set: set[str] = set()
+    sdk_set: set[str] = set()
+    for name in raw_external:
+        dep = classify_non_project_dependency(name, language)
+        if not dep.canonical:
+            continue
+        if dep.kind == KIND_SDK:
+            sdk_set.add(dep.canonical)
+        else:
+            external_set.add(dep.canonical)
+    external = sorted(external_set)
+    sdk = sorted(sdk_set)
+
     usage_notes = dependencies.get("usage_notes", []) if isinstance(dependencies, dict) else []
     dependency_refs = (
         dependencies.get("dependency_refs", []) if isinstance(dependencies, dict) else []
@@ -528,7 +225,7 @@ def _clean_file(record: dict) -> dict:
     file = {
         "hash": record.get("hash", ""),
         "path": record.get("file_path") or result.get("file_path", ""),
-        "language": result.get("language") or record.get("language", ""),
+        "language": language,
         "description": result.get("description", ""),
         "role_in_system": result.get("role_in_system", ""),
         "imports": result.get("imports", []),
@@ -539,11 +236,19 @@ def _clean_file(record: dict) -> dict:
         "usage_example": _sanitize_usage_example(result.get("usage_example", "")),
         "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
         "external_dependencies": external,
+        "sdk_dependencies": sdk,
         "dependency_refs": dependency_refs,
         "dependency_usage": _dependency_usage_map(usage_notes),
         "dependency_catalog_updates": _clean_catalog_updates(catalog_updates),
     }
-    return {key: value for key, value in file.items() if value not in (None, "", [], {})}
+    cleaned = {key: value for key, value in file.items() if value not in (None, "", [], {})}
+
+    # 0.9.3: registered private keys survive empty-value pruning.  Carry from the
+    # nested orchestrator result first, then the top-level record so a persisted
+    # top-level value wins when both layers contain the same key.
+    carry_private_keys(result, cleaned)
+    carry_private_keys(record, cleaned)
+    return cleaned
 
 
 # ---------------------------------------------------------------------------
@@ -581,208 +286,8 @@ def _sanitize_usage_example(usage_example: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Visible Markdown section parsers (legacy path)
+# Pruning utility
 # ---------------------------------------------------------------------------
-
-def _parse_project_overview(markdown: str) -> dict:
-    section = _section(markdown, "Project Overview")
-    return {
-        "entry_file": _strip_code(_bullet_value(section, "Entry file")),
-        "file_count": _parse_int(_bullet_value(section, "Files documented")),
-        "languages": _parse_csv(_bullet_value(section, "Languages"), empty_values={"unknown"}),
-        "folders": _parse_csv(_bullet_value(section, "Folders"), empty_values={"none"}),
-    }
-
-
-def _parse_run_summary(markdown: str) -> dict:
-    section = _section(markdown, "Run Summary")
-    return {
-        "files_checked": _parse_int(_bullet_value(section, "Files checked")),
-        "files_failed": _parse_int(_bullet_value(section, "Files failed")),
-        "files_skipped": _parse_int(_bullet_value(section, "Files skipped")),
-        "files_reused": _parse_int(_bullet_value(section, "Files reused from cache")),
-    }
-
-
-def _parse_dependency_edges(markdown: str) -> list[dict]:
-    section = _section(markdown, "Dependency Map")
-    edges: list[dict] = []
-    for match in re.finditer(r"^- `(.+?)` -> `(.+?)`$", section, flags=re.MULTILINE):
-        edges.append(
-            {
-                "from": match.group(1),
-                "to": match.group(2),
-                "type": "internal_import",
-            }
-        )
-    return edges
-
-
-def _parse_markdown_files(markdown: str) -> list[dict]:
-    section = _section(markdown, "Files")
-    if not section:
-        return []
-
-    chunks = re.split(r"(?m)^### ", section)
-    files: list[dict] = []
-    for chunk in chunks:
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-
-        path, _, body = chunk.partition("\n")
-        file: dict[str, Any] = {"path": path.strip()}
-        _set_if_value(file, "language", _bold_value(body, "Language"))
-        _set_if_value(file, "description", _paragraph_after_label(body, "Description"))
-        _set_if_value(file, "role_in_system", _paragraph_after_label(body, "Role"))
-        _set_if_value(file, "imports", _list_after_label(body, "Imports", code=True))
-        _set_if_value(file, "functions", _named_items_after_label(body, "Functions"))
-        _set_if_value(file, "classes", _named_items_after_label(body, "Classes"))
-        _set_if_value(file, "exports", _list_after_label(body, "Exports", code=True))
-        _set_if_value(file, "key_concepts", _list_after_label(body, "Key Concepts"))
-
-        links = {
-            "internal_dependencies": _list_after_label(
-                body,
-                "Internal Dependencies",
-                code=True,
-            ),
-            "imported_by": _list_after_label(body, "Imported By", code=True),
-            "external_dependencies": _list_after_label(
-                body,
-                "External Dependencies",
-                code=True,
-            ),
-        }
-        if any(links.values()):
-            file["links"] = links
-
-        usage = _fenced_text_after_label(body, "Usage Example")
-        _set_if_value(file, "usage_example", usage)
-        files.append(file)
-
-    return files
-
-
-def _parse_dependency_catalog(markdown: str) -> list[dict]:
-    section = _section(markdown, "Dependency Catalog")
-    if not section:
-        return []
-
-    dependencies: list[dict] = []
-    chunks = re.split(r"(?m)^### ", section)
-    for chunk in chunks:
-        chunk = chunk.strip()
-        if not chunk:
-            continue
-        name, _, body = chunk.partition("\n")
-        dependency = {
-            "name": name.strip(),
-            "type": _bullet_value(body, "Type") or "unknown",
-            "file_count": _parse_file_count(_bullet_value(body, "Used by")),
-        }
-        _set_if_value(dependency, "used_for", _bullet_value(body, "Used for"))
-        dependencies.append(dependency)
-    return dependencies
-
-
-# ---------------------------------------------------------------------------
-# Visible Markdown parsing utilities
-# ---------------------------------------------------------------------------
-
-def _section(markdown: str, title: str) -> str:
-    match = re.search(
-        rf"(?ms)^## {re.escape(title)}\n\n(.*?)(?=^## |\Z)",
-        markdown,
-    )
-    return match.group(1).strip() if match else ""
-
-
-def _bullet_value(section: str, label: str) -> str:
-    match = re.search(rf"(?m)^- {re.escape(label)}: (.*)$", section)
-    return match.group(1).strip() if match else ""
-
-
-def _bold_value(body: str, label: str) -> str:
-    match = re.search(rf"(?m)^\*\*{re.escape(label)}:\*\*\s*(.*?)(?:  )?$", body)
-    return match.group(1).strip() if match else ""
-
-
-def _paragraph_after_label(body: str, label: str) -> str:
-    match = re.search(
-        rf"(?ms)^\*\*{re.escape(label)}:\*\*\s*(.*?)(?=\n\n\*\*|\Z)",
-        body,
-    )
-    return match.group(1).strip() if match else ""
-
-
-def _list_after_label(body: str, label: str, code: bool = False) -> list[str]:
-    match = re.search(
-        rf"(?ms)^\*\*{re.escape(label)}:\*\*\n\n(.*?)(?=\n\n\*\*|\Z)",
-        body,
-    )
-    if not match:
-        return []
-
-    items = []
-    for line in match.group(1).splitlines():
-        line = line.strip()
-        if not line.startswith("- "):
-            continue
-        value = line[2:].strip()
-        items.append(_strip_code(value) if code else value)
-    return items
-
-
-def _named_items_after_label(body: str, label: str) -> list[dict]:
-    items = []
-    for item in _list_after_label(body, label):
-        match = re.match(r"`([^`]+)`(?::\s*(.*))?$", item)
-        if match:
-            items.append({"name": match.group(1), "description": match.group(2) or ""})
-        else:
-            items.append({"name": item, "description": ""})
-    return items
-
-
-def _fenced_text_after_label(body: str, label: str) -> str:
-    match = re.search(
-        rf"(?ms)^\*\*{re.escape(label)}:\*\*\n\n```text\n(.*?)\n```",
-        body,
-    )
-    return match.group(1).strip() if match else ""
-
-
-def _parse_csv(value: str, empty_values: set[str]) -> list[str]:
-    cleaned = value.strip()
-    if not cleaned or cleaned in empty_values:
-        return []
-    return [_strip_code(item.strip()) for item in cleaned.split(",") if item.strip()]
-
-
-def _parse_int(value: str) -> int:
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return 0
-
-
-def _parse_file_count(value: str) -> int:
-    match = re.match(r"(\d+)", value.strip())
-    return int(match.group(1)) if match else 0
-
-
-def _strip_code(value: str) -> str:
-    value = value.strip()
-    if value.startswith("`") and value.endswith("`"):
-        return value[1:-1]
-    return value
-
-
-def _set_if_value(target: dict, key: str, value: Any) -> None:
-    if value not in (None, "", [], {}):
-        target[key] = value
-
 
 def _prune_empty(value: Any) -> Any:
     if isinstance(value, dict):
@@ -810,113 +315,249 @@ def _prune_empty(value: Any) -> Any:
 # ---------------------------------------------------------------------------
 
 def _dependency_usage_map(usage_notes: list) -> dict[str, str]:
+    """Map each raw usage-note import to its ``used_for`` text.
+
+    0.9.3: names are kept *raw* here; classification (external vs sdk) and
+    canonicalization are deferred to :func:`_dependency_catalog`, which knows
+    each file's language.
+    """
     usage: dict[str, str] = {}
     for note in usage_notes:
         if not isinstance(note, dict):
             continue
-        name = _normalize_dependency_name(note.get("import", ""), "external")
+        name = str(note.get("import", "") or "").strip()
         used_for = str(note.get("used_for", "")).strip()
         if name and used_for and name not in usage:
             usage[name] = used_for
     return usage
 
 
+_RECOGNIZED_TYPE_HINTS = ("internal", "external", "sdk")
+
+
 def _clean_catalog_updates(catalog_updates: list) -> list[dict]:
+    """Shape-clean agent catalog updates only.
+
+    0.9.3: runs *before* graph links are attached, so it cannot validate
+    internal hints or classify names.  It retains the trimmed raw name, a
+    recognized raw type hint, and the trimmed ``used_for``.  All
+    classification and internal-hint validation happen later in
+    :func:`_dependency_catalog`, after links exist.
+    """
     updates = []
     for item in catalog_updates:
         if not isinstance(item, dict):
             continue
-        type_hint = item.get("type") if item.get("type") in ("internal", "external") else ""
-        name = _normalize_dependency_name(item.get("name", ""), type_hint)
+        name = str(item.get("name", "") or "").strip()
         if not name:
             continue
+        type_hint = item.get("type") if item.get("type") in _RECOGNIZED_TYPE_HINTS else ""
         update = {
             "name": name,
-            "type": type_hint or _dependency_type(name),
+            "type": type_hint,
             "used_for": str(item.get("used_for", "")).strip(),
         }
         updates.append({key: value for key, value in update.items() if value not in ("", None)})
     return updates
 
 
+def _normalize_internal_candidate(name: Any) -> str:
+    """Normalize an agent-provided internal hint for exact-path comparison."""
+    value = str(name or "").strip()
+    if value.startswith("package:"):
+        value = value[len("package:"):]
+    return value.replace("\\", "/")
+
+
+# Catalog type tag for graph-resolved internal dependencies.  External / SDK
+# tags come from the deterministic classifier (KIND_EXTERNAL / KIND_SDK).
+KIND_INTERNAL = "internal"
+
+
+def _project_import_roots(files: list[dict]) -> set[str]:
+    """Return exact Python import roots represented by project file paths.
+
+    Python modules contribute their filename stem (except ``__init__``), and
+    package paths contribute each directory segment. This represents root-level
+    modules, conventional packages, and ``src`` layouts. Admission still
+    requires matching finalized internal-link evidence for the same importing
+    file.
+    """
+    roots: set[str] = set()
+    for file in files:
+        if str(file.get("language", "") or "").lower() != "python":
+            continue
+        roots.update(_python_import_roots_for_path(file.get("path", "")))
+    return roots
+
+
+def _python_import_roots_for_path(path: Any) -> set[str]:
+    """Return exact import-root candidates represented by one Python path."""
+    normalized = str(path or "").strip().replace("\\", "/")
+    if not normalized:
+        return set()
+    parts = PurePosixPath(normalized).parts
+    if not parts:
+        return set()
+    roots = {part for part in parts[:-1] if part not in ("", ".", "..")}
+    stem = PurePosixPath(parts[-1]).stem
+    if stem and stem != "__init__":
+        roots.add(stem)
+    return roots
+
+
+def _eligible_catalog_keys(
+    file: dict,
+    project_import_roots: set[str],
+) -> set[tuple[str, str]]:
+    """Return the ``(type, canonical_name)`` keys this file's finalized links
+    authorize for the dependency catalog.
+
+    Only graph-resolved internal links and deterministically classified
+    external / SDK links produce eligible keys.  A Python external candidate
+    whose canonical root is a project package root is dropped as a false
+    external — project code resolved internally via the graph, not a third-party
+    package.  Model ``catalog_updates``, ``dependency_refs``, and ``usage_notes``
+    can never widen this set; they may only supply ``used_for`` text for a key
+    that is already eligible.
+    """
+    links = file.get("links", {})
+    if not isinstance(links, dict):
+        return set()
+    keys: set[tuple[str, str]] = set()
+    for internal_path in links.get("internal_dependencies", []):
+        if internal_path:
+            keys.add((KIND_INTERNAL, internal_path))
+    internal_roots: set[str] = set()
+    for path in links.get("internal_dependencies", []):
+        internal_roots.update(_python_import_roots_for_path(path))
+    language = str(file.get("language", "") or "").lower()
+    for name in links.get("external_dependencies", []):
+        if not name:
+            continue
+        is_resolved_python_project_root = (
+            language == "python"
+            and name in project_import_roots
+            and name in internal_roots
+        )
+        if not is_resolved_python_project_root:
+            keys.add((KIND_EXTERNAL, name))
+    for name in links.get("sdk_dependencies", []):
+        if name:
+            keys.add((KIND_SDK, name))
+    return keys
+
+
 def _dependency_catalog(files: list[dict]) -> list[dict]:
-    catalog: dict[str, dict] = {}
+    """Build the deduplicated dependency catalog, grouped by (type, name).
+
+    Admission is evidence-based: an entry's ``(type, canonical_name)`` key must
+    be authorized by at least one file's finalized links
+    (:func:`_eligible_catalog_keys`).  Graph resolution and deterministic
+    classification are authoritative; model ``catalog_updates``,
+    ``dependency_refs``, and ``usage_notes`` may enrich an eligible dependency
+    with ``used_for`` text but can never create or retype one.  Every emitted
+    entry carries non-empty ``used_for`` text and at least one backing file.
+    """
+    # Keyed by (type, canonical_name) so external/sdk/internal never collide.
+    catalog: dict[tuple[str, str], dict] = {}
+    project_import_roots = _project_import_roots(files)
+
+    def _entry(type_: str, canonical: str) -> dict:
+        key = (type_, canonical)
+        item = catalog.get(key)
+        if item is None:
+            item = {"name": canonical, "type": type_, "used_for": "", "files": set()}
+            catalog[key] = item
+        return item
 
     for file in files:
         path = file.get("path", "")
-        usage = file.pop("dependency_usage", {})
+        language = file.get("language", "")
+        usage_raw = file.pop("dependency_usage", {})
         catalog_updates = file.pop("dependency_catalog_updates", [])
-        dependency_refs = [
-            _normalize_dependency_name(name, "external")
-            for name in file.pop("dependency_refs", [])
-            if _normalize_dependency_name(name, "external")
-        ]
-        links = file.get("links", {})
+        dependency_refs = file.pop("dependency_refs", [])
 
+        eligible = _eligible_catalog_keys(file, project_import_roots)
+        if not eligible:
+            continue
+
+        # Classify this file's usage notes into used_for text, restricted to
+        # eligible external/SDK keys.  First note wins per key within a file.
+        usage: dict[tuple[str, str], str] = {}
+        for raw_name, used_for in usage_raw.items():
+            if not used_for:
+                continue
+            dep = classify_non_project_dependency(raw_name, language)
+            key = (dep.kind, dep.canonical)
+            if dep.canonical and key in eligible and key not in usage:
+                usage[key] = used_for
+
+        # 1. Agent catalog updates may carry used_for text + a type hint, but
+        #    only for an eligible key.  An unresolved internal hint, or a name
+        #    with no matching finalized link, is discarded — never reclassified
+        #    into a fabricated entry.
         for update in catalog_updates:
-            name = update["name"]
-            item = catalog.setdefault(
-                name,
-                {
-                    "name": name,
-                    "type": update.get("type", _dependency_type(name)),
-                    "used_for": update.get("used_for", ""),
-                    "files": set(),
-                },
-            )
-            item["files"].add(path)
-            item["type"] = _merge_dependency_type(item.get("type"), update.get("type"))
-            if _should_replace_catalog_text(item.get("used_for", ""), update.get("used_for", "")):
-                item["used_for"] = update["used_for"]
-
-        for dependency in dependency_refs:
-            name = _normalize_dependency_name(dependency, "external")
-            if not name:
+            raw_name = update.get("name", "")
+            type_hint = update.get("type", "")
+            used_for = update.get("used_for", "")
+            if not used_for:
                 continue
-            item = catalog.get(name)
-            if not item:
-                if name not in usage:
+            matched: tuple[str, str] | None = None
+            norm = _normalize_internal_candidate(raw_name)
+            if norm and (KIND_INTERNAL, norm) in eligible:
+                matched = (KIND_INTERNAL, norm)
+            if matched is None:
+                # An unresolved internal hint is discarded rather than
+                # reclassified. For other hints, deterministic external/SDK
+                # classification wins over the model-provided type.
+                if type_hint == "internal":
                     continue
-                item = catalog.setdefault(
-                    name,
-                    {
-                        "name": name,
-                        "type": _dependency_type(name),
-                        "used_for": "",
-                        "files": set(),
-                    },
-                )
-            item["files"].add(path)
-            if not item["used_for"] and usage.get(name):
-                item["used_for"] = usage[name]
-
-        for dependency in links.get("external_dependencies", []):
-            name = _normalize_dependency_name(dependency, "external")
-            if not name:
+                dep = classify_non_project_dependency(raw_name, language)
+                if dep.canonical and (dep.kind, dep.canonical) in eligible:
+                    matched = (dep.kind, dep.canonical)
+            if matched is None:
                 continue
-            item = catalog.get(name)
-            if not item:
-                if name not in usage:
+            item = _entry(*matched)
+            item["files"].add(path)
+            if _should_replace_catalog_text(item["used_for"], used_for):
+                item["used_for"] = used_for
+
+        # 2. Resolved external / SDK links from this file's classification are
+        #    the authority for membership.  Attach the file and any usage text,
+        #    but never create a text-less entry (A4 drops those below anyway).
+        for key in eligible:
+            if key[0] == KIND_INTERNAL:
+                continue
+            item = catalog.get(key)
+            if item is None:
+                if key not in usage:
                     continue
-                item = catalog.setdefault(
-                    name,
-                    {
-                        "name": name,
-                        "type": "external",
-                        "used_for": "",
-                        "files": set(),
-                    },
-                )
+                item = _entry(*key)
             item["files"].add(path)
-            item["type"] = _merge_dependency_type(item.get("type"), "external")
-            if not item["used_for"] and usage.get(name):
-                item["used_for"] = usage[name]
+            if not item["used_for"] and usage.get(key):
+                item["used_for"] = usage[key]
 
-        for dependency, used_for in usage.items():
-            if not dependency:
+        # 3. Dependency references — attach only to an eligible key, and only to
+        #    an existing entry or one the agent gave usage text for.
+        for raw_ref in dependency_refs:
+            dep = classify_non_project_dependency(raw_ref, language)
+            key = (dep.kind, dep.canonical)
+            if not dep.canonical or key not in eligible:
                 continue
-            item = catalog.get(dependency)
-            if not item:
+            item = catalog.get(key)
+            if item is None:
+                if key not in usage:
+                    continue
+                item = _entry(*key)
+            item["files"].add(path)
+            if not item["used_for"] and usage.get(key):
+                item["used_for"] = usage[key]
+
+        # 4. Remaining usage notes that match an existing eligible entry.
+        for key, used_for in usage.items():
+            item = catalog.get(key)
+            if item is None:
                 continue
             item["files"].add(path)
             if not item["used_for"]:
@@ -924,12 +565,16 @@ def _dependency_catalog(files: list[dict]) -> list[dict]:
 
     result = []
     for item in catalog.values():
-        files_used = sorted(path for path in item.pop("files") if path)
+        files_used = sorted(p for p in item.pop("files") if p)
+        # A4: every emitted entry needs non-empty used_for text and at least one
+        # backing file whose finalized links contain the key.
+        if not item["used_for"] or not files_used:
+            continue
         item["files"] = files_used
         item["file_count"] = len(files_used)
         result.append(item)
 
-    return sorted(result, key=lambda item: (-item["file_count"], item["name"]))
+    return sorted(result, key=lambda item: (-item["file_count"], item["name"], item["type"]))
 
 
 def _should_replace_catalog_text(existing: str, candidate: str) -> bool:
@@ -956,42 +601,6 @@ def _specificity_score(text: str) -> tuple[int, int]:
     )
     lowered = text.lower()
     return (sum(1 for word in project_words if word in lowered), len(text))
-
-
-def _merge_dependency_type(existing: str | None, candidate: str | None) -> str:
-    if existing == "internal" or candidate == "internal":
-        return "internal"
-    if existing == "external" or candidate == "external":
-        return "external"
-    return candidate or existing or "unknown"
-
-
-def _normalize_dependency_name(name: Any, dependency_type_hint: str = "") -> str:
-    value = str(name or "").strip()
-    if value.startswith("package:"):
-        value = value[len("package:"):]
-    if dependency_type_hint == "external":
-        return _external_package_name(value)
-    return value
-
-
-def _dependency_type(name: str) -> str:
-    if name.startswith(".") or "/" in name:
-        return "internal"
-    return "external"
-
-
-def _external_package_name(name: str) -> str:
-    value = name.strip()
-    if not value:
-        return ""
-    if value.startswith("dart:"):
-        return value
-    if value.startswith(("./", "../")):
-        return value
-    if "/" in value:
-        return value.split("/", 1)[0]
-    return value
 
 
 def _edge_indexes(graph_edges: list[dict]) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
@@ -1063,62 +672,44 @@ def _tree(paths: list[str]) -> dict:
     return root
 
 
-def _render_tree_lines(tree: dict, indent: int = 0) -> list[str]:
-    lines: list[str] = []
-    for name, value in sorted(tree.items()):
-        prefix = "  " * indent
-        if isinstance(value, dict) and value.get("type") == "file":
-            lines.append(f"{prefix}{name}\n")
-        else:
-            lines.append(f"{prefix}{name}/\n")
-            lines.extend(_render_tree_lines(value, indent + 1))
-    return lines
-
-
-def _append_file_markdown(lines: list[str], file: dict) -> None:
-    lines += [
-        f"### {file.get('path', 'unknown')}\n\n",
-        f"**Language:** {file.get('language', '')}  \n\n",
-    ]
-    if file.get("description"):
-        lines += ["**Description:** ", file["description"], "\n\n"]
-    if file.get("role_in_system"):
-        lines += ["**Role:** ", file["role_in_system"], "\n\n"]
-    _append_list(lines, "Imports", file.get("imports", []), code=True)
-    links = file.get("links", {})
-    _append_list(lines, "Internal Dependencies", links.get("internal_dependencies", []), code=True)
-    _append_list(lines, "Imported By", links.get("imported_by", []), code=True)
-    _append_list(lines, "External Dependencies", links.get("external_dependencies", []), code=True)
-    _append_named_items(lines, "Functions", file.get("functions", []))
-    _append_named_items(lines, "Classes", file.get("classes", []))
-    _append_list(lines, "Exports", file.get("exports", []), code=True)
-    _append_list(lines, "Key Concepts", file.get("key_concepts", []), code=False)
-    if file.get("usage_example"):
-        lines += ["**Usage Example:**\n\n```text\n", file["usage_example"], "\n```\n\n"]
-
-
-def _append_list(lines: list[str], title: str, items: list, code: bool) -> None:
-    if not items:
-        return
-    lines.append(f"**{title}:**\n\n")
-    for item in items:
-        text = f"`{item}`" if code else str(item)
-        lines.append(f"- {text}\n")
-    lines.append("\n")
-
-
-def _append_named_items(lines: list[str], title: str, items: list) -> None:
-    if not items:
-        return
-    lines.append(f"**{title}:**\n\n")
-    for item in items:
-        if isinstance(item, dict):
-            lines.append(f"- `{item.get('name', '')}`: {item.get('description', '')}\n")
-        else:
-            lines.append(f"- `{item}`\n")
-    lines.append("\n")
-
-
 def _top_folder(path: str) -> str:
     parts = PurePosixPath(path).parts
     return parts[0] if len(parts) > 1 else "."
+
+
+# ---------------------------------------------------------------------------
+# Compatibility shim (0.9.4 — deprecated; import from codedoc.core.markdown_view)
+# ---------------------------------------------------------------------------
+
+_MARKDOWN_VIEW_COMPAT_NAMES = frozenset(
+    {
+        "EmbeddedViewResult",
+        "json_from_markdown",
+        "markdown_from_json",
+        "markdown_from_view",
+        "markdown_to_view",
+        "read_embedded_view",
+        "read_embedded_view_result",
+        "_build_full_view_comment",
+        "_build_meta_comment",
+        "_public_view_for_embedding",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Lazily forward moved serializer/parser helpers to ``markdown_view``.
+
+    Markdown serialization/parsing moved to :mod:`codedoc.core.markdown_view`
+    in 0.9.4.  Repository tests and documented integrations still import those
+    names from this module, so they are forwarded here for one release.  The
+    import is function-local so ``markdown_view`` (which imports a few pure
+    assembly helpers from this module at load time) does not create a cycle.
+    No runtime warning is emitted.
+    """
+    if name not in _MARKDOWN_VIEW_COMPAT_NAMES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from codedoc.core import markdown_view as _mv
+
+    return getattr(_mv, name)

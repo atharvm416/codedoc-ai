@@ -26,6 +26,7 @@ codedoc_db.json
 .pytest_cache/
 .pytest_tmp/
 .pyt_tmp/
+.pyt_basetemp/
 tmp/
 .tmp/
 .tmp*/

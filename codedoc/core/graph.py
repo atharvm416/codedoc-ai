@@ -112,8 +112,16 @@ def resolve_import(
     all_files: set[str],
     root: Path,
 ) -> str | None:
-    """Resolve a parser import string to a known project-relative path."""
-    _ = root
+    """Resolve a parser import string to a known project-relative path.
+
+    Resolution is purely lexical: candidates are matched, exact-case, against
+    the project-relative paths in *all_files*.  It never probes the filesystem,
+    installed packages, or the network, so the same repository resolves to the
+    same dependency graph on case-sensitive and case-insensitive hosts alike.
+
+    ``root`` is retained for backward compatibility only — it is no longer read.
+    A case-mismatched import is left unresolved.
+    """
     if not import_str:
         return None
 
@@ -159,8 +167,6 @@ def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
         dotted = import_str.replace(".", "/")
         candidates.append(dotted)
         candidates.append(str(current_dir / dotted))
-        class_name = import_str.rsplit(".", 1)[-1]
-        candidates.append(class_name)
     else:
         candidates.append(import_str)
         candidates.append(str(current_dir / import_str))
@@ -177,18 +183,15 @@ def _resolve_python_relative(import_str: str, current_dir: PurePosixPath) -> str
     return _normalize_posix(str(base / module)) if module else _normalize_posix(str(base))
 
 
-def _match_candidate(candidate: str, known: dict[str, str]) -> str | None:
+def _match_candidate(
+    candidate: str,
+    known: dict[str, str],
+) -> str | None:
+    """Match *candidate* exactly (no case folding) against the known paths."""
     candidate = _normalize_posix(candidate)
-    variants = _candidate_variants(candidate)
-
-    known_lower = {key.lower(): original for key, original in known.items()}
-    for variant in variants:
+    for variant in _candidate_variants(candidate):
         if variant in known:
             return known[variant]
-        lower = variant.lower()
-        if lower in known_lower:
-            return known_lower[lower]
-
     return None
 
 

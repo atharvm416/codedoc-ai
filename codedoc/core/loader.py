@@ -45,6 +45,10 @@ DEFAULTS: dict[str, Any] = {
     "max_consecutive_failures": 5,
     "log_level": "INFO",
     "max_file_size_kb": 500,
+    # 0.9.6 scanner safety: when False (default) symlinked directories and files
+    # are skipped, preventing symlink cycles and escapes outside the project
+    # root.  Settable via JSON config or the Python API only (no CLI flag/env).
+    "follow_symlinks": False,
     "propagate_changes": True,
     # 0.8.0 rate-limit adaptive parallelism
     "rate_limit_adaptive": True,
@@ -474,6 +478,36 @@ def _coerce_bool(value: Any) -> bool:
     return bool(value)
 
 
+_TRUE_STRINGS = ("true", "1", "yes")
+_FALSE_STRINGS = ("false", "0", "no")
+
+
+def _coerce_strict_bool(value: Any, key: str) -> bool:
+    """Coerce a boolean config value, rejecting unrecognized strings.
+
+    Accepts real booleans and the repository's documented boolean string forms
+    (``"true"``/``"1"``/``"yes"`` and ``"false"``/``"0"``/``"no"``).  Any other
+    string raises :class:`ConfigError` rather than being silently coerced.
+    """
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in _TRUE_STRINGS:
+            return True
+        if normalized in _FALSE_STRINGS:
+            return False
+        raise ConfigError(
+            f"{key} must be a boolean (true/false); got {value!r}."
+        )
+    if isinstance(value, int):
+        # Non-string ints are already handled by the bool branch above for
+        # True/False; a bare 0/1 here is acceptable, anything else is not.
+        if value in (0, 1):
+            return bool(value)
+    raise ConfigError(f"{key} must be a boolean (true/false); got {value!r}.")
+
+
 def _validate(config: dict[str, Any]) -> None:
     """Raise ConfigError for invalid values."""
     if config.get("llm_mode", "api") != "api":
@@ -490,6 +524,12 @@ def _validate(config: dict[str, Any]) -> None:
     # 0.9.2: normalize booleans early — dry_run gates the API-key warning below.
     config["dry_run"] = _coerce_bool(config.get("dry_run", False))
     config["allow_partial"] = _coerce_bool(config.get("allow_partial", False))
+
+    # 0.9.6: follow_symlinks is a safety control — coerce strictly so an
+    # unrecognized string is a hard error rather than a silent False.
+    config["follow_symlinks"] = _coerce_strict_bool(
+        config.get("follow_symlinks", False), "follow_symlinks"
+    )
 
     if (
         config["llm_mode"] == "api"
@@ -567,10 +607,17 @@ def _validate(config: dict[str, Any]) -> None:
             "output_format must be one of: 'json', 'md', or 'both'."
         )
 
+    if isinstance(config.get("max_file_size_kb"), bool):
+        raise ConfigError("max_file_size_kb must be a positive integer (at least 1).")
     try:
         config["max_file_size_kb"] = int(config["max_file_size_kb"])
     except (TypeError, ValueError) as exc:
         raise ConfigError("max_file_size_kb must be an integer.") from exc
+    if config["max_file_size_kb"] < 1:
+        raise ConfigError(
+            "max_file_size_kb must be at least 1; a non-positive value would "
+            "silently skip every file."
+        )
 
     for key in ("max_parallel_files", "file_retry_attempts", "max_consecutive_failures"):
         try:
@@ -622,11 +669,16 @@ def _validate(config: dict[str, Any]) -> None:
         if ladder[-1] != 1:
             config["parallel_ladder"] = ladder + [1]
 
-    # Coerce retry_after_cap_s to int
+    # Coerce retry_after_cap_s to int.  Zero is valid and intentionally
+    # disables the backoff cap; negative values are invalid.  Booleans rejected.
+    if isinstance(config.get("retry_after_cap_s"), bool):
+        raise ConfigError("retry_after_cap_s must be an integer of 0 or greater.")
     try:
         config["retry_after_cap_s"] = int(config.get("retry_after_cap_s", 30))
     except (TypeError, ValueError) as exc:
         raise ConfigError("retry_after_cap_s must be an integer.") from exc
+    if config["retry_after_cap_s"] < 0:
+        raise ConfigError("retry_after_cap_s must be 0 or greater.")
 
     try:
         config["max_content_chars"] = int(config["max_content_chars"])

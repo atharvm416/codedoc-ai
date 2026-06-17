@@ -1,5 +1,195 @@
 # Changelog
 
+## 0.9.6 - 2026-06-17
+
+### Scan robustness and resolution precision (corrective patch)
+
+A corrective patch release. It fixes correctness and robustness defects found
+in a code audit and makes the existing CI green by fixing two non-portable
+tests. No new documentation scopes, prompts, providers, response-schema
+changes, or output artifacts. The only new configuration key is the safety
+control `follow_symlinks` (default `False`).
+
+- **Symlink-safe, iterative scanner.** The directory walk is now an explicit
+  stack instead of recursion, so a deeply nested acyclic tree can no longer
+  raise `RecursionError`. Every traversed directory's resolved identity
+  (`(st_dev, st_ino)` where meaningful, else the normalized resolved path) is
+  tracked, so symlink/junction cycles and multiple aliases to one real
+  directory are visited at most once. By default (`follow_symlinks=False`) all
+  symlinked directories and files are skipped — preventing both link cycles and
+  escapes outside the project root. With `follow_symlinks=True`, links are
+  followed only when their target exists, has the expected type, and resolves
+  inside the project root; broken, inaccessible, type-mismatched, and
+  out-of-root links are skipped. Lexical skip/dot/ignore rules are applied to a
+  link's in-root alias before it is resolved, so a link cannot bypass an ignored
+  path, and only project-relative paths are ever emitted as `rel_path`.
+- **Deterministic, exact-case import resolution.** Import resolution no longer
+  probes the filesystem, so the same repository resolves to the same dependency
+  graph on case-sensitive and case-insensitive hosts. The filesystem-dependent
+  case-folded matching and the standalone bare final-segment candidate (which
+  could link `collections.abc` or `com.example.Bar` to an unrelated root-level
+  file) are removed. Dotted imports resolve only through their directory-anchored
+  forms; relative, Python dotted-relative, and Dart `package:` imports are
+  unchanged. A case-mismatched or otherwise unresolved import stays in the
+  per-file `imports` list but creates no internal graph edge, so the dependency
+  graph, entry reachability, and catalog reflect only real resolved edges. The
+  now-unused `_filesystem_is_case_insensitive` / `_swap_case_letter` helpers were
+  removed from `graph.py`; `resolve_import()`'s `root` parameter is retained for
+  compatibility only and is no longer read.
+- **Atomic legacy summary writer.** The backward-compatible `write_summary()`
+  helper now routes through `atomic_write_text` like every other final writer,
+  so no completed public artifact is ever written via truncate-in-place.
+- **Stricter configuration bounds.** `max_file_size_kb` must be a positive
+  integer (`>= 1`); `0`, negatives, and booleans are rejected before scanning
+  instead of silently skipping every file. `retry_after_cap_s` must be `>= 0`
+  (zero still disables the cap); negatives and booleans are rejected.
+- **Portable CI tests.** Two environment-coupled tests were made
+  platform- and checkout-name independent (force-path normalization is asserted
+  per platform; the `run`-alias test compares the captured root to the actual
+  working directory) so the existing 3.10/3.11/3.12 CI matrix passes unchanged.
+  No product code, CI workflow, configuration default, prompt, schema, or output
+  artifact changed for this work.
+
+## 0.9.5 - 2026-06-15
+
+### Correctness and reliability (behavior changes are bounded and listed below)
+
+A corrective patch release. The only intentional change to successful output is
+the dependency-catalog correction; all other changes harden persistence,
+packaging, and CI without altering successful serialized contents. No schema
+bump, no new configuration, CLI feature, prompt, provider, or output artifact.
+
+- **Evidence-based dependency catalog.** A catalog entry is now admitted only
+  when its `(type, canonical_name)` key is authorized by a file's finalized
+  links (graph-resolved `internal_dependencies`, or deterministically classified
+  `external_dependencies` / `sdk_dependencies`). Model `catalog_updates`,
+  `dependency_refs`, and `usage_notes` may enrich a proven dependency with
+  `used_for` text but can no longer create or retype one; unresolved hints are
+  discarded rather than reclassified. A Python external whose canonical root is
+  the project's own package and is resolved internally by the graph is dropped as
+  a false external. Every emitted entry now carries non-empty `used_for` text and
+  a backing file. Deterministic output remains byte-identical except where an
+  entry lacked authoritative evidence.
+- **Atomic completed output.** Final JSON and Markdown are written through a
+  single canonical `atomic_write_text` helper (unique temp sibling, flush +
+  fsync, rename) so a completed artifact can never be truncated in place. In
+  `both` mode both payloads are rendered before any target is mutated, Markdown
+  is replaced first and JSON last (the JSON path is also the live backup), giving
+  per-artifact atomicity.
+- **Fatal live-backup persistence.** A failed live-backup write now raises
+  `LiveBackupWriteError` (an `OutputError`) instead of being silently swallowed.
+  `SafeWriter.record()` rolls back all in-memory markers on failure, and the
+  execution layer treats persistence failure as fatal on both the sequential and
+  parallel paths — no retry, no rate-limit reclassification, pending work
+  cancelled — so the run never continues under a false crash-safety guarantee.
+- **Artifact-path collision rejection.** Distinct generated artifacts that would
+  target the same normalized path are rejected before scanning or mutation, while
+  the intentional final-JSON / live-backup phase alias is accepted.
+- **Three-provider contract matrix.** OpenAI, Anthropic, and Gemini are verified
+  through one shared contract using injected fake SDK clients (no network or
+  credentials in normal tests).
+- **Active CI and metadata honesty.** Added a least-privilege CI workflow
+  (tests, lint, build, `twine check`, clean-wheel smoke). The declared
+  `requires-python` is now `>=3.10,<3.13`, the classifiers drop Python 3.9, and
+  the CI matrix tests exactly 3.10, 3.11, and 3.12.
+- **Release hygiene.** Import resolution now follows the actual target
+  filesystem's case
+  semantics instead of folding case unconditionally. Documentation-agent
+  fallback handling is defined on the agent class rather than installed by a
+  runtime monkey-patch. The dormant local-provider compatibility module now
+  uses the standard library for its optional liveness check, so `requests` is
+  no longer a runtime dependency, and repository tests are no longer bundled
+  into the source distribution.
+
+## 0.9.4 - 2026-06-14
+
+### Internal decomposition (structural only — no behavior change)
+
+This release reorganizes two oversized modules into cohesive,
+single-responsibility units. It does **not** change file selection, provider
+calls, prompts, retries, the output schema, output contents, the dependency
+catalog, configuration defaults, or the CLI. For the same inputs the run
+behaves identically and the serialized JSON/Markdown is byte-identical to
+0.9.3 output.
+
+- **Pipeline decomposition.** `codedoc/pipeline.py` is now a thin lifecycle
+  coordinator. Its internals moved into three modules behind the unchanged
+  `run_pipeline()` facade and phase ordering:
+  - `codedoc/core/resume.py` — live-backup path resolution, existing JSON/MD
+    record loading, public→internal record reconstruction, final
+    documentation-record construction, and stale-build / legacy-db cleanup.
+  - `codedoc/core/discovery.py` — entry recovery from existing CodeDoc
+    metadata, dependency-graph construction, entry-reachability selection, and
+    graph-edge serialization (selection behavior moved unchanged).
+  - `codedoc/core/execution.py` — rate-limit / retry-after classification, the
+    adaptive-parallelism ladder, and sequential/parallel processing behind a
+    new `ExecutionContext` / `ExecutionOptions` boundary and the
+    `execute_agent_files()` entry point. The provider-aware `RateLimitProfile`
+    and execution policy are built by the pipeline and passed in; execution no
+    longer reads the configuration dictionary.
+- **Serializer extraction.** Markdown serialization/parsing moved from
+  `codedoc/core/project_view.py` into `codedoc/core/markdown_view.py`
+  (`markdown_from_view`, `markdown_to_view`, `json_from_markdown`,
+  `markdown_from_json`, the embedded-view readers, and the visible-Markdown
+  parsers/render helpers). `project_view.py` retains view assembly, the
+  dependency catalog, pruning, usage-example sanitization, and
+  `read_codedoc_meta`.
+- **Compatibility.** The moved private helpers remain importable from their
+  previous modules for one release: pipeline helpers from `codedoc.pipeline`,
+  and the serializer helpers from `codedoc.core.project_view` (forwarded
+  lazily to `codedoc.core.markdown_view`). These re-exports are deprecated and
+  emit no runtime warning. No schema change; `SCHEMA_VERSION` stays `1.4`.
+- **Tests.** Added `tests/test_094_pipeline_boundaries.py` and
+  `tests/test_094_project_view_split.py`, including byte-identical
+  golden-output fixtures (`tests/fixtures/golden_094_*`). One existing
+  monkeypatch target (`codedoc.pipeline.time.sleep`) was retargeted to the
+  defining module (`codedoc.core.execution.time.sleep`).
+
+## 0.9.3 - 2026-06-13
+
+### Deterministic output, dependency categories, and centralized reading
+
+- **SDK/standard-library separation.** A new pure, deterministic, language-aware
+  classifier (`codedoc/core/dependency_kind.py`) splits non-project imports into
+  third-party `external_dependencies` and standard-library / SDK
+  `sdk_dependencies` (additive field). Dart `dart:*`, Python stdlib (via
+  `sys.stdlib_module_names` with a committed Python 3.9 fallback), and Node
+  built-ins / `node:*` are recognized as SDK; package subpaths and scoped npm
+  packages are canonicalized to their package root. Importability is never used
+  to classify modules.
+- **Internal links only from the graph.** `links.internal_dependencies` /
+  `links.imported_by` now come exclusively from resolved dependency-graph edges.
+  Unresolved agent text can no longer create an internal link, and an `internal`
+  catalog hint is accepted only when it exactly matches a resolved internal path
+  for that file; otherwise it is reclassified as non-project data. The catalog is
+  grouped by `(type, canonical_name)`.
+- **Centralized document reader.** A single read-only parser
+  (`codedoc/core/document.py`, `read_codedoc_document`) owns CodeDoc JSON /
+  Markdown parsing and structural ownership. Output ownership, `SafeWriter`,
+  metadata reads, existing-record reads, resume candidates, and stale-build
+  migration all route through it while keeping their own missing/malformed
+  policy. It reads UTF-8 with optional BOM, rejects invalid UTF-8, validates
+  collection types, rejects duplicate paths, prefers a valid embedded view, and
+  fails closed on unknown/missing-schema completed output and unsupported
+  extensions.
+- **Ownership tightening (intentional).** Markdown that merely contains a
+  `<!-- codedoc-ai:` marker but whose metadata is malformed (and which has no
+  valid embedded view) is now treated as foreign and is never overwritten. Valid
+  legacy Markdown remains accepted.
+- **Deterministic, timestamp-free completed output.** `generated_at` is removed
+  from the completed JSON `_codedoc` block, the Markdown metadata comment, and
+  the embedded lossless view. Two runs with identical sources, documentation,
+  configuration, and stats now produce byte-identical JSON and Markdown. Old
+  outputs containing `generated_at` remain readable. Live backups keep
+  `created_at` / `updated_at` diagnostics (new backups write `created_at`).
+- **Private record metadata plumbing.** A registry
+  (`codedoc/core/record_meta.py`) preserves explicitly registered private keys
+  through JSON, Markdown (embedded view only — never visible prose), live backup,
+  and resume reconstruction. The production registry is empty in this release;
+  arbitrary underscore-prefixed model output is not preserved.
+- No schema bump: `sdk_dependencies` and private keys are additive; missing
+  `sdk_dependencies` loads as an empty list.
+
 ## 0.9.2 - 2026-06-12
 
 ### Safe planning and CI ergonomics
@@ -791,7 +981,7 @@ reviewing the release.
   - Cache history
   - Raw agent responses
   - Redundant description fields
-  
+
 ## 0.1.3 - 2026-05-02
 
 - Changed generated docs to one combined JSON file by default.

@@ -213,23 +213,3 @@ class Orchestrator:
             # Status
             "state": "checked",
         }
-
-
-# Patch BaseAgent to support _safe_run_with_context used above
-def _safe_run_with_context(
-    self,
-    file_path: str,
-    content: str,
-    imports: list[str],
-    language: str,
-    structure: dict,
-    dependencies: dict,
-) -> dict:
-    try:
-        return self.run_with_context(file_path, content, imports, language, structure, dependencies)
-    except Exception as exc:
-        logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
-        return {"error": str(exc), "agent": "DocumentationAgent"}
-
-
-DocumentationAgent._safe_run_with_context = _safe_run_with_context

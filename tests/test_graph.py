@@ -1,6 +1,5 @@
 """Tests for DependencyGraph."""
 
-import pytest
 from codedoc.core.graph import DependencyGraph, resolve_import, _KNOWN_EXTENSIONS, _candidate_variants
 from pathlib import Path
 
@@ -124,6 +123,24 @@ class TestResolveImport:
             Path("."),
         )
         assert result == "lib/screens/home.dart"
+
+    def test_case_mismatch_is_rejected_on_every_platform(self):
+        """0.9.6: resolution is exact-case only and never probes the filesystem,
+        so a case-mismatched import is unresolved regardless of host OS."""
+        all_files = {"main.py", "foo.py"}
+        assert resolve_import("FOO", "main.py", all_files, Path(".")) is None
+
+    def test_exact_case_still_resolves(self):
+        all_files = {"main.py", "foo.py"}
+        assert resolve_import("foo", "main.py", all_files, Path(".")) == "foo.py"
+
+    def test_resolution_ignores_the_root_argument(self, tmp_path):
+        """``root`` is compatibility-only; the same inputs resolve identically
+        whatever path is passed."""
+        all_files = {"main.py", "foo.py"}
+        assert resolve_import("foo", "main.py", all_files, Path(".")) == "foo.py"
+        assert resolve_import("foo", "main.py", all_files, tmp_path) == "foo.py"
+        assert resolve_import("FOO", "main.py", all_files, tmp_path) is None
 
 
 class TestCandidateVariants:
