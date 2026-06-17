@@ -220,6 +220,7 @@ def run_pipeline(
         max_file_size_kb=config["max_file_size_kb"],
         skip_dirs=_scan_skip_dirs,
         ignore_paths=config.get("ignore_paths"),
+        follow_symlinks=config.get("follow_symlinks", False),
     )
     if not all_files:
         # A2: an explicitly specified entry cannot be honoured if nothing was

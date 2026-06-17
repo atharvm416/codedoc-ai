@@ -28,7 +28,13 @@ known to be safe.
    (nothing is written until `flush()`).
 
 4. **Scan and plan.** `scan_files` walks the project (skipping the output
-   directory), the dependency graph and selection are built, and
+   directory) with an iterative, symlink-safe walk: deep trees cannot raise
+   `RecursionError`, every directory's resolved identity is tracked so cycles
+   and aliases are visited once, and — with the default `follow_symlinks=false`
+   — symlinked directories and files are skipped so the scan never follows a
+   link cycle or escapes the project root. The dependency graph is then built
+   from purely lexical, exact-case import resolution (no filesystem probe, so
+   the same repository yields the same graph on every OS), and
    `build_pipeline_plan` produces the complete plan. A dry run returns its
    projected statistics here and performs no mutation.
 

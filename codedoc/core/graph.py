@@ -112,14 +112,23 @@ def resolve_import(
     all_files: set[str],
     root: Path,
 ) -> str | None:
-    """Resolve a parser import string to a known project-relative path."""
+    """Resolve a parser import string to a known project-relative path.
+
+    Resolution is purely lexical: candidates are matched, exact-case, against
+    the project-relative paths in *all_files*.  It never probes the filesystem,
+    installed packages, or the network, so the same repository resolves to the
+    same dependency graph on case-sensitive and case-insensitive hosts alike.
+
+    ``root`` is retained for backward compatibility only — it is no longer read.
+    A case-mismatched import is left unresolved.
+    """
     if not import_str:
         return None
 
     known = {_to_posix(path): path for path in all_files}
     candidates = _candidate_import_paths(import_str.strip(), current_file)
     for candidate in candidates:
-        match = _match_candidate(candidate, known, root)
+        match = _match_candidate(candidate, known)
         if match:
             return match
     return None
@@ -158,8 +167,6 @@ def _candidate_import_paths(import_str: str, current_file: str) -> list[str]:
         dotted = import_str.replace(".", "/")
         candidates.append(dotted)
         candidates.append(str(current_dir / dotted))
-        class_name = import_str.rsplit(".", 1)[-1]
-        candidates.append(class_name)
     else:
         candidates.append(import_str)
         candidates.append(str(current_dir / import_str))
@@ -179,55 +186,13 @@ def _resolve_python_relative(import_str: str, current_dir: PurePosixPath) -> str
 def _match_candidate(
     candidate: str,
     known: dict[str, str],
-    root: Path,
 ) -> str | None:
+    """Match *candidate* exactly (no case folding) against the known paths."""
     candidate = _normalize_posix(candidate)
-    variants = _candidate_variants(candidate)
-
-    case_insensitive = _filesystem_is_case_insensitive(root)
-    known_folded = (
-        {key.casefold(): original for key, original in known.items()}
-        if case_insensitive
-        else {}
-    )
-    for variant in variants:
+    for variant in _candidate_variants(candidate):
         if variant in known:
             return known[variant]
-        if case_insensitive:
-            folded = variant.casefold()
-            if folded in known_folded:
-                return known_folded[folded]
-
     return None
-
-
-def _filesystem_is_case_insensitive(path: Path) -> bool:
-    """Detect case behavior from an existing path without mutating the disk."""
-    candidate = Path(path).resolve()
-    while not candidate.exists() and candidate != candidate.parent:
-        candidate = candidate.parent
-
-    for current in (candidate, *candidate.parents):
-        name = current.name
-        swapped = _swap_case_letter(name)
-        if not swapped:
-            continue
-        alternate = current.with_name(swapped)
-        try:
-            return alternate.exists() and alternate.samefile(current)
-        except OSError:
-            continue
-    return False
-
-
-def _swap_case_letter(value: str) -> str:
-    """Return *value* with one ASCII letter's case changed, or ``""``."""
-    for index, char in enumerate(value):
-        if "a" <= char <= "z":
-            return value[:index] + char.upper() + value[index + 1:]
-        if "A" <= char <= "Z":
-            return value[:index] + char.lower() + value[index + 1:]
-    return ""
 
 
 def _candidate_variants(candidate: str) -> list[str]:

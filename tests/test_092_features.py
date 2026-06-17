@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import tarfile
 import threading
 import zipfile
@@ -99,7 +100,18 @@ def test_force_path_normalization_and_root_escape(tmp_path):
         ["src/a.py", str(source.resolve()), "src/./a.py", r"src\a.py"],
         tmp_path,
     )
-    assert normalized == ["src/a.py"]
+
+    # The expected result depends on whether the backslash is a path separator
+    # on the running platform.  ``normalize_force_files`` is correct per
+    # platform; only the assertion must be platform-aware.
+    backslash_is_separator = "\\" in (os.sep, os.altsep)
+    if backslash_is_separator:
+        # ``src\a.py`` collapses into the same entry as ``src/a.py``.
+        assert normalized == ["src/a.py"]
+    else:
+        # The backslash is a legal filename character, so ``src\a.py`` is a
+        # distinct relative path and is preserved as its own entry.
+        assert normalized == ["src/a.py", r"src\a.py"]
 
     with pytest.raises(ConfigError):
         normalize_force_files(["../outside.py"], tmp_path)

@@ -572,6 +572,8 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
 
 
 def test_cli_run_alias_passes_current_directory_and_overrides(monkeypatch):
+    from pathlib import Path
+
     from codedoc.cli.cli import main
 
     captured = {}
@@ -591,7 +593,9 @@ def test_cli_run_alias_passes_current_directory_and_overrides(monkeypatch):
 
     main(["run", "--format", "md", "--max-parallel-files", "3"])
 
-    assert captured["root"].name == "codedoc"
+    # The ``run`` alias passes the current working directory unchanged, so the
+    # captured root must equal CWD — not any hard-coded checkout directory name.
+    assert Path(captured["root"]).resolve() == Path.cwd().resolve()
     assert captured["config"]["output_format"] == "md"
     assert captured["config"]["max_parallel_files"] == 3
 
@@ -936,8 +940,6 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
     """Second --format md run must not call the LLM for unchanged files.
     This verifies that file_hashes from the MD metadata comment are used
     for the incremental hash check when no JSON exists."""
-    import json as _json
-
     from codedoc.core.db import compute_file_hash
     from codedoc.core.output import write_project_outputs
     from codedoc.pipeline import run_pipeline
@@ -997,8 +999,6 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
 def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
     """--output docs/claude.json after a previous --format md run that wrote
     docs/claude.md must read the entry from claude.md and resume without error."""
-    import json as _json
-
     from codedoc.core.db import compute_file_hash
     from codedoc.core.output import write_project_outputs
     from codedoc.pipeline import run_pipeline

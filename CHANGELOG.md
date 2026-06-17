@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.9.6 - 2026-06-17
+
+### Scan robustness and resolution precision (corrective patch)
+
+A corrective patch release. It fixes correctness and robustness defects found
+in a code audit and makes the existing CI green by fixing two non-portable
+tests. No new documentation scopes, prompts, providers, response-schema
+changes, or output artifacts. The only new configuration key is the safety
+control `follow_symlinks` (default `False`).
+
+- **Symlink-safe, iterative scanner.** The directory walk is now an explicit
+  stack instead of recursion, so a deeply nested acyclic tree can no longer
+  raise `RecursionError`. Every traversed directory's resolved identity
+  (`(st_dev, st_ino)` where meaningful, else the normalized resolved path) is
+  tracked, so symlink/junction cycles and multiple aliases to one real
+  directory are visited at most once. By default (`follow_symlinks=False`) all
+  symlinked directories and files are skipped — preventing both link cycles and
+  escapes outside the project root. With `follow_symlinks=True`, links are
+  followed only when their target exists, has the expected type, and resolves
+  inside the project root; broken, inaccessible, type-mismatched, and
+  out-of-root links are skipped. Lexical skip/dot/ignore rules are applied to a
+  link's in-root alias before it is resolved, so a link cannot bypass an ignored
+  path, and only project-relative paths are ever emitted as `rel_path`.
+- **Deterministic, exact-case import resolution.** Import resolution no longer
+  probes the filesystem, so the same repository resolves to the same dependency
+  graph on case-sensitive and case-insensitive hosts. The filesystem-dependent
+  case-folded matching and the standalone bare final-segment candidate (which
+  could link `collections.abc` or `com.example.Bar` to an unrelated root-level
+  file) are removed. Dotted imports resolve only through their directory-anchored
+  forms; relative, Python dotted-relative, and Dart `package:` imports are
+  unchanged. A case-mismatched or otherwise unresolved import stays in the
+  per-file `imports` list but creates no internal graph edge, so the dependency
+  graph, entry reachability, and catalog reflect only real resolved edges. The
+  now-unused `_filesystem_is_case_insensitive` / `_swap_case_letter` helpers were
+  removed from `graph.py`; `resolve_import()`'s `root` parameter is retained for
+  compatibility only and is no longer read.
+- **Atomic legacy summary writer.** The backward-compatible `write_summary()`
+  helper now routes through `atomic_write_text` like every other final writer,
+  so no completed public artifact is ever written via truncate-in-place.
+- **Stricter configuration bounds.** `max_file_size_kb` must be a positive
+  integer (`>= 1`); `0`, negatives, and booleans are rejected before scanning
+  instead of silently skipping every file. `retry_after_cap_s` must be `>= 0`
+  (zero still disables the cap); negatives and booleans are rejected.
+- **Portable CI tests.** Two environment-coupled tests were made
+  platform- and checkout-name independent (force-path normalization is asserted
+  per platform; the `run`-alias test compares the captured root to the actual
+  working directory) so the existing 3.10/3.11/3.12 CI matrix passes unchanged.
+  No product code, CI workflow, configuration default, prompt, schema, or output
+  artifact changed for this work.
+
 ## 0.9.5 - 2026-06-15
 
 ### Correctness and reliability (behavior changes are bounded and listed below)

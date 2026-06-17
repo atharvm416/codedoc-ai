@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.5`.
+Current release: `0.9.6`.
 
 ## What It Does
 
@@ -310,6 +310,7 @@ Create `codedoc.config.json` in the project being documented:
   "max_consecutive_failures": 5,
   "log_level": "INFO",
   "max_file_size_kb": 500,
+  "follow_symlinks": false,
   "propagate_changes": true,
   "rate_limit_adaptive": true,
   "parallel_ladder": null,
@@ -383,6 +384,8 @@ Parallelism settings:
 | `max_parallel_files` | Maximum number of files processed at the same time. Default: `5`. |
 | `file_retry_attempts` | Number of sequential retries for a failed file. Default: `1`. |
 | `max_consecutive_failures` | Stops the run after repeated failures so provider/API problems are visible quickly. Default: `5`. |
+| `max_file_size_kb` | Files larger than this are skipped. Must be a positive integer (at least `1`). Default: `500`. |
+| `follow_symlinks` | When `false` (default) symlinked directories and files are skipped, so a scan never follows a link cycle or escapes the project root. When `true`, links are followed only when their target exists, has the expected type, and resolves inside the project root. Settable via config file or the Python API only — there is no CLI flag or environment variable for it. |
 
 Configurable defaults added in 0.8.1:
 

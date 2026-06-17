@@ -325,5 +325,7 @@ def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Pat
     ]
     if error_summary:
         lines += ["\n## Errors\n\n```\n", error_summary, "\n```\n"]
-    summary_path.write_text("".join(lines), encoding="utf-8")
+    # 0.9.6: route through the canonical atomic writer so a failed write leaves
+    # the prior file intact instead of truncating it in place.
+    atomic_write_text(summary_path, "".join(lines))
     return summary_path
