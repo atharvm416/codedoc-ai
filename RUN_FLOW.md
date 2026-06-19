@@ -67,8 +67,23 @@ known to be safe.
    workers settle. Recoverable per-file failures (`ParseError`, `AgentError`,
    etc.) are handled by the retry logic and do not stop the run.
 
+   **Unrecoverable-provider stop (0.9.7).** At every failure-handling site the
+   same fixed precedence is applied to each error's message chain: a terminal
+   billing/credit/credentials/model/access fault, or a bounded zero-progress
+   rate limit, raises `UnrecoverableProviderError` and leaves execution; a
+   request/context-too-large error is recorded as a failed file without a retry;
+   everything else keeps the existing rate-limit or transient handling. The
+   `UnrecoverableProviderError` carries a `category` (`"terminal"` or
+   `"rate_limit_exhausted"`). Like the persistence-failure path, the abort
+   cancels pending parallel work and propagates after running workers settle — it
+   never writes final output, so the live backup stays intact and resumable.
+
 10. **Finalization.** `write_project_outputs` renders the complete payload(s) and
     atomically replaces the final target(s). See *Both-mode finalization* below.
+    On an `UnrecoverableProviderError` this step is skipped entirely: the pipeline
+    records and flushes the abort to `error.log`, then re-raises so the CLI can
+    present a safe-stop message (exit `2` for `"terminal"`, exit `1` for
+    `"rate_limit_exhausted"`) and the live backup is preserved for resume.
 
 11. **Diagnostics.** `ErrorReporter.flush()` writes `error.log` in the output
     directory when any issue was recorded.

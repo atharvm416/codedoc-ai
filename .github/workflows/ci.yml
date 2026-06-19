@@ -71,6 +71,10 @@ jobs:
           tests/test_093_dependency_view.py
           tests/test_graph.py
           tests/test_agents.py
+          tests/test_080_features.py
+          tests/test_097_error_classification.py
+          tests/test_097_fail_fast.py
+          tests/test_097_rate_limit_bound.py
 
   package:
     name: Build, twine check, installed-wheel smoke

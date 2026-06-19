@@ -1,5 +1,67 @@
 # Changelog
 
+## 0.9.7 - 2026-06-19
+
+Release candidate updated: 2026-06-19 23:34 IST (UTC+05:30).
+
+### Token- and time-safe failure handling (corrective patch)
+
+A corrective patch release. It stops spending provider calls — and your tokens,
+money, and wall-clock time — on a run that cannot succeed, while never losing
+work already completed. No new documentation scopes, prompts, providers,
+response-schema changes, output artifacts, configuration keys, environment
+variables, or CLI flags. Successful runs make exactly the same provider calls as
+before.
+
+Previously the only error classifier in the pipeline was rate-limit detection,
+so every other provider error was treated as a generic transient failure and
+retried per file. A run started with an invalid key, unknown model, or forbidden
+access walked through several files before the consecutive-failure breaker
+stopped it; a mid-run budget/credit exhaustion matched the rate-limit signals and
+slept through the entire backoff ladder for nothing; an input-too-large error
+re-sent the identical oversized prompt on every retry. The existing live JSON
+backup already made every stop *safe*; this release makes the *decision to stop*
+smart and bounded.
+
+- **Terminal-error fast stop.** Two deterministic, network-free classifiers now
+  inspect only the text already present in the raised exception chain. A
+  confirmed billing/credit exhaustion, invalid credentials, unknown model, or
+  forbidden/permission error stops the run on its first occurrence with an
+  actionable message and the configuration/credentials exit code (`2`) — instead
+  of retrying per file and sleeping through the backoff schedule. Classification
+  is conservative by design: bare numeric HTTP codes (`401`/`402`/`403`/`404`/
+  `413`) never trigger an abort on their own, and a bare `quota` /
+  `resource_exhausted` / `429` remains a retryable rate limit. When in doubt, an
+  error stays retryable.
+- **Input-too-large is recorded, not retried.** A request/context-too-large error
+  is recorded as a failed file without any retry (re-sending the identical prompt
+  cannot succeed); the rest of the run proceeds.
+- **Bounded rate-limit retrying.** A persistent ambiguous rate limit / quota
+  exhaustion (no terminal-billing phrase, e.g. Gemini `RESOURCE_EXHAUSTED`) now
+  stops after a bounded amount of retrying — at most one full step-down ladder
+  traversal plus one lowest-concurrency pass — instead of grinding to the
+  consecutive-failure breaker. This is a transient "retry later" condition, so it
+  exits `1`, not `2`. Normal transient rate limits where files keep succeeding
+  between step-downs are unaffected.
+- **Operator-facing safe-stop reporting.** Both stop paths record the abort to
+  `error.log` from the pipeline before it reaches the CLI, and the CLI prints a
+  clear, non-`Fatal error:` message naming the cause class and confirming that
+  completed files are saved in the live JSON backup and that re-running the same
+  command resumes. Every stop preserves the live backup; re-running re-documents
+  only the unfinished files.
+- **Release-gate classifier corrections.** Context-size messages that use the
+  ambiguous phrase `hard limit` are now kept as input-specific failures instead
+  of being mistaken for billing exhaustion and aborting the whole run. The
+  resolved provider rate-limit profile (including configured signal additions
+  and removals) is now used consistently by parallel processing, sequential
+  retries, and the sequential zero-progress bound.
+
+The rate-limit signal set, step-down ladder, backoff math, `retry_after_cap_s`
+per-sleep cap, `retry_attempts`, concurrency, the three-agent orchestration,
+prompts, schema, and provider behavior are all unchanged. Exit codes for existing
+error types are unchanged; the only new surface is the unrecoverable-provider
+stop (exit `2` for a terminal abort, exit `1` for the bounded rate-limit stop).
+
 ## 0.9.6 - 2026-06-17
 
 ### Scan robustness and resolution precision (corrective patch)

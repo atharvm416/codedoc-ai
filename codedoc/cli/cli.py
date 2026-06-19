@@ -447,7 +447,31 @@ def run_cli(argv: list[str] | None = None) -> int:
         )
         return 130
     except Exception as exc:
-        from codedoc.utils.errors import ConfigError, OutputError
+        from codedoc.utils.errors import (
+            ConfigError,
+            OutputError,
+            UnrecoverableProviderError,
+        )
+        if isinstance(exc, UnrecoverableProviderError):
+            # 0.9.7: a doomed-run safe stop — not an unexpected crash.  The
+            # pipeline already recorded and flushed it to error.log; here we only
+            # present it.  Completed files are in the live JSON backup and
+            # re-running resumes.  A *terminal* abort (billing/credentials/model/
+            # access) is a setup/credentials class problem → exit 2 (consistent
+            # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
+            # stop is a transient "retry later" condition, not a credentials
+            # fault → exit 1 so automation does not read it as "fix credentials".
+            print(f"Error: {exc}", file=sys.stderr)
+            print(
+                "\nCompleted files are saved in the live JSON backup in your "
+                "output directory. Re-run the same command to resume — only the "
+                "unfinished files will be re-documented.",
+                file=sys.stderr,
+            )
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
             # ownership conflicts, and the max_files cap.

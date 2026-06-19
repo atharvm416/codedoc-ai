@@ -81,7 +81,7 @@ from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import ConfigError, ErrorReporter
+from codedoc.utils.errors import ConfigError, ErrorReporter, UnrecoverableProviderError
 from codedoc.utils.logger import get_logger, set_level
 
 # ---------------------------------------------------------------------------
@@ -479,7 +479,19 @@ def run_pipeline(
         new_results=new_results,
         options=options,
     )
-    execute_agent_files(context)
+    try:
+        execute_agent_files(context)
+    except UnrecoverableProviderError as exc:
+        # 0.9.7: a confirmed unrecoverable provider abort (terminal
+        # billing/credentials/model/access, or a bounded zero-progress rate
+        # limit).  Record + flush it to error.log here — where the ErrorReporter
+        # lives — so the abort is logged exactly like other issues even though it
+        # leaves the pipeline by exception.  Then re-raise for the CLI to present.
+        # Deliberately do NOT call write_project_outputs(...) or recorder.delete()
+        # on this path: the live JSON backup must stay intact and resumable.
+        error_reporter.record(exc, context="provider abort")
+        error_reporter.flush()
+        raise
 
     stats["output_dir"] = str(output_dir)
     output_files = write_project_outputs(

@@ -40,7 +40,7 @@ Run these before opening a pull request:
 ```bash
 python -m pytest
 python -m ruff check codedoc
-python -m ruff check tests/test_095_*.py tests/test_093_dependency_view.py tests/test_graph.py tests/test_agents.py
+python -m ruff check tests/test_095_*.py tests/test_093_dependency_view.py tests/test_graph.py tests/test_agents.py tests/test_080_features.py tests/test_097_*.py
 python -m build
 python -m twine check dist/*
 ```

@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.6`.
+Current release: `0.9.7`.
 
 ## What It Does
 
@@ -728,6 +728,33 @@ backoff. You can tune this in config:
 Set `rate_limit_backoff_s` to `0` to disable computed inter-rung backoff.
 `Retry-After` hints are still honored when `respect_retry_after` is true.
 
+### Unrecoverable-error fast stop (0.9.7)
+
+Not every provider error can recover by retrying. codedoc inspects the text
+already present in the raised exception chain — no extra network call, no
+preflight — and stops a doomed run early instead of retrying every file and
+sleeping through the backoff schedule. Classification is deliberately
+conservative: when in doubt an error stays retryable, and bare numeric HTTP codes
+(`401`/`402`/`403`/`404`/`413`) never trigger a stop on their own.
+
+- **Terminal stop (exit `2`).** A confirmed billing/credit exhaustion, invalid
+  credentials, unknown model, or forbidden/permission error stops on its first
+  occurrence — the same setup/credentials exit code as `ConfigError`.
+- **Input-too-large.** A request/context-too-large error is recorded as a failed
+  file *without* any retry (re-sending the identical oversized prompt cannot
+  succeed); the rest of the run proceeds.
+- **Bounded rate-limit stop (exit `1`).** A persistent ambiguous rate limit /
+  quota exhaustion that carries no billing phrase (for example Gemini
+  `RESOURCE_EXHAUSTED`) is still treated as a rate limit, but the total retrying
+  is now bounded by progress: after one full step-down ladder traversal plus one
+  lowest-concurrency pass in which no file succeeds, the run stops. This is a
+  transient "retry later" condition, so it exits `1`, not `2`.
+
+A bare `quota` / `resource_exhausted` / `429`, generic `5xx`, timeouts, and
+JSON-parse failures are **not** treated as terminal — they remain ordinary
+retryable or rate-limited errors. Every stop preserves the live JSON backup;
+re-running the same command resumes and re-documents only the unfinished files.
+
 ### Lossless Markdown regeneration (0.8.1)
 
 Markdown output remains human-readable, but codedoc now embeds a hidden
@@ -798,8 +825,8 @@ CLI exit codes:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, dry-run success, or explicitly allowed partial output. |
-| `1` | File-processing failure, output/write failure, or unexpected fatal error. |
-| `2` | Invalid input/config/path, ownership conflict, cap exceeded, or provider initialization failure. |
+| `1` | File-processing failure, output/write failure, bounded rate-limit / quota stop, or unexpected fatal error. |
+| `2` | Invalid input/config/path, ownership conflict, cap exceeded, provider initialization failure, or terminal provider stop (billing/credit, credentials, unknown model, forbidden). |
 | `130` | Keyboard interrupt. |
 
 `--allow-partial` changes only completed runs with file-level failures. Setup,

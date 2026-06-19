@@ -25,9 +25,9 @@ Covers all new behaviour introduced in 0.8.0:
 from __future__ import annotations
 
 import json
-import threading
-import time
 from pathlib import Path
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ def test_2b_md_backup_survives_interrupted_run(tmp_path):
 def test_3_named_md_output_uses_json_sibling(tmp_path, monkeypatch):
     """Test 3: --output docs/report.md → docs/report.json (not docs/codedoc.json)."""
     (tmp_path / "main.py").write_text("x=1\n")
-    stats = _run(
+    _run(
         tmp_path, monkeypatch,
         entry_file="main.py",
         output_dir="docs/report.md",
@@ -759,8 +759,6 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
 
     from codedoc.utils.errors import LLMError
 
-    step = {"n": 0}
-
     class AlwaysRateLimitProvider:
         provider_name = "openai"
 
@@ -772,27 +770,33 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
 
     _patch_provider(monkeypatch, AlwaysRateLimitProvider())
     from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import UnrecoverableProviderError
 
-    stats = run_pipeline(tmp_path, {
-        "entry_file": "a.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-        "max_parallel_files": 3,
-        "rate_limit_adaptive": True,
-        "file_retry_attempts": 0,
-        "max_consecutive_failures": 1,
-    })
+    # 0.9.7: a persistent rate limit where no file ever succeeds now stops after
+    # the bounded zero-progress pass with the transient-class abort, instead of
+    # grinding to the consecutive-failure breaker.  The adaptive step-down
+    # notification is still printed before the stop and names the provider and
+    # the reduced concurrency — which is what this test verifies.
+    with pytest.raises(UnrecoverableProviderError) as excinfo:
+        run_pipeline(tmp_path, {
+            "entry_file": "a.py",
+            "parallel_agents": False,
+            "propagate_changes": False,
+            "max_parallel_files": 3,
+            "rate_limit_adaptive": True,
+            "file_retry_attempts": 0,
+            "max_consecutive_failures": 1,
+        })
+
+    assert excinfo.value.category == "rate_limit_exhausted"
 
     captured = capsys.readouterr()
-    # Either stdout or stats contain the warning
-    warnings = stats.get("rate_limit_warnings", [])
-    assert len(warnings) > 0 or "openai" in captured.out.lower() or "rate limit" in captured.out.lower()
-
-    if warnings:
-        w = warnings[0]
-        assert w["provider"] == "openai"
-        assert "original_max_parallel" in w
-        assert "new_level" in w
+    out = captured.out.lower()
+    assert "openai" in out
+    assert "rate limit" in out
+    # The step-down message reports the original max_parallel and the reduced level.
+    assert "max_parallel_files" in captured.out
+    assert "reduced to" in out
 
 
 def test_10b_no_warning_on_successful_run(tmp_path, monkeypatch, capsys):
@@ -900,7 +904,7 @@ def test_12_safe_mode_deprecation_notice(tmp_path, monkeypatch, capsys):
 def test_13_format_both_keeps_json_after_clean_finish(tmp_path, monkeypatch):
     """Test 13: --format both → both codedoc.json and codedoc.md on clean finish."""
     (tmp_path / "main.py").write_text("x=1\n")
-    stats = _run(
+    _run(
         tmp_path, monkeypatch,
         entry_file="main.py",
         output_format="both",
