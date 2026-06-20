@@ -56,6 +56,8 @@ from codedoc.core.execution import (
     execute_agent_files,
 )
 from codedoc.core.loader import load_config
+from codedoc.core.block_manager import BlockError
+from codedoc.core.ignore_manager import generated_ignore_entries, update_output_gitignore
 from codedoc.core.output import (
     inspect_output_ownership,
     validate_distinct_artifact_paths,
@@ -156,6 +158,19 @@ def run_pipeline(
         logger.info("Dry run: planning only — no writes, no provider, no LLM calls.")
 
     output_dir = root / config["output_dir"]
+    ignore_target: Path | None = None
+    if config.get("manage_output_gitignore", False):
+        ignore_target = output_dir / config["output_gitignore_filename"]
+        resolved_output = output_dir.resolve()
+        resolved_ignore = ignore_target.resolve()
+        try:
+            resolved_ignore.relative_to(resolved_output)
+        except ValueError as exc:
+            raise ConfigError("output_gitignore_filename must resolve inside output_dir") from exc
+        if ignore_target.is_symlink():
+            raise ConfigError(f"Managed ignore target '{ignore_target}' is a symbolic link")
+        if ignore_target.exists() and ignore_target.is_dir():
+            raise ConfigError(f"Managed ignore target '{ignore_target}' is a directory")
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
@@ -194,6 +209,8 @@ def run_pipeline(
     if output_format in ("md", "both"):
         artifact_paths["markdown"] = output_dir / md_filename
     artifact_paths["live_backup"] = live_backup_path
+    if ignore_target is not None:
+        artifact_paths["output_gitignore"] = ignore_target
     validate_distinct_artifact_paths(artifact_paths)
 
     # Read-only ownership inspection (0.9.2).  A real run fails fast before any
@@ -270,6 +287,11 @@ def run_pipeline(
                 "scanned": 0,
                 "selected": 0,
                 "entry_excluded": 0,
+                "documentation_scope": config.get("documentation_scope", "entry"),
+                "entry_reachable": 0,
+                "entry_disconnected": 0,
+                "disconnected_paid_files": 0,
+                "disconnected_planned_calls": 0,
                 "would_process": 0,
                 "would_call_llm_for": 0,
                 "unchanged": 0,
@@ -284,6 +306,7 @@ def run_pipeline(
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
                 "output_files": [],
+                **_initial_ignore_stats(config, ignore_target),
             }
         output_dir.mkdir(parents=True, exist_ok=True)
         _remove_legacy_db(output_dir)
@@ -291,23 +314,32 @@ def run_pipeline(
             "checked": 0,
             "failed": 0,
             "skipped": 0,
+            "entry_excluded": 0,
             "output_dir": str(output_dir),
             "live_backup_path": None,
             "error_log": None,
             "issues_recorded": 0,
             "rate_limit_warnings": [],
+            "documentation_scope": config.get("documentation_scope", "entry"),
+            "entry_reachable": 0,
+            "entry_disconnected": 0,
+            "disconnected_paid_files": 0,
+            "disconnected_planned_calls": 0,
+            **_initial_ignore_stats(config, ignore_target),
         }
 
     graph, file_map = _build_graph(all_files, root, error_reporter)
-    selected_rels, entry_rel = _select_files(root, config, graph, file_map)
+    reachable_rels, documented_rels, entry_rel = _select_files(
+        root, config, graph, file_map
+    )
 
     # Count of scanned files excluded by entry-reachability selection (A1).
     # Zero when no entry is in effect (selected_rels == all scanned files).
     # Surfaced in stats so the CLI can report it at the run summary.
-    entry_excluded = len(file_map) - len(selected_rels)
+    entry_excluded = len(file_map) - len(documented_rels)
 
     # Queue/topological order for the selected file set (all selected, not just agent files).
-    ordered_selected = [p for p in graph.topological_order() if p in selected_rels]
+    ordered_selected = [p for p in graph.topological_order() if p in documented_rels]
 
     # 0.9.2: normalize forced paths against the project root (raises
     # ConfigError for paths outside the root).
@@ -333,7 +365,7 @@ def run_pipeline(
     plan, materials = build_pipeline_plan(
         file_map=file_map,
         graph=graph,
-        selected_rels=selected_rels,
+        selected_rels=documented_rels,
         entry_rel=entry_rel,
         existing_docs=existing_docs,
         checkpoint_records=checkpoint_results,
@@ -343,8 +375,12 @@ def run_pipeline(
 
     if dry_run:
         return _build_dry_run_stats(
-            plan, file_map, config, output_dir, ownership_conflicts
+            plan, file_map, config, output_dir, ownership_conflicts, reachable_rels
         )
+
+    scope_stats = _build_scope_stats(
+        config, file_map, reachable_rels, documented_rels, plan.agent_rels, entry_rel
+    )
 
     # Paid-file safety cap: enforced after the complete plan exists and before
     # any mutation, writer initialization, or provider creation.
@@ -409,12 +445,14 @@ def run_pipeline(
             "reused": reused,
             "resumed": resumed,
             "entry_excluded": entry_excluded,
+            **scope_stats,
             "output_dir": str(output_dir),
             "rate_limit_warnings": rate_limit_warnings,
+            **_initial_ignore_stats(config, ignore_target),
         }
         output_files = write_project_outputs(
             _build_documentation_records(
-                selected_rels,
+                documented_rels,
                 file_map,
                 graph.topological_order(),
                 existing_docs,
@@ -425,14 +463,18 @@ def run_pipeline(
             error_reporter.summary(),
             output_format,
             entry_rel,
-            _graph_edges(graph, selected_rels),
+            _graph_edges(graph, documented_rels),
             json_filename=json_filename,
             md_filename=md_filename,
+            reachable_rels=reachable_rels,
         )
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
         recorder.delete()
         _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
+        _finalize_output_gitignore(
+            stats, config, output_dir, ignore_target, output_files, error_reporter
+        )
         _set_issue_stats(stats, error_reporter, live_backup_path)
         _set_usage_stats(stats, usage, plan, config)
         return stats
@@ -483,7 +525,9 @@ def run_pipeline(
         "reused": reused,
         "resumed": resumed,
         "entry_excluded": entry_excluded,
+        **scope_stats,
         "rate_limit_warnings": rate_limit_warnings,
+        **_initial_ignore_stats(config, ignore_target),
     }
 
     max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
@@ -549,7 +593,7 @@ def run_pipeline(
     stats["output_dir"] = str(output_dir)
     output_files = write_project_outputs(
         _build_documentation_records(
-            selected_rels,
+            documented_rels,
             file_map,
             graph.topological_order(),
             existing_docs,
@@ -560,9 +604,10 @@ def run_pipeline(
         error_reporter.summary(),
         output_format,
         entry_rel,
-        _graph_edges(graph, selected_rels),
+        _graph_edges(graph, documented_rels),
         json_filename=json_filename,
         md_filename=md_filename,
+        reachable_rels=reachable_rels,
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
@@ -573,6 +618,9 @@ def run_pipeline(
     # Complete the migration of a pre-0.9.8 legacy in-progress sibling (md mode):
     # its records are already in the stable output, so remove the leftover.
     _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
+    _finalize_output_gitignore(
+        stats, config, output_dir, ignore_target, output_files, error_reporter
+    )
     _set_issue_stats(stats, error_reporter, live_backup_path)
     _set_usage_stats(stats, usage, plan, config)
 
@@ -612,6 +660,51 @@ def _set_issue_stats(
         stats["live_backup_path"] = None
 
 
+def _initial_ignore_stats(config: dict, ignore_target: Path | None) -> dict:
+    enabled = bool(config.get("manage_output_gitignore", False))
+    return {
+        "output_gitignore_enabled": enabled,
+        "output_gitignore_updated": False,
+        "output_gitignore_path": str(ignore_target.resolve()) if enabled and ignore_target else None,
+        "output_gitignore_warning": None,
+    }
+
+
+def _finalize_output_gitignore(
+    stats: dict,
+    config: dict,
+    output_dir: Path,
+    ignore_target: Path | None,
+    output_files: tuple[Path | None, Path | None],
+    error_reporter: ErrorReporter,
+) -> None:
+    """Best-effort auxiliary ignore update after required finalization."""
+    if ignore_target is None or not config.get("manage_output_gitignore", False):
+        return
+    artifacts = [path.name for path in output_files if path is not None and path.exists()]
+    if error_reporter.log_path.exists():
+        artifacts.append(error_reporter.log_path.name)
+    if not artifacts:
+        return
+    try:
+        entries = generated_ignore_entries(artifacts)
+        update_output_gitignore(
+            output_dir, config["output_gitignore_filename"], entries
+        )
+        stats["output_gitignore_updated"] = True
+    except (BlockError, OSError) as exc:
+        warning = f"Documentation succeeded, but managed ignore update failed: {exc}"
+        stats["output_gitignore_warning"] = warning
+        logger.warning(warning)
+        error_reporter.record(exc, context="managed output .gitignore", level="warning")
+        try:
+            error_reporter.flush()
+        except OSError as flush_exc:
+            warning = f"{warning}; auxiliary warning log could not be persisted: {flush_exc}"
+            stats["output_gitignore_warning"] = warning
+            logger.warning(warning)
+
+
 def _set_usage_stats(
     stats: dict,
     usage: UsageAccumulator,
@@ -640,13 +733,28 @@ def _build_dry_run_stats(
     config: dict,
     output_dir: Path,
     ownership_conflicts: list[dict],
+    reachable_rels: set[str],
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
+    scope_stats = _build_scope_stats(
+        config,
+        file_map,
+        reachable_rels,
+        set(plan.documented_rels),
+        plan.agent_rels,
+        plan.entry_rel,
+    )
+    ignore_target = (
+        output_dir / config["output_gitignore_filename"]
+        if config.get("manage_output_gitignore", False)
+        else None
+    )
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
-        "selected": len(plan.selected_rels),
-        "entry_excluded": len(plan.scanned_rels - plan.selected_rels),
+        "selected": len(plan.documented_rels),
+        "entry_excluded": len(plan.scanned_rels - plan.documented_rels),
+        **scope_stats,
         "would_process": len(plan.process_rels),
         "would_call_llm_for": len(plan.agent_rels),
         "unchanged": len(plan.unchanged_rels),
@@ -661,6 +769,32 @@ def _build_dry_run_stats(
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
+        **_initial_ignore_stats(config, ignore_target),
+    }
+
+
+def _build_scope_stats(
+    config: dict,
+    file_map: dict[str, dict],
+    reachable_rels: set[str] | frozenset[str],
+    documented_rels: set[str] | frozenset[str],
+    agent_rels: set[str] | frozenset[str],
+    entry_rel: str | None,
+) -> dict:
+    """Return the stable scope/reachability statistics contract."""
+    scope = config.get("documentation_scope", "entry")
+    disconnected_paid = (
+        len(set(agent_rels) - set(reachable_rels))
+        if scope == "all" and entry_rel is not None
+        else 0
+    )
+    return {
+        "documentation_scope": scope,
+        "entry_reachable": len(reachable_rels),
+        "entry_disconnected": len(file_map) - len(reachable_rels),
+        "entry_excluded": len(file_map) - len(documented_rels),
+        "disconnected_paid_files": disconnected_paid,
+        "disconnected_planned_calls": disconnected_paid * 3,
     }
 
 

@@ -600,6 +600,8 @@ def _append_file_markdown(lines: list[str], file: dict) -> None:
     lines += [
         f"### {file.get('path', 'unknown')}\n\n",
         f"**Language:** {file.get('language', '')}  \n\n",
+        "**Reachable from entry:** "
+        f"{'Yes' if file.get('reachable_from_entry', True) else 'No'}  \n\n",
     ]
     if file.get("description"):
         lines += ["**Description:** ", file["description"], "\n\n"]

@@ -41,6 +41,11 @@ class PipelinePlan:
     max_files: int
     max_files_exceeded: bool
 
+    @property
+    def documented_rels(self) -> frozenset[str]:
+        """Files selected for documentation in this run."""
+        return self.selected_rels
+
 
 @dataclass(frozen=True)
 class PlanMaterials:

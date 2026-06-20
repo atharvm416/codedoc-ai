@@ -77,6 +77,29 @@ examples:
         ),
     )
     parser.add_argument(
+        "--documentation-scope",
+        choices=["entry", "all"],
+        default=None,
+        help=(
+            "Documentation coverage: entry follows files reachable from the entry; "
+            "all includes every scanned source file (default: entry)."
+        ),
+    )
+    ignore_group = parser.add_mutually_exclusive_group()
+    ignore_group.add_argument(
+        "--manage-output-gitignore",
+        dest="manage_output_gitignore",
+        action="store_true",
+        default=None,
+        help="Manage a codedoc-owned block in the output directory .gitignore.",
+    )
+    ignore_group.add_argument(
+        "--no-manage-output-gitignore",
+        dest="manage_output_gitignore",
+        action="store_false",
+        help="Disable managed output .gitignore updates.",
+    )
+    parser.add_argument(
         "--provider",
         choices=["auto", "openai", "anthropic", "gemini"],
         default=None,
@@ -237,14 +260,36 @@ examples:
     return parser
 
 
+def _print_ignore_status(stats: dict, dry_run: bool) -> None:
+    if not stats.get("output_gitignore_enabled", False):
+        return
+    if stats.get("output_gitignore_warning"):
+        print(f"  Managed ignore warning: {stats['output_gitignore_warning']}")
+    elif stats.get("output_gitignore_updated"):
+        print(f"  Managed ignore updated: {stats.get('output_gitignore_path', '')}")
+    elif dry_run:
+        print("  Managed ignore         : enabled (dry run; no change)")
+    else:
+        print("  Managed ignore         : enabled; no eligible artifact change")
+
+
 def _print_dry_run_summary(stats: dict) -> None:
     """Print the planning summary for a --dry-run invocation."""
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
     print(f"  Files scanned          : {stats.get('scanned', 0)}")
     print(f"  Files selected         : {stats.get('selected', 0)}")
+    scope = stats.get("documentation_scope", "entry")
+    print(f"  Documentation scope    : {scope}")
+    print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
+    print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
     excluded = stats.get("entry_excluded", 0)
     if excluded:
-        print(f"  Files excluded         : {excluded} (not reachable from --entry)")
+        print(
+            f"  Files excluded         : {excluded} disconnected file(s); "
+            "use --documentation-scope all for complete coverage"
+        )
+    elif stats.get("entry_disconnected", 0):
+        print("  Disconnected status    : included by documentation_scope='all'")
     print(f"  Would process          : {stats.get('would_process', 0)}")
     print(f"  Unchanged (skipped)    : {stats.get('unchanged', 0)}")
     print(f"  Would reuse (identical): {stats.get('would_reuse', 0)}")
@@ -254,11 +299,18 @@ def _print_dry_run_summary(stats: dict) -> None:
         print(f"  Forced                 : {stats['forced']}")
     print(f"  Would call LLM for     : {stats.get('would_call_llm_for', 0)} file(s)")
     print(f"  Estimated LLM calls    : {stats.get('estimated_calls', 0)}")
+    if stats.get("disconnected_paid_files", 0):
+        print(
+            "  Disconnected paid files: "
+            f"{stats['disconnected_paid_files']} "
+            f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
+        )
     print(
         f"  Estimated input tokens : ~{stats.get('estimated_input_tokens', 0)} "
         "(approximate lower bound — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
+    _print_ignore_status(stats, dry_run=True)
 
     if stats.get("max_files_exceeded"):
         print(
@@ -287,15 +339,28 @@ def _print_run_summary(stats: dict) -> None:
     if stats.get("resumed", 0):
         print(f"  Files resumed    : {stats['resumed']}")
     print(f"  Files failed     : {stats['failed']}")
+    scope = stats.get("documentation_scope", "entry")
+    print(f"  Scope            : {scope}")
+    print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
+    print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
     excluded = stats.get("entry_excluded", 0)
     if excluded:
         print(
-            f"  Files excluded   : {excluded} (not reachable from --entry; "
-            "see the warning above. Run without --entry to document everything.)"
+            f"  Files excluded   : {excluded} disconnected file(s) under "
+            "documentation_scope='entry'; use --documentation-scope all for "
+            "complete coverage."
+        )
+    elif stats.get("entry_disconnected", 0):
+        print("  Disconnected set : included by documentation_scope='all'")
+    if stats.get("disconnected_paid_files", 0):
+        print(
+            f"  Disconnected paid: {stats['disconnected_paid_files']} file(s), "
+            f"{stats.get('disconnected_planned_calls', 0)} planned initial calls"
         )
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
+    _print_ignore_status(stats, dry_run=False)
 
     # 0.9.2: approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
@@ -372,6 +437,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     overrides: dict = {}
     if args.entry:
         overrides["entry_file"] = args.entry
+    if args.documentation_scope is not None:
+        overrides["documentation_scope"] = args.documentation_scope
+    if args.manage_output_gitignore is not None:
+        overrides["manage_output_gitignore"] = args.manage_output_gitignore
     if args.provider:
         overrides["llm_provider"] = args.provider
     if args.model:

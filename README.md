@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.8`.
+Current release: `0.9.9`.
 
 ## What It Does
 
@@ -13,6 +13,8 @@ Current release: `0.9.8`.
 - Otherwise auto-detects common entry files such as `main.py`, `main.tsx`, `index.html`, `Main.java`, and related names.
 - If an entry file is found, documents that file and its reachable project dependencies.
 - If no entry file is found, documents all supported project files.
+- Lets you choose coverage with `--documentation-scope`: `entry` (default — only files reachable from the entry) or `all` (every scanned source file, including disconnected ones). Each file's public record carries a `reachable_from_entry` flag.
+- Optionally manages a codedoc-owned block in the output directory's `.gitignore` (`--manage-output-gitignore`), off by default.
 - Parses imports locally before calling an LLM.
 - Processes dependencies before dependent files where possible.
 - Processes up to 5 files at a time by default.
@@ -50,6 +52,8 @@ codedoc run
 | Output directory | `codedoc` |
 | Output format | `json` |
 | Output file | `codedoc/codedoc.json` |
+| Documentation scope | `entry` (only files reachable from the entry) |
+| Manage output `.gitignore` | `false` |
 | Parallel agents | `true` |
 | Max parallel files | `5` |
 | File retry attempts | `1` |
@@ -167,6 +171,8 @@ Common commands:
 | --- | --- |
 | `codedoc run --entry src/main.py` | First run — specify entry file; output to `codedoc/`. |
 | `codedoc run` | Subsequent run — entry read from `codedoc/codedoc.json` metadata. |
+| `codedoc run --documentation-scope all` | Document every scanned source file, including files not reachable from the entry. |
+| `codedoc run --manage-output-gitignore` | Maintain a codedoc-owned block in the output directory `.gitignore`. |
 | `codedoc execute` | Alias for `codedoc run`. |
 | `codedoc run --format json` | Write only `codedoc/codedoc.json`. |
 | `codedoc run --format md` | Write only `codedoc/codedoc.md`. |
@@ -301,8 +307,11 @@ Create `codedoc.config.json` in the project being documented:
   "model_name": "gpt-4o-mini",
   "api_base_url": null,
   "entry_file": null,
+  "documentation_scope": "entry",
   "output_dir": "codedoc",
   "output_format": "json",
+  "manage_output_gitignore": false,
+  "output_gitignore_filename": ".gitignore",
   "supported_extensions": [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"],
   "parallel_agents": true,
   "max_parallel_files": 5,
@@ -410,6 +419,16 @@ Planning and CI settings added in 0.9.2:
 | `max_files` | `0` | Maximum files allowed to make LLM calls after reuse and resume decisions. `0` is unlimited. |
 | `force_files` | `[]` | Selected project paths to reprocess explicitly before dependency propagation. |
 | `allow_partial` | `false` | Exit 0 only for completed runs that produced partial output after file failures. |
+
+Coverage and managed-output settings added in 0.9.9:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `documentation_scope` | `entry` | `entry` documents only files reachable from the entry; `all` documents every scanned source file, including disconnected ones. This is run configuration, not resume metadata — it is never recovered from a prior output file, so a later run with no override returns to `entry`. For repeatable full coverage keep `documentation_scope: "all"` in config or pass `--documentation-scope all` each run. |
+| `manage_output_gitignore` | `false` | When `true`, maintains a codedoc-owned block in the output directory's ignore file listing the generated artifacts. Disabled by default; the ignore file is never read for write, created, or modified while off. Failure to update it never changes successful documentation output — it surfaces only as an auxiliary warning. |
+| `output_gitignore_filename` | `.gitignore` | Portable basename of the managed ignore file, resolved beneath the output directory. |
+
+Every public file record also gains an additive `reachable_from_entry` boolean: `true` for files reachable from the configured entry (and for all files when there is no entry), `false` for disconnected files included only by `documentation_scope: "all"`. It appears in JSON, the lossless Markdown embed, and as one `**Reachable from entry:** Yes|No` line per file section in the visible Markdown.
 
 ## Environment Variables
 
@@ -634,7 +653,7 @@ On each run, `codedoc` follows this process:
 2. Resolve the entry point — from `--entry` if given, otherwise from metadata in the existing output file or legacy auto-detection.
 3. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
 4. Build a dependency graph from parsed imports.
-5. Select files reachable from the entry point.
+5. Compute the reachable set from the entry point, then select the documented set: under `documentation_scope: "entry"` (default) only reachable files; under `all` every scanned file. Reachability is still recorded for each file regardless of scope.
 6. Normalize forced paths and add valid forced files before dependency propagation.
 7. Compute one immutable plan covering changed, unchanged, reused, resumed, and paid-agent files.
 8. In `--dry-run`, return that plan and approximate lower-bound usage without writing or creating a provider.
@@ -916,6 +935,8 @@ CLI flags map directly to config keys:
 | --- | --- |
 | `PATH` | Optional first `run_pipeline(project_root, ...)` argument |
 | `--entry` | `entry_file` |
+| `--documentation-scope` | `documentation_scope` |
+| `--manage-output-gitignore` / `--no-manage-output-gitignore` | `manage_output_gitignore` |
 | `--provider` | `llm_provider` |
 | `--model` | `model_name` |
 | `--output` | `output_dir` |
@@ -947,7 +968,7 @@ If many files fail quickly:
 
 If files are missing from output:
 
-- Check `entry_file` or `--entry`; only reachable dependencies are selected when an entry file is used.
+- Check `entry_file` or `--entry`; under the default `documentation_scope: "entry"` only files reachable from the entry are documented. Pass `--documentation-scope all` to document every scanned source file.
 - Check `skip_dirs` and `ignore_paths`.
 - Check `supported_extensions`.
 - Check `max_file_size_kb`.

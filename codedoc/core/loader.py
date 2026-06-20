@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from pathlib import Path
+from pathlib import PureWindowsPath
 from typing import Any
 
 try:
@@ -25,10 +27,13 @@ DEFAULTS: dict[str, Any] = {
     "api_base_url": None,
     "api_key": None,
     "entry_file": None,
+    "documentation_scope": "entry",
     "output_dir": "codedoc",
     "output_format": "json",
     "output_json_filename": "codedoc.json",
     "output_md_filename": "codedoc.md",
+    "manage_output_gitignore": False,
+    "output_gitignore_filename": ".gitignore",
     # supported_extensions: read-only after load_config() — always derived from
     # the resolved extension_language_map.  The value listed here is the legacy
     # default set and acts as the detection baseline: if a caller passes a
@@ -539,6 +544,9 @@ def _validate(config: dict[str, Any]) -> None:
             "llm_provider must be one of: 'auto', 'openai', 'anthropic', or 'gemini'."
         )
 
+    if config.get("documentation_scope", "entry") not in ("entry", "all"):
+        raise ConfigError("documentation_scope must be 'entry' or 'all'.")
+
     # 0.9.2: normalize booleans early — dry_run gates the API-key warning below.
     config["dry_run"] = _coerce_bool(config.get("dry_run", False))
     config["allow_partial"] = _coerce_bool(config.get("allow_partial", False))
@@ -547,6 +555,12 @@ def _validate(config: dict[str, Any]) -> None:
     # unrecognized string is a hard error rather than a silent False.
     config["follow_symlinks"] = _coerce_strict_bool(
         config.get("follow_symlinks", False), "follow_symlinks"
+    )
+    config["manage_output_gitignore"] = _coerce_strict_bool(
+        config.get("manage_output_gitignore", False), "manage_output_gitignore"
+    )
+    _validate_portable_filename(
+        config.get("output_gitignore_filename"), "output_gitignore_filename"
     )
 
     if (
@@ -733,6 +747,32 @@ def _validate(config: dict[str, Any]) -> None:
     ):
         raise ConfigError("force_files must be a list of non-empty path strings.")
     config["force_files"] = [p.strip() for p in force_files]
+
+
+_WINDOWS_RESERVED_NAMES = {
+    "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+    *(f"LPT{i}" for i in range(1, 10)),
+}
+
+
+def _validate_portable_filename(value: Any, key: str) -> str:
+    """Validate one portable basename without reading or writing its target."""
+    if not isinstance(value, str) or not value or value in {".", ".."}:
+        raise ConfigError(f"{key} must be one non-empty portable filename.")
+    if (
+        Path(value).is_absolute()
+        or PureWindowsPath(value).is_absolute()
+        or PureWindowsPath(value).drive
+        or "/" in value
+        or "\\" in value
+        or value[-1] in {" ", "."}
+        or any(ord(char) < 32 or ord(char) == 127 for char in value)
+    ):
+        raise ConfigError(f"{key} must be one non-empty portable filename.")
+    stem = re.split(r"\.", value, maxsplit=1)[0].upper()
+    if stem in _WINDOWS_RESERVED_NAMES:
+        raise ConfigError(f"{key} uses reserved device name '{stem}'.")
+    return value
 
 
 def _has_provider_api_key() -> bool:

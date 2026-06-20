@@ -128,8 +128,11 @@ def _select_files(
     config: dict,
     graph: DependencyGraph,
     file_map: dict[str, dict],
-) -> tuple[set[str], str | None]:
+) -> tuple[set[str], set[str], str | None]:
     all_rel_paths = set(file_map)
+    scope = config.get("documentation_scope", "entry")
+    if scope not in {"entry", "all"}:
+        raise ConfigError("documentation_scope must be 'entry' or 'all'")
     # A2: distinguish an *explicitly specified* entry (via --entry or read from
     # existing docs) from auto-detection.  An explicit entry that cannot be
     # resolved or is absent from the scanned set must be a hard error — silently
@@ -149,7 +152,7 @@ def _select_files(
                 "Provide an entry path inside the project root, or remove the "
                 "entry setting to document all files."
             )
-        return all_rel_paths, None
+        return all_rel_paths, all_rel_paths, None
 
     # An explicit entry may resolve to a path outside the project root (e.g. an
     # absolute path or one with '..').  relative_to() would raise ValueError;
@@ -162,7 +165,7 @@ def _select_files(
                 f"Entry file '{explicit_entry}' resolves outside the project "
                 f"root '{root}'. Provide an entry path inside the project."
             )
-        return all_rel_paths, None
+        return all_rel_paths, all_rel_paths, None
 
     if entry_rel not in file_map:
         if explicit_entry:
@@ -178,9 +181,10 @@ def _select_files(
             entry_rel,
             len(all_rel_paths),
         )
-        return all_rel_paths, None
+        return all_rel_paths, all_rel_paths, None
 
-    reachable = graph.reachable_dependencies(entry_rel) or {entry_rel}
+    reachable = graph.reachable_dependencies(entry_rel) | {entry_rel}
+    documented = all_rel_paths if scope == "all" else reachable
 
     # Visibility for the known entry-reachability limitation (A1): files that are
     # not transitively imported from the entry are NOT documented.  Previously
@@ -192,16 +196,18 @@ def _select_files(
         sample = ", ".join(sorted(excluded)[:10])
         more = "" if len(excluded) <= 10 else f" (+{len(excluded) - 10} more)"
         logger.warning(
-            "Entry-based selection: %d of %d scanned file(s) are NOT reachable "
-            "from entry '%s' and will NOT be documented: %s%s. "
-            "Files not imported (transitively) from the entry are skipped — this "
-            "is a known limitation. To document every scanned file, run without "
-            "--entry. Full reachability handling is planned for 0.10.0.",
+            "Entry reachability: %d of %d scanned file(s) are disconnected from "
+            "entry '%s': %s%s. documentation_scope='%s' %s disconnected files.%s",
             len(excluded),
             len(all_rel_paths),
             entry_rel,
             sample,
             more,
+            scope,
+            "includes" if scope == "all" else "excludes",
+            " Use --documentation-scope all for complete coverage."
+            if scope == "entry"
+            else "",
         )
     else:
         logger.info(
@@ -209,7 +215,7 @@ def _select_files(
             entry_rel,
             len(reachable),
         )
-    return reachable, entry_rel
+    return reachable, documented, entry_rel
 
 
 def _graph_edges(graph: DependencyGraph, selected_rels: set[str]) -> list[dict]:

@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import base64
 import json
-from pathlib import Path
 
 
 # ---------------------------------------------------------------------------
@@ -864,7 +863,7 @@ def test_A15_clean_md_run_writes_markdown_and_removes_json(tmp_path, monkeypatch
     """A15: Clean MD-only run produces Markdown with embedded view and no JSON sibling."""
     (tmp_path / "main.py").write_text("x=1\n")
 
-    stats = _run_pipeline(tmp_path, monkeypatch, entry_file="main.py", output_format="md")
+    _run_pipeline(tmp_path, monkeypatch, entry_file="main.py", output_format="md")
 
     md_path = tmp_path / "codedoc" / "codedoc.md"
     json_sibling = tmp_path / "codedoc" / "codedoc.json"
@@ -1018,7 +1017,7 @@ def test_A18_crash_resume_final_md_embedded_view_complete(tmp_path, monkeypatch)
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
     from codedoc.pipeline import run_pipeline
 
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "a.py",
         "output_format": "md",
         "parallel_agents": False,

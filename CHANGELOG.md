@@ -1,5 +1,77 @@
 # Changelog
 
+## 0.9.9 - 2026-06-20
+
+### Complete coverage and managed output
+
+A feature release that adds an explicit documentation-scope choice, deterministic
+entry-reachability data in the public output, and opt-in management of a
+codedoc-owned block in the output directory's `.gitignore`. Defaults stay
+behaviorally conservative: provider, prompts, response schema, retries,
+concurrency, content ceilings, and cache identity are unchanged, and a default run
+makes exactly the same provider calls as before.
+
+- **`documentation_scope` (`entry` | `all`).** New configuration key and
+  `--documentation-scope` CLI flag selecting coverage. `entry` (default) documents
+  only files reachable from the entry, preserving current selection and cost; `all`
+  is an explicit cost-bearing choice that documents every scanned source file,
+  including disconnected ones. Validated at the loader (the safety net for values
+  arriving from a config file) and again defensively at the discovery boundary. The
+  CLI flag defaults to `None` and only enters the override dict when supplied, so an
+  absent flag never overwrites a config-resolved value.
+- **Scope is run configuration, not resume metadata.** It is never recovered from a
+  prior output file: a later run with no override returns to the conservative
+  `entry` default, so a previous `all` run can never silently make a later default
+  run incur full-repository provider work. Switching `all` back to `entry` also
+  drops stale disconnected records from the final output while retaining all
+  eligible cache reuse. For repeatable full coverage, keep
+  `documentation_scope: "all"` in config or pass `--documentation-scope all` each
+  run.
+- **`reachable_from_entry` on every public file record.** An additive boolean
+  (`true` for files reachable from the entry, or all files when there is no entry;
+  `false` for disconnected files included only by `all`). Recomputed at view-build
+  time without provider calls, present in JSON and the lossless Markdown embed, and
+  rendered as exactly one `**Reachable from entry:** Yes|No` line per file section.
+  No schema bump — the field is purely additive.
+- **New scope statistics.** `documentation_scope`, `entry_reachable`,
+  `entry_disconnected`, `disconnected_paid_files`, and `disconnected_planned_calls`
+  are populated on every stats path (dry-run, real, and early returns).
+  `disconnected_paid_files` counts disconnected files initially routed to providers
+  under `all`; `disconnected_planned_calls` reports planned initial calls (retries
+  can increase actual calls). The compatibility `entry_excluded` statistic is
+  retained. CLI dry-run and run summaries report scope, reachable/disconnected
+  counts, and paid-file versus planned-call units distinctly.
+- **Opt-in managed output `.gitignore` (`manage_output_gitignore`, default off).**
+  When enabled, maintains a codedoc-owned block (`# >>> codedoc-managed … >>>` …
+  `# <<< codedoc-managed <<<`) in the configured output ignore file
+  (`output_gitignore_filename`, default `.gitignore`), listing only the stable
+  final artifacts and diagnostics confirmed to exist after finalization — never a
+  transient recovery/checkpoint file. Entries are root-anchored literal patterns
+  with Git metacharacters (and trailing spaces) escaped, sorted and de-duplicated.
+  User content outside the owned block is preserved; LF/CRLF is preserved. The
+  target is validated for a portable filename, containment beneath the output
+  directory, and non-symlink/non-directory, and is added to the existing
+  artifact-path collision check before any scan or mutation. When disabled, the
+  ignore file is never read for write, created, or modified.
+- **Ignore management fails closed and never affects documentation.** A malformed or
+  unsafe existing block, or any filesystem error, leaves the target byte-identical,
+  is surfaced only as an auxiliary warning (`output_gitignore_warning`), and never
+  marks the documentation run failed. New stable status keys
+  (`output_gitignore_enabled`, `output_gitignore_updated`, `output_gitignore_path`,
+  `output_gitignore_warning`) appear on every CLI-consumed stats dict.
+- **Provider-neutral.** OpenAI, Anthropic, and Gemini receive the same file set for
+  the same scope; scope is computed before provider dispatch and managed-ignore
+  behavior never depends on provider or model.
+- Internal: `_select_files` now returns `(reachable_rels, documented_rels,
+  entry_rel)`; `PipelinePlan` gains a read-only `documented_rels` property over the
+  preserved `selected_rels` storage field (the legacy name is unchanged);
+  `build_project_view` and `write_project_outputs` gain an optional
+  `reachable_rels` parameter that defaults to marking every file reachable for
+  direct callers. New module `codedoc/core/ignore_manager.py` and generic
+  owned-block helpers (`merge_managed_block`, `write_owned_block`, `BlockError`) in
+  `codedoc/core/block_manager.py`, both delegating final mutation to the existing
+  `atomic_write_text()`.
+
 ## 0.9.8 - 2026-06-20
 
 ### Dedicated crash-recovery file (corrective robustness patch)

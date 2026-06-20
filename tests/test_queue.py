@@ -1,6 +1,5 @@
 """Tests for ProcessingQueue."""
 
-import pytest
 from codedoc.core.queue import ProcessingQueue, STATUS_CHECKED, STATUS_FAILED, STATUS_UNCHECKED
 
 
@@ -40,8 +39,10 @@ class TestProcessingQueue:
         q = ProcessingQueue()
         q.add(make_descriptor("a.py"))
         q.add(make_descriptor("b.py"))
-        q.next(); q.mark_checked("a.py")
-        q.next(); q.mark_checked("b.py")
+        q.next()
+        q.mark_checked("a.py")
+        q.next()
+        q.mark_checked("b.py")
         assert q.all_checked()
 
     def test_has_pending(self):
@@ -56,7 +57,8 @@ class TestProcessingQueue:
         q = ProcessingQueue()
         q.add(make_descriptor("a.py"))
         q.add(make_descriptor("b.py"))
-        q.next(); q.mark_checked("a.py")
+        q.next()
+        q.mark_checked("a.py")
         stats = q.stats()
         assert stats["checked"] == 1
         assert stats["unchecked"] == 1
@@ -72,8 +74,10 @@ class TestProcessingQueue:
         q = ProcessingQueue()
         q.add(make_descriptor("a.py"))
         q.add(make_descriptor("b.py"))
-        q.next(); q.mark_checked("a.py")
-        q.next(); q.mark_failed("b.py", "err")
+        q.next()
+        q.mark_checked("a.py")
+        q.next()
+        q.mark_failed("b.py", "err")
         checked = list(q.iter_checked())
         assert len(checked) == 1
         assert checked[0]["rel_path"] == "a.py"

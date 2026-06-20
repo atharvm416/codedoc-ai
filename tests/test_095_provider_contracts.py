@@ -17,6 +17,8 @@ Fake SDK modules are injected into ``sys.modules`` so the real ``openai`` /
 """
 from __future__ import annotations
 
+import json
+import re
 import sys
 import types
 import urllib.error
@@ -74,6 +76,7 @@ def _install_openai(monkeypatch, rec, *, content='{"ok": true}', error=None):
     class _Completions:
         def create(self, **kwargs):
             rec["create_kwargs"] = kwargs
+            rec.setdefault("create_calls", []).append(kwargs)
             if error is not None:
                 raise error
             return _OpenAIResponse(content)
@@ -97,6 +100,7 @@ def _install_anthropic(monkeypatch, rec, *, text='{"ok": true}', error=None):
     class _Messages:
         def create(self, **kwargs):
             rec["create_kwargs"] = kwargs
+            rec.setdefault("create_calls", []).append(kwargs)
             if error is not None:
                 raise error
             return _AnthropicResponse(text)
@@ -125,6 +129,7 @@ def _install_gemini(monkeypatch, rec, *, text='{"ok": true}', error=None):
     class _Models:
         def generate_content(self, model, contents, config):
             rec["generate"] = {"model": model, "contents": contents, "config": config}
+            rec.setdefault("generate_calls", []).append(rec["generate"])
             if error is not None:
                 raise error
             return _GeminiResponse(text)
@@ -272,12 +277,104 @@ def test_provider_adapters_do_not_own_pipeline_policy():
     assert not any(name in source for name in forbidden_imports)
 
 
+_ROUTING_RESPONSE = json.dumps(
+    {
+        "description": "Provider-neutral documentation.",
+        "role_in_system": "test",
+        "key_concepts": [],
+        "usage_example": "",
+        "dependencies_analysis": {"internal": [], "external": []},
+        "functions": [],
+        "classes": [],
+        "exports": [],
+    }
+)
+
+
+def _sdk_prompts(provider_name, rec):
+    if provider_name == "gemini":
+        return [call["contents"] for call in rec.get("generate_calls", [])]
+    return [call["messages"][-1]["content"] for call in rec.get("create_calls", [])]
+
+
+@pytest.mark.parametrize(
+    ("provider_name", "model", "installer"),
+    [
+        ("openai", "gpt-test", _install_openai),
+        ("anthropic", "claude-test", _install_anthropic),
+        ("gemini", "gemini-test", _install_gemini),
+    ],
+)
+def test_scope_routing_uses_each_real_adapter_with_cache_reuse(
+    tmp_path, monkeypatch, provider_name, model, installer
+):
+    from codedoc.pipeline import run_pipeline
+
+    project = tmp_path / provider_name
+    project.mkdir()
+    (project / "main.py").write_text("import helper\n", encoding="utf-8")
+    (project / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    (project / "orphan.py").write_text("y = 2\n", encoding="utf-8")
+
+    rec = {}
+    response_kwarg = {"text": _ROUTING_RESPONSE} if provider_name != "openai" else {
+        "content": _ROUTING_RESPONSE
+    }
+    installer(monkeypatch, rec, **response_kwarg)
+    base_config = {
+        "entry_file": "main.py",
+        "llm_provider": provider_name,
+        "model_name": model,
+        "api_key": "test-key",
+        "parallel_agents": False,
+        "max_parallel_files": 1,
+        "propagate_changes": False,
+    }
+
+    entry_stats = run_pipeline(
+        project, {**base_config, "documentation_scope": "entry"}
+    )
+    entry_prompts = _sdk_prompts(provider_name, rec)
+    entry_routes = sorted(
+        match.group(1).strip()
+        for prompt in entry_prompts
+        if (match := re.search(r"^File: (.+)$", prompt, re.MULTILINE))
+    )
+    assert entry_stats["checked"] == 2
+    assert len(entry_prompts) == 6
+    assert entry_routes == ["helper.py"] * 3 + ["main.py"] * 3
+
+    rec.get("create_calls", []).clear()
+    rec.get("generate_calls", []).clear()
+    all_stats = run_pipeline(
+        project, {**base_config, "documentation_scope": "all"}
+    )
+    all_prompts = _sdk_prompts(provider_name, rec)
+    all_routes = sorted(
+        match.group(1).strip()
+        for prompt in all_prompts
+        if (match := re.search(r"^File: (.+)$", prompt, re.MULTILINE))
+    )
+    assert all_stats["checked"] == 1
+    assert all_stats["skipped"] == 2
+    assert all_stats["disconnected_paid_files"] == 1
+    assert all_stats["disconnected_planned_calls"] == 3
+    assert len(all_prompts) == 3
+    assert all_routes == ["orphan.py"] * 3
+    output = json.loads(
+        (project / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    assert [file["path"] for file in output["files"]] == [
+        "helper.py",
+        "orphan.py",
+        "main.py",
+    ]
+
+
 def test_provider_choice_does_not_change_pipeline_results_or_cache_policy(
     tmp_path,
     monkeypatch,
 ):
-    import json
-
     from codedoc.pipeline import run_pipeline
 
     class EquivalentProvider:

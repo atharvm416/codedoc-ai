@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import json
 import re
-import textwrap
 from pathlib import Path
 
 
@@ -337,7 +336,7 @@ def test_B5_second_run_old_md_no_hashes_reprocesses_once(tmp_path, monkeypatch):
     stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
                                      "propagate_changes": False, "parallel_agents": False})
     assert stats["checked"] == 1  # re-processed because no hashes
-    new_md = (tmp_path / "codedoc" / "codedoc.md").read_text()
+    (tmp_path / "codedoc" / "codedoc.md").read_text()
     meta = md_meta(tmp_path / "codedoc" / "codedoc.md")
     assert "file_hashes" in meta
     assert "main.py" in meta["file_hashes"]

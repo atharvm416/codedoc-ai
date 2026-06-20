@@ -27,7 +27,10 @@ known to be safe.
    rejects two distinct generated artifacts that would target the same
    normalized path, before any scan or mutation. The selected recovery file is
    its own `live_backup` artifact, distinct from `json`, `markdown`, and
-   `error_log`, in every format.
+   `error_log`, in every format. When `manage_output_gitignore` is enabled, the
+   resolved managed-ignore target (validated for portable filename, containment
+   beneath the output directory, and non-symlink/non-directory) is added to this
+   collision set so it cannot alias any other artifact.
 
 3. **Read-only preflight.** `inspect_output_ownership` checks that every final
    output target that already exists was produced by codedoc. A real run stops
@@ -42,9 +45,18 @@ known to be safe.
    — symlinked directories and files are skipped so the scan never follows a
    link cycle or escapes the project root. The dependency graph is then built
    from purely lexical, exact-case import resolution (no filesystem probe, so
-   the same repository yields the same graph on every OS), and
-   `build_pipeline_plan` produces the complete plan. A dry run returns its
-   projected statistics here and performs no mutation.
+   the same repository yields the same graph on every OS). `_select_files` then
+   computes two distinct sets from this precise graph: the **reachable** set
+   (files transitively imported from the entry, or every scanned file when there
+   is no entry) and the **documented** set (the reachable set under the default
+   `documentation_scope="entry"`, or every scanned file under `all`).
+   `build_pipeline_plan` plans over the documented set, while the reachable set
+   feeds the additive `reachable_from_entry` field and the scope statistics
+   (`entry_reachable`, `entry_disconnected`, `disconnected_paid_files`,
+   `disconnected_planned_calls`). `documentation_scope` is validated at the
+   loader and again defensively here; it is run configuration only and is never
+   recovered from prior output. A dry run returns its projected statistics here
+   and performs no mutation.
 
 5. **Paid-file safety cap.** After the full plan exists and before any mutation,
    writer initialization, or provider creation, a plan that exceeds the
@@ -113,6 +125,17 @@ known to be safe.
     the run is reported unsuccessful and the next invocation finalizes again. For
     a migrated pre-0.9.8 Markdown run, the leftover legacy in-progress JSON
     sibling is also removed here so only the Markdown remains.
+
+13. **Managed output `.gitignore` (auxiliary, opt-in).** Only after every
+    required stable output is written, diagnostics are flushed, and the recovery
+    file is deleted, and only when `manage_output_gitignore` is enabled, the
+    pipeline collects the basenames of the stable artifacts plus the diagnostic
+    log confirmed to exist (never a transient recovery/checkpoint file) and
+    rewrites a codedoc-owned block in the configured ignore file via
+    `write_owned_block`. This is strictly auxiliary: a `BlockError`/`OSError`
+    here is recorded as a warning (surfaced in `output_gitignore_warning`) and
+    never marks the documentation run failed, never mutates content outside the
+    owned block, and leaves malformed ownership byte-identical.
 
 ## The dedicated crash-recovery file (0.9.8)
 

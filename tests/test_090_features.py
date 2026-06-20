@@ -273,7 +273,7 @@ class TestCleanLogs:
     """G1.1: Third-party logger silencing."""
 
     def test_httpx_silenced_after_configure(self):
-        from codedoc.utils.logger import _configure, _NOISY_LOGGERS
+        from codedoc.utils.logger import _configure
         _configure()
         httpx_logger = logging.getLogger("httpx")
         assert httpx_logger.level >= logging.WARNING
@@ -329,7 +329,6 @@ class TestAgentProgressLogs:
 
     def test_fallback_emits_warning(self, tmp_path, monkeypatch, caplog):
         """When _safe_run returns an error dict, WARNING with 'fallback' is emitted."""
-        import json as _json
 
         class FailingProvider:
             provider_name = "failing"
@@ -476,8 +475,6 @@ class TestConfigurableContentTruncation:
     def test_pipeline_wires_max_content_chars(self, tmp_path, monkeypatch):
         """max_content_chars from config reaches the agents via the pipeline."""
         received = []
-
-        original_truncate = None
 
         def capturing_truncate(self, content, file_path=""):
             received.append(self._max_content_chars)

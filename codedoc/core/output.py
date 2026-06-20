@@ -132,6 +132,7 @@ def write_project_outputs(
     graph_edges: list[dict] | None = None,
     json_filename: str = PROJECT_JSON,
     md_filename: str = PROJECT_MARKDOWN,
+    reachable_rels: set[str] | frozenset[str] | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Write the final combined output file(s).
 
@@ -160,7 +161,9 @@ def write_project_outputs(
             _check_file_ownership(path)
 
     try:
-        view = build_project_view(records, stats, entry_file, graph_edges)
+        view = build_project_view(
+            records, stats, entry_file, graph_edges, reachable_rels=reachable_rels
+        )
 
         # Render both complete payloads before mutating any final target, so a
         # render failure can never leave one artifact rewritten and the other

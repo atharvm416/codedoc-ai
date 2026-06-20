@@ -122,25 +122,42 @@ def _read_golden(name: str) -> str:
     return (FIXTURES / name).read_text(encoding="utf-8")
 
 
+def _without_reachability(view: dict) -> dict:
+    return {
+        **view,
+        "files": [
+            {key: value for key, value in file.items() if key != "reachable_from_entry"}
+            for file in view.get("files", [])
+        ],
+    }
+
+
+def _without_visible_reachability(markdown: str) -> str:
+    return markdown.replace("**Reachable from entry:** Yes  \n\n", "").replace(
+        "**Reachable from entry:** No  \n\n", ""
+    )
+
+
 # ---------------------------------------------------------------------------
 # Byte-identical golden output (the governing property of this release)
 # ---------------------------------------------------------------------------
 
 def test_view_assembly_byte_identical():
-    view = _build_view()
+    view = _without_reachability(_build_view())
     assert json.dumps(view, indent=2, ensure_ascii=False) == _read_golden(
         "golden_094_view.json"
     )
 
 
 def test_json_serialization_byte_identical():
-    view = _build_view()
+    view = _without_reachability(_build_view())
     assert json_from_view(view, "No errors.") == _read_golden("golden_094_output.json")
 
 
 def test_markdown_serialization_byte_identical():
-    view = _build_view()
-    assert markdown_from_view(view, "Sample error\nsecond line") == _read_golden(
+    view = _without_reachability(_build_view())
+    rendered = markdown_from_view(view, "Sample error\nsecond line")
+    assert _without_visible_reachability(rendered) == _read_golden(
         "golden_094_output.md"
     )
 
