@@ -26,6 +26,95 @@ import os
 import tempfile
 from pathlib import Path
 
+from codedoc.utils.errors import ConfigError
+
+
+class BlockError(ConfigError):
+    """Existing owned-block markers are malformed or unsafe."""
+
+
+def _validate_block_arguments(
+    interior_lines: list[str], start_marker: str, end_marker: str
+) -> None:
+    for name, marker in (("start_marker", start_marker), ("end_marker", end_marker)):
+        if not isinstance(marker, str) or not marker or "\n" in marker or "\r" in marker:
+            raise ValueError(f"{name} must be one non-empty logical line")
+    if start_marker == end_marker:
+        raise ValueError("start_marker and end_marker must be distinct")
+    if not isinstance(interior_lines, list):
+        raise ValueError("interior_lines must be a list of logical lines")
+    for line in interior_lines:
+        if (
+            not isinstance(line, str)
+            or "\n" in line
+            or "\r" in line
+            or line in {start_marker, end_marker}
+        ):
+            raise ValueError("interior_lines must contain valid non-marker logical lines")
+
+
+def merge_managed_block(
+    existing_text: str | None,
+    interior_lines: list[str],
+    start_marker: str,
+    end_marker: str,
+) -> str:
+    """Return text with exactly one validated owned block merged into it."""
+    _validate_block_arguments(interior_lines, start_marker, end_marker)
+    newline = "\r\n" if existing_text and "\r\n" in existing_text else "\n"
+    block = newline.join([start_marker, *interior_lines, end_marker]) + newline
+    if not existing_text:
+        return block
+
+    lines = existing_text.splitlines(keepends=True)
+    logical = [line.rstrip("\r\n") for line in lines]
+    starts = [index for index, line in enumerate(logical) if line == start_marker]
+    ends = [index for index, line in enumerate(logical) if line == end_marker]
+    if not starts and not ends:
+        return existing_text.rstrip("\r\n") + newline * 2 + block
+    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
+        raise BlockError("Existing managed-block markers are malformed")
+
+    start_index, end_index = starts[0], ends[0]
+    for line in logical[start_index + 1 : end_index]:
+        if line in {start_marker, end_marker}:
+            raise BlockError("Existing managed-block markers are nested")
+
+    prefix = "".join(lines[: start_index + 1])
+    if not prefix.endswith(("\n", "\r")):
+        prefix += newline
+    suffix = "".join(lines[end_index:])
+    replacement = newline.join(interior_lines)
+    if replacement:
+        replacement += newline
+    merged = prefix + replacement + suffix
+    return existing_text if merged == existing_text else merged
+
+
+def write_owned_block(
+    path: Path,
+    interior_lines: list[str],
+    start_marker: str,
+    end_marker: str,
+) -> None:
+    """Strictly read and atomically update one owned block in *path*."""
+    _validate_block_arguments(interior_lines, start_marker, end_marker)
+    path = Path(path)
+    if path.is_symlink():
+        raise BlockError(f"Owned-block target '{path}' is a symbolic link")
+    if path.exists() and path.is_dir():
+        raise BlockError(f"Owned-block target '{path}' is a directory")
+
+    existing: str | None = None
+    if path.exists():
+        try:
+            existing = path.read_bytes().decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise BlockError(f"Owned-block target '{path}' is not valid UTF-8") from exc
+    merged = merge_managed_block(existing, interior_lines, start_marker, end_marker)
+    if existing != merged:
+        atomic_write_text(path, merged)
+
 
 def atomic_write_text(path: Path, text: str) -> None:
     """Atomically write *text* to *path* (UTF-8), never truncating in place.

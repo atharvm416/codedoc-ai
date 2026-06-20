@@ -56,6 +56,7 @@ def build_project_view(
     stats: dict,
     entry_file: str | None = None,
     graph_edges: list[dict] | None = None,
+    reachable_rels: set[str] | frozenset[str] | None = None,
 ) -> dict:
     """Return a compact language-neutral view for public JSON/Markdown output."""
     graph_edges = graph_edges or []
@@ -65,6 +66,9 @@ def build_project_view(
 
     for file in files:
         path = file["path"]
+        file["reachable_from_entry"] = (
+            True if reachable_rels is None else path in reachable_rels
+        )
         links = {
             "internal_dependencies": internal_by_from.get(path, []),
             "imported_by": imported_by.get(path, []),

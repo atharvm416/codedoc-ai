@@ -1,5 +1,187 @@
 # Changelog
 
+## 0.9.9 - 2026-06-20
+
+### Complete coverage and managed output
+
+A feature release that adds an explicit documentation-scope choice, deterministic
+entry-reachability data in the public output, and opt-in management of a
+codedoc-owned block in the output directory's `.gitignore`. Defaults stay
+behaviorally conservative: provider, prompts, response schema, retries,
+concurrency, content ceilings, and cache identity are unchanged, and a default run
+makes exactly the same provider calls as before.
+
+- **`documentation_scope` (`entry` | `all`).** New configuration key and
+  `--documentation-scope` CLI flag selecting coverage. `entry` (default) documents
+  only files reachable from the entry, preserving current selection and cost; `all`
+  is an explicit cost-bearing choice that documents every scanned source file,
+  including disconnected ones. Validated at the loader (the safety net for values
+  arriving from a config file) and again defensively at the discovery boundary. The
+  CLI flag defaults to `None` and only enters the override dict when supplied, so an
+  absent flag never overwrites a config-resolved value.
+- **Scope is run configuration, not resume metadata.** It is never recovered from a
+  prior output file: a later run with no override returns to the conservative
+  `entry` default, so a previous `all` run can never silently make a later default
+  run incur full-repository provider work. Switching `all` back to `entry` also
+  drops stale disconnected records from the final output while retaining all
+  eligible cache reuse. For repeatable full coverage, keep
+  `documentation_scope: "all"` in config or pass `--documentation-scope all` each
+  run.
+- **`reachable_from_entry` on every public file record.** An additive boolean
+  (`true` for files reachable from the entry, or all files when there is no entry;
+  `false` for disconnected files included only by `all`). Recomputed at view-build
+  time without provider calls, present in JSON and the lossless Markdown embed, and
+  rendered as exactly one `**Reachable from entry:** Yes|No` line per file section.
+  No schema bump — the field is purely additive.
+- **New scope statistics.** `documentation_scope`, `entry_reachable`,
+  `entry_disconnected`, `disconnected_paid_files`, and `disconnected_planned_calls`
+  are populated on every stats path (dry-run, real, and early returns).
+  `disconnected_paid_files` counts disconnected files initially routed to providers
+  under `all`; `disconnected_planned_calls` reports planned initial calls (retries
+  can increase actual calls). The compatibility `entry_excluded` statistic is
+  retained. CLI dry-run and run summaries report scope, reachable/disconnected
+  counts, and paid-file versus planned-call units distinctly.
+- **Opt-in managed output `.gitignore` (`manage_output_gitignore`, default off).**
+  When enabled, maintains a codedoc-owned block (`# >>> codedoc-managed … >>>` …
+  `# <<< codedoc-managed <<<`) in the configured output ignore file
+  (`output_gitignore_filename`, default `.gitignore`), listing only the stable
+  final artifacts and diagnostics confirmed to exist after finalization — never a
+  transient recovery/checkpoint file. Entries are root-anchored literal patterns
+  with Git metacharacters (and trailing spaces) escaped, sorted and de-duplicated.
+  User content outside the owned block is preserved; LF/CRLF is preserved. The
+  target is validated for a portable filename, containment beneath the output
+  directory, and non-symlink/non-directory, and is added to the existing
+  artifact-path collision check before any scan or mutation. When disabled, the
+  ignore file is never read for write, created, or modified.
+- **Ignore management fails closed and never affects documentation.** A malformed or
+  unsafe existing block, or any filesystem error, leaves the target byte-identical,
+  is surfaced only as an auxiliary warning (`output_gitignore_warning`), and never
+  marks the documentation run failed. New stable status keys
+  (`output_gitignore_enabled`, `output_gitignore_updated`, `output_gitignore_path`,
+  `output_gitignore_warning`) appear on every CLI-consumed stats dict.
+- **Provider-neutral.** OpenAI, Anthropic, and Gemini receive the same file set for
+  the same scope; scope is computed before provider dispatch and managed-ignore
+  behavior never depends on provider or model.
+- Internal: `_select_files` now returns `(reachable_rels, documented_rels,
+  entry_rel)`; `PipelinePlan` gains a read-only `documented_rels` property over the
+  preserved `selected_rels` storage field (the legacy name is unchanged);
+  `build_project_view` and `write_project_outputs` gain an optional
+  `reachable_rels` parameter that defaults to marking every file reachable for
+  direct callers. New module `codedoc/core/ignore_manager.py` and generic
+  owned-block helpers (`merge_managed_block`, `write_owned_block`, `BlockError`) in
+  `codedoc/core/block_manager.py`, both delegating final mutation to the existing
+  `atomic_write_text()`.
+
+## 0.9.8 - 2026-06-20
+
+### Dedicated crash-recovery file (corrective robustness patch)
+
+A corrective robustness patch. It changes *where* in-progress work is staged on
+disk and *when* the stable output is written; it does not change documentation
+content, prompts, provider behaviour, concurrency, the response schema, file
+selection, or the shape of the completed output. Successful runs make exactly the
+same provider calls as before. No new configuration key, environment variable, or
+CLI flag is added.
+
+Previously, in `json` and `both` modes the live backup path *was* the final JSON
+path: a new run wrote incremental in-progress records (with the `_crash_safety`
+banner) straight into `codedoc.json`, so the moment a run started it overwrote the
+user's last stable completed output — and an interruption left only a partial
+in-progress document where the clean one had been.
+
+- **In-progress records now go to a dedicated file**, `crash_recovery_<stem>.json`
+  (derived from the final output stem), for **every** format — never the stable
+  output. The stable completed output (`codedoc.json`, a named `--output` JSON, or
+  the Markdown) is not opened, truncated, or mutated while a run is in progress.
+- **The stable output is written once, on clean completion**, and only then is the
+  recovery file deleted (write-stable-then-delete-recovery). If the stable write
+  fails, the recovery file is preserved so the run stays resumable. A failure to
+  delete the recovery file raises `OutputError`, leaves both the completed stable
+  output and the recovery file intact, and is not reported as success.
+- **Resume** combines the stable completed output (reuse baseline) with the active
+  recovery file (in-progress overlay), and — for migrated Markdown runs — a legacy
+  in-progress JSON sibling, in a fixed oldest-to-newest, whole-record precedence.
+  Unchanged files are still skipped by content hash.
+- **A present-but-unreadable/foreign recovery file is preserved**, not overwritten:
+  the run advances to `crash_recovery_<stem>(2).json`, `(3).json`, … (bounded at
+  1000 candidates → `OutputError`).
+- **Backward migration is automatic.** A stable output left as an in-progress
+  `_crash_safety` document by an earlier version is detected, used as a resume
+  source, and migrated into the new layout with new writes going to a separate
+  recovery file. No manual file deletion is required.
+- **`--output` may not target a `crash_recovery_*` name** (`.json`/`.md`, including
+  `(<n>)` forms); such a name is rejected with a `ConfigError` before any scan or
+  mutation. The reserved prefix is a fixed internal constant.
+- **CLI interrupt messaging** names the exact dedicated recovery file that enables
+  resume (or truthfully reports that none was confirmed). Exit code `130` is
+  unchanged.
+- Internal: `validate_distinct_artifact_paths` now treats the recovery file as its
+  own `live_backup` artifact and the `json_live_backup` self-alias is removed; no
+  public API or output path is renamed. `--safe-mode` remains the accepted,
+  deprecated no-op.
+
+## 0.9.7 - 2026-06-19
+
+Release candidate updated: 2026-06-19 23:34 IST (UTC+05:30).
+
+### Token- and time-safe failure handling (corrective patch)
+
+A corrective patch release. It stops spending provider calls — and your tokens,
+money, and wall-clock time — on a run that cannot succeed, while never losing
+work already completed. No new documentation scopes, prompts, providers,
+response-schema changes, output artifacts, configuration keys, environment
+variables, or CLI flags. Successful runs make exactly the same provider calls as
+before.
+
+Previously the only error classifier in the pipeline was rate-limit detection,
+so every other provider error was treated as a generic transient failure and
+retried per file. A run started with an invalid key, unknown model, or forbidden
+access walked through several files before the consecutive-failure breaker
+stopped it; a mid-run budget/credit exhaustion matched the rate-limit signals and
+slept through the entire backoff ladder for nothing; an input-too-large error
+re-sent the identical oversized prompt on every retry. The existing live JSON
+backup already made every stop *safe*; this release makes the *decision to stop*
+smart and bounded.
+
+- **Terminal-error fast stop.** Two deterministic, network-free classifiers now
+  inspect only the text already present in the raised exception chain. A
+  confirmed billing/credit exhaustion, invalid credentials, unknown model, or
+  forbidden/permission error stops the run on its first occurrence with an
+  actionable message and the configuration/credentials exit code (`2`) — instead
+  of retrying per file and sleeping through the backoff schedule. Classification
+  is conservative by design: bare numeric HTTP codes (`401`/`402`/`403`/`404`/
+  `413`) never trigger an abort on their own, and a bare `quota` /
+  `resource_exhausted` / `429` remains a retryable rate limit. When in doubt, an
+  error stays retryable.
+- **Input-too-large is recorded, not retried.** A request/context-too-large error
+  is recorded as a failed file without any retry (re-sending the identical prompt
+  cannot succeed); the rest of the run proceeds.
+- **Bounded rate-limit retrying.** A persistent ambiguous rate limit / quota
+  exhaustion (no terminal-billing phrase, e.g. Gemini `RESOURCE_EXHAUSTED`) now
+  stops after a bounded amount of retrying — at most one full step-down ladder
+  traversal plus one lowest-concurrency pass — instead of grinding to the
+  consecutive-failure breaker. This is a transient "retry later" condition, so it
+  exits `1`, not `2`. Normal transient rate limits where files keep succeeding
+  between step-downs are unaffected.
+- **Operator-facing safe-stop reporting.** Both stop paths record the abort to
+  `error.log` from the pipeline before it reaches the CLI, and the CLI prints a
+  clear, non-`Fatal error:` message naming the cause class and confirming that
+  completed files are saved in the live JSON backup and that re-running the same
+  command resumes. Every stop preserves the live backup; re-running re-documents
+  only the unfinished files.
+- **Release-gate classifier corrections.** Context-size messages that use the
+  ambiguous phrase `hard limit` are now kept as input-specific failures instead
+  of being mistaken for billing exhaustion and aborting the whole run. The
+  resolved provider rate-limit profile (including configured signal additions
+  and removals) is now used consistently by parallel processing, sequential
+  retries, and the sequential zero-progress bound.
+
+The rate-limit signal set, step-down ladder, backoff math, `retry_after_cap_s`
+per-sleep cap, `retry_attempts`, concurrency, the three-agent orchestration,
+prompts, schema, and provider behavior are all unchanged. Exit codes for existing
+error types are unchanged; the only new surface is the unrecoverable-provider
+stop (exit `2` for a terminal abort, exit `1` for the bounded rate-limit stop).
+
 ## 0.9.6 - 2026-06-17
 
 ### Scan robustness and resolution precision (corrective patch)

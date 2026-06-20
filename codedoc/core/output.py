@@ -70,10 +70,9 @@ def inspect_output_ownership(
         if not _is_codedoc_owned(target):
             _add_conflict(target)
 
-    # For md-only runs the live backup is a JSON sibling of the MD file.
-    # A foreign sibling would block SafeWriter.initialize_empty() after
-    # scanning — same acceptance rules as SafeWriter.load(): the file is
-    # accepted if it does not exist or contains a _codedoc key.
+    # Compatibility for callers using the pre-0.9.8 API. The 0.9.8 pipeline
+    # does not pass the dedicated recovery path here because occupied recovery
+    # names are handled by the suffix-selection walk instead.
     if output_format == "md" and live_backup_path is not None:
         if not _is_codedoc_owned(live_backup_path):
             _add_conflict(live_backup_path)
@@ -133,13 +132,13 @@ def write_project_outputs(
     graph_edges: list[dict] | None = None,
     json_filename: str = PROJECT_JSON,
     md_filename: str = PROJECT_MARKDOWN,
+    reachable_rels: set[str] | frozenset[str] | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Write the final combined output file(s).
 
-    For ``format="json"`` and ``format="both"`` the JSON output also acts as
-    the live backup written throughout the run, so ``write_project_outputs``
-    simply overwrites it with the final clean payload (no ``_crash_safety``
-    banner, no ``status = "in_progress"``).
+    For ``format="json"`` and ``format="both"`` this writes the final clean JSON
+    payload (no ``_crash_safety`` banner and no ``status = "in_progress"``).
+    In-progress work is staged separately by ``SafeWriter``.
 
     For ``format="md"`` the Markdown file is written directly without an
     intermediate build file.  If the Markdown conversion fails the live JSON
@@ -162,7 +161,9 @@ def write_project_outputs(
             _check_file_ownership(path)
 
     try:
-        view = build_project_view(records, stats, entry_file, graph_edges)
+        view = build_project_view(
+            records, stats, entry_file, graph_edges, reachable_rels=reachable_rels
+        )
 
         # Render both complete payloads before mutating any final target, so a
         # render failure can never leave one artifact rewritten and the other
@@ -171,12 +172,9 @@ def write_project_outputs(
         json_text = json_from_view(view, error_summary) if json_path else None
         md_text = markdown_from_view(view, error_summary) if md_path else None
 
-        # Markdown first, JSON last: the JSON path is also the live backup, so
-        # it must remain the prior valid backup until Markdown has succeeded.
-        # If Markdown fails, the previous JSON live backup is untouched.  If the
-        # final JSON replacement fails after Markdown, no target is partially
-        # truncated — Markdown holds the new document and JSON holds the prior
-        # complete live backup.
+        # Markdown first, JSON last. If either stable write fails, the dedicated
+        # recovery file still exists because the caller deletes it only after
+        # this function returns successfully.
         if md_path is not None and md_text is not None:
             atomic_write_text(md_path, md_text)
             logger.info("Markdown output: %s", md_path)
@@ -251,18 +249,20 @@ def _check_file_ownership(path: Path) -> None:
 def validate_distinct_artifact_paths(paths: dict[str, Path | None]) -> None:
     """Reject two distinct generated artifacts targeting the same path.
 
-    *paths* maps a logical artifact name (e.g. ``"json_live_backup"``,
-    ``"markdown"``, ``"live_backup"``, ``"error_log"``) to its target ``Path``.
-    ``None`` values are ignored.  The check is read-only: targets are normalized
-    to absolute paths without being created, existing aliases are resolved where
-    possible, and case behavior is detected from the target filesystem without
-    creating probe files. Raises :class:`ConfigError` naming both
-    logical artifacts when two of them resolve to the same path.
+    *paths* maps a logical artifact name (e.g. ``"json"``, ``"markdown"``,
+    ``"live_backup"``, ``"error_log"``) to its target ``Path``.  ``None`` values
+    are ignored.  The check is read-only: targets are normalized to absolute
+    paths without being created, existing aliases are resolved where possible,
+    and case behavior is detected from the target filesystem without creating
+    probe files. Raises :class:`ConfigError` naming both logical artifacts when
+    two of them resolve to the same path.
 
-    The intentional final-JSON / live-backup phase alias is expressed by passing
-    that single path once under one logical name (``"json_live_backup"``), so it
-    is never mistaken for a collision.  The helper is generic: any future
-    generated artifact can join the same validation call.
+    0.9.8 — the dedicated crash-recovery file is its own ``"live_backup"``
+    artifact, always distinct from the final JSON (``"json"``), Markdown
+    (``"markdown"``), and the diagnostic log (``"error_log"``); the pre-0.9.8
+    ``json_live_backup`` self-alias (final JSON and live backup sharing one path)
+    no longer exists, so any overlap between them is now a real collision.  The
+    helper is generic: any future generated artifact can join the same call.
     """
     seen: dict[str, tuple[str, Path]] = {}
     for name, path in paths.items():

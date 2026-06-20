@@ -9,8 +9,10 @@ Behaviour notes
   only when ``failed > 0``.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
-- On interrupt, a generic resume message is printed (the live JSON backup in the
-  output directory holds completed work; re-run to resume).
+- On interrupt, the dedicated crash-recovery file path attached by the pipeline
+  (``KeyboardInterrupt.recovery_path``) is named so the user knows the stable
+  output was preserved and which file enables resume; if no recovery file was
+  confirmed, a truthful generic message is printed instead.
 - When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
   reported in the run summary.
 
@@ -73,6 +75,29 @@ examples:
             "Required for the first run. On subsequent runs the entry point is "
             "read automatically from the previously generated documentation file."
         ),
+    )
+    parser.add_argument(
+        "--documentation-scope",
+        choices=["entry", "all"],
+        default=None,
+        help=(
+            "Documentation coverage: entry follows files reachable from the entry; "
+            "all includes every scanned source file (default: entry)."
+        ),
+    )
+    ignore_group = parser.add_mutually_exclusive_group()
+    ignore_group.add_argument(
+        "--manage-output-gitignore",
+        dest="manage_output_gitignore",
+        action="store_true",
+        default=None,
+        help="Manage a codedoc-owned block in the output directory .gitignore.",
+    )
+    ignore_group.add_argument(
+        "--no-manage-output-gitignore",
+        dest="manage_output_gitignore",
+        action="store_false",
+        help="Disable managed output .gitignore updates.",
     )
     parser.add_argument(
         "--provider",
@@ -235,14 +260,36 @@ examples:
     return parser
 
 
+def _print_ignore_status(stats: dict, dry_run: bool) -> None:
+    if not stats.get("output_gitignore_enabled", False):
+        return
+    if stats.get("output_gitignore_warning"):
+        print(f"  Managed ignore warning: {stats['output_gitignore_warning']}")
+    elif stats.get("output_gitignore_updated"):
+        print(f"  Managed ignore updated: {stats.get('output_gitignore_path', '')}")
+    elif dry_run:
+        print("  Managed ignore         : enabled (dry run; no change)")
+    else:
+        print("  Managed ignore         : enabled; no eligible artifact change")
+
+
 def _print_dry_run_summary(stats: dict) -> None:
     """Print the planning summary for a --dry-run invocation."""
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
     print(f"  Files scanned          : {stats.get('scanned', 0)}")
     print(f"  Files selected         : {stats.get('selected', 0)}")
+    scope = stats.get("documentation_scope", "entry")
+    print(f"  Documentation scope    : {scope}")
+    print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
+    print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
     excluded = stats.get("entry_excluded", 0)
     if excluded:
-        print(f"  Files excluded         : {excluded} (not reachable from --entry)")
+        print(
+            f"  Files excluded         : {excluded} disconnected file(s); "
+            "use --documentation-scope all for complete coverage"
+        )
+    elif stats.get("entry_disconnected", 0):
+        print("  Disconnected status    : included by documentation_scope='all'")
     print(f"  Would process          : {stats.get('would_process', 0)}")
     print(f"  Unchanged (skipped)    : {stats.get('unchanged', 0)}")
     print(f"  Would reuse (identical): {stats.get('would_reuse', 0)}")
@@ -252,11 +299,18 @@ def _print_dry_run_summary(stats: dict) -> None:
         print(f"  Forced                 : {stats['forced']}")
     print(f"  Would call LLM for     : {stats.get('would_call_llm_for', 0)} file(s)")
     print(f"  Estimated LLM calls    : {stats.get('estimated_calls', 0)}")
+    if stats.get("disconnected_paid_files", 0):
+        print(
+            "  Disconnected paid files: "
+            f"{stats['disconnected_paid_files']} "
+            f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
+        )
     print(
         f"  Estimated input tokens : ~{stats.get('estimated_input_tokens', 0)} "
         "(approximate lower bound — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
+    _print_ignore_status(stats, dry_run=True)
 
     if stats.get("max_files_exceeded"):
         print(
@@ -285,15 +339,28 @@ def _print_run_summary(stats: dict) -> None:
     if stats.get("resumed", 0):
         print(f"  Files resumed    : {stats['resumed']}")
     print(f"  Files failed     : {stats['failed']}")
+    scope = stats.get("documentation_scope", "entry")
+    print(f"  Scope            : {scope}")
+    print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
+    print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
     excluded = stats.get("entry_excluded", 0)
     if excluded:
         print(
-            f"  Files excluded   : {excluded} (not reachable from --entry; "
-            "see the warning above. Run without --entry to document everything.)"
+            f"  Files excluded   : {excluded} disconnected file(s) under "
+            "documentation_scope='entry'; use --documentation-scope all for "
+            "complete coverage."
+        )
+    elif stats.get("entry_disconnected", 0):
+        print("  Disconnected set : included by documentation_scope='all'")
+    if stats.get("disconnected_paid_files", 0):
+        print(
+            f"  Disconnected paid: {stats['disconnected_paid_files']} file(s), "
+            f"{stats.get('disconnected_planned_calls', 0)} planned initial calls"
         )
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
+    _print_ignore_status(stats, dry_run=False)
 
     # 0.9.2: approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
@@ -370,6 +437,10 @@ def run_cli(argv: list[str] | None = None) -> int:
     overrides: dict = {}
     if args.entry:
         overrides["entry_file"] = args.entry
+    if args.documentation_scope is not None:
+        overrides["documentation_scope"] = args.documentation_scope
+    if args.manage_output_gitignore is not None:
+        overrides["manage_output_gitignore"] = args.manage_output_gitignore
     if args.provider:
         overrides["llm_provider"] = args.provider
     if args.model:
@@ -438,16 +509,54 @@ def run_cli(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
-        print(
-            "\nRun interrupted. Any files completed before the interrupt are saved "
-            "in the live JSON backup in your output directory (if the run reached "
-            "file processing) — re-run the same command to resume.",
-            file=sys.stderr,
-        )
+    except KeyboardInterrupt as exc:
+        # 0.9.8: the pipeline attaches the exact selected crash-recovery path to
+        # the interrupt as ``recovery_path`` only when that file exists on disk.
+        # The stable output is never touched mid-run, so it is always preserved;
+        # we just report which file enables resume (or that none was created).
+        recovery_path = getattr(exc, "recovery_path", None)
+        if recovery_path:
+            print(
+                "\nRun interrupted. Your previous stable output was left untouched. "
+                "Files completed before the interrupt are saved in the crash-recovery "
+                f"file:\n  {recovery_path}\n"
+                "Re-run the same command to resume from it.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nRun interrupted before any crash-recovery file was created or "
+                "confirmed. Your previous stable output (if any) was left untouched. "
+                "Re-run the same command to start or resume.",
+                file=sys.stderr,
+            )
         return 130
     except Exception as exc:
-        from codedoc.utils.errors import ConfigError, OutputError
+        from codedoc.utils.errors import (
+            ConfigError,
+            OutputError,
+            UnrecoverableProviderError,
+        )
+        if isinstance(exc, UnrecoverableProviderError):
+            # 0.9.7: a doomed-run safe stop — not an unexpected crash.  The
+            # pipeline already recorded and flushed it to error.log; here we only
+            # present it.  Completed files are in the live JSON backup and
+            # re-running resumes.  A *terminal* abort (billing/credentials/model/
+            # access) is a setup/credentials class problem → exit 2 (consistent
+            # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
+            # stop is a transient "retry later" condition, not a credentials
+            # fault → exit 1 so automation does not read it as "fix credentials".
+            print(f"Error: {exc}", file=sys.stderr)
+            print(
+                "\nCompleted files are saved in the live JSON backup in your "
+                "output directory. Re-run the same command to resume — only the "
+                "unfinished files will be re-documented.",
+                file=sys.stderr,
+            )
+            if args.verbose:
+                import traceback
+                traceback.print_exc()
+            return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
             # ownership conflicts, and the max_files cap.

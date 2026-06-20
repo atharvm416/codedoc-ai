@@ -50,6 +50,49 @@ class LLMError(CodeDocError):
         super().__init__(f"LLMError [{provider}]: {reason}")
 
 
+class UnrecoverableProviderError(LLMError):
+    """Raised at the execution layer when a provider error cannot recover by
+    retrying, so the run is stopped immediately to save tokens, money, and time.
+
+    0.9.7 — this is the only error type that aborts the per-file loop on a
+    *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
+    that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
+    may legitimately appear in an exception chain.  Every stop it represents is
+    *safe*: the live JSON backup is left intact and resumable; no stop path
+    deletes the backup or overwrites it with a "complete" final output.
+
+    Parameters
+    ----------
+    provider:
+        The provider name (e.g. ``"openai"``), forwarded to :class:`LLMError`.
+    reason:
+        A human-readable message naming the likely cause class (billing/credit,
+        credentials, model name, access, or persistent rate limit).  It must not
+        invent specifics that are absent from the original error.
+    category:
+        One of two stable values so the CLI can pick the exit code without
+        re-parsing the message:
+
+        ``"terminal"``
+            A confirmed billing/credit, credentials, unknown-model, or
+            forbidden/permission abort (Workstream B).  Setup/credentials class
+            → CLI exit code 2.
+        ``"rate_limit_exhausted"``
+            The bounded zero-progress rate-limit / quota stop (Workstream C).  A
+            transient "retry later" condition, not a credentials fault → CLI
+            exit code 1.
+
+    The original SDK/agent exception is retained as ``__cause__`` (callers raise
+    ``... from exc``) so diagnostics are preserved.
+    """
+
+    def __init__(self, provider: str, reason: str, category: str):
+        if category not in {"terminal", "rate_limit_exhausted"}:
+            raise ValueError(f"Unsupported unrecoverable-provider category: {category!r}")
+        self.category = category
+        super().__init__(provider, reason)
+
+
 class ConfigError(CodeDocError):
     """Raised when the config file is missing, invalid, or incomplete."""
 

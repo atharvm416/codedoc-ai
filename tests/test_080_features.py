@@ -25,9 +25,9 @@ Covers all new behaviour introduced in 0.8.0:
 from __future__ import annotations
 
 import json
-import threading
-import time
 from pathlib import Path
+
+import pytest
 
 
 # ---------------------------------------------------------------------------
@@ -214,7 +214,7 @@ def test_2b_md_backup_survives_interrupted_run(tmp_path):
 def test_3_named_md_output_uses_json_sibling(tmp_path, monkeypatch):
     """Test 3: --output docs/report.md → docs/report.json (not docs/codedoc.json)."""
     (tmp_path / "main.py").write_text("x=1\n")
-    stats = _run(
+    _run(
         tmp_path, monkeypatch,
         entry_file="main.py",
         output_dir="docs/report.md",
@@ -231,13 +231,17 @@ def test_3_named_md_output_uses_json_sibling(tmp_path, monkeypatch):
 
 
 def test_3b_named_md_sibling_persists_on_interrupt(tmp_path):
-    """Test 3b: interrupted named-MD run keeps report.json with crash banner."""
+    """Test 3b: interrupted named-MD run keeps the recovery file with crash banner.
+
+    0.9.8: the recovery file is the dedicated ``crash_recovery_report.json``,
+    derived from the Markdown stem — not the old ``report.json`` sibling.
+    """
     from codedoc.pipeline import _resolve_live_backup_path
     from codedoc.core.safe_writer import SafeWriter
 
     out = tmp_path / "docs"
     backup_path = _resolve_live_backup_path(out, "md", "codedoc.json", "report.md")
-    assert backup_path.name == "report.json"
+    assert backup_path.name == "crash_recovery_report.json"
 
     sw = SafeWriter(backup_path, "md", "main.py", {})
     sw.initialize_empty()
@@ -350,28 +354,36 @@ def test_5b_has_record_returns_true_after_worker_records(tmp_path):
 # Test 6 — Ownership guard for named-MD JSON sibling
 # ---------------------------------------------------------------------------
 
-def test_6_foreign_json_sibling_blocks_run(tmp_path, monkeypatch):
-    """Test 6: a foreign report.json blocks the run before any AI calls."""
+def test_6_foreign_json_sibling_does_not_block_md_run(tmp_path, monkeypatch):
+    """Test 6 (0.9.8): a foreign report.json no longer blocks an md run.
+
+    Pre-0.9.8 the live backup for ``--output docs/report.md`` *was*
+    ``report.json``, so a foreign file there blocked the run.  The recovery file
+    is now the dedicated ``crash_recovery_report.json`` and the stable output is
+    ``report.md``; an unrelated ``report.json`` is neither, so it is left
+    byte-identical and the run proceeds.
+    """
     (tmp_path / "docs").mkdir()
-    (tmp_path / "docs" / "report.json").write_text(
-        json.dumps({"not": "codedoc"}), encoding="utf-8"
-    )
+    foreign = tmp_path / "docs" / "report.json"
+    foreign_bytes = json.dumps({"not": "codedoc"}).encode("utf-8")
+    foreign.write_bytes(foreign_bytes)
     (tmp_path / "main.py").write_text("x=1\n")
 
-    from codedoc.utils.errors import ConfigError
     _patch_provider(monkeypatch, _make_fake_provider())
 
     from codedoc.pipeline import run_pipeline
-    try:
-        run_pipeline(tmp_path, {
-            "entry_file": "main.py",
-            "output_dir": "docs/report.md",
-            "parallel_agents": False,
-            "propagate_changes": False,
-        })
-        assert False, "Should have raised ConfigError for foreign sibling"
-    except ConfigError:
-        pass
+    run_pipeline(tmp_path, {
+        "entry_file": "main.py",
+        "output_dir": "docs/report.md",
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+
+    # The md stable output was produced; the foreign sibling was untouched and
+    # the dedicated recovery file was cleaned up on success.
+    assert (tmp_path / "docs" / "report.md").exists()
+    assert foreign.read_bytes() == foreign_bytes
+    assert not (tmp_path / "docs" / "crash_recovery_report.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -759,8 +771,6 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
 
     from codedoc.utils.errors import LLMError
 
-    step = {"n": 0}
-
     class AlwaysRateLimitProvider:
         provider_name = "openai"
 
@@ -772,27 +782,33 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
 
     _patch_provider(monkeypatch, AlwaysRateLimitProvider())
     from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import UnrecoverableProviderError
 
-    stats = run_pipeline(tmp_path, {
-        "entry_file": "a.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-        "max_parallel_files": 3,
-        "rate_limit_adaptive": True,
-        "file_retry_attempts": 0,
-        "max_consecutive_failures": 1,
-    })
+    # 0.9.7: a persistent rate limit where no file ever succeeds now stops after
+    # the bounded zero-progress pass with the transient-class abort, instead of
+    # grinding to the consecutive-failure breaker.  The adaptive step-down
+    # notification is still printed before the stop and names the provider and
+    # the reduced concurrency — which is what this test verifies.
+    with pytest.raises(UnrecoverableProviderError) as excinfo:
+        run_pipeline(tmp_path, {
+            "entry_file": "a.py",
+            "parallel_agents": False,
+            "propagate_changes": False,
+            "max_parallel_files": 3,
+            "rate_limit_adaptive": True,
+            "file_retry_attempts": 0,
+            "max_consecutive_failures": 1,
+        })
+
+    assert excinfo.value.category == "rate_limit_exhausted"
 
     captured = capsys.readouterr()
-    # Either stdout or stats contain the warning
-    warnings = stats.get("rate_limit_warnings", [])
-    assert len(warnings) > 0 or "openai" in captured.out.lower() or "rate limit" in captured.out.lower()
-
-    if warnings:
-        w = warnings[0]
-        assert w["provider"] == "openai"
-        assert "original_max_parallel" in w
-        assert "new_level" in w
+    out = captured.out.lower()
+    assert "openai" in out
+    assert "rate limit" in out
+    # The step-down message reports the original max_parallel and the reduced level.
+    assert "max_parallel_files" in captured.out
+    assert "reduced to" in out
 
 
 def test_10b_no_warning_on_successful_run(tmp_path, monkeypatch, capsys):
@@ -900,7 +916,7 @@ def test_12_safe_mode_deprecation_notice(tmp_path, monkeypatch, capsys):
 def test_13_format_both_keeps_json_after_clean_finish(tmp_path, monkeypatch):
     """Test 13: --format both → both codedoc.json and codedoc.md on clean finish."""
     (tmp_path / "main.py").write_text("x=1\n")
-    stats = _run(
+    _run(
         tmp_path, monkeypatch,
         entry_file="main.py",
         output_format="both",
@@ -927,13 +943,13 @@ def test_13_format_both_keeps_json_after_clean_finish(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_14_live_backup_path_in_stats_default(tmp_path, monkeypatch):
-    """Test 14a: stats['live_backup_path'] is set for default JSON run."""
+    """Test 14a: stats['live_backup_path'] names the dedicated recovery file (0.9.8)."""
     (tmp_path / "main.py").write_text("x=1\n")
     stats = _run(tmp_path, monkeypatch, entry_file="main.py")
 
     assert "live_backup_path" in stats
     assert stats["live_backup_path"] is not None
-    expected = str((tmp_path / "codedoc" / "codedoc.json").resolve())
+    expected = str((tmp_path / "codedoc" / "crash_recovery_codedoc.json").resolve())
     assert stats["live_backup_path"] == expected
 
 
@@ -1141,30 +1157,34 @@ def test_provider_init_failure_prints_error_log_path(tmp_path, monkeypatch, caps
 
 
 def test_resolve_live_backup_path_scenarios(tmp_path):
-    """Verify the live backup path for every output scenario."""
+    """Verify the dedicated recovery base path for every output scenario (0.9.8).
+
+    The recovery file is always ``crash_recovery_<stem>.json``, distinct from the
+    stable JSON / Markdown output, derived from the final output stem.
+    """
     from codedoc.pipeline import _resolve_live_backup_path
 
     out = tmp_path / "codedoc"
 
     # Default JSON
     p = _resolve_live_backup_path(out, "json", "codedoc.json", "codedoc.md")
-    assert p == out / "codedoc.json"
+    assert p == out / "crash_recovery_codedoc.json"
 
     # Both
     p = _resolve_live_backup_path(out, "both", "codedoc.json", "codedoc.md")
-    assert p == out / "codedoc.json"
+    assert p == out / "crash_recovery_codedoc.json"
 
     # Default MD
     p = _resolve_live_backup_path(out, "md", "codedoc.json", "codedoc.md")
-    assert p == out / "codedoc.json"
+    assert p == out / "crash_recovery_codedoc.json"
 
-    # Named JSON
+    # Named JSON: stem derived from json_filename
     p = _resolve_live_backup_path(out, "json", "report.json", "codedoc.md")
-    assert p == out / "report.json"
+    assert p == out / "crash_recovery_report.json"
 
-    # Named MD: sibling derived from md_filename, NOT json_filename
+    # Named MD: stem derived from md_filename, NOT json_filename
     p = _resolve_live_backup_path(out, "md", "codedoc.json", "report.md")
-    assert p == out / "report.json"
+    assert p == out / "crash_recovery_report.json"
 
 
 # ---------------------------------------------------------------------------

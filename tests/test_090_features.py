@@ -190,10 +190,13 @@ class TestPreflightOutputTargets:
             )
         assert not provider_called
 
-    def test_foreign_live_backup_sibling_fails_preflight_for_md(self, tmp_path, monkeypatch):
-        """A foreign JSON sibling of an MD target fails preflight before scanning."""
-        from codedoc.utils.errors import ConfigError
+    def test_foreign_json_sibling_does_not_fail_preflight_for_md(self, tmp_path, monkeypatch):
+        """0.9.8: a foreign JSON sibling of an MD target no longer fails preflight.
 
+        The recovery file is the dedicated ``crash_recovery_report.json`` and the
+        stable output is ``report.md``; an unrelated ``report.json`` is neither,
+        so it does not block the run and is left untouched.
+        """
         provider_called = []
         monkeypatch.setattr(
             "codedoc.pipeline.create_provider",
@@ -204,14 +207,15 @@ class TestPreflightOutputTargets:
         write_py(src)
         out_dir = tmp_path / "out"
         out_dir.mkdir()
-        # The live backup for report.md is report.json — make it foreign
-        (out_dir / "report.json").write_text('{"foreign": true}', encoding="utf-8")
+        foreign = out_dir / "report.json"
+        foreign.write_text('{"foreign": true}', encoding="utf-8")
 
         from codedoc.pipeline import run_pipeline
-        with pytest.raises(ConfigError):
-            run_pipeline(tmp_path, {"entry_file": "src.py", "output_dir": "out/report.md"})
+        run_pipeline(tmp_path, {"entry_file": "src.py", "output_dir": "out/report.md"})
 
-        assert not provider_called
+        assert provider_called
+        assert (out_dir / "report.md").exists()
+        assert foreign.read_text(encoding="utf-8") == '{"foreign": true}'
 
     def test_foreign_target_leaves_no_new_output_directory(self, tmp_path, monkeypatch):
         """Preflight fires before mkdir: a genuinely new output dir is not created on failure."""
@@ -269,7 +273,7 @@ class TestCleanLogs:
     """G1.1: Third-party logger silencing."""
 
     def test_httpx_silenced_after_configure(self):
-        from codedoc.utils.logger import _configure, _NOISY_LOGGERS
+        from codedoc.utils.logger import _configure
         _configure()
         httpx_logger = logging.getLogger("httpx")
         assert httpx_logger.level >= logging.WARNING
@@ -325,7 +329,6 @@ class TestAgentProgressLogs:
 
     def test_fallback_emits_warning(self, tmp_path, monkeypatch, caplog):
         """When _safe_run returns an error dict, WARNING with 'fallback' is emitted."""
-        import json as _json
 
         class FailingProvider:
             provider_name = "failing"
@@ -472,8 +475,6 @@ class TestConfigurableContentTruncation:
     def test_pipeline_wires_max_content_chars(self, tmp_path, monkeypatch):
         """max_content_chars from config reaches the agents via the pipeline."""
         received = []
-
-        original_truncate = None
 
         def capturing_truncate(self, content, file_path=""):
             received.append(self._max_content_chars)

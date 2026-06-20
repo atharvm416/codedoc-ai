@@ -113,7 +113,8 @@ class TestOrchestrator:
     def test_process_returns_merged_result(self, mock_llm):
         from codedoc.agents.orchestrator import Orchestrator
         from pathlib import Path
-        import tempfile, os
+        import tempfile
+        import os
 
         with tempfile.NamedTemporaryFile(suffix=".tsx", delete=False, mode="w") as f:
             f.write("import React from 'react';\nconst App = () => <div/>;\nexport default App;\n")
@@ -138,7 +139,8 @@ class TestOrchestrator:
     def test_parallel_mode(self, mock_llm):
         from codedoc.agents.orchestrator import Orchestrator
         from pathlib import Path
-        import tempfile, os
+        import tempfile
+        import os
 
         with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
             f.write("import os\ndef main(): pass\n")

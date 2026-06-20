@@ -24,14 +24,25 @@ from codedoc.core.markdown_view import markdown_to_view
 from codedoc.core.output import BUILD_FILENAME
 from codedoc.core.project_view import read_codedoc_meta
 from codedoc.core.record_meta import carry_private_keys
-from codedoc.utils.errors import ConfigError
+from codedoc.utils.errors import ConfigError, OutputError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# 0.9.8: crash-recovery (live-backup) data lives in its own dedicated file so a
+# run never overwrites the user's last stable completed output while it is still
+# in progress.  The recovery file is named ``crash_recovery_<stem>.json`` where
+# ``<stem>`` is the stem of the final output file.  This is a fixed internal
+# constant — there is no configuration key, environment variable, or CLI flag
+# for it, and the same constant guards ``--output`` (see ``loader._resolve_output_spec``).
+CRASH_RECOVERY_PREFIX = "crash_recovery_"
+
+# Bound on the suffix walk for an occupied/invalid recovery name (Workstream B).
+_MAX_RECOVERY_CANDIDATES = 1000
+
 
 # ---------------------------------------------------------------------------
-# Live backup path helper (Work Item 1)
+# Recovery path helpers (Work Item 1 / 0.9.8)
 # ---------------------------------------------------------------------------
 
 def _resolve_live_backup_path(
@@ -40,23 +51,104 @@ def _resolve_live_backup_path(
     json_filename: str,
     md_filename: str,
 ) -> Path:
-    """Return the absolute live JSON backup path for the given output scenario.
+    """Return the *base* crash-recovery file path for the given output scenario.
 
-    | output_format | md_filename    | json_filename | Live backup path         |
-    |---------------|----------------|---------------|--------------------------|
-    | json / both   | (any)          | codedoc.json  | output_dir/codedoc.json  |
-    | md            | codedoc.md     | (ignored)     | output_dir/codedoc.json  |
-    | md            | report.md      | (ignored)     | output_dir/report.json   |
+    The recovery file is always a distinct file derived from the final output
+    stem, in the output directory — it is **never** equal to the stable JSON
+    output, the Markdown output, or the diagnostic log:
 
-    For MD-only runs the backup is a JSON sibling of the Markdown file,
-    derived from ``md_filename`` stem (not from ``json_filename``, which
-    ``_resolve_output_spec`` leaves as the default ``codedoc.json`` even when
-    the user requested ``--output docs/report.md``).
+    | output_format | stem source   | base recovery path                    |
+    |---------------|---------------|---------------------------------------|
+    | json / both   | json_filename | output_dir/crash_recovery_<stem>.json |
+    | md            | md_filename   | output_dir/crash_recovery_<stem>.json |
+
+    For MD-only runs the stem is taken from ``md_filename`` (not from
+    ``json_filename``, which ``_resolve_output_spec`` leaves as the default
+    ``codedoc.json`` even when the user requested ``--output docs/report.md``).
+
+    Resolution is pure and does not touch the disk.  Suffix selection for an
+    occupied/invalid name happens in :func:`select_active_recovery_path`.
     """
     if output_format == "md":
-        md_stem = Path(md_filename).stem
-        return output_dir / f"{md_stem}.json"
+        stem = Path(md_filename).stem
+    else:
+        stem = Path(json_filename).stem
+    return output_dir / f"{CRASH_RECOVERY_PREFIX}{stem}.json"
+
+
+def _resolve_legacy_backup_path(
+    output_dir: Path,
+    output_format: str,
+    json_filename: str,
+    md_filename: str,
+) -> Path:
+    """Return the *legacy* (pre-0.9.8) live-backup location for this scenario.
+
+    Earlier versions aliased the live backup onto the final JSON (for
+    ``json``/``both``) or onto a JSON sibling of the Markdown file (for ``md``).
+    An interrupted pre-0.9.8 run may therefore have left in-progress
+    ``_crash_safety`` records at that location.  This release reads that file as
+    a *legacy in-progress overlay* during resume; the value is otherwise pure.
+    """
+    if output_format == "md":
+        return output_dir / f"{Path(md_filename).stem}.json"
     return output_dir / json_filename
+
+
+def _recovery_candidate(base_recovery_path: Path, n: int) -> Path:
+    """Return the n-th recovery candidate.
+
+    ``n == 1`` is the base name itself; ``n >= 2`` appends the literal ``(n)``
+    suffix before ``.json`` (``crash_recovery_<stem>(2).json``, then ``(3)`` …).
+    """
+    if n == 1:
+        return base_recovery_path
+    return base_recovery_path.with_name(
+        f"{base_recovery_path.stem}({n}){base_recovery_path.suffix}"
+    )
+
+
+def select_active_recovery_path(base_recovery_path: Path) -> tuple[Path, bool]:
+    """Deterministically choose the active recovery file by walking candidates.
+
+    Walks ``crash_recovery_<stem>.json``, ``crash_recovery_<stem>(2).json``,
+    ``…(3).json`` … and applies, for each candidate, the first matching rule:
+
+    1. **Absent** → use it for a fresh run (no resume); returns ``(path, False)``.
+    2. **Present and a valid, codedoc-owned in-progress recovery document** →
+       use it and resume from its records; returns ``(path, True)``.
+    3. **Present but completed, unreadable, malformed, or foreign-owned** →
+       leave it untouched and advance to the next suffix.
+
+    The walk stops at the first name resolved by rule 1 or 2.  It is capped at
+    exactly :data:`_MAX_RECOVERY_CANDIDATES` candidates; if every candidate is
+    occupied by a non-resumable, non-absent file an :class:`OutputError` naming
+    the output directory and the exhausted range is raised rather than looping
+    unbounded.
+
+    The walk is read-only — it never creates, mutates, or deletes a candidate.
+    """
+    for n in range(1, _MAX_RECOVERY_CANDIDATES + 1):
+        candidate = _recovery_candidate(base_recovery_path, n)
+        if not candidate.exists():
+            return candidate, False
+        try:
+            document = read_codedoc_document(candidate)
+        except (ConfigError, FileNotFoundError):
+            # Unreadable / malformed / foreign — preserve and advance.
+            continue
+        if document.in_progress:
+            return candidate, True
+        # A clean completed CodeDoc JSON at a reserved recovery name is not a
+        # live recovery source; preserve it rather than overwrite, and advance.
+
+    last = _recovery_candidate(base_recovery_path, _MAX_RECOVERY_CANDIDATES)
+    raise OutputError(
+        str(base_recovery_path.parent),
+        f"all {_MAX_RECOVERY_CANDIDATES} crash-recovery candidates from "
+        f"'{base_recovery_path.name}' to '{last.name}' in '{base_recovery_path.parent}' "
+        "are occupied by non-resumable files; remove or relocate them to continue.",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -69,6 +161,9 @@ def _load_existing_file_docs(
     md_filename: str = "codedoc.md",
     live_backup_path: Path | None = None,
     read_only: bool = False,
+    *,
+    output_format: str | None = None,
+    legacy_recovery_path: Path | None = None,
 ) -> dict[str, dict]:
     """Load per-file documentation from existing output files.
 
@@ -77,54 +172,48 @@ def _load_existing_file_docs(
     delete the stale file later, behind the mutation boundary, via
     :func:`_cleanup_stale_build_file`.
 
-    Priority order
-    --------------
-    1. **Live backup path** (e.g. ``report.json`` for ``--output report.md``)
-       when it differs from the default JSON path.  This handles the named-MD
-       case where ``_resolve_output_spec`` leaves ``output_json_filename`` as
-       ``codedoc.json`` even though the live backup is ``report.json``.
-    2. **Final JSON output** (``json_filename``).  Covers the JSON/both case
-       and the default-MD case where the live backup IS ``codedoc.json``.
-    3. **Stale build file** (``.codedoc_build.json``).  Migration fallback for
-       0.7.x interrupted MD runs.  Overlaid only when newer than the JSON.
-    4. **Markdown fallback** — same-stem sibling or configured ``md_filename``.
+    0.9.8 — the dedicated recovery file (``live_backup_path``, now always a
+    distinct ``crash_recovery_<stem>.json``) is no longer a short-circuit source.
+    The stable completed output is read first as the reuse baseline, and the
+    active in-progress recovery records overlay it.  Records are merged by
+    project-relative path in a fixed oldest-to-newest precedence; a path present
+    in a later source replaces the whole earlier record (fields are never merged
+    across records):
+
+    1. **Clean stable completed output** as the baseline:
+       - ``json`` / ``both``: ``json_filename`` (clean *or* a legacy in-progress
+         ``_crash_safety`` document — either way the reuse base for this path);
+       - ``md``: the Markdown output (same-stem sibling or configured
+         ``md_filename``).
+       The stale 0.7.x build file (``.codedoc_build.json``) is migrated into this
+       baseline when newer than the JSON.
+    2. **Legacy in-progress stable-path records** overlay the baseline — for
+       ``md`` runs this is the pre-0.9.8 JSON sibling (``legacy_recovery_path``)
+       when it is an in-progress document.  (For ``json``/``both`` the legacy
+       location *is* the baseline path, so it is already covered by step 1.)
+    3. **Active dedicated recovery records** (``live_backup_path``) overlay both
+       — newest work from an interrupted run.
 
     Returns a dict mapping rel_path → file record dict.
     """
     existing: dict[str, dict] = {}
-
-    # 1. Live backup when it differs from the standard JSON path (named-MD case).
     json_path = output_dir / json_filename
-    if live_backup_path and live_backup_path.resolve() != json_path.resolve():
-        if live_backup_path.exists():
-            try:
-                existing = records_by_path(read_codedoc_document(live_backup_path))
-                if existing:
-                    logger.info(
-                        "Loaded %d existing record(s) from live backup '%s'.",
-                        len(existing),
-                        live_backup_path.name,
-                    )
-                    return existing
-            except (ConfigError, FileNotFoundError) as exc:
-                logger.debug(
-                    "Optional resume candidate '%s' rejected: %s",
-                    live_backup_path.name,
-                    exc,
-                )
+    # ``output_format`` is accepted for call-site clarity and forward use; the
+    # overlay logic below is format-agnostic (the stable JSON, the Markdown
+    # fallback, the legacy sibling, and the active recovery file are each read
+    # when present), so no explicit branching on it is required here.
+    _ = output_format
 
-    # 2. Final JSON output (also the live backup for JSON/both and default-MD runs).
+    # --- 1a. Stable JSON baseline (json/both; also cross-format reuse for md).
     if json_path.exists():
         try:
-            existing = records_by_path(read_codedoc_document(json_path))
+            existing.update(records_by_path(read_codedoc_document(json_path)))
         except (ConfigError, FileNotFoundError) as exc:
             logger.debug(
-                "Optional resume candidate '%s' rejected: %s",
-                json_path.name,
-                exc,
+                "Optional resume candidate '%s' rejected: %s", json_path.name, exc
             )
 
-    # 3. Stale 0.7.x build file migration fallback.
+    # --- 1b. Stale 0.7.x build file migration overlay.
     build_path = output_dir / BUILD_FILENAME
     if build_path.exists():
         try:
@@ -166,29 +255,70 @@ def _load_existing_file_docs(
         except Exception:
             pass
 
-    if existing:
-        return existing
+    # --- 1c. Markdown baseline when no JSON/build baseline exists yet.
+    if not existing:
+        stem_sibling = output_dir / (Path(json_filename).stem + ".md")
+        configured_md = output_dir / md_filename
+        md_candidates: list[Path] = [stem_sibling]
+        if configured_md != stem_sibling:
+            md_candidates.append(configured_md)
+        for md_path in md_candidates:
+            if md_path.exists():
+                try:
+                    existing = _load_existing_file_docs_from_md(md_path)
+                    break
+                except Exception:
+                    pass
 
-    # 4. Markdown fallback.
-    stem_sibling = output_dir / (Path(json_filename).stem + ".md")
-    configured_md = output_dir / md_filename
-    md_candidates: list[Path] = [stem_sibling]
-    if configured_md != stem_sibling:
-        md_candidates.append(configured_md)
-    # Also check the live backup sibling when named-MD
-    if live_backup_path:
-        md_sibling = live_backup_path.with_suffix(".md")
-        if md_sibling not in md_candidates:
-            md_candidates.insert(0, md_sibling)
+    # --- 2. Legacy in-progress stable-path overlay (md old JSON sibling).
+    if (
+        legacy_recovery_path is not None
+        and legacy_recovery_path.resolve() != json_path.resolve()
+        and legacy_recovery_path.exists()
+    ):
+        try:
+            legacy_doc = read_codedoc_document(legacy_recovery_path)
+            if legacy_doc.in_progress:
+                legacy_records = records_by_path(legacy_doc)
+                if legacy_records:
+                    logger.info(
+                        "Overlaying %d legacy in-progress record(s) from '%s'.",
+                        len(legacy_records),
+                        legacy_recovery_path.name,
+                    )
+                    existing.update(legacy_records)
+        except (ConfigError, FileNotFoundError) as exc:
+            logger.debug(
+                "Optional legacy recovery '%s' rejected: %s",
+                legacy_recovery_path.name,
+                exc,
+            )
 
-    for md_path in md_candidates:
-        if md_path.exists():
-            try:
-                return _load_existing_file_docs_from_md(md_path)
-            except Exception:
-                pass
+    # --- 3. Active dedicated recovery overlay (newest), all formats.
+    if (
+        live_backup_path is not None
+        and live_backup_path.resolve() != json_path.resolve()
+        and live_backup_path.exists()
+    ):
+        try:
+            recovery_doc = read_codedoc_document(live_backup_path)
+            if recovery_doc.in_progress:
+                recovery_records = records_by_path(recovery_doc)
+                if recovery_records:
+                    logger.info(
+                        "Overlaying %d in-progress record(s) from recovery file '%s'.",
+                        len(recovery_records),
+                        live_backup_path.name,
+                    )
+                    existing.update(recovery_records)
+        except (ConfigError, FileNotFoundError) as exc:
+            logger.debug(
+                "Optional recovery candidate '%s' rejected: %s",
+                live_backup_path.name,
+                exc,
+            )
 
-    return {}
+    return existing
 
 
 def _load_existing_file_docs_from_md(md_path: Path) -> dict[str, dict]:
@@ -282,6 +412,52 @@ def _build_documentation_records(
             "documentation": doc,
         })
     return records
+
+
+def _cleanup_legacy_recovery(
+    legacy_recovery_path: Path | None,
+    do_not_delete: set[Path],
+) -> None:
+    """Remove a migrated legacy in-progress recovery sibling after clean success.
+
+    0.9.8 — for ``md`` runs the pre-0.9.8 live backup was a JSON sibling of the
+    Markdown file (e.g. ``codedoc.json`` next to ``codedoc.md``).  After a clean
+    completion the new layout writes only the Markdown stable output and the
+    dedicated recovery file is removed by :meth:`SafeWriter.delete`; this removes
+    the now-migrated legacy sibling too, so the old "only the Markdown remains"
+    guarantee holds and the user is never required to delete anything by hand.
+
+    Acts only on a distinct, codedoc-owned, **in-progress** legacy file — never a
+    stable output target (``do_not_delete``) and never a clean completed
+    document.  For ``json``/``both`` the legacy location *is* the stable JSON
+    output (already overwritten cleanly by ``write_project_outputs``), so it is in
+    ``do_not_delete`` and is never touched here.  A deletion failure is
+    non-fatal: the data is already in the stable output and a leftover is re-read
+    harmlessly on the next run.
+    """
+    if legacy_recovery_path is None or not legacy_recovery_path.exists():
+        return
+    resolved = legacy_recovery_path.resolve()
+    if any(resolved == p.resolve() for p in do_not_delete):
+        return
+    try:
+        document = read_codedoc_document(legacy_recovery_path)
+    except (ConfigError, FileNotFoundError):
+        return
+    if not document.in_progress:
+        return
+    try:
+        legacy_recovery_path.unlink()
+        logger.info(
+            "Removed migrated legacy in-progress recovery file '%s'.",
+            legacy_recovery_path.name,
+        )
+    except OSError as exc:
+        logger.debug(
+            "Could not remove migrated legacy recovery file '%s' (non-fatal): %s",
+            legacy_recovery_path.name,
+            exc,
+        )
 
 
 def _cleanup_stale_build_file(output_dir: Path, json_filename: str) -> None:

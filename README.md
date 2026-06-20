@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.6`.
+Current release: `0.9.9`.
 
 ## What It Does
 
@@ -13,6 +13,8 @@ Current release: `0.9.6`.
 - Otherwise auto-detects common entry files such as `main.py`, `main.tsx`, `index.html`, `Main.java`, and related names.
 - If an entry file is found, documents that file and its reachable project dependencies.
 - If no entry file is found, documents all supported project files.
+- Lets you choose coverage with `--documentation-scope`: `entry` (default — only files reachable from the entry) or `all` (every scanned source file, including disconnected ones). Each file's public record carries a `reachable_from_entry` flag.
+- Optionally manages a codedoc-owned block in the output directory's `.gitignore` (`--manage-output-gitignore`), off by default.
 - Parses imports locally before calling an LLM.
 - Processes dependencies before dependent files where possible.
 - Processes up to 5 files at a time by default.
@@ -22,7 +24,7 @@ Current release: `0.9.6`.
 - Reuses existing documentation for unchanged files.
 - Reuses existing documentation when another file has identical content.
 - Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
-- Survives interruptions: writes a live JSON backup before any AI work starts, then updates it after every completed file. A Ctrl-C or crash always leaves a readable partial output file — no results are lost, and re-running the same command resumes automatically from where it stopped.
+- Survives interruptions: stages work in a dedicated `crash_recovery_<stem>.json` file before any AI work starts and updates it after every completed file, so your last stable output is never overwritten mid-run. A Ctrl-C or crash leaves the stable output intact plus a resumable recovery file — no results are lost, and re-running the same command resumes automatically from where it stopped.
 - Adaptive rate-limit parallelism: when a provider signals 429 / rate-limit, file concurrency is stepped down (`5 → 2 → 1`) and a provider-specific warning is printed to the terminal. No manual intervention needed.
 - Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
 - Provides a filesystem-read-only `--dry-run` with approximate lower-bound call and token estimates.
@@ -50,6 +52,8 @@ codedoc run
 | Output directory | `codedoc` |
 | Output format | `json` |
 | Output file | `codedoc/codedoc.json` |
+| Documentation scope | `entry` (only files reachable from the entry) |
+| Manage output `.gitignore` | `false` |
 | Parallel agents | `true` |
 | Max parallel files | `5` |
 | File retry attempts | `1` |
@@ -167,6 +171,8 @@ Common commands:
 | --- | --- |
 | `codedoc run --entry src/main.py` | First run — specify entry file; output to `codedoc/`. |
 | `codedoc run` | Subsequent run — entry read from `codedoc/codedoc.json` metadata. |
+| `codedoc run --documentation-scope all` | Document every scanned source file, including files not reachable from the entry. |
+| `codedoc run --manage-output-gitignore` | Maintain a codedoc-owned block in the output directory `.gitignore`. |
 | `codedoc execute` | Alias for `codedoc run`. |
 | `codedoc run --format json` | Write only `codedoc/codedoc.json`. |
 | `codedoc run --format md` | Write only `codedoc/codedoc.md`. |
@@ -301,8 +307,11 @@ Create `codedoc.config.json` in the project being documented:
   "model_name": "gpt-4o-mini",
   "api_base_url": null,
   "entry_file": null,
+  "documentation_scope": "entry",
   "output_dir": "codedoc",
   "output_format": "json",
+  "manage_output_gitignore": false,
+  "output_gitignore_filename": ".gitignore",
   "supported_extensions": [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"],
   "parallel_agents": true,
   "max_parallel_files": 5,
@@ -411,6 +420,16 @@ Planning and CI settings added in 0.9.2:
 | `force_files` | `[]` | Selected project paths to reprocess explicitly before dependency propagation. |
 | `allow_partial` | `false` | Exit 0 only for completed runs that produced partial output after file failures. |
 
+Coverage and managed-output settings added in 0.9.9:
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `documentation_scope` | `entry` | `entry` documents only files reachable from the entry; `all` documents every scanned source file, including disconnected ones. This is run configuration, not resume metadata — it is never recovered from a prior output file, so a later run with no override returns to `entry`. For repeatable full coverage keep `documentation_scope: "all"` in config or pass `--documentation-scope all` each run. |
+| `manage_output_gitignore` | `false` | When `true`, maintains a codedoc-owned block in the output directory's ignore file listing the generated artifacts. Disabled by default; the ignore file is never read for write, created, or modified while off. Failure to update it never changes successful documentation output — it surfaces only as an auxiliary warning. |
+| `output_gitignore_filename` | `.gitignore` | Portable basename of the managed ignore file, resolved beneath the output directory. |
+
+Every public file record also gains an additive `reachable_from_entry` boolean: `true` for files reachable from the configured entry (and for all files when there is no entry), `false` for disconnected files included only by `documentation_scope: "all"`. It appears in JSON, the lossless Markdown embed, and as one `**Reachable from entry:** Yes|No` line per file section in the visible Markdown.
+
 ## Environment Variables
 
 Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
@@ -429,7 +448,7 @@ Supported variables:
 | `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
-| `CODEDOC_SAFE_MODE` | Deprecated — live backup is always on since 0.8.0. |
+| `CODEDOC_SAFE_MODE` | Deprecated — crash recovery is always on since 0.8.0. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
@@ -548,7 +567,7 @@ In JSON files the block is the first key in the document:
 }
 ```
 
-Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (Live crash-safety backups keep `created_at` / `updated_at` diagnostics.)
+Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (The dedicated crash-recovery file keeps `created_at` / `updated_at` diagnostics.)
 
 In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
 
@@ -634,7 +653,7 @@ On each run, `codedoc` follows this process:
 2. Resolve the entry point — from `--entry` if given, otherwise from metadata in the existing output file or legacy auto-detection.
 3. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
 4. Build a dependency graph from parsed imports.
-5. Select files reachable from the entry point.
+5. Compute the reachable set from the entry point, then select the documented set: under `documentation_scope: "entry"` (default) only reachable files; under `all` every scanned file. Reachability is still recorded for each file regardless of scope.
 6. Normalize forced paths and add valid forced files before dependency propagation.
 7. Compute one immutable plan covering changed, unchanged, reused, resumed, and paid-agent files.
 8. In `--dry-run`, return that plan and approximate lower-bound usage without writing or creating a provider.
@@ -650,41 +669,53 @@ This means repeated runs should only send new or changed code to the LLM. Unchan
 `codedoc` is built so that interrupting a run — Ctrl-C, a crash, or a dropped
 network connection — never forces you to repeat work that already completed.
 
-### Default: always-on live JSON backup
+### Default: dedicated crash-recovery file
 
-Every run creates a visible live JSON backup in the output directory **before
-the first AI call**, then updates it atomically after each completed file.
-You do not need to enable anything — `--safe-mode` is deprecated since 0.8.0.
+Every run stages in-progress work in a **dedicated crash-recovery file** in the
+output directory, written **before the first AI call** and updated atomically
+after each completed file. Crucially, your last stable completed output is
+**never overwritten while a run is in progress** — it is written once, only on
+clean completion. You do not need to enable anything; `--safe-mode` is deprecated
+since 0.8.0.
 
-- `codedoc/codedoc.json` is written immediately with a `_crash_safety` banner
-  and an empty `files` array, before any LLM request is made.
-- After every completed file the backup is updated (`.tmp` rename — atomic).
-- If a run is interrupted, the backup stays on disk with `_crash_safety` clearly
-  marking it as partial output.
-- Re-run the same command — files already in the backup are verified by content
-  hash and skipped; only the remaining files are sent to the LLM.
-- If a file was edited between the interruption and the re-run, its hash no
-  longer matches and it is re-documented, so you never restore stale docs.
+- The recovery file is `crash_recovery_<stem>.json`, derived from the final
+  output stem (`codedoc/crash_recovery_codedoc.json` by default,
+  `docs/crash_recovery_report.json` for `--output docs/report.json`). It is
+  written immediately with a `_crash_safety` banner before any LLM request.
+- After every completed file the recovery file is updated (`.tmp` rename —
+  atomic). Your stable `codedoc.json` / Markdown is not opened or touched yet.
+- If a run is interrupted or fails, the **last stable output stays intact** and
+  the recovery file stays on disk marked `_crash_safety`. Re-run the same command
+  — files already recovered are verified by content hash and skipped; only the
+  remaining files are sent to the LLM.
+- On clean completion the stable output is written **first**, and only then is
+  the recovery file deleted. If a file was edited between the interruption and
+  the re-run, its hash no longer matches and it is re-documented, so you never
+  restore stale docs.
 
-The live backup is written atomically (to a temporary sibling, then renamed) so a
-crash mid-write can never corrupt it, and writes are thread-safe under parallel
+The recovery file is written atomically (to a temporary sibling, then renamed) so
+a crash mid-write can never corrupt it, and writes are thread-safe under parallel
 processing.
 
-**Files array ordering.** The `files` array in the live backup follows the
+**Files array ordering.** The `files` array in the recovery file follows the
 topological (dependency-first) processing order, not completion order or
-alphabetical order. An interrupted backup is therefore structured consistently
-with the final clean output.
+alphabetical order, so it is structured consistently with the final clean output.
 
-**MD-only and named-MD runs.**
-- `--format md`: live backup is `codedoc/codedoc.json`; removed automatically
-  after clean Markdown conversion. If interrupted, `codedoc.json` remains as the
-  resume source and the next run converts without any LLM calls.
-- `--output docs/report.md`: live backup is `docs/report.json` (sibling derived
-  from the Markdown stem). Same lifecycle as above.
+**Reserved names.** `crash_recovery_*` filenames are reserved for codedoc; an
+`--output` whose own filename begins with that prefix is rejected. If a foreign
+or unrelated file already occupies a recovery name, it is preserved untouched and
+codedoc uses the next `crash_recovery_<stem>(2).json`, `(3).json`, … instead.
+
+**MD-only and named-MD runs.** The recovery file is derived from the Markdown
+stem (`codedoc/crash_recovery_codedoc.json` for `--format md`,
+`docs/crash_recovery_report.json` for `--output docs/report.md`) and is removed
+after the clean Markdown write. A pre-0.9.8 interrupted Markdown run that left a
+`codedoc.json` / `report.json` sibling is detected, used as a resume source, and
+migrated into the new layout automatically — no manual cleanup needed.
 
 **`--safe-mode` (deprecated).** This flag is kept for backwards compatibility
-and now has no effect — live backup is always on. Passing it prints a deprecation
-notice. It will be removed in a future release.
+and now has no effect — crash recovery is always on. Passing it prints a
+deprecation notice. It will be removed in a future release.
 
 ### Adaptive rate-limit parallelism (0.8.1)
 
@@ -727,6 +758,34 @@ backoff. You can tune this in config:
 
 Set `rate_limit_backoff_s` to `0` to disable computed inter-rung backoff.
 `Retry-After` hints are still honored when `respect_retry_after` is true.
+
+### Unrecoverable-error fast stop (0.9.7)
+
+Not every provider error can recover by retrying. codedoc inspects the text
+already present in the raised exception chain — no extra network call, no
+preflight — and stops a doomed run early instead of retrying every file and
+sleeping through the backoff schedule. Classification is deliberately
+conservative: when in doubt an error stays retryable, and bare numeric HTTP codes
+(`401`/`402`/`403`/`404`/`413`) never trigger a stop on their own.
+
+- **Terminal stop (exit `2`).** A confirmed billing/credit exhaustion, invalid
+  credentials, unknown model, or forbidden/permission error stops on its first
+  occurrence — the same setup/credentials exit code as `ConfigError`.
+- **Input-too-large.** A request/context-too-large error is recorded as a failed
+  file *without* any retry (re-sending the identical oversized prompt cannot
+  succeed); the rest of the run proceeds.
+- **Bounded rate-limit stop (exit `1`).** A persistent ambiguous rate limit /
+  quota exhaustion that carries no billing phrase (for example Gemini
+  `RESOURCE_EXHAUSTED`) is still treated as a rate limit, but the total retrying
+  is now bounded by progress: after one full step-down ladder traversal plus one
+  lowest-concurrency pass in which no file succeeds, the run stops. This is a
+  transient "retry later" condition, so it exits `1`, not `2`.
+
+A bare `quota` / `resource_exhausted` / `429`, generic `5xx`, timeouts, and
+JSON-parse failures are **not** treated as terminal — they remain ordinary
+retryable or rate-limited errors. Every stop preserves the stable output intact
+and the dedicated crash-recovery file; re-running the same command resumes and
+re-documents only the unfinished files.
 
 ### Lossless Markdown regeneration (0.8.1)
 
@@ -798,8 +857,8 @@ CLI exit codes:
 | Code | Meaning |
 | --- | --- |
 | `0` | Success, dry-run success, or explicitly allowed partial output. |
-| `1` | File-processing failure, output/write failure, or unexpected fatal error. |
-| `2` | Invalid input/config/path, ownership conflict, cap exceeded, or provider initialization failure. |
+| `1` | File-processing failure, output/write failure, bounded rate-limit / quota stop, or unexpected fatal error. |
+| `2` | Invalid input/config/path, ownership conflict, cap exceeded, provider initialization failure, or terminal provider stop (billing/credit, credentials, unknown model, forbidden). |
 | `130` | Keyboard interrupt. |
 
 `--allow-partial` changes only completed runs with file-level failures. Setup,
@@ -876,6 +935,8 @@ CLI flags map directly to config keys:
 | --- | --- |
 | `PATH` | Optional first `run_pipeline(project_root, ...)` argument |
 | `--entry` | `entry_file` |
+| `--documentation-scope` | `documentation_scope` |
+| `--manage-output-gitignore` / `--no-manage-output-gitignore` | `manage_output_gitignore` |
 | `--provider` | `llm_provider` |
 | `--model` | `model_name` |
 | `--output` | `output_dir` |
@@ -907,7 +968,7 @@ If many files fail quickly:
 
 If files are missing from output:
 
-- Check `entry_file` or `--entry`; only reachable dependencies are selected when an entry file is used.
+- Check `entry_file` or `--entry`; under the default `documentation_scope: "entry"` only files reachable from the entry are documented. Pass `--documentation-scope all` to document every scanned source file.
 - Check `skip_dirs` and `ignore_paths`.
 - Check `supported_extensions`.
 - Check `max_file_size_kb`.

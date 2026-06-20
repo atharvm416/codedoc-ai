@@ -286,7 +286,7 @@ def test_C7_output_dir_auto_appended_to_scan_skip(tmp_path, monkeypatch):
 
     # Remove "codedoc" from skip_dirs — the source package should be scanned.
     # But the output goes to a different dir ("docs") so that is auto-skipped.
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "main.py",
         "output_dir": "docs",
         "skip_dirs_remove": ["codedoc"],  # allow scanning codedoc/ source
@@ -316,7 +316,7 @@ def test_C8_new_extension_scanned_and_labelled(tmp_path, monkeypatch):
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
     from codedoc.pipeline import run_pipeline
 
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "App.svelte",
         "extension_language_map_add": {".svelte": "svelte"},
         "parallel_agents": False,
@@ -340,7 +340,7 @@ def test_C8_removed_extension_not_scanned(tmp_path, monkeypatch):
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
     from codedoc.pipeline import run_pipeline
 
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "entry_file": "main.ts",
         "extension_language_map_remove": [".py"],
         "parallel_agents": False,
@@ -367,7 +367,7 @@ def test_C9_custom_auto_entry_detected(tmp_path, monkeypatch):
     from codedoc.pipeline import run_pipeline
 
     # No --entry; should auto-detect "app_start.py" from custom candidates
-    stats = run_pipeline(tmp_path, {
+    run_pipeline(tmp_path, {
         "auto_entry_candidates_add": ["app_start.py"],
         "parallel_agents": False,
         "propagate_changes": False,
@@ -482,7 +482,6 @@ def test_C12_remove_prefix_changes_detection(tmp_path):
 
 def test_C13_api_key_lookup_consistent_with_detection(tmp_path, monkeypatch):
     """C13: _provider_api_key uses the same prefixes as _resolve_api_provider."""
-    import os
     from codedoc.llm.factory import _provider_api_key, _resolve_api_provider
 
     custom_prefixes = {
@@ -543,7 +542,6 @@ def test_C16_cli_remove_skip_dir_is_repeatable():
 
 def test_C16_cli_remove_skip_dir_wired_to_overrides(tmp_path, monkeypatch, capsys):
     """C16b: --remove-skip-dir codedoc removes 'codedoc' from resolved skip_dirs."""
-    import sys
     (tmp_path / "main.py").write_text("x=1\n")
 
     # Capture the resolved skip_dirs by intercepting run_pipeline
