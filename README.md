@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.7`.
+Current release: `0.9.8`.
 
 ## What It Does
 
@@ -22,7 +22,7 @@ Current release: `0.9.7`.
 - Reuses existing documentation for unchanged files.
 - Reuses existing documentation when another file has identical content.
 - Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
-- Survives interruptions: writes a live JSON backup before any AI work starts, then updates it after every completed file. A Ctrl-C or crash always leaves a readable partial output file — no results are lost, and re-running the same command resumes automatically from where it stopped.
+- Survives interruptions: stages work in a dedicated `crash_recovery_<stem>.json` file before any AI work starts and updates it after every completed file, so your last stable output is never overwritten mid-run. A Ctrl-C or crash leaves the stable output intact plus a resumable recovery file — no results are lost, and re-running the same command resumes automatically from where it stopped.
 - Adaptive rate-limit parallelism: when a provider signals 429 / rate-limit, file concurrency is stepped down (`5 → 2 → 1`) and a provider-specific warning is printed to the terminal. No manual intervention needed.
 - Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
 - Provides a filesystem-read-only `--dry-run` with approximate lower-bound call and token estimates.
@@ -429,7 +429,7 @@ Supported variables:
 | `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
-| `CODEDOC_SAFE_MODE` | Deprecated — live backup is always on since 0.8.0. |
+| `CODEDOC_SAFE_MODE` | Deprecated — crash recovery is always on since 0.8.0. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
@@ -548,7 +548,7 @@ In JSON files the block is the first key in the document:
 }
 ```
 
-Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (Live crash-safety backups keep `created_at` / `updated_at` diagnostics.)
+Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (The dedicated crash-recovery file keeps `created_at` / `updated_at` diagnostics.)
 
 In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
 
@@ -650,41 +650,53 @@ This means repeated runs should only send new or changed code to the LLM. Unchan
 `codedoc` is built so that interrupting a run — Ctrl-C, a crash, or a dropped
 network connection — never forces you to repeat work that already completed.
 
-### Default: always-on live JSON backup
+### Default: dedicated crash-recovery file
 
-Every run creates a visible live JSON backup in the output directory **before
-the first AI call**, then updates it atomically after each completed file.
-You do not need to enable anything — `--safe-mode` is deprecated since 0.8.0.
+Every run stages in-progress work in a **dedicated crash-recovery file** in the
+output directory, written **before the first AI call** and updated atomically
+after each completed file. Crucially, your last stable completed output is
+**never overwritten while a run is in progress** — it is written once, only on
+clean completion. You do not need to enable anything; `--safe-mode` is deprecated
+since 0.8.0.
 
-- `codedoc/codedoc.json` is written immediately with a `_crash_safety` banner
-  and an empty `files` array, before any LLM request is made.
-- After every completed file the backup is updated (`.tmp` rename — atomic).
-- If a run is interrupted, the backup stays on disk with `_crash_safety` clearly
-  marking it as partial output.
-- Re-run the same command — files already in the backup are verified by content
-  hash and skipped; only the remaining files are sent to the LLM.
-- If a file was edited between the interruption and the re-run, its hash no
-  longer matches and it is re-documented, so you never restore stale docs.
+- The recovery file is `crash_recovery_<stem>.json`, derived from the final
+  output stem (`codedoc/crash_recovery_codedoc.json` by default,
+  `docs/crash_recovery_report.json` for `--output docs/report.json`). It is
+  written immediately with a `_crash_safety` banner before any LLM request.
+- After every completed file the recovery file is updated (`.tmp` rename —
+  atomic). Your stable `codedoc.json` / Markdown is not opened or touched yet.
+- If a run is interrupted or fails, the **last stable output stays intact** and
+  the recovery file stays on disk marked `_crash_safety`. Re-run the same command
+  — files already recovered are verified by content hash and skipped; only the
+  remaining files are sent to the LLM.
+- On clean completion the stable output is written **first**, and only then is
+  the recovery file deleted. If a file was edited between the interruption and
+  the re-run, its hash no longer matches and it is re-documented, so you never
+  restore stale docs.
 
-The live backup is written atomically (to a temporary sibling, then renamed) so a
-crash mid-write can never corrupt it, and writes are thread-safe under parallel
+The recovery file is written atomically (to a temporary sibling, then renamed) so
+a crash mid-write can never corrupt it, and writes are thread-safe under parallel
 processing.
 
-**Files array ordering.** The `files` array in the live backup follows the
+**Files array ordering.** The `files` array in the recovery file follows the
 topological (dependency-first) processing order, not completion order or
-alphabetical order. An interrupted backup is therefore structured consistently
-with the final clean output.
+alphabetical order, so it is structured consistently with the final clean output.
 
-**MD-only and named-MD runs.**
-- `--format md`: live backup is `codedoc/codedoc.json`; removed automatically
-  after clean Markdown conversion. If interrupted, `codedoc.json` remains as the
-  resume source and the next run converts without any LLM calls.
-- `--output docs/report.md`: live backup is `docs/report.json` (sibling derived
-  from the Markdown stem). Same lifecycle as above.
+**Reserved names.** `crash_recovery_*` filenames are reserved for codedoc; an
+`--output` whose own filename begins with that prefix is rejected. If a foreign
+or unrelated file already occupies a recovery name, it is preserved untouched and
+codedoc uses the next `crash_recovery_<stem>(2).json`, `(3).json`, … instead.
+
+**MD-only and named-MD runs.** The recovery file is derived from the Markdown
+stem (`codedoc/crash_recovery_codedoc.json` for `--format md`,
+`docs/crash_recovery_report.json` for `--output docs/report.md`) and is removed
+after the clean Markdown write. A pre-0.9.8 interrupted Markdown run that left a
+`codedoc.json` / `report.json` sibling is detected, used as a resume source, and
+migrated into the new layout automatically — no manual cleanup needed.
 
 **`--safe-mode` (deprecated).** This flag is kept for backwards compatibility
-and now has no effect — live backup is always on. Passing it prints a deprecation
-notice. It will be removed in a future release.
+and now has no effect — crash recovery is always on. Passing it prints a
+deprecation notice. It will be removed in a future release.
 
 ### Adaptive rate-limit parallelism (0.8.1)
 
@@ -752,8 +764,9 @@ conservative: when in doubt an error stays retryable, and bare numeric HTTP code
 
 A bare `quota` / `resource_exhausted` / `429`, generic `5xx`, timeouts, and
 JSON-parse failures are **not** treated as terminal — they remain ordinary
-retryable or rate-limited errors. Every stop preserves the live JSON backup;
-re-running the same command resumes and re-documents only the unfinished files.
+retryable or rate-limited errors. Every stop preserves the stable output intact
+and the dedicated crash-recovery file; re-running the same command resumes and
+re-documents only the unfinished files.
 
 ### Lossless Markdown regeneration (0.8.1)
 

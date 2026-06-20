@@ -1,26 +1,26 @@
 """
 Live JSON backup writer for the codedoc pipeline.
 
-0.8.0: This writer is now the **default** crash-safety mechanism for every
-run — no longer opt-in via ``--safe-mode``.  A visible ``codedoc.json`` (or
-the appropriate sibling) is created before AI work begins, updated after each
-completed file, and finalized (banner removed) by ``write_project_outputs``
-at the end of a clean run.
+0.8.0: This writer is the **default** crash-safety mechanism for every run —
+no longer opt-in via ``--safe-mode``.
+
+0.9.8: crash-recovery data is kept in its own dedicated file named
+``crash_recovery_<stem>.json`` (or a ``(<n>)``-suffixed sibling), **never** the
+stable output.  The recovery file is created before AI work begins and updated
+after each completed file.  The stable completed output (the final JSON for
+``json``/``both`` or the Markdown for ``md``/``both``) is written only once, on
+clean completion, by ``write_project_outputs`` — it is not opened, truncated, or
+mutated while a run is in progress.  After the stable output is written,
+``SafeWriter.delete()`` removes the recovery file.
 
 Format behaviour
 ----------------
-JSON / both
-    The live backup IS ``codedoc.json`` (or the named JSON file).
-    ``write_project_outputs`` overwrites it cleanly at the end.  No explicit
-    cleanup needed.
-
-MD only
-    The live backup is a JSON sibling of the requested MD file:
-    ``codedoc.json`` (for ``--format md``) or ``report.json`` (for
-    ``--output docs/report.md``).  After a clean MD conversion,
-    ``SafeWriter.delete()`` removes the sibling so only ``codedoc.md``
-    remains.  On interrupt the sibling is preserved and the next run resumes
-    from it.
+All formats
+    The recovery file is a distinct ``crash_recovery_<stem>.json`` in the output
+    directory.  On clean completion the stable output is written first and the
+    recovery file is then deleted by ``SafeWriter.delete()``.  On interrupt or
+    failure the stable output is left intact and the recovery file is preserved
+    so the next run resumes from it.
 
 Banner
 ------
@@ -56,7 +56,7 @@ from pathlib import Path
 from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.db import compute_file_hash
 from codedoc.core.project_view import SCHEMA_VERSION, clean_file_record
-from codedoc.utils.errors import LiveBackupWriteError
+from codedoc.utils.errors import LiveBackupWriteError, OutputError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -84,13 +84,13 @@ class SafeWriter:
         sw.initialize_empty()  # flush empty in-progress banner before AI starts
         # ... process files ...
         sw.record(rel_path, result, file_hash)  # called in worker thread after each file
-        # ... write_project_outputs writes the final clean output ...
-        sw.delete()            # removes live backup for MD-only runs
+        # ... write_project_outputs writes the final clean stable output ...
+        sw.delete()            # removes the dedicated recovery file (all formats)
 
     Attributes
     ----------
     path : Path
-        Absolute path to the live JSON backup file.
+        Absolute path to the dedicated crash-recovery file.
     size : int
         Number of file results currently recorded in memory.
     """
@@ -131,22 +131,41 @@ class SafeWriter:
         with self._lock:
             self._queue_order = list(ordered_paths)
 
-    def load(self) -> dict[str, dict]:
+    def load(self, preloaded: dict[str, dict] | None = None) -> dict[str, dict]:
         """
-        Pre-populate in-memory state from an existing live backup or output file.
+        Pre-populate in-memory state from an existing recovery file or output.
+
+        Parameters
+        ----------
+        preloaded:
+            0.9.8 — the merged reuse record set computed by the canonical resume
+            boundary (``_load_existing_file_docs``: stable completed output +
+            legacy in-progress overlay + active recovery overlay).  Seeding the
+            writer with this set means every partial flush of the dedicated
+            recovery file is a self-contained snapshot, so an interrupted run
+            resumes correctly even if a later source is removed.  This replaces
+            the pre-0.9.8 behaviour where the live backup *was* the stable output
+            and ``load()`` re-read it directly.
 
         Ownership guard
         ---------------
-        If a file exists at the target path but is not a codedoc output
+        If a file exists at the target recovery path but is not a codedoc output
         (unreadable / malformed JSON or no ``_codedoc`` metadata block) a
-        :class:`ConfigError` is raised before any LLM work begins.
+        :class:`ConfigError` is raised before any LLM work begins.  In normal
+        operation the active recovery path was already validated by the
+        candidate walk, so this guard is defensive.
 
-        A valid in-progress live backup (``_codedoc.status = "in_progress"``)
+        A valid in-progress recovery file (``_codedoc.status = "in_progress"``)
         is fully accepted — this is the normal resume path.
 
         Returns ``{}`` — routing is handled by ``_load_existing_file_docs``
         in the pipeline, not here.
         """
+        if preloaded:
+            for rel_path, record in preloaded.items():
+                if isinstance(record, dict) and record.get("path"):
+                    self._clean_records[rel_path] = dict(record)
+
         if not self._path.exists():
             return {}
 
@@ -291,24 +310,26 @@ class SafeWriter:
             return dict(record) if record is not None else None
 
     def delete(self) -> None:
-        """Remove the live JSON backup for MD-only runs after clean conversion.
+        """Remove the dedicated crash-recovery file after a clean completion.
 
-        For JSON / both format, ``write_project_outputs`` already overwrote
-        the live backup with the final clean output — nothing to remove.
+        0.9.8 — the recovery file is now a distinct ``crash_recovery_<stem>.json``
+        for **every** output format, never the stable output.  Clean completion
+        writes the stable output first (via ``write_project_outputs``) and only
+        then calls this to remove the recovery file.  Deletion is therefore a
+        required part of clean completion for ``json``, ``both``, and ``md``
+        alike.
 
-        For MD-only runs the live backup is a JSON sibling (e.g. ``codedoc.json``
-        next to ``codedoc.md``).  It is deleted here after a clean MD write so
-        only the Markdown file remains.  If deletion fails (permission error,
-        file locked on Windows) a warning is logged and the path is reported so
-        the user knows the leftover file is safe to delete manually.
+        The guard ``status == "in_progress"`` ensures this only ever unlinks an
+        active in-progress recovery file we own — a completed CodeDoc JSON that
+        happens to share the name is left intact.  A missing file is a no-op
+        (nothing was initialized, e.g. an all-reused run).
 
-        The guard ``status == "in_progress"`` prevents accidentally deleting a
-        completed JSON from a previous JSON-format run that happens to share the
-        same filename.
+        If the validated active recovery file exists and cannot be unlinked, the
+        stable output may already hold the completed document; that is *not*
+        rolled back.  Instead the recovery file is preserved and an
+        :class:`OutputError` naming the path is raised so the run is reported as
+        unsuccessful and the next invocation can finalize again.
         """
-        if self._output_format != "md":
-            return
-
         if not self._path.exists():
             return
 
@@ -323,21 +344,20 @@ class SafeWriter:
         try:
             self._path.unlink()
             logger.info(
-                "LiveBackup: removed live JSON backup '%s' after successful MD write.",
+                "LiveBackup: removed crash-recovery file '%s' after clean completion.",
                 self._path.name,
             )
-        except Exception as exc:
-            logger.warning(
-                "LiveBackup: could not remove live backup '%s' — it is safe to delete "
-                "manually.  Path: %s  Cause: %s",
-                self._path.name,
-                self._path,
-                exc,
-            )
+        except OSError as exc:
+            raise OutputError(
+                str(self._path),
+                f"could not remove crash-recovery file '{self._path.name}' after "
+                "writing the completed stable output; the stable output is intact "
+                "and the recovery file was preserved — re-run to finalize again.",
+            ) from exc
 
     @property
     def path(self) -> Path:
-        """Absolute path to the live JSON backup file."""
+        """Absolute path to the dedicated crash-recovery file."""
         return self._path
 
     @property

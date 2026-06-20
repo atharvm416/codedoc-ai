@@ -1366,8 +1366,13 @@ def test_version_identity_consistent(capsys):
 
 
 def test_A5_interrupt_prints_clean_message_and_exits_130(tmp_path, monkeypatch, capsys):
-    """A5: KeyboardInterrupt is handled with a clean resume message and exit 130;
-    no dead live-backup-path code path is taken."""
+    """A5: KeyboardInterrupt with no recovery_path attached prints the truthful
+    generic message (no recovery file confirmed) and exits 130.
+
+    0.9.8: when the interrupt carries no ``recovery_path`` (interrupted before a
+    recovery file was initialized), the CLI must not claim a recovery file
+    exists, and must affirm the stable output was left untouched.
+    """
     import pytest
 
     import codedoc.pipeline as pipeline_mod
@@ -1384,9 +1389,8 @@ def test_A5_interrupt_prints_clean_message_and_exits_130(tmp_path, monkeypatch, 
     assert exc_info.value.code == 130
     err = capsys.readouterr().err
     assert "interrupted" in err.lower()
-    assert "live JSON backup" in err
-    # Must use the conditional wording (the fix) and NOT the old unconditional
-    # "Progress has been saved" claim, which would be false when interrupted
-    # before any file was processed.
-    assert "if the run reached file processing" in err
+    # Truthful generic wording: no recovery file was created/confirmed, and the
+    # stable output was left untouched.  Never the old "Progress has been saved".
+    assert "crash-recovery file was created or confirmed" in err
+    assert "left untouched" in err
     assert "Progress has been saved" not in err

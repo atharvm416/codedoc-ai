@@ -425,6 +425,24 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
             "ending in '.json' or '.md' (e.g. 'docs/report.json')."
         )
 
+    # 0.9.8: ``crash_recovery_*`` filenames are reserved for codedoc's dedicated
+    # crash-recovery file and must never be a user output target — that is the
+    # exact file this release keeps separate from the stable output.  Check only
+    # the user-supplied filename's own stem (covering both ``.json`` and ``.md``
+    # forms, and the ``(<n>)``-suffixed forms whose stem still begins with the
+    # prefix).  The same constant guards the recovery-path writer so the two
+    # cannot drift.  Imported locally to avoid an import cycle with resume.py.
+    from codedoc.core.resume import CRASH_RECOVERY_PREFIX
+
+    if p.stem.startswith(CRASH_RECOVERY_PREFIX):
+        raise ConfigError(
+            f"'{p.name}' uses the reserved '{CRASH_RECOVERY_PREFIX}' prefix, which "
+            "codedoc keeps for its crash-recovery file and cannot be used as an "
+            "output target.\n"
+            "Choose a different output name — e.g. 'docs/report.json' or a "
+            "directory like 'docs_output'."
+        )
+
     # --- File path with a valid extension ---
     inferred_format = "json" if suffix == ".json" else "md"
     parent_str = str(p.parent)  # "." when no directory component

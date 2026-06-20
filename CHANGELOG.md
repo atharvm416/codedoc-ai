@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.9.8 - 2026-06-20
+
+### Dedicated crash-recovery file (corrective robustness patch)
+
+A corrective robustness patch. It changes *where* in-progress work is staged on
+disk and *when* the stable output is written; it does not change documentation
+content, prompts, provider behaviour, concurrency, the response schema, file
+selection, or the shape of the completed output. Successful runs make exactly the
+same provider calls as before. No new configuration key, environment variable, or
+CLI flag is added.
+
+Previously, in `json` and `both` modes the live backup path *was* the final JSON
+path: a new run wrote incremental in-progress records (with the `_crash_safety`
+banner) straight into `codedoc.json`, so the moment a run started it overwrote the
+user's last stable completed output — and an interruption left only a partial
+in-progress document where the clean one had been.
+
+- **In-progress records now go to a dedicated file**, `crash_recovery_<stem>.json`
+  (derived from the final output stem), for **every** format — never the stable
+  output. The stable completed output (`codedoc.json`, a named `--output` JSON, or
+  the Markdown) is not opened, truncated, or mutated while a run is in progress.
+- **The stable output is written once, on clean completion**, and only then is the
+  recovery file deleted (write-stable-then-delete-recovery). If the stable write
+  fails, the recovery file is preserved so the run stays resumable. A failure to
+  delete the recovery file raises `OutputError`, leaves both the completed stable
+  output and the recovery file intact, and is not reported as success.
+- **Resume** combines the stable completed output (reuse baseline) with the active
+  recovery file (in-progress overlay), and — for migrated Markdown runs — a legacy
+  in-progress JSON sibling, in a fixed oldest-to-newest, whole-record precedence.
+  Unchanged files are still skipped by content hash.
+- **A present-but-unreadable/foreign recovery file is preserved**, not overwritten:
+  the run advances to `crash_recovery_<stem>(2).json`, `(3).json`, … (bounded at
+  1000 candidates → `OutputError`).
+- **Backward migration is automatic.** A stable output left as an in-progress
+  `_crash_safety` document by an earlier version is detected, used as a resume
+  source, and migrated into the new layout with new writes going to a separate
+  recovery file. No manual file deletion is required.
+- **`--output` may not target a `crash_recovery_*` name** (`.json`/`.md`, including
+  `(<n>)` forms); such a name is rejected with a `ConfigError` before any scan or
+  mutation. The reserved prefix is a fixed internal constant.
+- **CLI interrupt messaging** names the exact dedicated recovery file that enables
+  resume (or truthfully reports that none was confirmed). Exit code `130` is
+  unchanged.
+- Internal: `validate_distinct_artifact_paths` now treats the recovery file as its
+  own `live_backup` artifact and the `json_live_backup` self-alias is removed; no
+  public API or output path is renamed. `--safe-mode` remains the accepted,
+  deprecated no-op.
+
 ## 0.9.7 - 2026-06-19
 
 Release candidate updated: 2026-06-19 23:34 IST (UTC+05:30).

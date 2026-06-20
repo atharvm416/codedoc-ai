@@ -9,8 +9,10 @@ Behaviour notes
   only when ``failed > 0``.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
-- On interrupt, a generic resume message is printed (the live JSON backup in the
-  output directory holds completed work; re-run to resume).
+- On interrupt, the dedicated crash-recovery file path attached by the pipeline
+  (``KeyboardInterrupt.recovery_path``) is named so the user knows the stable
+  output was preserved and which file enables resume; if no recovery file was
+  confirmed, a truthful generic message is printed instead.
 - When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
   reported in the run summary.
 
@@ -438,13 +440,27 @@ def run_cli(argv: list[str] | None = None) -> int:
     except FileNotFoundError as exc:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
-    except KeyboardInterrupt:
-        print(
-            "\nRun interrupted. Any files completed before the interrupt are saved "
-            "in the live JSON backup in your output directory (if the run reached "
-            "file processing) — re-run the same command to resume.",
-            file=sys.stderr,
-        )
+    except KeyboardInterrupt as exc:
+        # 0.9.8: the pipeline attaches the exact selected crash-recovery path to
+        # the interrupt as ``recovery_path`` only when that file exists on disk.
+        # The stable output is never touched mid-run, so it is always preserved;
+        # we just report which file enables resume (or that none was created).
+        recovery_path = getattr(exc, "recovery_path", None)
+        if recovery_path:
+            print(
+                "\nRun interrupted. Your previous stable output was left untouched. "
+                "Files completed before the interrupt are saved in the crash-recovery "
+                f"file:\n  {recovery_path}\n"
+                "Re-run the same command to resume from it.",
+                file=sys.stderr,
+            )
+        else:
+            print(
+                "\nRun interrupted before any crash-recovery file was created or "
+                "confirmed. Your previous stable output (if any) was left untouched. "
+                "Re-run the same command to start or resume.",
+                file=sys.stderr,
+            )
         return 130
     except Exception as exc:
         from codedoc.utils.errors import (

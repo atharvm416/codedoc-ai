@@ -357,11 +357,13 @@ def test_pipeline_records_and_flushes_abort_and_preserves_backup(tmp_path, monke
     assert "UnrecoverableProviderError" in log_text
     assert "provider abort" in log_text
 
-    # The final output write was never reached, so the live JSON backup is left
-    # intact and resumable (still the in-progress crash-safety file, not deleted
-    # or overwritten with a "complete" final output).
+    # The final output write was never reached, so the dedicated recovery file is
+    # left intact and resumable (still the in-progress crash-safety file, not
+    # deleted or overwritten with a "complete" final output).  0.9.8: the stable
+    # output (docs/codedoc.json) was never created.
     assert wrote["called"] is False
-    backup = out_dir / "codedoc.json"
+    assert not (out_dir / "codedoc.json").exists()
+    backup = out_dir / "crash_recovery_codedoc.json"
     assert backup.exists()
     data = json.loads(backup.read_text(encoding="utf-8"))
     assert "_crash_safety" in data or data.get("_codedoc", {}).get("status") == "in_progress"

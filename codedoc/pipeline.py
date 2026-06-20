@@ -58,7 +58,6 @@ from codedoc.core.execution import (
 from codedoc.core.loader import load_config
 from codedoc.core.output import (
     inspect_output_ownership,
-    read_existing_records,
     validate_distinct_artifact_paths,
     write_project_outputs,
 )
@@ -70,10 +69,13 @@ from codedoc.core.planning import (
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import (
     _build_documentation_records,
+    _cleanup_legacy_recovery,
     _cleanup_stale_build_file,
     _load_existing_file_docs,
     _remove_legacy_db,
+    _resolve_legacy_backup_path,
     _resolve_live_backup_path,
+    select_active_recovery_path,
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
@@ -157,28 +159,51 @@ def run_pipeline(
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
-    live_backup_path = _resolve_live_backup_path(output_dir, output_format, json_filename, md_filename)
+    # 0.9.8: crash-recovery data is staged in its own dedicated file, never the
+    # stable output.  Derive the base recovery path, then deterministically
+    # select the active candidate (absent → fresh; valid in-progress → resume;
+    # invalid/foreign/completed → advance to the next ``(<n>)`` suffix).  The
+    # walk is read-only.  The legacy path is the pre-0.9.8 live-backup location,
+    # read only as an in-progress overlay during resume/migration.
+    base_recovery_path = _resolve_live_backup_path(
+        output_dir, output_format, json_filename, md_filename
+    )
+    live_backup_path, _recovery_resume = select_active_recovery_path(base_recovery_path)
+    legacy_recovery_path = _resolve_legacy_backup_path(
+        output_dir, output_format, json_filename, md_filename
+    )
+    # Stable output targets and the active recovery file must never be removed by
+    # the legacy-migration cleanup (which only prunes a distinct, migrated,
+    # in-progress legacy sibling — e.g. the old md JSON sibling).
+    _recovery_keep_paths: set[Path] = {live_backup_path}
+    if output_format in ("json", "both"):
+        _recovery_keep_paths.add(output_dir / json_filename)
+    if output_format in ("md", "both"):
+        _recovery_keep_paths.add(output_dir / md_filename)
 
     # Reject generated-artifact path collisions before any scan or mutation.
-    # JSON and both modes intentionally alias the final JSON and its live-backup
-    # phase to one path, represented here as a single ``json_live_backup``
-    # artifact so the alias is never mistaken for a collision.  Markdown-only
-    # mode submits separate ``markdown`` and ``live_backup`` artifacts.  The
-    # diagnostic log is ``error_log``.
+    # The dedicated recovery file is always its own ``live_backup`` artifact,
+    # distinct from the final JSON (``json``), Markdown (``markdown``), and the
+    # diagnostic log (``error_log``), for every format.  The *selected* recovery
+    # candidate is the artifact validated here, so a configuration that points a
+    # final output or the log at the recovery file is rejected rather than hidden
+    # behind a suffix increment.
     artifact_paths: dict[str, Path | None] = {"error_log": output_dir / "error.log"}
     if output_format in ("json", "both"):
-        artifact_paths["json_live_backup"] = output_dir / json_filename
+        artifact_paths["json"] = output_dir / json_filename
     if output_format in ("md", "both"):
         artifact_paths["markdown"] = output_dir / md_filename
-    if output_format == "md":
-        artifact_paths["live_backup"] = live_backup_path
+    artifact_paths["live_backup"] = live_backup_path
     validate_distinct_artifact_paths(artifact_paths)
 
     # Read-only ownership inspection (0.9.2).  A real run fails fast before any
     # filesystem side effect, scanning, or LLM call when a final output target
-    # is foreign-owned; a dry run records the conflicts and reports them.
+    # is foreign-owned; a dry run records the conflicts and reports them.  The
+    # recovery file is NOT inspected here: a foreign file at a recovery name is
+    # preserved and skipped by the candidate walk, not treated as a run-blocking
+    # final-output conflict.
     ownership_conflicts = inspect_output_ownership(
-        output_dir, output_format, json_filename, md_filename, live_backup_path
+        output_dir, output_format, json_filename, md_filename
     )
     if ownership_conflicts and not dry_run:
         raise ConfigError(ownership_conflicts[0]["message"])
@@ -200,7 +225,13 @@ def run_pipeline(
     error_reporter = ErrorReporter(output_dir / "error.log")
 
     existing_docs = _load_existing_file_docs(
-        output_dir, json_filename, md_filename, live_backup_path, read_only=True
+        output_dir,
+        json_filename,
+        md_filename,
+        live_backup_path,
+        read_only=True,
+        output_format=output_format,
+        legacy_recovery_path=legacy_recovery_path,
     )
 
     # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
@@ -282,12 +313,13 @@ def run_pipeline(
     # ConfigError for paths outside the root).
     forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
-    # Migration eligibility: legacy Checkpoint entries may be used only when
-    # the live backup contains no records — read-only equivalent of the
-    # ``SafeWriter.size == 0`` check.
-    live_records = read_existing_records(live_backup_path)
+    # Migration eligibility: legacy Checkpoint entries may be used only when no
+    # existing records were recovered — read-only equivalent of the
+    # ``SafeWriter.size == 0`` check.  0.9.8: the recovery file is now a separate
+    # path, so eligibility is keyed on the merged reuse set (stable baseline +
+    # legacy overlay + active recovery), i.e. exactly what seeds the writer.
     checkpoint_results: dict[str, dict] = {}
-    if not live_records:
+    if not existing_docs:
         cp = Checkpoint(output_dir, entry_file=entry_rel)
         checkpoint_results = cp.load()
         if checkpoint_results:
@@ -331,12 +363,16 @@ def run_pipeline(
     _remove_legacy_db(output_dir)
     _cleanup_stale_build_file(output_dir, json_filename)
 
-    # Always-on live backup writer (Work Item 1).
+    # Always-on crash-recovery writer (Work Item 1).  Targets the dedicated
+    # recovery file for every format; the stable output is untouched until
+    # finalization.
     recorder = SafeWriter(live_backup_path, output_format, entry_rel, file_map)
     recorder.set_queue_order(ordered_selected)
 
-    # Ownership check + pre-load existing records (raises ConfigError for foreign files).
-    recorder.load()
+    # Seed the writer with the same merged reuse set planning consumed (stable
+    # baseline + legacy in-progress overlay + active recovery overlay) so every
+    # partial flush of the recovery file is a self-contained resumable snapshot.
+    recorder.load(preloaded=existing_docs)
 
     skipped = len(plan.unchanged_rels)
     if skipped > 0:
@@ -396,6 +432,7 @@ def run_pipeline(
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
         recorder.delete()
+        _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
         _set_issue_stats(stats, error_reporter, live_backup_path)
         _set_usage_stats(stats, usage, plan, config)
         return stats
@@ -425,6 +462,12 @@ def run_pipeline(
                 file=sys.stderr,
                 flush=True,
             )
+        raise
+    except KeyboardInterrupt as exc:
+        # 0.9.8: an interrupt during provider init still happens after the
+        # recovery file was initialized; name it for the CLI (see below).
+        if live_backup_path.exists():
+            exc.recovery_path = str(live_backup_path)
         raise
 
     orchestrator = Orchestrator(
@@ -492,6 +535,16 @@ def run_pipeline(
         error_reporter.record(exc, context="provider abort")
         error_reporter.flush()
         raise
+    except KeyboardInterrupt as exc:
+        # 0.9.8: the run was interrupted mid-processing.  The stable output was
+        # never opened; completed work is staged in the dedicated recovery file.
+        # Attach the exact selected recovery path (only when it exists on disk)
+        # so the CLI can name it in the interrupt message, then re-raise the same
+        # exception unchanged.  No suffix walk, candidate creation, or filesystem
+        # mutation happens here.
+        if live_backup_path.exists():
+            exc.recovery_path = str(live_backup_path)
+        raise
 
     stats["output_dir"] = str(output_dir)
     output_files = write_project_outputs(
@@ -513,8 +566,13 @@ def run_pipeline(
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
-    # For MD-only runs, remove the live JSON backup after clean MD conversion.
+    # Clean completion: the stable output is written above; only now delete the
+    # dedicated recovery file (all formats).  A deletion OSError raises
+    # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
+    # Complete the migration of a pre-0.9.8 legacy in-progress sibling (md mode):
+    # its records are already in the stable output, so remove the leftover.
+    _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
     _set_issue_stats(stats, error_reporter, live_backup_path)
     _set_usage_stats(stats, usage, plan, config)
 

@@ -13,13 +13,21 @@ known to be safe.
 ## Phases
 
 1. **Configuration and path resolution.** Resolve the output directory, the JSON
-   and Markdown filenames, and the live-backup path
-   (`_resolve_live_backup_path`).
+   and Markdown filenames, and the **dedicated crash-recovery file**. The base
+   recovery path is `crash_recovery_<stem>.json` (`_resolve_live_backup_path`,
+   derived from the final output stem), and `select_active_recovery_path` then
+   walks candidates (`crash_recovery_<stem>.json`, `…(2).json`, `…(3).json`, …)
+   read-only to choose the active one: an absent name is a fresh run; a valid
+   in-progress recovery document is resumed from; a completed / malformed /
+   foreign file at a recovery name is preserved and skipped to the next suffix
+   (bounded at 1000 candidates → `OutputError`). A `--output` filename whose own
+   stem begins with `crash_recovery_` is rejected with a `ConfigError`.
 
 2. **Artifact-path collision check (read-only).** `validate_distinct_artifact_paths`
    rejects two distinct generated artifacts that would target the same
-   normalized path, before any scan or mutation. See *Path aliasing* below for
-   how the intentional JSON / live-backup alias is represented.
+   normalized path, before any scan or mutation. The selected recovery file is
+   its own `live_backup` artifact, distinct from `json`, `markdown`, and
+   `error_log`, in every format.
 
 3. **Read-only preflight.** `inspect_output_ownership` checks that every final
    output target that already exists was produced by codedoc. A real run stops
@@ -43,25 +51,32 @@ known to be safe.
    configured `max_files` limit stops with a `ConfigError`.
 
 6. **Mutation boundary.** Everything below may write to the filesystem. The
-   output directory is created, legacy artifacts are cleaned, and the live-backup
-   `SafeWriter` is constructed and given the topological queue order.
-   `SafeWriter.load()` performs the ownership check and pre-loads any existing
-   records (raising `ConfigError` for a foreign file).
+   output directory is created, legacy artifacts are cleaned, and the
+   crash-recovery `SafeWriter` (targeting the dedicated recovery file) is
+   constructed and given the topological queue order. `SafeWriter.load()` is
+   seeded with the merged reuse set computed by the canonical resume boundary
+   (`_load_existing_file_docs`: stable completed output as the baseline, then the
+   legacy in-progress overlay, then the active recovery overlay — whole-record,
+   oldest-to-newest), so planning and the writer consume the same records and
+   every partial flush of the recovery file is a self-contained resumable
+   snapshot. The stable output is **not** opened or mutated here.
 
 7. **Reuse / resume materialization.** Records routed by the plan as identical
    reuse or checkpoint reuse are materialized in memory. If no files need agent
    work, the run finalizes immediately (phase 10) and returns.
 
-8. **Live-backup initialization, then provider creation.** `initialize_empty()`
-   flushes the in-progress backup banner to disk *before* the LLM provider is
-   created. A live-backup write failure here raises `LiveBackupWriteError` before
-   any provider exists, so initialization failure makes **zero** provider calls.
-   Only after the backup is initialized is the provider created and the
-   orchestrator built.
+8. **Recovery-file initialization, then provider creation.** `initialize_empty()`
+   flushes the in-progress banner to the dedicated recovery file *before* the LLM
+   provider is created. A recovery-write failure here raises
+   `LiveBackupWriteError` before any provider exists, so initialization failure
+   makes **zero** provider calls. Only after the recovery file is initialized is
+   the provider created and the orchestrator built. If a `KeyboardInterrupt`
+   propagates from here on, the pipeline attaches the exact selected recovery
+   path to the exception (when the file exists) so the CLI can name it.
 
 9. **Execution.** `execute_agent_files` processes the queue (sequential or the
-   parallel rate-limit ladder). Each completed file is persisted to the live
-   backup from the worker via `SafeWriter.record()`. A live-backup persistence
+   parallel rate-limit ladder). Each completed file is persisted to the dedicated
+   recovery file from the worker via `SafeWriter.record()`. A recovery-write
    failure is fatal: it is never retried, never reclassified as a rate-limit or
    ordinary failure, and propagates after pending work is cancelled and running
    workers settle. Recoverable per-file failures (`ParseError`, `AgentError`,
@@ -76,35 +91,53 @@ known to be safe.
    `UnrecoverableProviderError` carries a `category` (`"terminal"` or
    `"rate_limit_exhausted"`). Like the persistence-failure path, the abort
    cancels pending parallel work and propagates after running workers settle — it
-   never writes final output, so the live backup stays intact and resumable.
+   never writes final output, so the stable output stays untouched and the
+   recovery file stays intact and resumable.
 
 10. **Finalization.** `write_project_outputs` renders the complete payload(s) and
-    atomically replaces the final target(s). See *Both-mode finalization* below.
-    On an `UnrecoverableProviderError` this step is skipped entirely: the pipeline
+    atomically replaces the stable target(s) — the **first** time the stable
+    output is written this run. See *Both-mode finalization* below. On an
+    `UnrecoverableProviderError` this step is skipped entirely: the pipeline
     records and flushes the abort to `error.log`, then re-raises so the CLI can
     present a safe-stop message (exit `2` for `"terminal"`, exit `1` for
-    `"rate_limit_exhausted"`) and the live backup is preserved for resume.
+    `"rate_limit_exhausted"`) and the recovery file is preserved for resume.
 
 11. **Diagnostics.** `ErrorReporter.flush()` writes `error.log` in the output
     directory when any issue was recorded.
 
-12. **Cleanup.** For Markdown-only runs the live JSON backup sibling is removed
-    after a clean Markdown write (`SafeWriter.delete()`). For JSON and both
-    modes the live backup *is* the final JSON, so there is nothing to remove.
+12. **Cleanup.** Only after the stable output is written, `SafeWriter.delete()`
+    removes the dedicated recovery file — for **every** format. Order matters: if
+    the stable write fails the recovery file must remain so the run is still
+    resumable. A deletion `OSError` raises `OutputError` naming the recovery path
+    and leaves **both** the completed stable output and the recovery file intact;
+    the run is reported unsuccessful and the next invocation finalizes again. For
+    a migrated pre-0.9.8 Markdown run, the leftover legacy in-progress JSON
+    sibling is also removed here so only the Markdown remains.
 
-## Path aliasing (JSON and the live backup)
+## The dedicated crash-recovery file (0.9.8)
 
-For `--format json` and `--format both`, the live backup and the final JSON are
-the **same path**: the run writes the in-progress JSON throughout and the
-finalization step overwrites it with the clean payload. This is intentional, not
-a collision. The collision check in phase 2 therefore submits that single path
-once under one logical artifact name, `json_live_backup`, so the alias is never
-mistaken for two artifacts targeting one path.
+In-progress (crash-recovery) records are staged in a dedicated
+`crash_recovery_<stem>.json` (or a `(<n>)`-suffixed sibling), **never** the
+stable output. For every format the stable completed output — the final JSON for
+`json`/`both`, the Markdown for `md`/`both` — is not opened, truncated, or
+mutated while a run is in progress; it is written once at clean completion, after
+which the recovery file is deleted. An interrupted or failed run therefore leaves
+the last stable output intact **and** a resumable recovery file.
 
-For `--format md`, the live backup is a JSON **sibling** of the Markdown file
-(e.g. `codedoc.json` next to `codedoc.md`). Markdown-only mode submits separate
-`markdown` and `live_backup` artifacts to the collision check. The diagnostic
-log is always submitted as `error_log`.
+The selected recovery file is its own `live_backup` artifact in the phase-2
+collision check, distinct from `json`, `markdown`, and `error_log`. A foreign
+file sitting at a recovery name is preserved and skipped by the candidate walk
+(phase 1), not treated as a run-blocking conflict.
+
+**Resume** combines, by project-relative path in a fixed oldest-to-newest
+precedence: (1) the clean stable completed output as the reuse baseline; (2) a
+legacy in-progress stable-path document (for Markdown runs, the pre-0.9.8 JSON
+sibling); (3) the active dedicated recovery records. A path present in a later
+source replaces the whole earlier record. A pre-0.9.8 stable output left as an
+in-progress `_crash_safety` document is detected via
+`read_codedoc_document(...).in_progress`, used as a resume source, and migrated
+into the new layout automatically with new writes going to the separate recovery
+file — no manual file deletion is required.
 
 ## Both-mode finalization (per-artifact atomicity)
 
@@ -113,15 +146,18 @@ log is always submitted as `error_log`.
 1. The project view is built and **both** payload strings (JSON and Markdown) are
    rendered before either final target is mutated.
 2. Markdown is replaced first (atomically).
-3. JSON is replaced last (atomically), because the JSON path is also the live
-   backup.
+3. JSON is replaced last (atomically).
+
+Both stable targets are distinct from the dedicated recovery file, which is
+deleted only after both stable writes succeed.
 
 Consequences:
 
-- If Markdown replacement fails, the previous JSON live backup is left intact.
+- If Markdown replacement fails, neither stable artifact reflects the new run and
+  the recovery file is preserved for resume.
 - If the final JSON replacement fails after Markdown has succeeded, Markdown
-  holds the new complete document while JSON remains the previous complete live
-  backup.
+  holds the new complete document, JSON keeps its previous complete content, and
+  the recovery file is preserved (not deleted).
 - No target is ever truncated in place: each replacement writes a uniquely named
   temporary sibling, flushes and closes it, then renames it over the target via
   the canonical `atomic_write_text` helper.
