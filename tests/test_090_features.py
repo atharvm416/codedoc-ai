@@ -313,14 +313,21 @@ class TestAgentProgressLogs:
     """G1.2: Per-agent progress lines appear in orchestrator."""
 
     def test_progress_lines_emitted(self, tmp_path, monkeypatch, caplog):
-        """structure ok, dependencies ok, documentation ok lines appear per file."""
+        """structure ok, dependencies ok, documentation ok lines appear per file.
+
+        These per-agent progress lines belong to triple mode (the three-agent
+        path); single mode logs a single 'combined ok' line instead.
+        """
         patch_provider(monkeypatch)
         src = tmp_path / "src.py"
         write_py(src)
 
         with caplog.at_level(logging.INFO, logger="codedoc.agents.orchestrator"):
             from codedoc.pipeline import run_pipeline
-            run_pipeline(tmp_path, {"entry_file": "src.py", "output_dir": "out"})
+            run_pipeline(
+                tmp_path,
+                {"entry_file": "src.py", "output_dir": "out", "analysis_mode": "triple"},
+            )
 
         messages = caplog.text
         assert "structure ok" in messages

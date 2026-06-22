@@ -18,10 +18,39 @@ from pathlib import Path
 
 from codedoc.core.db import compute_file_hash
 from codedoc.core.graph import DependencyGraph
+from codedoc.core.record_meta import CACHE_IDENTITY_KEYS, expected_analysis_identity
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _identity_matches(stored: dict, expected: dict) -> bool:
+    """Compare every key in :data:`CACHE_IDENTITY_KEYS`.
+
+    An absent expected key and absent stored key compare equal; a
+    present-but-mismatched key blocks reuse.
+    """
+    if not isinstance(stored, dict):
+        return False
+    for key in CACHE_IDENTITY_KEYS:
+        if stored.get(key) != expected.get(key):
+            return False
+    return True
+
+
+def _record_is_reusable(stored: dict | None, content_hash: str, expected: dict) -> bool:
+    """The single centralized reuse predicate (0.10.0).
+
+    A stored record may be reused only when its content hash matches *and* every
+    cache-identity key matches the expected revision/mode.  A record that matches
+    the content hash while ignoring a registered cache-identity key is a defect.
+    """
+    if not isinstance(stored, dict):
+        return False
+    if stored.get("hash", "") != content_hash:
+        return False
+    return _identity_matches(stored, expected)
 
 
 @dataclass(frozen=True)
@@ -29,7 +58,7 @@ class PipelinePlan:
     """Immutable description of all routing decisions for one pipeline run."""
 
     scanned_rels: frozenset[str]
-    selected_rels: frozenset[str]
+    documented_rels: frozenset[str]
     changed_rels: frozenset[str]
     forced_rels: frozenset[str]
     process_rels: frozenset[str]
@@ -42,9 +71,14 @@ class PipelinePlan:
     max_files_exceeded: bool
 
     @property
-    def documented_rels(self) -> frozenset[str]:
-        """Files selected for documentation in this run."""
-        return self.selected_rels
+    def selected_rels(self) -> frozenset[str]:
+        """Read-only compatibility alias for :attr:`documented_rels` (0.10.0).
+
+        The canonical field is now ``documented_rels``; ``selected_rels`` is
+        retained as a non-settable delegating property so existing callers do
+        not break.  Do not remove it in this release.
+        """
+        return self.documented_rels
 
 
 @dataclass(frozen=True)
@@ -151,16 +185,35 @@ def build_pipeline_plan(
         else:
             effective_forced.add(rel)
 
-    docs_by_hash: dict[str, dict] = {
-        doc["hash"]: doc for doc in existing_docs.values() if doc.get("hash")
-    }
+    # 0.10.0: the expected cache identity for this run (revision + resolved mode).
+    expected_identity = expected_analysis_identity(
+        config.get("analysis_mode", "single")
+    )
 
-    # Changed = hash differs from existing docs; forced paths are added before
-    # dependency propagation, so dependents of a forced file are included
-    # exactly as they would be for a hash change.
+    # 0.10.0: index reusable candidates by content hash, retaining *all* records
+    # with the same hash (was a single-record-per-hash last-writer-wins map).
+    # Two records with identical content can carry different cache identities, so
+    # the per-file loop must be free to pick a candidate that passes the
+    # centralized predicate for the destination file.
+    docs_by_hash: dict[str, list[dict]] = {}
+    for doc in existing_docs.values():
+        doc_hash = doc.get("hash")
+        if doc_hash:
+            docs_by_hash.setdefault(doc_hash, []).append(doc)
+
+    # Changed = the same-path existing record is not reusable (hash differs, or
+    # the hash matches but the cache identity is missing/stale).  Routing the
+    # same-path "unchanged" determination through the predicate ensures a record
+    # whose revision/mode no longer matches is reprocessed instead of silently
+    # reused.  Forced paths are added before dependency propagation, so
+    # dependents of a forced file are included exactly as for a hash change.
     changed_rels = {
         rel for rel in selected_rels
-        if compute_file_hash(file_map[rel]["path"]) != existing_docs.get(rel, {}).get("hash", "")
+        if not _record_is_reusable(
+            existing_docs.get(rel),
+            compute_file_hash(file_map[rel]["path"]),
+            expected_identity,
+        )
     }
     changed_rels |= effective_forced
 
@@ -188,37 +241,69 @@ def build_pipeline_plan(
             # for the explicitly forced file.  Propagated dependents keep
             # normal reuse behaviour below.
             agent_rels.add(rel_path)
-        elif content_hash in docs_by_hash:
+            continue
+
+        # Identical-content reuse: only a candidate that passes the centralized
+        # predicate (hash + every cache-identity key) for this destination file
+        # is eligible.  A candidate matching content but carrying a stale/missing
+        # revision or mode is skipped.
+        candidate = None
+        if content_hash in docs_by_hash:
+            candidate = next(
+                (
+                    doc
+                    for doc in docs_by_hash[content_hash]
+                    if _record_is_reusable(doc, content_hash, expected_identity)
+                ),
+                None,
+            )
+        if candidate is not None:
             identical_reuse.add(rel_path)
-            materials.identical_reuse_docs[rel_path] = docs_by_hash[content_hash]
-        elif rel_path in checkpoint_records:
+            materials.identical_reuse_docs[rel_path] = candidate
+            continue
+
+        # Legacy checkpoint reuse: eligible only when the checkpoint hash matches
+        # and the checkpoint carries a matching cache identity.  A checkpoint
+        # without the analysis revision/mode is reprocessed once.
+        if rel_path in checkpoint_records:
             checkpoint_entry = checkpoint_records[rel_path]
             stored_hash = checkpoint_entry.get("_checkpoint_hash", "")
+            checkpoint_candidate = {**checkpoint_entry, "hash": stored_hash}
             if not stored_hash:
                 logger.info(
                     "Checkpoint entry for '%s' has no hash — reprocessing.", rel_path
                 )
                 agent_rels.add(rel_path)
-            elif content_hash != stored_hash:
-                logger.info(
-                    "File '%s' was modified after it was checkpointed — reprocessing.",
-                    rel_path,
-                )
+            elif not _record_is_reusable(
+                checkpoint_candidate, content_hash, expected_identity
+            ):
+                if content_hash == stored_hash:
+                    logger.info(
+                        "Checkpoint entry for '%s' predates the current analysis "
+                        "revision/mode — reprocessing.",
+                        rel_path,
+                    )
+                else:
+                    logger.info(
+                        "File '%s' was modified after it was checkpointed — reprocessing.",
+                        rel_path,
+                    )
                 agent_rels.add(rel_path)
             else:
                 checkpoint_reuse.add(rel_path)
                 materials.checkpoint_reuse_docs[rel_path] = {
                     k: v for k, v in checkpoint_entry.items() if k != "_checkpoint_hash"
                 }
-        else:
-            agent_rels.add(rel_path)
+            continue
+
+        agent_rels.add(rel_path)
 
     max_files = int(config.get("max_files", 0) or 0)
     max_files_exceeded = max_files > 0 and len(agent_rels) > max_files
 
     plan = PipelinePlan(
         scanned_rels=scanned_rels,
-        selected_rels=frozenset(selected_rels),
+        documented_rels=frozenset(selected_rels),
         changed_rels=frozenset(changed_rels),
         forced_rels=frozenset(effective_forced),
         process_rels=frozenset(process_rels),

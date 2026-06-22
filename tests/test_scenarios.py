@@ -22,25 +22,20 @@ def make_fake_provider(description="Documented."):
         provider_name = "fake"
 
         def complete_json(self, prompt, system=""):
-            if "key_concepts" in prompt:
-                return _json.dumps({
-                    "description": description,
-                    "role_in_system": "test role",
-                    "key_concepts": [],
-                    "usage_example": "",
-                })
-            if "dependencies_analysis" in prompt:
-                return _json.dumps({
-                    "dependencies_analysis": {
-                        "internal": [], "external": [],
-                        "dependency_refs": [], "catalog_updates": [],
-                        "usage_notes": [], "warnings": [],
-                    }
-                })
+            # 0.10.0: a single combined response shape works for both the default
+            # single-call combined agent and each legacy triple-mode agent (each
+            # extracts only its own fields).
             return _json.dumps({
                 "description": description,
                 "role_in_system": "test role",
                 "functions": [], "classes": [], "exports": [],
+                "dependencies_analysis": {
+                    "internal": [], "external": [],
+                    "dependency_refs": [], "catalog_updates": [],
+                    "usage_notes": [], "warnings": [],
+                },
+                "key_concepts": [],
+                "usage_example": "",
             })
 
         def complete(self, prompt, system="", temperature=0.1):
@@ -69,33 +64,57 @@ def md_meta(md_path: Path) -> dict:
     return json.loads(m.group(1))
 
 
-def write_existing_json(path: Path, file_hash: str, description: str = "Cached."):
+def _cache_identity(analysis_mode: str = "single") -> dict:
+    """0.10.0 cache-identity keys a prior CodeDoc run would have persisted."""
+    from codedoc.core.record_meta import expected_analysis_identity
+
+    return expected_analysis_identity(analysis_mode)
+
+
+def write_existing_json(
+    path: Path, file_hash: str, description: str = "Cached.", analysis_mode: str = "single"
+):
     path.parent.mkdir(parents=True, exist_ok=True)
+    file_record = {
+        "path": "main.py", "hash": file_hash,
+        "language": "python", "description": description,
+        **_cache_identity(analysis_mode),
+    }
     path.write_text(json.dumps({
         "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
-        "files": [{"path": "main.py", "hash": file_hash,
-                   "language": "python", "description": description}],
+        "files": [file_record],
     }), encoding="utf-8")
 
 
-def write_existing_md(path: Path, file_hash: str, description: str = "Cached."):
-    """Write a 0.7.0-format MD file with file_hashes in the metadata comment."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    meta = json.dumps({
-        "entry_file": "main.py",
+def write_existing_md(
+    path: Path, file_hash: str, description: str = "Cached.", analysis_mode: str = "single"
+):
+    """Write a prior-run MD file with a lossless embedded view carrying the
+    0.10.0 cache-identity keys, so steady-state reuse skips the provider."""
+    from codedoc.core.markdown_view import markdown_from_view
+
+    view = {
         "schema_version": "1.4",
-        "generated_at": "2026-05-24T00:00:00+00:00",
-        "file_hashes": {"main.py": file_hash},
-    })
-    path.write_text(
-        f"<!-- codedoc-ai: {meta} -->\n"
-        f"# codedoc project documentation\n\n"
-        f"## Files\n\n"
-        f"### main.py\n\n"
-        f"**Language:** python  \n\n"
-        f"**Description:** {description}\n\n",
-        encoding="utf-8",
-    )
+        "project": {
+            "entry_file": "main.py", "file_count": 1,
+            "languages": ["python"], "folders": [],
+        },
+        "run": {
+            "files_checked": 1, "files_failed": 0, "files_skipped": 0,
+            "files_reused": 0, "files_documented": 1,
+        },
+        "tree": {},
+        "folders": [],
+        "dependency_catalog": [],
+        "dependency_graph": [],
+        "files": [{
+            "path": "main.py", "hash": file_hash,
+            "language": "python", "description": description,
+            **_cache_identity(analysis_mode),
+        }],
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(markdown_from_view(view), encoding="utf-8")
 
 
 # ---------------------------------------------------------------------------
@@ -684,8 +703,8 @@ def test_H1_identical_content_files_reuse_docs(tmp_path, monkeypatch):
     (tmp_path / "codedoc" / "codedoc.json").write_text(json.dumps({
         "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
         "files": [
-            {"path": "main.py",     "hash": main_hash,   "language": "python", "description": "Entry."},
-            {"path": "helper_a.py", "hash": shared_hash, "language": "python", "description": "Shared helper."},
+            {"path": "main.py",     "hash": main_hash,   "language": "python", "description": "Entry.", **_cache_identity()},
+            {"path": "helper_a.py", "hash": shared_hash, "language": "python", "description": "Shared helper.", **_cache_identity()},
         ],
     }), encoding="utf-8")
 
@@ -730,9 +749,9 @@ def test_I1_propagate_changes_true_reimports_updated(tmp_path, monkeypatch):
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
             {"path": "a.py", "hash": "old_a_hash", "language": "python",
-             "description": "Old A."},
+             "description": "Old A.", **_cache_identity()},
             {"path": "b.py", "hash": b_hash, "language": "python",
-             "description": "Old B."},
+             "description": "Old B.", **_cache_identity()},
         ],
     }), encoding="utf-8")
 
@@ -761,8 +780,8 @@ def test_I2_propagate_changes_false_only_changed(tmp_path, monkeypatch):
     (out / "codedoc.json").write_text(json.dumps({
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
-            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A."},
-            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B."},
+            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A.", **_cache_identity()},
+            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B.", **_cache_identity()},
         ],
     }), encoding="utf-8")
 

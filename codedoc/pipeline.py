@@ -41,7 +41,7 @@ import sys
 from pathlib import Path
 
 from codedoc.agents.base_agent import truncate_for_llm
-from codedoc.agents.orchestrator import Orchestrator
+from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.discovery import (
@@ -287,6 +287,10 @@ def run_pipeline(
                 "scanned": 0,
                 "selected": 0,
                 "entry_excluded": 0,
+                "analysis_mode": config.get("analysis_mode", "single"),
+                "initial_calls_per_file": initial_calls_per_file(
+                    config.get("analysis_mode", "single")
+                ),
                 "documentation_scope": config.get("documentation_scope", "entry"),
                 "entry_reachable": 0,
                 "entry_disconnected": 0,
@@ -300,7 +304,7 @@ def run_pipeline(
                 "forced": 0,
                 "estimated_calls": 0,
                 "estimated_input_tokens": 0,
-                "estimate_is_lower_bound": True,
+                "estimate_is_lower_bound": config.get("analysis_mode", "single") == "triple",
                 "max_files": int(config.get("max_files", 0) or 0),
                 "max_files_exceeded": False,
                 "ownership_conflicts": ownership_conflicts,
@@ -315,6 +319,10 @@ def run_pipeline(
             "failed": 0,
             "skipped": 0,
             "entry_excluded": 0,
+            "analysis_mode": config.get("analysis_mode", "single"),
+            "initial_calls_per_file": initial_calls_per_file(
+                config.get("analysis_mode", "single")
+            ),
             "output_dir": str(output_dir),
             "live_backup_path": None,
             "error_log": None,
@@ -517,6 +525,7 @@ def run_pipeline(
         parallel=config.get("parallel_agents", True),
         max_content_chars=config.get("max_content_chars", 12000),
         usage=usage,
+        analysis_mode=config.get("analysis_mode", "single"),
     )
     stats = {
         "checked": 0,
@@ -715,8 +724,12 @@ def _set_usage_stats(
 
     Token figures are character-heuristic estimates, not tokenizer counts.
     """
+    analysis_mode = config.get("analysis_mode", "single")
+    per_file = initial_calls_per_file(analysis_mode)
     stats.update(usage.snapshot())
-    stats["planned_calls"] = len(plan.agent_rels) * 3
+    stats["analysis_mode"] = analysis_mode
+    stats["initial_calls_per_file"] = per_file
+    stats["planned_calls"] = len(plan.agent_rels) * per_file
     stats["planned_files"] = len(plan.agent_rels)
     # Files the plan routed to the LLM that were neither completed nor failed
     # (e.g. a run aborted early by the consecutive-failure health check).
@@ -749,11 +762,18 @@ def _build_dry_run_stats(
         if config.get("manage_output_gitignore", False)
         else None
     )
+    analysis_mode = config.get("analysis_mode", "single")
+    per_file = initial_calls_per_file(analysis_mode)
+    # single mode embeds only known inputs, so its input estimate is exact;
+    # triple mode's documentation prompt estimate is a lower bound.
+    estimate_is_lower_bound = analysis_mode == "triple"
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
         "selected": len(plan.documented_rels),
         "entry_excluded": len(plan.scanned_rels - plan.documented_rels),
+        "analysis_mode": analysis_mode,
+        "initial_calls_per_file": per_file,
         **scope_stats,
         "would_process": len(plan.process_rels),
         "would_call_llm_for": len(plan.agent_rels),
@@ -761,9 +781,9 @@ def _build_dry_run_stats(
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": len(plan.checkpoint_reuse_rels),
         "forced": len(plan.forced_rels),
-        "estimated_calls": len(plan.agent_rels) * 3,
+        "estimated_calls": len(plan.agent_rels) * per_file,
         "estimated_input_tokens": _estimate_planned_input_tokens(plan, file_map, config),
-        "estimate_is_lower_bound": True,
+        "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
         "max_files_exceeded": plan.max_files_exceeded,
         "ownership_conflicts": ownership_conflicts,
@@ -783,6 +803,7 @@ def _build_scope_stats(
 ) -> dict:
     """Return the stable scope/reachability statistics contract."""
     scope = config.get("documentation_scope", "entry")
+    per_file = initial_calls_per_file(config.get("analysis_mode", "single"))
     disconnected_paid = (
         len(set(agent_rels) - set(reachable_rels))
         if scope == "all" and entry_rel is not None
@@ -794,7 +815,7 @@ def _build_scope_stats(
         "entry_disconnected": len(file_map) - len(reachable_rels),
         "entry_excluded": len(file_map) - len(documented_rels),
         "disconnected_paid_files": disconnected_paid,
-        "disconnected_planned_calls": disconnected_paid * 3,
+        "disconnected_planned_calls": disconnected_paid * per_file,
     }
 
 
@@ -811,8 +832,14 @@ def _estimate_planned_input_tokens(
     centralized truncation helper as real execution so the estimated source
     size matches what would actually be sent.
     """
-    from codedoc.agents import dependency_agent, documentation_agent, structure_agent
+    from codedoc.agents import (
+        dependency_agent,
+        documentation_agent,
+        file_documentation_agent,
+        structure_agent,
+    )
 
+    analysis_mode = config.get("analysis_mode", "single")
     max_chars = config.get("max_content_chars", 12000)
     total = 0
     for rel_path in plan.agent_rels:
@@ -827,11 +854,16 @@ def _estimate_planned_input_tokens(
             imports = []
         language = descriptor.get("language", "generic")
         content = truncate_for_llm(content, max_chars)
-        prompts = (
-            structure_agent.build_prompt(rel_path, content, imports, language),
-            dependency_agent.build_prompt(rel_path, content, imports, language),
-            documentation_agent.build_prompt(rel_path, content, language, {}, {}),
-        )
+        if analysis_mode == "triple":
+            prompts = (
+                structure_agent.build_prompt(rel_path, content, imports, language),
+                dependency_agent.build_prompt(rel_path, content, imports, language),
+                documentation_agent.build_prompt(rel_path, content, language, {}, {}),
+            )
+        else:
+            prompts = (
+                file_documentation_agent.build_prompt(rel_path, content, imports, language),
+            )
         for system, prompt in prompts:
             total += estimate_tokens(system) + estimate_tokens(prompt)
     return total

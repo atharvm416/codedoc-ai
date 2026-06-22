@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.9.9`.
+Current release: `0.10.0`.
 
 ## What It Does
 
@@ -14,6 +14,7 @@ Current release: `0.9.9`.
 - If an entry file is found, documents that file and its reachable project dependencies.
 - If no entry file is found, documents all supported project files.
 - Lets you choose coverage with `--documentation-scope`: `entry` (default — only files reachable from the entry) or `all` (every scanned source file, including disconnected ones). Each file's public record carries a `reachable_from_entry` flag.
+- Defaults to one combined provider call per file (`--analysis-mode single`); opt into the legacy three-agent path with `--analysis-mode triple`.
 - Optionally manages a codedoc-owned block in the output directory's `.gitignore` (`--manage-output-gitignore`), off by default.
 - Parses imports locally before calling an LLM.
 - Processes dependencies before dependent files where possible.
@@ -308,6 +309,7 @@ Create `codedoc.config.json` in the project being documented:
   "api_base_url": null,
   "entry_file": null,
   "documentation_scope": "entry",
+  "analysis_mode": "single",
   "output_dir": "codedoc",
   "output_format": "json",
   "manage_output_gitignore": false,
@@ -389,7 +391,7 @@ Parallelism settings:
 
 | Setting | Purpose |
 | --- | --- |
-| `parallel_agents` | Runs the structure and dependency agents for a single file in parallel. |
+| `parallel_agents` | Runs the structure and dependency agents for a single file in parallel. Only affects `triple` analysis mode; has no per-file effect in the default `single` mode (one call per file). |
 | `max_parallel_files` | Maximum number of files processed at the same time. Default: `5`. |
 | `file_retry_attempts` | Number of sequential retries for a failed file. Default: `1`. |
 | `max_consecutive_failures` | Stops the run after repeated failures so provider/API problems are visible quickly. Default: `5`. |
@@ -420,11 +422,12 @@ Planning and CI settings added in 0.9.2:
 | `force_files` | `[]` | Selected project paths to reprocess explicitly before dependency propagation. |
 | `allow_partial` | `false` | Exit 0 only for completed runs that produced partial output after file failures. |
 
-Coverage and managed-output settings added in 0.9.9:
+Coverage, analysis, and managed-output settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `documentation_scope` | `entry` | `entry` documents only files reachable from the entry; `all` documents every scanned source file, including disconnected ones. This is run configuration, not resume metadata — it is never recovered from a prior output file, so a later run with no override returns to `entry`. For repeatable full coverage keep `documentation_scope: "all"` in config or pass `--documentation-scope all` each run. |
+| `analysis_mode` | `single` | `single` makes one combined provider call per file (lower cost and latency); `triple` runs the legacy three-agent path (structure + dependency + documentation) at three calls per file. Also settable via `CODEDOC_ANALYSIS_MODE` or `--analysis-mode {single,triple}`. Records carry the resolved mode in private cache-identity metadata, so switching modes reprocesses affected files once. The default `single` is a cost/latency choice; deterministic tests confirm a correct one-call response maps losslessly into the public record, but one-call live prose quality is not claimed to equal the three-call path. |
 | `manage_output_gitignore` | `false` | When `true`, maintains a codedoc-owned block in the output directory's ignore file listing the generated artifacts. Disabled by default; the ignore file is never read for write, created, or modified while off. Failure to update it never changes successful documentation output — it surfaces only as an auxiliary warning. |
 | `output_gitignore_filename` | `.gitignore` | Portable basename of the managed ignore file, resolved beneath the output directory. |
 
@@ -936,6 +939,7 @@ CLI flags map directly to config keys:
 | `PATH` | Optional first `run_pipeline(project_root, ...)` argument |
 | `--entry` | `entry_file` |
 | `--documentation-scope` | `documentation_scope` |
+| `--analysis-mode` | `analysis_mode` |
 | `--manage-output-gitignore` / `--no-manage-output-gitignore` | `manage_output_gitignore` |
 | `--provider` | `llm_provider` |
 | `--model` | `model_name` |

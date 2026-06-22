@@ -401,7 +401,8 @@ def test_7_resume_skips_unchanged_files(tmp_path, monkeypatch):
     # Write a live backup that already has main.py with the correct hash
     _codedoc_json(
         tmp_path / "codedoc" / "codedoc.json",
-        [{"path": "main.py", "hash": h, "language": "python"}],
+        [{"path": "main.py", "hash": h, "language": "python",
+          "_analysis_revision": "file-doc-v1", "_analysis_mode": "single"}],
         status="in_progress",
     )
     # Add _crash_safety to make it look like an in-progress run
@@ -502,6 +503,8 @@ def test_8_checkpoint_migration_restores_valid_entries(tmp_path, monkeypatch):
                 "language": "python",
                 "description": "Checkpointed.",
                 "_checkpoint_hash": h,
+                "_analysis_revision": "file-doc-v1",
+                "_analysis_mode": "single",
             }
         },
     }), encoding="utf-8")

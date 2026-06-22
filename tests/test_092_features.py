@@ -138,6 +138,8 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
             "path": rel,
             "hash": compute_file_hash(tmp_path / rel),
             "description": "cached",
+            "_analysis_revision": "file-doc-v1",
+            "_analysis_mode": "single",
         }
         for rel in file_map
     }
@@ -206,6 +208,8 @@ def test_checkpoint_hash_reuse_and_live_backup_precedence(tmp_path, monkeypatch)
                 "_checkpoint_hash": compute_file_hash(tmp_path / "main.py"),
                 "description": "checkpoint",
                 "language": "python",
+                "_analysis_revision": "file-doc-v1",
+                "_analysis_mode": "single",
             }
         },
     }
@@ -260,8 +264,10 @@ def test_dry_run_is_provider_free_and_filesystem_read_only(tmp_path, monkeypatch
     after = {p.relative_to(tmp_path).as_posix(): p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
     assert stats["dry_run"] is True
-    assert stats["estimated_calls"] == 3
-    assert stats["estimate_is_lower_bound"] is True
+    # 0.10.0: default single mode → one call per file; the single-mode input
+    # estimate is exact, so it is not a lower bound.
+    assert stats["estimated_calls"] == 1
+    assert stats["estimate_is_lower_bound"] is False
     assert before == after
     assert not (tmp_path / "new-output").exists()
 
@@ -338,6 +344,8 @@ def test_max_files_counts_only_agent_files(tmp_path):
         "old-name.py": {
             "path": "old-name.py",
             "hash": compute_file_hash(tmp_path / "cached.py"),
+            "_analysis_revision": "file-doc-v1",
+            "_analysis_mode": "single",
         }
     }
     plan, _ = build_pipeline_plan(
@@ -431,10 +439,11 @@ def test_real_run_reports_planned_and_actual_usage(tmp_path, monkeypatch):
         {"entry_file": "main.py", "parallel_agents": False, "propagate_changes": False},
     )
 
-    assert stats["planned_calls"] == 3
-    assert stats["successful_calls"] == 3
+    # 0.10.0: default single mode → one combined call per file.
+    assert stats["planned_calls"] == 1
+    assert stats["successful_calls"] == 1
     assert stats["failed_calls"] == 0
-    assert stats["attempted_calls"] == 3
+    assert stats["attempted_calls"] == 1
     assert stats["estimated_input_tokens"] > 0
     assert stats["estimated_output_tokens"] > 0
 
@@ -461,7 +470,10 @@ def test_provider_construction_errors_are_classified_as_setup_errors(monkeypatch
 def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
     from codedoc.agents.orchestrator import Orchestrator
 
-    orchestrator = Orchestrator(FakeProvider(), parallel=False, max_content_chars=1000)
+    # triple mode is the path that runs all three agents on the same text.
+    orchestrator = Orchestrator(
+        FakeProvider(), parallel=False, max_content_chars=1000, analysis_mode="triple"
+    )
     seen: list[str] = []
 
     def structure(file_path, content, imports, language):

@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.10.0 - 2026-06-22
+
+### Selectable per-file call mode (default one call)
+
+A feature release that makes normal analysis default to **one** validated provider
+call per processed file, while keeping the legacy three-call path available as an
+opt-in. The public record shape, pipeline scheduling, incremental reuse, rate-limit
+handling, and output behavior are unchanged.
+
+- **`analysis_mode` (`single` | `triple`).** New configuration key,
+  `CODEDOC_ANALYSIS_MODE` environment variable, and `--analysis-mode {single,triple}`
+  CLI flag. `single` (default) runs one combined `FileDocumentationAgent` call per
+  file; `triple` runs the legacy StructureAgent/DependencyAgent/DocumentationAgent
+  path (three calls). Validated at the loader; the CLI flag defaults to `None` so an
+  absent flag never overwrites a config-resolved value, and absence from every source
+  resolves to `single`.
+- **Default call count goes from three to one.** `estimated_calls`, `planned_calls`,
+  `disconnected_planned_calls`, and usage accounting all reflect the resolved mode
+  via a single `initial_calls_per_file()` helper (one for `single`, three for
+  `triple`), in both dry-run and real paths. Two new stats — `analysis_mode` and
+  `initial_calls_per_file` — are reported on every stats path, and CLI summaries show
+  them so the default one-call behavior is not silent.
+- **The combined agent is provider-neutral.** OpenAI, Anthropic, and Gemini all run
+  the one-call contract through their existing JSON mechanisms and the same
+  `LLMError` / retry / rate-limit / usage-accounting / file-failure paths. Response
+  cleaning is strict (unknown keys removed, malformed items dropped, booleans
+  rejected, order-preserving de-duplication, named item/length caps, and a global
+  response cap with a fixed lower-priority-first trim order).
+- **Cache identity is revision- and mode-aware.** Records carry private
+  `_analysis_revision` and `_analysis_mode` keys, registered in a dedicated
+  `CACHE_IDENTITY_KEYS` registry. A single centralized predicate governs every reuse
+  source (same-path, identical-content, live-backup, legacy checkpoint): reuse
+  requires a matching content hash **and** every cache-identity key. Pre-0.10.0
+  records (no revision) are reprocessed exactly once; a mode switch invalidates reuse.
+- **Documentation-quality scope (deterministic only).** Deterministic fixture
+  assertions verify that a correct combined response maps losslessly into the public
+  record shape and the catalog/graph for Python, TypeScript/TSX, Dart, and Java
+  fixtures. This checks plumbing, not live-model prose: the default change to
+  `single` is an explicit cost/latency decision, and one-call live prose quality is
+  **not** claimed to equal or exceed the three-call path.
+- **Compatibility.** The three agent classes remain importable and power `triple`
+  mode. `PipelinePlan.documented_rels` is now the canonical dataclass field, with
+  `selected_rels` retained as a read-only delegating alias; the `entry_excluded`
+  statistic is retained while CLI wording derives the excluded count from the
+  reachable/disconnected counts. No `SCHEMA_VERSION` bump — the new keys are private
+  and additive. `parallel_agents` / `--no-parallel` affects only `triple` mode and
+  has no per-file effect in `single` mode.
+
 ## 0.9.9 - 2026-06-20
 
 ### Complete coverage and managed output

@@ -340,9 +340,10 @@ def test_scope_routing_uses_each_real_adapter_with_cache_reuse(
         for prompt in entry_prompts
         if (match := re.search(r"^File: (.+)$", prompt, re.MULTILINE))
     )
+    # 0.10.0: default single mode → one combined call per file.
     assert entry_stats["checked"] == 2
-    assert len(entry_prompts) == 6
-    assert entry_routes == ["helper.py"] * 3 + ["main.py"] * 3
+    assert len(entry_prompts) == 2
+    assert entry_routes == ["helper.py", "main.py"]
 
     rec.get("create_calls", []).clear()
     rec.get("generate_calls", []).clear()
@@ -358,9 +359,9 @@ def test_scope_routing_uses_each_real_adapter_with_cache_reuse(
     assert all_stats["checked"] == 1
     assert all_stats["skipped"] == 2
     assert all_stats["disconnected_paid_files"] == 1
-    assert all_stats["disconnected_planned_calls"] == 3
-    assert len(all_prompts) == 3
-    assert all_routes == ["orphan.py"] * 3
+    assert all_stats["disconnected_planned_calls"] == 1
+    assert len(all_prompts) == 1
+    assert all_routes == ["orphan.py"]
     output = json.loads(
         (project / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
     )
@@ -390,40 +391,29 @@ def test_provider_choice_does_not_change_pipeline_results_or_cache_policy(
             return self.complete_json(prompt, system)
 
         def complete_json(self, prompt, system=""):
+            # 0.10.0: one combined response per file (default single mode).
             self.calls += 1
-            if "key_concepts" in prompt:
-                return json.dumps(
-                    {
-                        "description": "Provider-neutral documentation.",
-                        "role_in_system": "Entry point.",
-                        "key_concepts": ["startup"],
-                    }
-                )
-            if "dependencies_analysis" in prompt:
-                return json.dumps(
-                    {
-                        "dependencies_analysis": {
-                            "external": ["requests"],
-                            "dependency_refs": ["requests"],
-                            "catalog_updates": [
-                                {
-                                    "name": "requests",
-                                    "type": "external",
-                                    "used_for": "HTTP calls",
-                                }
-                            ],
-                            "usage_notes": [
-                                {"import": "requests", "used_for": "HTTP calls"}
-                            ],
-                        }
-                    }
-                )
             return json.dumps(
                 {
-                    "description": "Structured entry point.",
+                    "description": "Provider-neutral documentation.",
                     "role_in_system": "Entry point.",
                     "functions": [{"name": "main", "description": "Run"}],
                     "exports": ["main"],
+                    "key_concepts": ["startup"],
+                    "dependencies_analysis": {
+                        "external": ["requests"],
+                        "dependency_refs": ["requests"],
+                        "catalog_updates": [
+                            {
+                                "name": "requests",
+                                "type": "external",
+                                "used_for": "HTTP calls",
+                            }
+                        ],
+                        "usage_notes": [
+                            {"import": "requests", "used_for": "HTTP calls"}
+                        ],
+                    },
                 }
             )
 
@@ -451,7 +441,7 @@ def test_provider_choice_does_not_change_pipeline_results_or_cache_policy(
             },
         )
         assert stats["checked"] == 1
-        assert provider.calls == 3
+        assert provider.calls == 1
         payloads.append(
             json.loads((project / "docs" / "codedoc.json").read_text(encoding="utf-8"))
         )

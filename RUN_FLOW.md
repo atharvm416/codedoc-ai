@@ -55,8 +55,14 @@ known to be safe.
    (`entry_reachable`, `entry_disconnected`, `disconnected_paid_files`,
    `disconnected_planned_calls`). `documentation_scope` is validated at the
    loader and again defensively here; it is run configuration only and is never
-   recovered from prior output. A dry run returns its projected statistics here
-   and performs no mutation.
+   recovered from prior output. Planned-call statistics (`planned_calls`,
+   `estimated_calls`, `disconnected_planned_calls`) are mode-aware: they multiply
+   the agent-file count by `initial_calls_per_file(analysis_mode)` — one for the
+   default `single` mode, three for `triple`. Reuse eligibility is decided by a
+   single predicate over the content hash plus the cache-identity keys
+   (`_analysis_revision`, `_analysis_mode`), so a record whose revision or mode no
+   longer matches is reprocessed once. A dry run returns its projected statistics
+   here and performs no mutation.
 
 5. **Paid-file safety cap.** After the full plan exists and before any mutation,
    writer initialization, or provider creation, a plan that exceeds the
@@ -82,7 +88,11 @@ known to be safe.
    provider is created. A recovery-write failure here raises
    `LiveBackupWriteError` before any provider exists, so initialization failure
    makes **zero** provider calls. Only after the recovery file is initialized is
-   the provider created and the orchestrator built. If a `KeyboardInterrupt`
+   the provider created and the orchestrator built. The orchestrator is given
+   the resolved `analysis_mode` once: `single` (default) dispatches one combined
+   `FileDocumentationAgent` call per file, while `triple` runs the three legacy
+   agents (three calls); both modes produce the identical flat record and route
+   provider exceptions through the same paths. If a `KeyboardInterrupt`
    propagates from here on, the pipeline attaches the exact selected recovery
    path to the exception (when the file exists) so the CLI can name it.
 

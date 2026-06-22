@@ -161,6 +161,13 @@ DEFAULTS: dict[str, Any] = {
     "force_files": [],
     # Exit 0 even when some files failed (completed runs only).
     "allow_partial": False,
+    # -----------------------------------------------------------------------
+    # 0.10.0 selectable per-file analysis mode
+    # -----------------------------------------------------------------------
+    # "single" — one combined provider call per file (default).
+    # "triple" — the legacy StructureAgent/DependencyAgent/DocumentationAgent
+    #            three-call path.
+    "analysis_mode": "single",
 }
 
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
@@ -182,7 +189,11 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_FILES": "max_files",
     "CODEDOC_FORCE_FILES": "force_files",
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
+    "CODEDOC_ANALYSIS_MODE": "analysis_mode",
 }
+
+# 0.10.0: allowed values for the selectable per-file analysis mode.
+VALID_ANALYSIS_MODES = ("single", "triple")
 
 # Config keys whose environment values are parsed as semicolon-separated lists.
 _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
@@ -546,6 +557,14 @@ def _validate(config: dict[str, Any]) -> None:
 
     if config.get("documentation_scope", "entry") not in ("entry", "all"):
         raise ConfigError("documentation_scope must be 'entry' or 'all'.")
+
+    # 0.10.0: selectable per-file analysis mode — reject unknown values before
+    # provider creation.
+    if config.get("analysis_mode", "single") not in VALID_ANALYSIS_MODES:
+        raise ConfigError(
+            "analysis_mode must be 'single' (one combined call per file) or "
+            "'triple' (the three-agent path)."
+        )
 
     # 0.9.2: normalize booleans early — dry_run gates the API-key warning below.
     config["dry_run"] = _coerce_bool(config.get("dry_run", False))

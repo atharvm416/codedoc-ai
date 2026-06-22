@@ -234,7 +234,19 @@ examples:
         default=False,
         help=(
             "Disable parallel agent execution within each file. "
-            "Useful when an API has strict concurrency limits."
+            "Only affects 'triple' analysis mode (StructureAgent/DependencyAgent "
+            "concurrency); 'single' mode makes one call per file regardless."
+        ),
+    )
+    parser.add_argument(
+        "--analysis-mode",
+        choices=["single", "triple"],
+        default=None,
+        dest="analysis_mode",
+        help=(
+            "Per-file analysis mode: 'single' makes one combined provider call "
+            "per file (default); 'triple' runs the three-agent path "
+            "(structure + dependency + documentation)."
         ),
     )
     parser.add_argument(
@@ -280,15 +292,25 @@ def _print_dry_run_summary(stats: dict) -> None:
     print(f"  Files selected         : {stats.get('selected', 0)}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
+    print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
+    print(
+        "  Initial calls per file : "
+        f"{stats.get('initial_calls_per_file', 1)}"
+    )
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
-    excluded = stats.get("entry_excluded", 0)
+    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # counts.  Under scope 'entry' the disconnected files are exactly the ones
+    # excluded from documentation; scope 'all' documents them so none are
+    # excluded.  The compatibility ``entry_excluded`` stat is still returned.
+    disconnected = stats.get("entry_disconnected", 0)
+    excluded = disconnected if scope == "entry" else 0
     if excluded:
         print(
             f"  Files excluded         : {excluded} disconnected file(s); "
             "use --documentation-scope all for complete coverage"
         )
-    elif stats.get("entry_disconnected", 0):
+    elif disconnected:
         print("  Disconnected status    : included by documentation_scope='all'")
     print(f"  Would process          : {stats.get('would_process', 0)}")
     print(f"  Unchanged (skipped)    : {stats.get('unchanged', 0)}")
@@ -305,9 +327,14 @@ def _print_dry_run_summary(stats: dict) -> None:
             f"{stats['disconnected_paid_files']} "
             f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
         )
+    estimate_qualifier = (
+        "approximate lower bound"
+        if stats.get("estimate_is_lower_bound", False)
+        else "approximate"
+    )
     print(
         f"  Estimated input tokens : ~{stats.get('estimated_input_tokens', 0)} "
-        "(approximate lower bound — character heuristic, not a tokenizer)"
+        f"({estimate_qualifier} — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
     _print_ignore_status(stats, dry_run=True)
@@ -341,16 +368,25 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Files failed     : {stats['failed']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
+    print(f"  Analysis mode    : {stats.get('analysis_mode', 'single')}")
+    print(
+        "  Initial calls/file: "
+        f"{stats.get('initial_calls_per_file', 1)}"
+    )
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
-    excluded = stats.get("entry_excluded", 0)
+    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # counts (see _print_dry_run_summary).  ``entry_excluded`` is still returned
+    # in stats for compatibility.
+    disconnected = stats.get("entry_disconnected", 0)
+    excluded = disconnected if scope == "entry" else 0
     if excluded:
         print(
             f"  Files excluded   : {excluded} disconnected file(s) under "
             "documentation_scope='entry'; use --documentation-scope all for "
             "complete coverage."
         )
-    elif stats.get("entry_disconnected", 0):
+    elif disconnected:
         print("  Disconnected set : included by documentation_scope='all'")
     if stats.get("disconnected_paid_files", 0):
         print(
@@ -461,6 +497,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["safe_mode"] = True
     if args.no_parallel:
         overrides["parallel_agents"] = False
+    if args.analysis_mode is not None:
+        overrides["analysis_mode"] = args.analysis_mode
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.verbose:
