@@ -60,6 +60,7 @@ from codedoc.core.block_manager import BlockError
 from codedoc.core.ignore_manager import generated_ignore_entries, update_output_gitignore
 from codedoc.core.output import (
     inspect_output_ownership,
+    preflight_output_accessibility,
     validate_distinct_artifact_paths,
     write_project_outputs,
 )
@@ -85,7 +86,12 @@ from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
 from codedoc.parser.factory import parse_file
-from codedoc.utils.errors import ConfigError, ErrorReporter, UnrecoverableProviderError
+from codedoc.utils.errors import (
+    ConfigError,
+    ErrorReporter,
+    LiveBackupWriteError,
+    UnrecoverableProviderError,
+)
 from codedoc.utils.logger import get_logger, set_level
 
 # ---------------------------------------------------------------------------
@@ -404,6 +410,13 @@ def run_pipeline(
     # Mutation boundary — everything below may write to the filesystem.
     # ------------------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
+    # 0.10.1 (Workstream C): a provider-free output accessibility probe before
+    # any provider is created.  Runs for every real finalization path — including
+    # all-reused runs that still rewrite stable output — but never for dry-run
+    # (which returns above).  Raises a classified OutputError if the directory
+    # cannot be written, so a persistent permission/space failure is caught
+    # before paid work instead of after it.
+    preflight_output_accessibility(output_dir)
     _remove_legacy_db(output_dir)
     _cleanup_stale_build_file(output_dir, json_filename)
 
@@ -478,6 +491,7 @@ def run_pipeline(
         )
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
+        _cleanup_stale_error_log(stats, error_reporter)
         recorder.delete()
         _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
         _finalize_output_gitignore(
@@ -506,7 +520,7 @@ def run_pipeline(
         error_reporter.flush()
         # The exception propagates to the CLI which never sees stats, so print
         # the error.log path here so the user can always find diagnostics.
-        if error_reporter.has_issues():
+        if error_reporter.has_issues() and error_reporter.has_persisted_log():
             print(
                 f"\n  1 issue recorded. See {error_reporter.log_path.resolve()} for details.",
                 file=sys.stderr,
@@ -588,6 +602,36 @@ def run_pipeline(
         error_reporter.record(exc, context="provider abort")
         error_reporter.flush()
         raise
+    except LiveBackupWriteError as exc:
+        # 0.10.1 (Workstream D3): the dedicated recovery file could not be
+        # persisted, so crash-safety no longer holds and execution stopped
+        # scheduling paid work.  The last valid recovery file is preserved by the
+        # atomic writer.  Record the failure (target path + classified cause +
+        # traceback) to error.log on a best-effort basis, then print the recovery
+        # and error-log paths so the user can act.  A log-write failure must never
+        # replace or hide this primary persistence error.
+        error_reporter.record(exc, context="live backup write")
+        log_note = ""
+        try:
+            error_reporter.flush()
+        except Exception as flush_exc:  # noqa: BLE001 — secondary, must not mask primary
+            log_note = f" (issue log could not be written: {flush_exc})"
+        recovery_note = (
+            f"\n  Completed work is preserved in: {live_backup_path}"
+            if live_backup_path.exists()
+            else ""
+        )
+        error_log_note = (
+            f"\n  Diagnostics: {error_reporter.log_path.resolve()}"
+            if error_reporter.has_persisted_log()
+            else ""
+        )
+        print(
+            f"\nError: {exc}{recovery_note}{error_log_note}{log_note}",
+            file=sys.stderr,
+            flush=True,
+        )
+        raise
     except KeyboardInterrupt as exc:
         # 0.9.8: the run was interrupted mid-processing.  The stable output was
         # never opened; completed work is staged in the dedicated recovery file.
@@ -620,6 +664,11 @@ def run_pipeline(
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
+    # 0.10.1: a clean, issue-free run clears a stale CodeDoc-owned error.log left
+    # by a prior failed run so a historical failure no longer looks current.  A
+    # foreign log is left byte-identical; a removal failure is an auxiliary
+    # warning surfaced in stats, never a failure of valid documentation output.
+    _cleanup_stale_error_log(stats, error_reporter)
     # Clean completion: the stable output is written above; only now delete the
     # dedicated recovery file (all formats).  A deletion OSError raises
     # OutputError and leaves both the stable output and the recovery file intact.
@@ -651,6 +700,19 @@ def run_pipeline(
     return stats
 
 
+def _cleanup_stale_error_log(stats: dict, error_reporter: ErrorReporter) -> None:
+    """Remove a stale CodeDoc-owned error log on a clean run; record any warning.
+
+    Only acts when the current run recorded no issues (``flush`` already wrote
+    the log otherwise).  A removal failure is surfaced as ``stats['stale_log_warning']``
+    and logged, but never raised.
+    """
+    warning = error_reporter.clear_stale_owned_log()
+    if warning:
+        stats["stale_log_warning"] = warning
+        logger.warning(warning)
+
+
 def _set_issue_stats(
     stats: dict,
     error_reporter: ErrorReporter,
@@ -658,8 +720,16 @@ def _set_issue_stats(
 ) -> None:
     """Populate error/issue stats keys on *stats* in-place."""
     if error_reporter.has_issues():
-        stats["error_log"] = str(error_reporter.log_path.resolve())
         stats["issues_recorded"] = error_reporter.issue_count()
+        if error_reporter.has_persisted_log():
+            stats["error_log"] = str(error_reporter.log_path.resolve())
+        else:
+            stats["error_log"] = None
+            stats["issue_log_warning"] = (
+                f"{error_reporter.issue_count()} issue(s) were recorded, but "
+                f"'{error_reporter.log_path.name}' could not be written because "
+                "a foreign file already exists at that path."
+            )
     else:
         stats["error_log"] = None
         stats["issues_recorded"] = 0

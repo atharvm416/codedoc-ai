@@ -63,17 +63,25 @@ def build_project_view(
     files = [_clean_file(record) for record in records]
     paths = [file["path"] for file in files]
     internal_by_from, imported_by = _edge_indexes(graph_edges)
+    project_import_roots = _project_import_roots(files)
 
     for file in files:
         path = file["path"]
         file["reachable_from_entry"] = (
             True if reachable_rels is None else path in reachable_rels
         )
+        internal_paths = internal_by_from.get(path, [])
+        # 0.10.1 (Workstream F): external/sdk links are projected deterministically
+        # from this file's parser imports + finalized graph edges, never from
+        # model output, so single and triple modes produce identical links.
+        external, sdk = _project_dependency_links(
+            file, internal_paths, project_import_roots
+        )
         links = {
-            "internal_dependencies": internal_by_from.get(path, []),
+            "internal_dependencies": internal_paths,
             "imported_by": imported_by.get(path, []),
-            "external_dependencies": file.pop("external_dependencies", []),
-            "sdk_dependencies": file.pop("sdk_dependencies", []),
+            "external_dependencies": external,
+            "sdk_dependencies": sdk,
         }
         links = {key: value for key, value in links.items() if value}
         if links:
@@ -200,24 +208,14 @@ def _clean_file(record: dict) -> dict:
     result = record.get("documentation", {}) or {}
     language = result.get("language") or record.get("language", "")
     dependencies = result.get("dependencies_analysis", {})
-    raw_external = dependencies.get("external", []) if isinstance(dependencies, dict) else []
 
-    # 0.9.3: classify each non-project import as external (third-party) or sdk
-    # (standard library / language SDK), threading the file's language through.
-    # Internal links are never produced here — they come only from graph edges.
-    external_set: set[str] = set()
-    sdk_set: set[str] = set()
-    for name in raw_external:
-        dep = classify_non_project_dependency(name, language)
-        if not dep.canonical:
-            continue
-        if dep.kind == KIND_SDK:
-            sdk_set.add(dep.canonical)
-        else:
-            external_set.add(dep.canonical)
-    external = sorted(external_set)
-    sdk = sorted(sdk_set)
-
+    # 0.10.1 (Workstream F): public external/sdk dependency links are no longer
+    # derived from the model's ``dependencies_analysis.external``.  They are
+    # projected deterministically from the parser ``imports`` and finalized graph
+    # edges in :func:`build_project_view`, so the same source produces identical
+    # links in single and triple modes.  The model dependency fields below remain
+    # *bounded enrichment*: they may only supply ``used_for`` text for a
+    # dependency that the deterministic projection already admits.
     usage_notes = dependencies.get("usage_notes", []) if isinstance(dependencies, dict) else []
     dependency_refs = (
         dependencies.get("dependency_refs", []) if isinstance(dependencies, dict) else []
@@ -239,8 +237,6 @@ def _clean_file(record: dict) -> dict:
         "key_concepts": result.get("key_concepts", []),
         "usage_example": _sanitize_usage_example(result.get("usage_example", "")),
         "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
-        "external_dependencies": external,
-        "sdk_dependencies": sdk,
         "dependency_refs": dependency_refs,
         "dependency_usage": _dependency_usage_map(usage_notes),
         "dependency_catalog_updates": _clean_catalog_updates(catalog_updates),
@@ -376,6 +372,75 @@ def _normalize_internal_candidate(name: Any) -> str:
 # Catalog type tag for graph-resolved internal dependencies.  External / SDK
 # tags come from the deterministic classifier (KIND_EXTERNAL / KIND_SDK).
 KIND_INTERNAL = "internal"
+
+
+def _project_dependency_links(
+    file: dict,
+    internal_paths: list[str],
+    project_import_roots: set[str],
+) -> tuple[list[str], list[str]]:
+    """Project deterministic ``(external, sdk)`` links for one file.
+
+    Workstream F (0.10.1).  Dependency identity is no longer taken from model
+    type labels; it is projected through :func:`classify_non_project_dependency`
+    from an authoritative name source, then de-duplicated and sorted so both
+    analysis modes emit identical links for identical source.
+
+    The authoritative name source depends on the language:
+
+    - **Python** — the parser ``imports`` stored on the record.  A relative
+      import yields an empty canonical and is skipped (internal links come only
+      from graph edges).  A Python import whose canonical root names a project
+      package *and* resolves to one of this file's finalized internal links
+      (e.g. ``codedoc.*``) is dropped as a false external.  Here the model can
+      never add, remove, or reclassify a link.
+    - **Every other language** — the parser deliberately omits third-party
+      package specifiers (e.g. ``react_parser`` returns only relative imports and
+      path aliases, never bare npm packages), so the parser cannot enumerate
+      external dependencies.  For these languages the external/SDK names are taken
+      from the model's reported ``dependencies_analysis.external`` and
+      canonicalized by the same deterministic classifier.  This preserves real
+      JS/TS/Dart/Java dependency information rather than silently dropping it; the
+      cross-mode determinism guarantee for these languages is therefore bounded
+      by the parser's import capability, not by model type labels.
+
+    Either way, model ``catalog_updates`` / ``dependency_refs`` / ``usage_notes``
+    can only enrich an admitted dependency with ``used_for`` text in
+    :func:`_dependency_catalog`; they never create a public link.
+    """
+    language = str(file.get("language", "") or "").lower()
+    if language == "python":
+        names = file.get("imports", [])
+        suppress_project_roots = True
+    else:
+        deps = file.get("_deps", {})
+        names = deps.get("external", []) if isinstance(deps, dict) else []
+        suppress_project_roots = False
+    if not isinstance(names, list):
+        return [], []
+
+    internal_roots: set[str] = set()
+    for internal_path in internal_paths:
+        internal_roots.update(_python_import_roots_for_path(internal_path))
+
+    external_set: set[str] = set()
+    sdk_set: set[str] = set()
+    for name in names:
+        dep = classify_non_project_dependency(name, language)
+        if not dep.canonical:
+            continue
+        is_resolved_python_project_root = (
+            suppress_project_roots
+            and dep.canonical in project_import_roots
+            and dep.canonical in internal_roots
+        )
+        if is_resolved_python_project_root:
+            continue
+        if dep.kind == KIND_SDK:
+            sdk_set.add(dep.canonical)
+        else:
+            external_set.add(dep.canonical)
+    return sorted(external_set), sorted(sdk_set)
 
 
 def _project_import_roots(files: list[dict]) -> set[str]:

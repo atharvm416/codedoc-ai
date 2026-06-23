@@ -69,7 +69,13 @@ known to be safe.
    configured `max_files` limit stops with a `ConfigError`.
 
 6. **Mutation boundary.** Everything below may write to the filesystem. The
-   output directory is created, legacy artifacts are cleaned, and the
+   output directory is created, then a **provider-free output accessibility
+   preflight** (0.10.1) validates create → UTF-8 write → flush → fsync → atomic
+   rename → cleanup using uniquely named probe files. It runs for every real
+   finalization path (including all-reused runs), never for `--dry-run`, never
+   overwrites a user file, and raises a classified `OutputError` before any
+   provider is created if the directory is not writable. Legacy artifacts are
+   then cleaned, and the
    crash-recovery `SafeWriter` (targeting the dedicated recovery file) is
    constructed and given the topological queue order. `SafeWriter.load()` is
    seeded with the merged reuse set computed by the canonical resume boundary
@@ -124,8 +130,17 @@ known to be safe.
     present a safe-stop message (exit `2` for `"terminal"`, exit `1` for
     `"rate_limit_exhausted"`) and the recovery file is preserved for resume.
 
-11. **Diagnostics.** `ErrorReporter.flush()` writes `error.log` in the output
-    directory when any issue was recorded.
+11. **Diagnostics.** `ErrorReporter.flush()` atomically writes `error.log` in the
+    output directory when any issue was recorded; the log begins with the
+    `# codedoc-ai issue log` ownership marker. On a clean, issue-free run a stale
+    CodeDoc-owned `error.log` left by a prior failure is removed so it no longer
+    looks current (0.10.1); a foreign file at that path is left byte-identical and
+    never deleted, truncated, or overwritten, and a removal failure is surfaced as
+    an auxiliary `stale_log_warning` rather than failing the run. A fatal
+    `LiveBackupWriteError` that escapes execution records best-effort diagnostics
+    (target path, classified OS cause, traceback) and prints the recovery and
+    error-log paths, without a secondary log-write failure masking the primary
+    persistence error.
 
 12. **Cleanup.** Only after the stable output is written, `SafeWriter.delete()`
     removes the dedicated recovery file — for **every** format. Order matters: if

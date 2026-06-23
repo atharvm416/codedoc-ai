@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.10.0`.
+Current release: `0.10.1`.
 
 ## What It Does
 
@@ -586,6 +586,8 @@ If a JSON output file is missing but an identically-named Markdown file is prese
 
 Incremental state lives inside the output file itself — there is no separate cache database. On each run, `codedoc` reads the existing output file, extracts per-file hashes and documentation records, and compares them against current file content. Only files whose content has changed are sent to the LLM.
 
+> **One-time reprocessing in 0.10.1.** The analysis cache identity advanced from `file-doc-v1` to `file-doc-v2` because the prompt semantics and response cleaning changed (precise local-symbol/export/usage-example rules and the head-plus-tail truncation marker). Records produced by 0.10.0 remain readable, but each one is regenerated **once** under the corrected contract before it is reused — so the first 0.10.1 run over an existing project re-documents previously cached files and incurs the corresponding one-time provider cost. The public document schema is unchanged (`schema_version` stays `1.4`); subsequent runs resume incrementally as usual.
+
 The CLI logs the selected output format and the exact output file path during execution for better visibility.
 
 The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readable output files. They include:
@@ -600,6 +602,8 @@ The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readabl
 - Internal, external, SDK/standard-library, and reverse dependencies (`imported_by`).
 
 Since 0.9.3, third-party packages and language standard-library / SDK modules are separated: each file's `links` carry `external_dependencies` (third-party) and `sdk_dependencies` (e.g. Python stdlib, Dart `dart:*`, Node built-ins). The `SDK / Standard Library` Markdown section is rendered only when non-empty, and `internal_dependencies` / `imported_by` are derived **only** from resolved project-graph edges — unresolved agent text can never become an internal link. Missing `sdk_dependencies` loads as an empty list for older outputs.
+
+Since 0.10.1, dependency links are projected deterministically rather than from model type labels, so `single` and `triple` modes produce identical links for identical source. For Python the projection is fully parser-authoritative: `external_dependencies` and `sdk_dependencies` come from the parser-extracted imports classified against the standard library, and model output can never add, remove, or reclassify a Python link. For other languages whose parser intentionally omits third-party package specifiers (e.g. the JS/TS parser returns only relative imports), the external/SDK set is taken from the model's reported dependencies and canonicalized by the same deterministic classifier; model `catalog_updates` / `usage_notes` may only attach purpose text to a dependency that already exists.
 
 They exclude internal processing data such as raw LLM responses and per-file history.
 

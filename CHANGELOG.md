@@ -1,5 +1,80 @@
 # Changelog
 
+## 0.10.1 - 2026-06-23
+
+### Output diagnostics, Windows write resilience, and deterministic enrichment
+
+A patch release that makes local output failures actionable and less likely to
+interrupt a paid run, and corrects verified cross-mode enrichment inconsistencies,
+without weakening CodeDoc's atomic-write, crash-recovery, ownership, factuality, or
+credential-safety guarantees. The public document schema is unchanged
+(`schema_version` stays `1.4`).
+
+- **Actionable local I/O diagnostics.** A new private `codedoc/core/io_diagnostics.py`
+  classifies a local write failure into a stable category (`locked`, `permission`,
+  `missing_parent`, `is_directory`, `no_space`, `read_only`, `io`, `serialization`)
+  and formats a concise, secret-free cause from OS metadata only (exception class,
+  Windows `winerror`, portable `errno`, OS reason text) plus the affected local path.
+  No API keys, prompts, source contents, or provider responses ever appear in a
+  message. `LiveBackupWriteError` now carries this cause and a resume hint.
+- **Bounded transient-lock retry on atomic replace.** `atomic_write_text()` retries
+  only the final `Path.replace` step, and only for a Windows sharing/lock violation
+  (`winerror` 32/33), using a fixed sub-second delay sequence
+  (`ATOMIC_REPLACE_RETRY_DELAYS_S = (0.05, 0.15, 0.30)`). It reuses the already
+  flushed/fsynced temporary file, never recreates provider output or re-calls the
+  provider, and never retries `ENOSPC`, read-only media, missing-parent, directory
+  collisions, serialization failures, or non-lock permission denials. A successful
+  retry leaves no temporary sibling; an exhausted one removes the temp file and
+  raises the original failure with its cause intact.
+- **Output accessibility preflight.** A real run validates that the output directory
+  can be created, written (UTF-8), flushed, fsynced, atomically renamed, and cleaned
+  up — using uniquely named probe files — after planning and the paid-file cap but
+  **before** any provider is created. It never overwrites a user file, leaves no
+  probe artifacts, and is skipped entirely for `--dry-run`. The authoritative
+  recovery-target check remains `SafeWriter.initialize_empty()`.
+- **Current-run error-log lifecycle.** `error.log` now begins with a stable ASCII
+  ownership marker (`# codedoc-ai issue log`; the legacy `codedoc issue log` header is
+  still recognized). A clean, issue-free run removes a stale CodeDoc-owned log so a
+  historical failure no longer looks current; a foreign file at that path is left
+  byte-identical and never deleted, truncated, or overwritten. `ErrorReporter.flush()`
+  is now routed through the canonical atomic writer. A fatal `LiveBackupWriteError`
+  records best-effort diagnostics and prints the recovery and error-log paths without
+  letting a log-write failure mask the primary error.
+- **Deterministic dependency projection.** Public dependency links no longer come
+  from model type labels, so `single` and `triple` modes produce identical links for
+  identical source. For Python the projection is fully parser-authoritative (parser
+  imports + finalized graph edges; project imports that resolve to a graph edge are
+  never mislabeled external; model output can never add, remove, or reclassify a
+  link). For languages whose parser intentionally omits third-party package
+  specifiers (e.g. JS/TS), the external/SDK set is taken from the model's reported
+  dependencies and canonicalized by the same deterministic classifier; this preserves
+  real non-Python dependency information rather than dropping it. Model
+  `catalog_updates` / `dependency_refs` / `usage_notes` remain enrichment-only.
+- **Shared strict enrichment and aligned prompts.** Single-mode response cleaners
+  moved to `codedoc/agents/response_cleaning.py` and now also clean the triple-mode
+  `StructureAgent` / `DependencyAgent` / `DocumentationAgent` subresponses, so both
+  modes enforce the same documented keys, bounds, de-duplication, and boolean/malformed
+  rejection. Prompts in both families share precise definitions: `functions`/`classes`
+  are symbols *defined in* the file, `exports` are deliberately exposed names
+  (including package re-exports), imported names are never relabeled as local symbols,
+  and `usage_example` is included only when supported by the file's real public API —
+  never a placeholder path.
+- **Head-plus-tail source context.** Files larger than `max_content_chars` now send a
+  leading *and* a trailing slice (~70/30) with the truncation marker between them,
+  within the same character ceiling, so late class/function definitions and entry
+  points are no longer invisible. The single shared helper is used by both modes and
+  dry-run estimation, and at most one truncation warning is logged per file.
+- **Cache identity advances to `file-doc-v2`.** Because prompt and cleaning semantics
+  changed, `ANALYSIS_REVISION` advances from `file-doc-v1` to `file-doc-v2`. Existing
+  0.10.0 outputs and recovery files remain readable, but matching `file-doc-v1`
+  records are regenerated **once** under the corrected contract before reuse, so the
+  first 0.10.1 run over an existing project re-documents previously cached files and
+  incurs a one-time provider cost. Mode identity (`single`/`triple`) is still required.
+
+Provider selection, call counts, retries, rate limits, usage accounting, the public
+JSON/Markdown schema, and crash-recovery semantics are otherwise unchanged. Windows
+improvements do not regress Linux or macOS behavior.
+
 ## 0.10.0 - 2026-06-22
 
 ### Selectable per-file call mode (default one call)

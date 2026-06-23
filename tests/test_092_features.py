@@ -12,6 +12,8 @@ from pathlib import Path
 
 import pytest
 
+from codedoc.core.record_meta import ANALYSIS_REVISION
+
 
 class FakeProvider:
     provider_name = "fake"
@@ -138,7 +140,7 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
             "path": rel,
             "hash": compute_file_hash(tmp_path / rel),
             "description": "cached",
-            "_analysis_revision": "file-doc-v1",
+            "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
         }
         for rel in file_map
@@ -208,7 +210,7 @@ def test_checkpoint_hash_reuse_and_live_backup_precedence(tmp_path, monkeypatch)
                 "_checkpoint_hash": compute_file_hash(tmp_path / "main.py"),
                 "description": "checkpoint",
                 "language": "python",
-                "_analysis_revision": "file-doc-v1",
+                "_analysis_revision": ANALYSIS_REVISION,
                 "_analysis_mode": "single",
             }
         },
@@ -344,7 +346,7 @@ def test_max_files_counts_only_agent_files(tmp_path):
         "old-name.py": {
             "path": "old-name.py",
             "hash": compute_file_hash(tmp_path / "cached.py"),
-            "_analysis_revision": "file-doc-v1",
+            "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
         }
     }
@@ -501,8 +503,11 @@ def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
 
     assert len(seen) == 3
     assert seen[0] == seen[1] == seen[2]
+    # 0.10.1 (Workstream H): head-plus-tail truncation keeps a leading and a
+    # trailing slice with the marker between them, all within the ceiling.
     assert len(seen[0]) == 1000
-    assert seen[0].endswith("[truncated]")
+    assert "[truncated]" in seen[0]
+    assert seen[0].startswith("x") and seen[0].endswith("x")
     assert caplog.text.count("Content truncated") == 1
 
 

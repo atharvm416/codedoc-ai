@@ -23,6 +23,34 @@ from __future__ import annotations
 import traceback
 from pathlib import Path
 
+# ---------------------------------------------------------------------------
+# error.log ownership markers (0.10.1)
+# ---------------------------------------------------------------------------
+# A CodeDoc-owned log starts with one of these ASCII markers on its first line.
+# The new marker is written by ``ErrorReporter.flush()``; the legacy prefix is
+# recognized for safe cleanup of logs created before 0.10.1.  A file whose first
+# line matches neither is foreign and is never deleted, truncated, or replaced.
+LOG_OWNERSHIP_MARKER = "# codedoc-ai issue log"
+_LEGACY_LOG_MARKER_PREFIX = "codedoc issue log"
+
+
+def is_codedoc_owned_log(path: Path) -> bool:
+    """Return True only if *path* is a recognized CodeDoc-owned ``error.log``.
+
+    Reads just the first line.  A missing or unreadable file is treated as
+    not-owned (the caller must never delete it).  Both the new ``# codedoc-ai
+    issue log`` marker and the legacy ``codedoc issue log`` header are accepted.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="strict") as handle:
+            first_line = handle.readline()
+    except (OSError, UnicodeDecodeError):
+        return False
+    stripped = first_line.lstrip("﻿").strip()
+    return stripped.startswith(LOG_OWNERSHIP_MARKER) or stripped.startswith(
+        _LEGACY_LOG_MARKER_PREFIX
+    )
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -165,6 +193,7 @@ class ErrorReporter:
     def __init__(self, log_path: Path):
         self.log_path = log_path
         self._entries: list[dict] = []
+        self._last_flush_persisted: bool = False
 
     def record(self, error: Exception, context: str = "", level: str = "error") -> None:
         """Record an issue without stopping execution.
@@ -212,18 +241,38 @@ class ErrorReporter:
     # Output helpers
     # ------------------------------------------------------------------
 
-    def flush(self) -> None:
-        """Write all recorded issues to the log file.
+    def flush(self) -> bool:
+        """Atomically write all recorded issues to the log file.
 
         Creates the log file's parent directory if needed (output_dir may
         not exist yet when flush is called on an early-exit code path).
-        Does nothing when no issues have been recorded.
+        Returns ``True`` when a CodeDoc-owned log was actually persisted, and
+        ``False`` when there were no issues or a foreign file occupied the log
+        path.
+
+        0.10.1: the log begins with a stable ASCII ownership marker so a later
+        successful run can recognize and clear it.  When a *foreign* file already
+        occupies the path it is never replaced — its bytes are left intact and a
+        warning is logged instead of raising.  Writing is routed through the
+        canonical atomic-write helper so a stale owned log is replaced in one
+        atomic rename rather than appended to or truncated in place.
         """
+        self._last_flush_persisted = False
         if not self._entries:
-            return
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+            return False
+        if self.log_path.exists() and not is_codedoc_owned_log(self.log_path):
+            # A foreign file sits at the log path: never overwrite it.
+            from codedoc.utils.logger import get_logger
+
+            get_logger(__name__).warning(
+                "A foreign file occupies the issue-log path '%s'; codedoc will "
+                "not overwrite it. %d issue(s) were not persisted to disk.",
+                self.log_path,
+                len(self._entries),
+            )
+            return False
         lines = [
-            f"codedoc issue log — {len(self._entries)} issue(s)\n",
+            f"{LOG_OWNERSHIP_MARKER} — {len(self._entries)} issue(s)\n",
             "=" * 60 + "\n",
         ]
         for i, e in enumerate(self._entries, 1):
@@ -234,7 +283,44 @@ class ErrorReporter:
             if e.get("level", "error") == "error":
                 lines.append(f"    Root cause:\n{e['traceback']}\n")
             lines.append("-" * 60 + "\n")
-        self.log_path.write_text("".join(lines), encoding="utf-8")
+        # Function-local import avoids a module-load cycle (block_manager imports
+        # io_diagnostics which imports nothing from this module, but routing the
+        # canonical writer lazily keeps errors.py free of core imports at load).
+        from codedoc.core.block_manager import atomic_write_text
+
+        atomic_write_text(self.log_path, "".join(lines))
+        self._last_flush_persisted = True
+        return True
+
+    def has_persisted_log(self) -> bool:
+        """True when the last successful ``flush()`` wrote a CodeDoc-owned log."""
+        return self._last_flush_persisted and self.log_path.exists() and is_codedoc_owned_log(
+            self.log_path
+        )
+
+    def clear_stale_owned_log(self) -> str | None:
+        """Remove a stale CodeDoc-owned ``error.log`` after a clean, issue-free run.
+
+        Returns ``None`` when nothing needed removal or removal succeeded, or a
+        short warning string when an owned log could not be removed.  A foreign
+        file is left byte-identical and reported as ``None`` (not our file).  A
+        missing file is a no-op.  Never raises — a stale-log removal failure is an
+        auxiliary warning, not a failure of otherwise valid documentation output.
+        """
+        if self._entries:
+            return None
+        if not self.log_path.exists():
+            return None
+        if not is_codedoc_owned_log(self.log_path):
+            return None
+        try:
+            self.log_path.unlink()
+        except OSError as exc:
+            return (
+                f"a stale codedoc issue log '{self.log_path.name}' could not be "
+                f"removed: {exc}"
+            )
+        return None
 
     def summary(self) -> str:
         """Return a summary string for error-level entries only.

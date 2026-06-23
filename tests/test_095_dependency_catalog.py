@@ -17,8 +17,14 @@ from __future__ import annotations
 from codedoc.core.project_view import build_project_view
 
 
-def _record(path, language, *, external=None, catalog_updates=None,
+def _record(path, language, *, external=None, imports=None, catalog_updates=None,
             dependency_refs=None, usage_notes=None):
+    # 0.10.1 (Workstream F): finalized external/SDK links are projected from the
+    # parser ``imports``.  Each case states the parser-found dependency names via
+    # ``external``; by default those names are the parser imports too, so the
+    # deterministic input is declared once.  ``dependencies_analysis.external``
+    # remains set to exercise the bounded model-enrichment path, which can no
+    # longer create a public link on its own.
     deps = {}
     if external is not None:
         deps["external"] = external
@@ -28,6 +34,7 @@ def _record(path, language, *, external=None, catalog_updates=None,
         deps["dependency_refs"] = dependency_refs
     if usage_notes is not None:
         deps["usage_notes"] = usage_notes
+    parser_imports = imports if imports is not None else (external or [])
     return {
         "hash": f"h-{path}",
         "file_path": path,
@@ -36,6 +43,7 @@ def _record(path, language, *, external=None, catalog_updates=None,
             "file_path": path,
             "language": language,
             "description": "d",
+            "imports": parser_imports,
             "dependencies_analysis": deps,
         },
     }

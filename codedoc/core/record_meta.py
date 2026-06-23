@@ -16,9 +16,15 @@ synthetic key to exercise the carry behaviour.
 
 from __future__ import annotations
 
-# 0.10.0 cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation
-# strategy changes in a way that should invalidate previously cached records.
-ANALYSIS_REVISION = "file-doc-v1"
+# Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
+# changes in a way that should invalidate previously cached records.
+#
+# 0.10.1: advanced from ``file-doc-v1`` to ``file-doc-v2`` because prompt
+# semantics (precise local-symbol / export / usage-example definitions, the
+# head-plus-tail truncation marker) and response cleaning changed for both
+# ``single`` and ``triple`` modes.  ``file-doc-v1`` records remain readable but
+# are reprocessed exactly once under the corrected contract before reuse.
+ANALYSIS_REVISION = "file-doc-v2"
 
 # Cache-identity keys: private keys that, together with the content hash, decide
 # whether a stored record may be reused.  This is a *narrower* set than

@@ -435,6 +435,8 @@ def _print_run_summary(stats: dict) -> None:
             print(f"\n  {failed} file(s) failed. See {error_log} for details.")
         else:
             print(f"\n  {issues} issue(s) recorded (all recovered). See {error_log} for details.")
+    elif issues and stats.get("issue_log_warning"):
+        print(f"\n  Issue log warning: {stats['issue_log_warning']}")
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -604,7 +606,32 @@ def run_cli(argv: list[str] | None = None) -> int:
                 traceback.print_exc()
             return 2
         if isinstance(exc, OutputError):
+            # 0.10.1: the OutputError message already carries the sanitized OS
+            # cause/category and the affected path.  Add concrete next-step
+            # guidance keyed on whether this was a transient lock or a persistent
+            # accessibility failure.  CodeDoc never names the locking process
+            # unless the OS supplied it in the message above.
+            from codedoc.core.io_diagnostics import classify_os_error
+
             print(f"Error: {exc}", file=sys.stderr)
+            category = classify_os_error(exc)
+            if category == "locked":
+                print(
+                    "\nThis looks like a transient file lock. Completed work is "
+                    "preserved in the named crash-recovery file. Close any program "
+                    "that may be viewing the file and rerun the same command to "
+                    "resume. CodeDoc cannot identify the locking process unless the "
+                    "operating system reports it.",
+                    file=sys.stderr,
+                )
+            else:
+                print(
+                    "\nChoose a writable output directory or correct local "
+                    "permissions, then rerun the same command. When the failure "
+                    "occurred during preflight or recovery initialization, no "
+                    "provider was contacted.",
+                    file=sys.stderr,
+                )
             if args.verbose:
                 import traceback
                 traceback.print_exc()

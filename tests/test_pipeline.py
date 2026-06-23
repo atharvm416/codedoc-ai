@@ -237,6 +237,12 @@ def test_public_output_normalizes_external_package_names(tmp_path):
                     "file_path": "lib/main.dart",
                     "language": "dart",
                     "description": "Starts the app.",
+                    # 0.10.1: public links project from the parser imports.
+                    "imports": [
+                        "flutter/material.dart",
+                        "provider/provider.dart",
+                        "dart:async",
+                    ],
                     "dependencies_analysis": {
                         "external": [
                             "flutter/material.dart",
@@ -801,7 +807,7 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
             "documentation": {
                 "file_path": "src/main.tsx",
                 "language": "tsx",
-                "imports": ["./router"],
+                "imports": ["react", "./router"],
                 "description": "Starts the frontend app.",
                 "role_in_system": "Application entry.",
                 "functions": [],
@@ -835,7 +841,7 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
             "documentation": {
                 "file_path": "src/router.tsx",
                 "language": "tsx",
-                "imports": [],
+                "imports": ["react", "react-router-dom"],
                 "description": "Defines routes.",
                 "role_in_system": "Routes application screens.",
                 "functions": [],
