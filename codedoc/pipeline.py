@@ -342,7 +342,7 @@ def run_pipeline(
             **_initial_ignore_stats(config, ignore_target),
         }
 
-    graph, file_map = _build_graph(all_files, root, error_reporter)
+    graph, file_map, unresolved_imports_by_path = _build_graph(all_files, root, error_reporter)
     reachable_rels, documented_rels, entry_rel = _select_files(
         root, config, graph, file_map
     )
@@ -488,6 +488,7 @@ def run_pipeline(
             json_filename=json_filename,
             md_filename=md_filename,
             reachable_rels=reachable_rels,
+            unresolved_imports_by_path=unresolved_imports_by_path,
         )
         stats["output_files"] = [str(path) for path in output_files if path]
         error_reporter.flush()
@@ -540,6 +541,7 @@ def run_pipeline(
         max_content_chars=config.get("max_content_chars", 12000),
         usage=usage,
         analysis_mode=config.get("analysis_mode", "single"),
+        truncation_head_ratio=config.get("truncation_head_ratio", 0.70),
     )
     stats = {
         "checked": 0,
@@ -661,6 +663,7 @@ def run_pipeline(
         json_filename=json_filename,
         md_filename=md_filename,
         reachable_rels=reachable_rels,
+        unresolved_imports_by_path=unresolved_imports_by_path,
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
@@ -923,7 +926,8 @@ def _estimate_planned_input_tokens(
         except Exception:
             imports = []
         language = descriptor.get("language", "generic")
-        content = truncate_for_llm(content, max_chars)
+        head_fraction = config.get("truncation_head_ratio", 0.70)
+        content = truncate_for_llm(content, max_chars, head_fraction=head_fraction)
         if analysis_mode == "triple":
             prompts = (
                 structure_agent.build_prompt(rel_path, content, imports, language),

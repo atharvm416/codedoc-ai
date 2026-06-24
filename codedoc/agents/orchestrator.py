@@ -74,6 +74,7 @@ class Orchestrator:
         max_content_chars: int = 12000,
         usage: UsageAccumulator | None = None,
         analysis_mode: str = "single",
+        truncation_head_ratio: float = 0.70,
     ) -> None:
         if analysis_mode not in VALID_ANALYSIS_MODES:
             raise ValueError(
@@ -84,6 +85,7 @@ class Orchestrator:
         self.parallel = parallel
         self.max_content_chars = max_content_chars
         self.analysis_mode = analysis_mode
+        self.truncation_head_ratio = truncation_head_ratio
         # The combined agent powers the default single-call path.
         self._file_agent = FileDocumentationAgent(
             llm, max_content_chars=max_content_chars, usage=usage
@@ -118,7 +120,11 @@ class Orchestrator:
         # WARNING per processed file — the agents' own fallback is DEBUG.
         original_chars = len(content)
         if original_chars > self.max_content_chars:
-            content = truncate_for_llm(content, self.max_content_chars)
+            content = truncate_for_llm(
+                content,
+                self.max_content_chars,
+                head_fraction=self.truncation_head_ratio,
+            )
             logger.warning(
                 "Content truncated: %s (%d chars -> %d chars sent; configured "
                 "ceiling max_content_chars=%d). Raise max_content_chars in "

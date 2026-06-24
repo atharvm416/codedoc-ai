@@ -257,6 +257,19 @@ examples:
         help="Maximum files to process at once (default: 5)",
     )
     parser.add_argument(
+        "--truncation-head-ratio",
+        type=float,
+        default=None,
+        metavar="FLOAT",
+        dest="truncation_head_ratio",
+        help=(
+            "Head fraction (0.0–1.0 exclusive) for the head-plus-tail source "
+            "truncation split (default: 0.70). Lower values send more of the "
+            "file tail to the LLM; raise this for files where definitions live "
+            "near the top."
+        ),
+    )
+    parser.add_argument(
         "--verbose", "-v",
         action="store_true",
         default=False,
@@ -503,6 +516,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["analysis_mode"] = args.analysis_mode
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
+    if args.truncation_head_ratio is not None:
+        overrides["truncation_head_ratio"] = args.truncation_head_ratio
     if args.verbose:
         overrides["log_level"] = "DEBUG"
     if args.dry_run:

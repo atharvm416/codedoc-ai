@@ -30,7 +30,11 @@ TRUNCATION_MARKER = "\n... [truncated] ...\n"
 TRUNCATION_HEAD_FRACTION = 0.70
 
 
-def truncate_for_llm(content: str, max_chars: int) -> str:
+def truncate_for_llm(
+    content: str,
+    max_chars: int,
+    head_fraction: float = TRUNCATION_HEAD_FRACTION,
+) -> str:
     """Truncate *content* to a head-plus-tail slice within *max_chars*.
 
     Workstream H (0.10.1).  Files larger than the ceiling previously sent only a
@@ -47,7 +51,10 @@ def truncate_for_llm(content: str, max_chars: int) -> str:
       agent's defensive fallback, and dry-run estimation), so single and triple
       modes and the dry-run estimate all see exactly the same truncated text.
 
-    This is the single truncation helper shared across the pipeline.
+    0.10.2: the *head_fraction* parameter (default :data:`TRUNCATION_HEAD_FRACTION`
+    = 0.70) is now configurable via ``truncation_head_ratio`` in the config
+    or ``--truncation-head-ratio`` on the CLI.  Callers that omit the argument
+    continue to use the 0.70 default and produce byte-identical output.
     """
     if len(content) <= max_chars:
         return content
@@ -57,7 +64,7 @@ def truncate_for_llm(content: str, max_chars: int) -> str:
     if max_chars <= len(marker):
         return marker[:max_chars]
     budget = max_chars - len(marker)
-    head_len = int(budget * TRUNCATION_HEAD_FRACTION)
+    head_len = int(budget * head_fraction)
     tail_len = budget - head_len
     head = content[:head_len]
     tail = content[len(content) - tail_len:] if tail_len > 0 else ""

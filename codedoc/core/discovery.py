@@ -104,23 +104,39 @@ def _build_graph(
     all_files: list[dict],
     root: Path,
     error_reporter: ErrorReporter,
-) -> tuple[DependencyGraph, dict[str, dict]]:
+) -> tuple[DependencyGraph, dict[str, dict], dict[str, list[str]]]:
+    """Build the dependency graph from scanned file descriptors.
+
+    Returns ``(graph, file_map, unresolved_imports_by_path)``.
+
+    ``unresolved_imports_by_path`` maps each file's ``rel_path`` to the list of
+    raw import strings that the parser emitted but that did not resolve to any
+    internal project file via ``resolve_import()``.  These are the candidates for
+    external / SDK dependency projection in ``_project_dependency_links()``
+    (Workstream C, 0.10.2).
+    """
     graph = DependencyGraph()
     all_rel_paths = {d["rel_path"] for d in all_files}
     file_map = {d["rel_path"]: d for d in all_files}
+    unresolved_imports_by_path: dict[str, list[str]] = {}
 
     for descriptor in all_files:
-        graph.add_file(descriptor["rel_path"])
+        rel_path = descriptor["rel_path"]
+        graph.add_file(rel_path)
+        unresolved: list[str] = []
         try:
             imports = parse_file(descriptor)
             for imp in imports:
-                resolved = resolve_import(imp, descriptor["rel_path"], all_rel_paths, root)
+                resolved = resolve_import(imp, rel_path, all_rel_paths, root)
                 if resolved:
-                    graph.add_dependency(descriptor["rel_path"], resolved)
+                    graph.add_dependency(rel_path, resolved)
+                else:
+                    unresolved.append(imp)
         except ParseError as exc:
-            error_reporter.record(exc, context=descriptor["rel_path"])
+            error_reporter.record(exc, context=rel_path)
+        unresolved_imports_by_path[rel_path] = unresolved
 
-    return graph, file_map
+    return graph, file_map, unresolved_imports_by_path
 
 
 def _select_files(

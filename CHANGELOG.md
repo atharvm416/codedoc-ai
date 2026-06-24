@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.10.2 - 2026-06-24
+
+### Dependency projection fix, configurable truncation ratio, and error classifier extraction
+
+A patch release that completes three targeted improvements identified during 0.10.1 review.
+The public document schema is unchanged (`schema_version` stays `1.4`). `SCHEMA_VERSION`
+is not bumped. `_analysis_revision` is not bumped — the truncation ratio is user-controlled
+and explicit; the dependency projection fix only changes which deterministic source is used,
+not prompts, cleaned record shape, or provider-facing analysis semantics.
+
+- **Parser-authoritative dependency projection for non-React languages (Workstream C).**
+  0.10.1 made Python parser-authoritative but kept JS/TS/Dart/Java/etc. on model-provided
+  external dependencies. The global rule is now: every parser that emits complete imports is
+  authoritative for public external/SDK links, with an explicit exception for the React/Node
+  family (`js`, `jsx`, `ts`, `tsx`), whose parser deliberately omits bare npm packages. For
+  Python and generic-parser languages (Dart, Java, Kotlin, C#, Swift, Go, Ruby, Rust, C/C++,
+  HTML), public links are derived from the imports that did not resolve to an internal project
+  file via graph resolution — so relative Dart imports and same-directory file references never
+  leak as bogus external dependencies. Dart SDK imports (`dart:io`) classify as SDK; Dart
+  package imports (`package:record/record.dart`) canonicalize to the package name (`record`).
+  React/Node bare npm dependencies continue to come from model `_deps.external`. Single and
+  triple modes now produce byte-identical external/SDK links for identical source for Python
+  and generic-parser languages; React/Node remains model-assisted for bare npm packages.
+
+- **Configurable truncation head ratio (Workstream A).** The 70/30 head-plus-tail split
+  introduced in 0.10.1 is now user-configurable via `truncation_head_ratio` in the config
+  file (or `CODEDOC_TRUNCATION_HEAD_RATIO` environment variable, or `--truncation-head-ratio`
+  CLI flag). The default stays 0.70, producing byte-identical output to 0.10.1 when not set.
+  Invalid values (0.0, 1.0, outside (0,1), booleans, non-numeric strings) are rejected before
+  provider creation. The dry-run token estimate uses the same configured ratio so the planning
+  output reflects the actual truncated input.
+
+- **Error classifier extraction (Workstream B).** Signal constants and pure classification
+  functions (`_classify_failure`, `_build_terminal_abort`, `_parse_retry_after`, etc.) are
+  now in `codedoc/core/error_classifier.py`. `execution.py` is reduced from ~1150 to ~770
+  lines. Deprecated compat re-exports remain in `execution.py` for one release. No behavior
+  change; this is a structural-only decomposition following the 0.9.4 pattern.
+
+Existing configuration, API, CLI, and output formats are fully backward-compatible. All
+compat re-exports added in this release will be removed in a future release.
+
 ## 0.10.1 - 2026-06-23
 
 ### Output diagnostics, Windows write resilience, and deterministic enrichment

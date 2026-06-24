@@ -194,6 +194,7 @@ def write_project_outputs(
     json_filename: str = PROJECT_JSON,
     md_filename: str = PROJECT_MARKDOWN,
     reachable_rels: set[str] | frozenset[str] | None = None,
+    unresolved_imports_by_path: dict[str, list[str]] | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Write the final combined output file(s).
 
@@ -223,7 +224,12 @@ def write_project_outputs(
 
     try:
         view = build_project_view(
-            records, stats, entry_file, graph_edges, reachable_rels=reachable_rels
+            records,
+            stats,
+            entry_file,
+            graph_edges,
+            reachable_rels=reachable_rels,
+            unresolved_imports_by_path=unresolved_imports_by_path,
         )
 
         # Render both complete payloads before mutating any final target, so a
