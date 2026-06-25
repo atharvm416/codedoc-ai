@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from codedoc.core.db import compute_file_hash
+from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import (
     _load_existing_file_docs,
     select_active_recovery_path,
@@ -226,7 +227,8 @@ def test_pipeline_resumes_from_valid_recovery_file(tmp_path, monkeypatch):
     out = tmp_path / "codedoc"
     _in_progress(out / "crash_recovery_codedoc.json", [
         {"path": "main.py", "hash": compute_file_hash(main_py),
-         "language": "python", "description": "done"},
+         "language": "python", "description": "done",
+         "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single"},
     ])
 
     stats = _run(tmp_path, monkeypatch)
@@ -291,7 +293,8 @@ def test_legacy_in_progress_stable_output_is_migrated(tmp_path, monkeypatch):
     # _crash_safety document (the old scheme wrote the banner into the final JSON).
     _in_progress(out / "codedoc.json", [
         {"path": "main.py", "hash": compute_file_hash(main_py),
-         "language": "python", "description": "pre-migration"},
+         "language": "python", "description": "pre-migration",
+         "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single"},
     ])
 
     stats = _run(tmp_path, monkeypatch)

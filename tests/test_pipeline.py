@@ -1,3 +1,10 @@
+from codedoc.core.record_meta import expected_analysis_identity
+
+# 0.10.0: cache-identity keys a prior single-mode CodeDoc run would persist, so
+# reuse fixtures simulate real prior output rather than pre-0.10.0 records.
+_PRIOR_RUN_IDENTITY = expected_analysis_identity("single")
+
+
 def test_json_is_the_default_combined_output(tmp_path):
     from codedoc.core.output import write_project_outputs
 
@@ -230,6 +237,12 @@ def test_public_output_normalizes_external_package_names(tmp_path):
                     "file_path": "lib/main.dart",
                     "language": "dart",
                     "description": "Starts the app.",
+                    # 0.10.1: public links project from the parser imports.
+                    "imports": [
+                        "flutter/material.dart",
+                        "provider/provider.dart",
+                        "dart:async",
+                    ],
                     "dependencies_analysis": {
                         "external": [
                             "flutter/material.dart",
@@ -305,6 +318,7 @@ def test_pipeline_reads_entry_from_existing_json_metadata(tmp_path, monkeypatch)
                     "description": "Resumed from metadata.",
                     "language": "python",
                     "format": "py",
+                    **_PRIOR_RUN_IDENTITY,
                 }
             ],
         }),
@@ -363,6 +377,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
                     "language": "python",
                     "format": "py",
                     "imports": ["first", "second"],
+                    **_PRIOR_RUN_IDENTITY,
                 },
                 {
                     "path": "first.py",
@@ -370,6 +385,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
                     "description": "Shared helper.",
                     "language": "python",
                     "format": "py",
+                    **_PRIOR_RUN_IDENTITY,
                 },
             ],
         }),
@@ -439,6 +455,7 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
                     "description": "Main entry point.",
                     "language": "python",
                     "format": "py",
+                    **_PRIOR_RUN_IDENTITY,
                 }
             ],
         }),
@@ -491,6 +508,7 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
                     "description": "Main entry point.",
                     "language": "python",
                     "format": "py",
+                    **_PRIOR_RUN_IDENTITY,
                 }
             ],
         }),
@@ -544,6 +562,7 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
                     "description": "Current directory API.",
                     "language": "python",
                     "format": "py",
+                    **_PRIOR_RUN_IDENTITY,
                 }
             ],
         }),
@@ -788,7 +807,7 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
             "documentation": {
                 "file_path": "src/main.tsx",
                 "language": "tsx",
-                "imports": ["./router"],
+                "imports": ["react", "./router"],
                 "description": "Starts the frontend app.",
                 "role_in_system": "Application entry.",
                 "functions": [],
@@ -822,7 +841,7 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
             "documentation": {
                 "file_path": "src/router.tsx",
                 "language": "tsx",
-                "imports": [],
+                "imports": ["react", "react-router-dom"],
                 "description": "Defines routes.",
                 "role_in_system": "Routes application screens.",
                 "functions": [],
@@ -963,6 +982,7 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
                 "language": "python",
                 "description": "The app module.",
             },
+            **_PRIOR_RUN_IDENTITY,
         }
     ]
     write_project_outputs(
@@ -1020,6 +1040,7 @@ def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
                 "language": "python",
                 "description": "Entry module.",
             },
+            **_PRIOR_RUN_IDENTITY,
         }
     ]
     write_project_outputs(

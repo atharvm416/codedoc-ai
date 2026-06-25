@@ -55,15 +55,27 @@ known to be safe.
    (`entry_reachable`, `entry_disconnected`, `disconnected_paid_files`,
    `disconnected_planned_calls`). `documentation_scope` is validated at the
    loader and again defensively here; it is run configuration only and is never
-   recovered from prior output. A dry run returns its projected statistics here
-   and performs no mutation.
+   recovered from prior output. Planned-call statistics (`planned_calls`,
+   `estimated_calls`, `disconnected_planned_calls`) are mode-aware: they multiply
+   the agent-file count by `initial_calls_per_file(analysis_mode)` — one for the
+   default `single` mode, three for `triple`. Reuse eligibility is decided by a
+   single predicate over the content hash plus the cache-identity keys
+   (`_analysis_revision`, `_analysis_mode`), so a record whose revision or mode no
+   longer matches is reprocessed once. A dry run returns its projected statistics
+   here and performs no mutation.
 
 5. **Paid-file safety cap.** After the full plan exists and before any mutation,
    writer initialization, or provider creation, a plan that exceeds the
    configured `max_files` limit stops with a `ConfigError`.
 
 6. **Mutation boundary.** Everything below may write to the filesystem. The
-   output directory is created, legacy artifacts are cleaned, and the
+   output directory is created, then a **provider-free output accessibility
+   preflight** (0.10.1) validates create → UTF-8 write → flush → fsync → atomic
+   rename → cleanup using uniquely named probe files. It runs for every real
+   finalization path (including all-reused runs), never for `--dry-run`, never
+   overwrites a user file, and raises a classified `OutputError` before any
+   provider is created if the directory is not writable. Legacy artifacts are
+   then cleaned, and the
    crash-recovery `SafeWriter` (targeting the dedicated recovery file) is
    constructed and given the topological queue order. `SafeWriter.load()` is
    seeded with the merged reuse set computed by the canonical resume boundary
@@ -82,7 +94,11 @@ known to be safe.
    provider is created. A recovery-write failure here raises
    `LiveBackupWriteError` before any provider exists, so initialization failure
    makes **zero** provider calls. Only after the recovery file is initialized is
-   the provider created and the orchestrator built. If a `KeyboardInterrupt`
+   the provider created and the orchestrator built. The orchestrator is given
+   the resolved `analysis_mode` once: `single` (default) dispatches one combined
+   `FileDocumentationAgent` call per file, while `triple` runs the three legacy
+   agents (three calls); both modes produce the identical flat record and route
+   provider exceptions through the same paths. If a `KeyboardInterrupt`
    propagates from here on, the pipeline attaches the exact selected recovery
    path to the exception (when the file exists) so the CLI can name it.
 
@@ -114,8 +130,17 @@ known to be safe.
     present a safe-stop message (exit `2` for `"terminal"`, exit `1` for
     `"rate_limit_exhausted"`) and the recovery file is preserved for resume.
 
-11. **Diagnostics.** `ErrorReporter.flush()` writes `error.log` in the output
-    directory when any issue was recorded.
+11. **Diagnostics.** `ErrorReporter.flush()` atomically writes `error.log` in the
+    output directory when any issue was recorded; the log begins with the
+    `# codedoc-ai issue log` ownership marker. On a clean, issue-free run a stale
+    CodeDoc-owned `error.log` left by a prior failure is removed so it no longer
+    looks current (0.10.1); a foreign file at that path is left byte-identical and
+    never deleted, truncated, or overwritten, and a removal failure is surfaced as
+    an auxiliary `stale_log_warning` rather than failing the run. A fatal
+    `LiveBackupWriteError` that escapes execution records best-effort diagnostics
+    (target path, classified OS cause, traceback) and prints the recovery and
+    error-log paths, without a secondary log-write failure masking the primary
+    persistence error.
 
 12. **Cleanup.** Only after the stable output is written, `SafeWriter.delete()`
     removes the dedicated recovery file — for **every** format. Order matters: if

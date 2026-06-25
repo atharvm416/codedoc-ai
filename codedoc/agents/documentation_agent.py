@@ -11,6 +11,7 @@ generates the final polished documentation for a file:
 from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
+from codedoc.agents.response_cleaning import clean_documentation_response
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -46,8 +47,14 @@ Rules:
 - Write for a developer who is new to this codebase
 - Be specific — avoid generic phrases like 'this file contains utility functions'
 - If there are no noteworthy key_concepts, omit key_concepts instead of returning an empty list
-- If there is no real usage example from the codebase context, omit usage_example instead of inventing placeholder package names
-- Never use placeholder package names such as your_project, your_package, your_app, or your_package_name
+- Include usage_example only when it is directly supported by this file's real
+  public API and project/package path; omit it when caller context is absent or
+  uncertain rather than inventing one
+- Never invent placeholder paths or packages such as path/to/file, example.py,
+  my_module, your_project, your_package, your_app, or your_package_name
+- If the Code above ends with a truncation marker ("... [truncated] ..."), part
+  of the middle of the file is omitted; report only what is visible in the
+  supplied head and tail slices and the analyses — never infer the omitted middle
 - Do not include empty arrays, empty objects, null values, or duplicate fields
 """
 
@@ -139,6 +146,7 @@ class DocumentationAgent(BaseAgent):
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
+        cleaned = clean_documentation_response(result, file_path)
 
         logger.debug("DocumentationAgent: completed %s", file_path)
-        return result
+        return cleaned

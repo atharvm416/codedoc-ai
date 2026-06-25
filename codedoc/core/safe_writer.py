@@ -55,6 +55,11 @@ from pathlib import Path
 
 from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.db import compute_file_hash
+from codedoc.core.io_diagnostics import (
+    category_reason,
+    classify_os_error,
+    describe_cause,
+)
 from codedoc.core.project_view import SCHEMA_VERSION, clean_file_record
 from codedoc.utils.errors import LiveBackupWriteError, OutputError
 from codedoc.utils.logger import get_logger
@@ -426,7 +431,14 @@ class SafeWriter:
             # The prior valid backup is left intact by atomic_write_text.  A
             # serialization or persistence failure is fatal — surface it so
             # execution stops and record() can roll back its in-memory markers.
+            # 0.10.1: include the sanitized OS cause/category and an actionable
+            # resume note (no secrets — only the local path and OS metadata).
+            category = classify_os_error(exc)
+            cause = describe_cause(exc)
+            detail = f"{category_reason(category)} ({cause})" if cause else category_reason(category)
             raise LiveBackupWriteError(
                 str(self._path),
-                f"could not persist live backup '{self._path.name}'",
+                f"could not update crash recovery file '{self._path.name}': {detail}. "
+                "Close any program viewing the file and rerun the same command; "
+                "completed work is preserved.",
             ) from exc

@@ -3,7 +3,6 @@
 0.9.4 — extracted from ``codedoc.pipeline`` as part of the internal
 decomposition.  This module owns:
 
-- rate-limit and retry-after classification;
 - the adaptive-parallelism step-down ladder;
 - sequential and parallel descriptor processing with per-file retries and
   worker-thread recording;
@@ -15,12 +14,15 @@ constructed :class:`ExecutionContext`.  The provider-specific
 :class:`ExecutionOptions` are built by the pipeline from resolved
 configuration and passed in; this module never receives the full
 configuration dictionary nor recomputes configuration policy.
+
+0.10.2 — error classification logic moved to :mod:`codedoc.core.error_classifier`.
+Compat re-exports below preserve all ``codedoc.core.execution._name`` imports
+for one release.
 """
 
 from __future__ import annotations
 
 import concurrent.futures
-import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +30,13 @@ from typing import Any
 
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.core.db import compute_file_hash
+from codedoc.core.error_classifier import (
+    _classify_failure,
+    _detect_limit_type,
+    _is_rate_limit_error,
+    _parse_retry_after,
+    _raise_rate_limit_exhausted,
+)
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import _public_record_to_doc
 from codedoc.core.safe_writer import SafeWriter
@@ -37,7 +46,6 @@ from codedoc.utils.errors import (
     AgentError,
     ErrorReporter,
     LiveBackupWriteError,
-    LLMError,
     OutputError,
     ParseError,
     UnrecoverableProviderError,
@@ -47,351 +55,25 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Rate-limit detection helpers (Work Item 3)
+# Compat re-exports (0.10.2 — deprecated; import from error_classifier instead)
 # ---------------------------------------------------------------------------
-
-_RATE_LIMIT_SIGNALS = (
-    "429",
-    "rate limit",
-    "rate_limit",
-    "too many requests",
-    "tokens per min",
-    "tpm",
-    "quota",
-    "resource_exhausted",   # Gemini / Google AI
-    "overloaded",           # Anthropic
-    "529",                  # Anthropic overloaded
-    "503",
+from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-export)
+    _ACCESS_SIGNALS,
+    _CREDENTIAL_SIGNALS,
+    _DETECT_RPM_RE,
+    _DETECT_TPM_RE,
+    _GLOBAL_PERMANENT_SIGNALS,
+    _INPUT_PERMANENT_SIGNALS,
+    _MODEL_SIGNALS,
+    _RATE_LIMIT_SIGNALS,
+    _TERMINAL_BILLING_SIGNALS,
+    _build_rate_limit_exhausted_abort,
+    _build_terminal_abort,
+    _classify_permanent_error,
+    _has_provider_or_agent_error,
+    _is_terminal_billing_error,
+    _walk_chain,
 )
-
-
-def _is_rate_limit_error(
-    exc: BaseException,
-    profile: RateLimitProfile | None = None,
-) -> bool:
-    """Return True if *exc* or any cause in its chain is a rate-limit signal.
-
-    Inspects ``str(exc)`` and walks ``__cause__`` / ``__context__`` so that
-    provider signals are not hidden by wrapper exceptions.
-
-    Parameters
-    ----------
-    exc:
-        The exception to classify.
-    profile:
-        0.8.1 — when supplied, only ``profile.signals`` are used for detection,
-        giving provider-specific accuracy.  When ``None`` (backward-compat),
-        the module-level ``_RATE_LIMIT_SIGNALS`` tuple is used so that existing
-        callers without a profile continue to work unchanged.
-    """
-    signals = profile.signals if profile is not None else _RATE_LIMIT_SIGNALS
-    visited: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        msg = str(current).lower()
-        if any(sig in msg for sig in signals):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
-# ---------------------------------------------------------------------------
-# Unrecoverable-error classification (0.9.7)
-# ---------------------------------------------------------------------------
-#
-# These two classifiers sit next to ``_is_rate_limit_error`` because they are
-# the same kind of conservative, network-free, chain-walking message classifier:
-# they inspect only the text already present in the raised exception chain
-# (``str(exc)`` plus every ``__cause__`` / ``__context__`` node), match
-# lowercased substrings against narrow signal sets, and never make a provider
-# call.  They are deliberately conservative: when in doubt they return the
-# retryable default and let the Workstream C time bound stop a doomed run.  A
-# false *abort* wrongly kills a healthy run, which is worse than bounded
-# retrying, so bare numeric HTTP codes are never matched on their own.
-#
-# Provider message text reaches this layer by two routes and both are covered by
-# walking the chain *and* inspecting each node's own ``str()`` (exactly as
-# ``_is_rate_limit_error`` does): the common agent path folds ``str(exc)`` into
-# an ``AgentError`` message raised *without* ``from exc`` (phrase lives in the
-# ``AgentError``'s own string), while the validation/parse path raises
-# ``AgentError(...) from exc`` (original in ``__cause__``).
-
-# Unambiguous billing/credit/quota-exhaustion phrases.  These are *specific
-# phrases*, never the bare word ``quota``: an account out of funds/credit or at a
-# hard spend limit cannot recover by waiting.  Some co-occur with
-# ``quota``/``429`` (also rate-limit signals), so terminal-billing is always
-# checked *before* ``_is_rate_limit_error`` at every call site.  The textual
-# ``payment required`` phrase also covers the HTTP 402 case without matching a
-# bare ``402``.
-_TERMINAL_BILLING_SIGNALS = (
-    "insufficient_quota",
-    "exceeded your current quota",
-    "credit balance is too low",
-    "billing is required",
-    "billing not active",
-    "billing is not active",
-    "billing disabled",
-    "payment required",
-    "hard limit",
-    "spending limit",
-)
-
-# Permanent signals that affect *every* file the same way: invalid credentials,
-# authentication failure, forbidden/permission-denied access, and
-# unknown/not-found model.  Phrases only — a bare ``401`` / ``403`` / ``404`` is
-# never matched on its own; the model phrases ("model not found", "does not
-# exist", ...) already require corroborating text, so a naked ``404`` in a
-# request id does not trigger an abort.
-_CREDENTIAL_SIGNALS = (
-    "invalid api key",
-    "incorrect api key",
-    "invalid_api_key",
-    "invalid x-api-key",
-    "authentication_error",
-    "authentication error",
-    "authentication failed",
-    "authentication failure",
-    "failed to authenticate",
-    "could not authenticate",
-    "unauthenticated",
-    "unauthorized",
-)
-
-_ACCESS_SIGNALS = (
-    "permission denied",
-    "permission_denied",
-    "permission_error",
-    "permission error",
-    "forbidden",
-    "access denied",
-)
-
-_MODEL_SIGNALS = (
-    "model not found",
-    "model_not_found",
-    "not found for api version",
-    "unknown model",
-    "no such model",
-)
-
-_GLOBAL_PERMANENT_SIGNALS = (
-    _CREDENTIAL_SIGNALS + _ACCESS_SIGNALS + _MODEL_SIGNALS
-)
-
-# Permanent signals that affect *only this file's input* (the request/context is
-# too large).  Re-sending the identical oversized prompt is guaranteed to fail
-# again, so this file is recorded as failed without retrying; the rest of the run
-# proceeds.  Phrases only — a bare ``413`` is never matched on its own.
-_INPUT_PERMANENT_SIGNALS = (
-    "context length",
-    "context_length_exceeded",
-    "maximum context",
-    "prompt is too long",
-    "prompt too long",
-    "input is too long",
-    "input too long",
-    "string is too long",
-    "string too long",
-    "request too large",
-    "request_too_large",
-    "payload too large",
-)
-
-
-def _walk_chain(exc: BaseException):
-    """Yield *exc* and every ``__cause__`` / ``__context__`` node, with a
-    visited-id guard so a cyclic chain cannot loop forever."""
-    visited: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        yield current
-        current = current.__cause__ or current.__context__
-
-
-def _has_provider_or_agent_error(exc: BaseException) -> bool:
-    """Return whether *exc* came through the provider/agent boundary.
-
-    Permanent-error phrases such as ``permission denied`` also occur in local
-    filesystem and parser failures.  Restricting permanent classification to
-    an ``LLMError`` or ``AgentError`` in the chain prevents those local errors
-    from being mistaken for invalid provider credentials or access.
-    """
-    return any(isinstance(node, (LLMError, AgentError)) for node in _walk_chain(exc))
-
-
-def _is_terminal_billing_error(exc: BaseException) -> bool:
-    """True for an unambiguous billing/credit/quota-exhaustion signal.
-
-    These cannot recover by waiting: the account is out of funds/credit or has
-    hit a hard spend limit.  Takes priority over rate-limit classification, so
-    it is checked before ``_is_rate_limit_error`` at every call site.
-
-    Conservative by design: matches only the specific phrases in
-    ``_TERMINAL_BILLING_SIGNALS``, never a bare ``quota`` / ``429`` / ``402``.
-    """
-    for node in _walk_chain(exc):
-        msg = str(node).lower()
-        # "hard limit" is used for both account spending limits and per-request
-        # context limits.  Input-size evidence is narrower and must keep the
-        # failure scoped to one file instead of aborting the entire run.
-        signals = _TERMINAL_BILLING_SIGNALS
-        if any(sig in msg for sig in _INPUT_PERMANENT_SIGNALS):
-            signals = tuple(sig for sig in signals if sig != "hard limit")
-        if any(sig in msg for sig in signals):
-            return True
-    return False
-
-
-def _classify_permanent_error(exc: BaseException) -> str | None:
-    """Return ``"global"``, ``"input"``, or ``None``.
-
-    ``"global"``
-        Affects every file the same way (invalid credentials, unknown model,
-        forbidden/permission-denied access).
-    ``"input"``
-        Affects only this file's input (request/context too large).
-    ``None``
-        Not classifiable as permanent; treat as retryable.
-
-    Conservative by design: matches only the specific phrases in
-    ``_GLOBAL_PERMANENT_SIGNALS`` / ``_INPUT_PERMANENT_SIGNALS`` and never a bare
-    numeric HTTP code.  When a message matches both a global and an input signal,
-    ``"input"`` (the narrower, run-continuing verdict) is preferred.
-    """
-    saw_global = False
-    saw_input = False
-    for node in _walk_chain(exc):
-        msg = str(node).lower()
-        if any(sig in msg for sig in _INPUT_PERMANENT_SIGNALS):
-            saw_input = True
-        if any(sig in msg for sig in _GLOBAL_PERMANENT_SIGNALS):
-            saw_global = True
-        # Provider wording commonly inserts a model id between "model" and
-        # "does not exist" (for example, "The model `x` does not exist").
-        # Require both concepts so unrelated missing resources do not abort the
-        # whole run.
-        if "model" in msg and "does not exist" in msg:
-            saw_global = True
-    if saw_input:
-        return "input"
-    if saw_global:
-        return "global"
-    return None
-
-
-def _classify_failure(
-    exc: BaseException,
-    profile: RateLimitProfile | None,
-) -> str:
-    """Apply the fixed 0.9.7 failure precedence to *exc* and return a verdict.
-
-    Returns one of ``"terminal_billing"``, ``"rate_limit"``, ``"global"``,
-    ``"input"``, or ``"transient"``.  Precedence (identical at every call site):
-
-    1. terminal-billing — checked first because billing phrases co-occur with
-       ``quota`` / ``429`` rate-limit signals;
-    2. rate-limit — existing handling, bounded by Workstream C;
-    3. global-permanent — abort;
-    4. input-permanent — do not retry this file;
-    5. transient — existing retry/sleep behavior.
-    """
-    provider_or_agent_error = _has_provider_or_agent_error(exc)
-    if provider_or_agent_error and _is_terminal_billing_error(exc):
-        return "terminal_billing"
-    if _is_rate_limit_error(exc, profile):
-        return "rate_limit"
-    permanent = _classify_permanent_error(exc) if provider_or_agent_error else None
-    if permanent == "global":
-        return "global"
-    if permanent == "input":
-        return "input"
-    return "transient"
-
-
-def _build_terminal_abort(
-    exc: BaseException,
-    provider_name: str,
-    verdict: str,
-) -> UnrecoverableProviderError:
-    """Build an ``UnrecoverableProviderError(category="terminal")`` for a
-    confirmed billing/credentials/model/access fault.
-
-    The message names the likely cause class and the provider without inventing
-    specifics absent from *exc*, and tells the operator that completed work is
-    saved and re-running resumes.  The original error is retained as
-    ``__cause__`` so diagnostics are preserved (equivalent to ``raise ... from
-    exc`` regardless of which site raises it).
-    """
-    if verdict == "terminal_billing":
-        cause = (
-            "billing/credit exhausted — the account is out of funds or credit, "
-            "or has hit a hard spend limit"
-        )
-    else:
-        messages = "\n".join(str(node).lower() for node in _walk_chain(exc))
-        if any(signal in messages for signal in _CREDENTIAL_SIGNALS):
-            cause = "invalid credentials or authentication failure"
-        elif any(signal in messages for signal in _MODEL_SIGNALS) or (
-            "model" in messages and "does not exist" in messages
-        ):
-            cause = "unknown or unavailable model name"
-        else:
-            cause = "forbidden or permission-denied access"
-    reason = (
-        f"Provider error that cannot recover by retrying ({cause}). "
-        "Completed files were saved to the live JSON backup in the output "
-        "directory; re-running the same command resumes the unfinished files."
-    )
-    err = UnrecoverableProviderError(provider_name, reason, category="terminal")
-    err.__cause__ = exc
-    err.__suppress_context__ = True
-    return err
-
-
-def _build_rate_limit_exhausted_abort(
-    provider_name: str,
-) -> UnrecoverableProviderError:
-    """Build the bounded zero-progress rate-limit stop (Workstream C).
-
-    Carries ``category="rate_limit_exhausted"`` so the CLI exits ``1`` (a
-    transient "retry later" condition, not a credentials fault).  The message
-    states the provider is persistently rate-limited / out of quota, that partial
-    results were saved to the live backup, and that re-running resumes.
-    """
-    reason = (
-        "Provider is persistently rate-limited or out of quota: no file made "
-        "progress after stepping down to the lowest concurrency, so retrying was "
-        "stopped to avoid sleeping through the backoff schedule for nothing. "
-        "Partial results were saved to the live JSON backup in the output "
-        "directory; re-running the same command resumes the unfinished files."
-    )
-    return UnrecoverableProviderError(
-        provider_name, reason, category="rate_limit_exhausted"
-    )
-
-
-def _raise_rate_limit_exhausted(
-    provider_name: str,
-    error_reporter: ErrorReporter,
-) -> None:
-    """Emit a final warning describing the bounded zero-progress stop, then raise
-    the ``category="rate_limit_exhausted"`` abort.  Does not sleep."""
-    abort = _build_rate_limit_exhausted_abort(provider_name)
-    warn_msg = (
-        f"[{provider_name}] Persistent rate limit / quota: no file made progress "
-        "at the lowest concurrency. Stopping the run; completed files are saved "
-        "in the live JSON backup — re-run the same command to resume."
-    )
-    print(warn_msg, flush=True)
-    logger.warning(warn_msg)
-    error_reporter.record(
-        RuntimeError(warn_msg),
-        context="rate limit bound — zero-progress stop",
-        level="warning",
-    )
-    raise abort
 
 
 @dataclass(frozen=True)
@@ -423,40 +105,6 @@ def _is_zero_progress_pass(outcome: _SequentialOutcome) -> bool:
     )
 
 
-# Pre-compiled patterns for _detect_limit_type.  Word boundaries ensure that
-# "tpm" inside "uptime" does not match, and parenthesised forms like "(TPM)"
-# do match because ( and ) are non-word characters.
-_DETECT_TPM_RE = re.compile(r"\btpm\b", re.IGNORECASE)
-_DETECT_RPM_RE = re.compile(r"\brpm\b", re.IGNORECASE)
-
-
-def _detect_limit_type(error_msg: str) -> str | None:
-    """Classify the kind of rate limit from an error message string.
-
-    Returns one of ``"tpm"``, ``"rpm"``, ``"quota"``, ``"overloaded"``, or
-    ``None`` when the type cannot be determined.  Patterns are checked
-    case-insensitively in priority order.
-
-    Examples that must classify correctly:
-    - ``"429 tokens per min exceeded"`` → ``"tpm"``
-    - ``"limit exceeded (TPM)"``        → ``"tpm"``
-    - ``"requests per min exceeded"``   → ``"rpm"``
-    - ``"daily quota exhausted"``       → ``"quota"``
-    - ``"529 overloaded"``              → ``"overloaded"``
-    - ``"429 too many requests"``       → ``None``
-    """
-    msg = error_msg.lower()
-    if "tokens per min" in msg or _DETECT_TPM_RE.search(error_msg):
-        return "tpm"
-    if "requests per min" in msg or _DETECT_RPM_RE.search(error_msg):
-        return "rpm"
-    if "daily" in msg or "quota" in msg or "resource_exhausted" in msg:
-        return "quota"
-    if "overloaded" in msg or "529" in msg:
-        return "overloaded"
-    return None
-
-
 def _build_default_ladder(max_p: int) -> list[int]:
     """Build the default parallelism step-down ladder for *max_p* workers."""
     if max_p <= 1:
@@ -470,29 +118,6 @@ def _build_default_ladder(max_p: int) -> list[int]:
     if 1 not in ladder:
         ladder.append(1)
     return ladder
-
-
-def _parse_retry_after(exc: BaseException) -> float | None:
-    """Extract a Retry-After delay (seconds) from the exception message chain."""
-    visited: set[int] = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in visited:
-        visited.add(id(current))
-        msg = str(current)
-        m = re.search(r"try again in\s+([\d.]+)\s*s", msg, re.IGNORECASE)
-        if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                pass
-        m = re.search(r"retry.after[:\s]+([\d.]+)", msg, re.IGNORECASE)
-        if m:
-            try:
-                return float(m.group(1))
-            except ValueError:
-                pass
-        current = current.__cause__ or current.__context__
-    return None
 
 
 # ---------------------------------------------------------------------------

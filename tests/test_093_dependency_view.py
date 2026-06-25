@@ -16,8 +16,15 @@ from codedoc.core.project_view import (
 )
 
 
-def _record(path, language, *, external=None, catalog_updates=None,
+def _record(path, language, *, external=None, imports=None, catalog_updates=None,
             dependency_refs=None, usage_notes=None):
+    # 0.10.1 (Workstream F): public external/sdk links are projected from the
+    # parser ``imports``, not from the model ``dependencies_analysis.external``.
+    # These tests express the parser-found dependency names; by default the
+    # ``external`` argument *is* the parser import list so each case states the
+    # deterministic input once.  ``dependencies_analysis.external`` is still set
+    # so the (now bounded) model-enrichment path is exercised, but it can no
+    # longer create a public link on its own.
     deps = {}
     if external is not None:
         deps["external"] = external
@@ -27,6 +34,7 @@ def _record(path, language, *, external=None, catalog_updates=None,
         deps["dependency_refs"] = dependency_refs
     if usage_notes is not None:
         deps["usage_notes"] = usage_notes
+    parser_imports = imports if imports is not None else (external or [])
     return {
         "hash": f"h-{path}",
         "file_path": path,
@@ -35,6 +43,7 @@ def _record(path, language, *, external=None, catalog_updates=None,
             "file_path": path,
             "language": language,
             "description": "d",
+            "imports": parser_imports,
             "dependencies_analysis": deps,
         },
     }
@@ -90,8 +99,8 @@ def test_internal_links_come_only_from_graph_edges():
 
 
 def test_unresolved_agent_text_cannot_create_internal_link():
-    # An agent emitting a path-like name in `external` must never become an
-    # internal link — internal comes only from edges (none supplied here).
+    # A path-like parser import must never become an internal link — internal
+    # comes only from graph edges (none supplied here); it stays external.
     view = build_project_view(
         [_record("main.py", "python", external=["pkg/submodule"])],
         {"checked": 1},
@@ -99,6 +108,36 @@ def test_unresolved_agent_text_cannot_create_internal_link():
     links = view["files"][0]["links"]
     assert "internal_dependencies" not in links
     assert links["external_dependencies"] == ["pkg/submodule"]
+
+
+def test_model_only_external_name_never_becomes_a_public_link():
+    # 0.10.1 (Workstream F): a model-supplied dependency name that is NOT in the
+    # parser imports can never appear in public links.  Parser imports are the
+    # sole authority for dependency identity.
+    record = _record("main.py", "python", imports=["os"])
+    record["documentation"]["dependencies_analysis"]["external"] = ["requests", "evil_pkg"]
+    view = build_project_view([record], {"checked": 1})
+    links = view["files"][0]["links"]
+    assert links["sdk_dependencies"] == ["os"]
+    assert "external_dependencies" not in links  # model-only names dropped
+
+
+def test_project_import_resolved_by_graph_edge_is_not_external():
+    # A project import (``codedoc.*``) that resolves to a graph edge must be an
+    # internal link, never an external dependency.
+    edges = [{"from": "codedoc/cli.py", "to": "codedoc/core/x.py", "type": "internal_import"}]
+    view = build_project_view(
+        [
+            _record("codedoc/cli.py", "python", imports=["codedoc.core.x", "os"]),
+            _record("codedoc/core/x.py", "python"),
+        ],
+        {"checked": 2},
+        graph_edges=edges,
+    )
+    links = {f["path"]: f.get("links", {}) for f in view["files"]}["codedoc/cli.py"]
+    assert links["internal_dependencies"] == ["codedoc/core/x.py"]
+    assert links["sdk_dependencies"] == ["os"]
+    assert "codedoc" not in links.get("external_dependencies", [])
 
 
 # ---------------------------------------------------------------------------

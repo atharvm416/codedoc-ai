@@ -24,9 +24,30 @@ from __future__ import annotations
 
 import os
 import tempfile
+import time
 from pathlib import Path
 
+from codedoc.core.io_diagnostics import (
+    WINDOWS_TRANSIENT_LOCK_ERRORS,
+    is_transient_lock,
+)
 from codedoc.utils.errors import ConfigError
+
+# Bounded transient-lock retry budget for the final atomic replacement step
+# (Workstream B).  The first attempt is immediate; these are the sleeps *between*
+# subsequent retries, so the total added wait is deliberately below one second.
+# Only a Windows sharing/lock violation (see ``WINDOWS_TRANSIENT_LOCK_ERRORS``)
+# is retried; every other failure raises immediately.
+ATOMIC_REPLACE_RETRY_DELAYS_S: tuple[float, ...] = (0.05, 0.15, 0.30)
+
+__all__ = [
+    "ATOMIC_REPLACE_RETRY_DELAYS_S",
+    "WINDOWS_TRANSIENT_LOCK_ERRORS",
+    "BlockError",
+    "atomic_write_text",
+    "merge_managed_block",
+    "write_owned_block",
+]
 
 
 class BlockError(ConfigError):
@@ -149,7 +170,7 @@ def atomic_write_text(path: Path, text: str) -> None:
         # produced (the previous writer's behaviour) instead of silently making
         # output owner-only.  A no-op on platforms that ignore POSIX modes.
         _relax_to_default_mode(tmp)
-        tmp.replace(path)
+        _replace_with_lock_retry(tmp, path)
     except Exception as exc:
         if fd >= 0:
             try:
@@ -160,6 +181,32 @@ def atomic_write_text(path: Path, text: str) -> None:
         if isinstance(exc, OSError):
             raise
         raise OSError(f"Could not write UTF-8 text to '{path}'") from exc
+
+
+def _replace_with_lock_retry(tmp: Path, path: Path) -> None:
+    """Atomically rename *tmp* over *path*, retrying only a transient Windows lock.
+
+    The first ``replace`` attempt is immediate.  When — and only when — the
+    failure is a Windows sharing/lock violation (``winerror`` 32/33) the same
+    already-written, flushed, fsynced, and closed temporary file is reused after
+    a bounded sleep and the rename is retried.  Every other failure (permission
+    denial without a lock code, ``ENOSPC``, read-only media, missing parent,
+    directory collision, generic I/O) raises immediately with its cause intact.
+    The provider is never re-contacted; this is a pure local filesystem retry.
+
+    ``time.sleep`` is the only wait; tests monkeypatch it (and ``Path.replace``)
+    so the suite never actually sleeps.
+    """
+    attempt = 0
+    while True:
+        try:
+            tmp.replace(path)
+            return
+        except OSError as exc:
+            if attempt >= len(ATOMIC_REPLACE_RETRY_DELAYS_S) or not is_transient_lock(exc):
+                raise
+            time.sleep(ATOMIC_REPLACE_RETRY_DELAYS_S[attempt])
+            attempt += 1
 
 
 def _relax_to_default_mode(path: Path) -> None:

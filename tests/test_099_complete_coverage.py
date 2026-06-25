@@ -102,7 +102,8 @@ def test_dry_run_scope_stats_and_cost_units(tmp_path):
     assert all_stats["entry_disconnected"] == 1
     assert all_stats["entry_excluded"] == 0
     assert all_stats["disconnected_paid_files"] == 1
-    assert all_stats["disconnected_planned_calls"] == 3
+    # 0.10.0: default single mode → one planned initial call per disconnected file.
+    assert all_stats["disconnected_planned_calls"] == 1
 
 
 class _RoutingProvider:
@@ -305,7 +306,9 @@ def test_force_disconnected_file_is_documented_under_all(tmp_path, monkeypatch):
     assert "orphan.py" in documented
 
 
-def test_pipeline_plan_preserves_selected_constructor_and_documented_accessor(tmp_path):
+def test_pipeline_plan_canonical_documented_field_with_selected_alias(tmp_path):
+    # 0.10.0: documented_rels is now the canonical dataclass field; selected_rels
+    # is retained as a read-only delegating compatibility property.
     _project(tmp_path)
     graph, file_map = _graph_and_map(tmp_path)
     plan, _ = build_pipeline_plan(
@@ -318,13 +321,15 @@ def test_pipeline_plan_preserves_selected_constructor_and_documented_accessor(tm
         forced_paths=[],
         config={"propagate_changes": True, "max_files": 0},
     )
-    assert plan.documented_rels == plan.selected_rels
-    assert "selected_rels" in {field.name for field in fields(plan)}
-    assert "documented_rels" not in {field.name for field in fields(plan)}
-    assert asdict(plan)["selected_rels"] == plan.selected_rels
+    # Canonical field direction.
+    assert "documented_rels" in {field.name for field in fields(plan)}
+    assert "selected_rels" not in {field.name for field in fields(plan)}
+    assert asdict(plan)["documented_rels"] == plan.documented_rels
     match plan:
-        case PipelinePlan(selected_rels=selected):
-            assert selected == plan.documented_rels
+        case PipelinePlan(documented_rels=documented):
+            assert documented == plan.documented_rels
+    # Retained compatibility alias.
+    assert plan.selected_rels == plan.documented_rels
 
 
 def test_no_supported_files_real_stats_keep_scope_and_compatibility_keys(tmp_path):

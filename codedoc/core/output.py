@@ -16,10 +16,13 @@
 
 from __future__ import annotations
 
+import os
+import uuid
 from pathlib import Path
 
 from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.document import read_codedoc_document, records_by_path
+from codedoc.core.io_diagnostics import category_reason, classify_os_error, describe_cause
 from codedoc.core.markdown_view import markdown_from_view
 from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.utils.errors import ConfigError, OutputError
@@ -101,6 +104,64 @@ def preflight_output_targets(
         raise ConfigError(conflicts[0]["message"])
 
 
+def preflight_output_accessibility(output_dir: Path) -> None:
+    """Verify *output_dir* can actually be written before any provider is created.
+
+    Workstream C (0.10.1).  This is a non-destructive, provider-free probe run
+    only for a real run that may write output (never for ``--dry-run``).  It:
+
+    - creates *output_dir* when absent (a real run will need it anyway);
+    - exercises create → UTF-8 write → flush → fsync → atomic rename → cleanup
+      using uniquely named CodeDoc probe files inside the directory;
+    - never overwrites or deletes a user file (probe names are random and unique);
+    - cleans both probe paths on success and best-effort on failure;
+    - raises a classified :class:`OutputError` before provider creation on the
+      first failure.
+
+    It is an early diagnostic, not a guarantee — a file can still become locked
+    afterwards, which is why the bounded replacement retry and fatal recovery
+    semantics remain.  The authoritative recovery-target check stays with
+    ``SafeWriter.initialize_empty()``; this probe never touches the recovery file.
+    """
+    token = uuid.uuid4().hex
+    src = output_dir / f".codedoc_preflight_{token}.src.tmp"
+    dst = output_dir / f".codedoc_preflight_{token}.dst.tmp"
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        # create + UTF-8 write + flush + fsync on the unique source probe.
+        fd = os.open(str(src), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write("codedoc preflight\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        # atomic rename to the unique destination probe, then remove it.
+        os.replace(str(src), str(dst))
+    except OSError as exc:
+        _silent_remove(src)
+        _silent_remove(dst)
+        category = classify_os_error(exc)
+        cause = describe_cause(exc)
+        detail = f"{category_reason(category)} ({cause})" if cause else category_reason(category)
+        raise OutputError(
+            str(output_dir),
+            f"output directory '{output_dir}' is not writable: {detail}. "
+            "No provider was contacted — choose a writable output directory or "
+            "correct local permissions, then rerun.",
+        ) from exc
+    finally:
+        _silent_remove(src)
+        _silent_remove(dst)
+
+
+def _silent_remove(path: Path) -> None:
+    """Remove *path* if present, swallowing cleanup-time OSErrors."""
+    try:
+        if path.exists():
+            path.unlink()
+    except OSError:
+        pass
+
+
 def read_existing_records(path: Path) -> dict[str, dict] | None:
     """Read per-file records from a codedoc JSON output file, read-only.
 
@@ -133,6 +194,7 @@ def write_project_outputs(
     json_filename: str = PROJECT_JSON,
     md_filename: str = PROJECT_MARKDOWN,
     reachable_rels: set[str] | frozenset[str] | None = None,
+    unresolved_imports_by_path: dict[str, list[str]] | None = None,
 ) -> tuple[Path | None, Path | None]:
     """Write the final combined output file(s).
 
@@ -162,7 +224,12 @@ def write_project_outputs(
 
     try:
         view = build_project_view(
-            records, stats, entry_file, graph_edges, reachable_rels=reachable_rels
+            records,
+            stats,
+            entry_file,
+            graph_edges,
+            reachable_rels=reachable_rels,
+            unresolved_imports_by_path=unresolved_imports_by_path,
         )
 
         # Render both complete payloads before mutating any final target, so a

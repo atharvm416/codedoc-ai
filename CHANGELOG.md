@@ -1,5 +1,200 @@
 # Changelog
 
+## 0.10.3 - 2026-06-25
+
+### Truncation parameters now participate in cache identity
+
+A patch release that fixes a cache-invalidation gap left by the configurable truncation
+controls. Before 0.10.3, changing `max_content_chars` or `truncation_head_ratio` altered the
+truncated prompt sent for an oversized file but did **not** invalidate that file's cached
+record, so an incremental re-run silently reused stale documentation — the exact remedy the
+truncation warning recommends ("raise `max_content_chars`") had no effect on a cached run.
+
+- **`_max_context_revision` cache-identity key (`codedoc/core/record_meta.py`).** A new private
+  per-file cache-identity key encodes the effective `max_content_chars` ceiling and
+  `truncation_head_ratio` (e.g. `truncate-v1:max=12000:head=0.7000`) for any file large enough
+  to be truncated. A file that fits within the ceiling carries no value and stays reusable
+  across ceiling/ratio changes — only files whose prompt is actually truncated are affected.
+  The key joins the single centralized reuse predicate alongside `_analysis_revision` and
+  `_analysis_mode`; no second reuse path is introduced.
+
+- **Precise, minimal invalidation.** Changing `max_content_chars` or `truncation_head_ratio`
+  reprocesses exactly the files large enough to be truncated and no others; files that fit the
+  ceiling remain byte-for-byte reusable. On the first run after upgrade, legacy oversized
+  records (which lack the key) are reprocessed once; every other record is reused.
+
+- **Consistent character counting.** Planning computes each file's character count exactly as
+  the orchestrator does (`utf-8-sig`, `errors="replace"`, via a shared `read_source_text`
+  helper in `codedoc/core/db.py`), with a cheap byte-size short-circuit so files within the
+  ceiling are never re-read. `_analysis_revision` and `SCHEMA_VERSION` are not bumped; the
+  public document schema is unchanged (`schema_version` stays `1.4`).
+
+Existing configuration, API, CLI, and output formats are fully backward-compatible.
+
+## 0.10.2 - 2026-06-24
+
+### Dependency projection fix, configurable truncation ratio, and error classifier extraction
+
+A patch release that completes three targeted improvements identified during 0.10.1 review.
+The public document schema is unchanged (`schema_version` stays `1.4`). `SCHEMA_VERSION`
+is not bumped. `_analysis_revision` is not bumped — the truncation ratio is user-controlled
+and explicit; the dependency projection fix only changes which deterministic source is used,
+not prompts, cleaned record shape, or provider-facing analysis semantics.
+
+- **Parser-authoritative dependency projection for non-React languages (Workstream C).**
+  0.10.1 made Python parser-authoritative but kept JS/TS/Dart/Java/etc. on model-provided
+  external dependencies. The global rule is now: every parser that emits complete imports is
+  authoritative for public external/SDK links, with an explicit exception for the React/Node
+  family (`js`, `jsx`, `ts`, `tsx`), whose parser deliberately omits bare npm packages. For
+  Python and generic-parser languages (Dart, Java, Kotlin, C#, Swift, Go, Ruby, Rust, C/C++,
+  HTML), public links are derived from the imports that did not resolve to an internal project
+  file via graph resolution — so relative Dart imports and same-directory file references never
+  leak as bogus external dependencies. Dart SDK imports (`dart:io`) classify as SDK; Dart
+  package imports (`package:record/record.dart`) canonicalize to the package name (`record`).
+  React/Node bare npm dependencies continue to come from model `_deps.external`. Single and
+  triple modes now produce byte-identical external/SDK links for identical source for Python
+  and generic-parser languages; React/Node remains model-assisted for bare npm packages.
+
+- **Configurable truncation head ratio (Workstream A).** The 70/30 head-plus-tail split
+  introduced in 0.10.1 is now user-configurable via `truncation_head_ratio` in the config
+  file (or `CODEDOC_TRUNCATION_HEAD_RATIO` environment variable, or `--truncation-head-ratio`
+  CLI flag). The default stays 0.70, producing byte-identical output to 0.10.1 when not set.
+  Invalid values (0.0, 1.0, outside (0,1), booleans, non-numeric strings) are rejected before
+  provider creation. The dry-run token estimate uses the same configured ratio so the planning
+  output reflects the actual truncated input.
+
+- **Error classifier extraction (Workstream B).** Signal constants and pure classification
+  functions (`_classify_failure`, `_build_terminal_abort`, `_parse_retry_after`, etc.) are
+  now in `codedoc/core/error_classifier.py`. `execution.py` is reduced from ~1150 to ~770
+  lines. Deprecated compat re-exports remain in `execution.py` for one release. No behavior
+  change; this is a structural-only decomposition following the 0.9.4 pattern.
+
+Existing configuration, API, CLI, and output formats are fully backward-compatible. All
+compat re-exports added in this release will be removed in a future release.
+
+## 0.10.1 - 2026-06-23
+
+### Output diagnostics, Windows write resilience, and deterministic enrichment
+
+A patch release that makes local output failures actionable and less likely to
+interrupt a paid run, and corrects verified cross-mode enrichment inconsistencies,
+without weakening CodeDoc's atomic-write, crash-recovery, ownership, factuality, or
+credential-safety guarantees. The public document schema is unchanged
+(`schema_version` stays `1.4`).
+
+- **Actionable local I/O diagnostics.** A new private `codedoc/core/io_diagnostics.py`
+  classifies a local write failure into a stable category (`locked`, `permission`,
+  `missing_parent`, `is_directory`, `no_space`, `read_only`, `io`, `serialization`)
+  and formats a concise, secret-free cause from OS metadata only (exception class,
+  Windows `winerror`, portable `errno`, OS reason text) plus the affected local path.
+  No API keys, prompts, source contents, or provider responses ever appear in a
+  message. `LiveBackupWriteError` now carries this cause and a resume hint.
+- **Bounded transient-lock retry on atomic replace.** `atomic_write_text()` retries
+  only the final `Path.replace` step, and only for a Windows sharing/lock violation
+  (`winerror` 32/33), using a fixed sub-second delay sequence
+  (`ATOMIC_REPLACE_RETRY_DELAYS_S = (0.05, 0.15, 0.30)`). It reuses the already
+  flushed/fsynced temporary file, never recreates provider output or re-calls the
+  provider, and never retries `ENOSPC`, read-only media, missing-parent, directory
+  collisions, serialization failures, or non-lock permission denials. A successful
+  retry leaves no temporary sibling; an exhausted one removes the temp file and
+  raises the original failure with its cause intact.
+- **Output accessibility preflight.** A real run validates that the output directory
+  can be created, written (UTF-8), flushed, fsynced, atomically renamed, and cleaned
+  up — using uniquely named probe files — after planning and the paid-file cap but
+  **before** any provider is created. It never overwrites a user file, leaves no
+  probe artifacts, and is skipped entirely for `--dry-run`. The authoritative
+  recovery-target check remains `SafeWriter.initialize_empty()`.
+- **Current-run error-log lifecycle.** `error.log` now begins with a stable ASCII
+  ownership marker (`# codedoc-ai issue log`; the legacy `codedoc issue log` header is
+  still recognized). A clean, issue-free run removes a stale CodeDoc-owned log so a
+  historical failure no longer looks current; a foreign file at that path is left
+  byte-identical and never deleted, truncated, or overwritten. `ErrorReporter.flush()`
+  is now routed through the canonical atomic writer. A fatal `LiveBackupWriteError`
+  records best-effort diagnostics and prints the recovery and error-log paths without
+  letting a log-write failure mask the primary error.
+- **Deterministic dependency projection.** Public dependency links no longer come
+  from model type labels, so `single` and `triple` modes produce identical links for
+  identical source. For Python the projection is fully parser-authoritative (parser
+  imports + finalized graph edges; project imports that resolve to a graph edge are
+  never mislabeled external; model output can never add, remove, or reclassify a
+  link). For languages whose parser intentionally omits third-party package
+  specifiers (e.g. JS/TS), the external/SDK set is taken from the model's reported
+  dependencies and canonicalized by the same deterministic classifier; this preserves
+  real non-Python dependency information rather than dropping it. Model
+  `catalog_updates` / `dependency_refs` / `usage_notes` remain enrichment-only.
+- **Shared strict enrichment and aligned prompts.** Single-mode response cleaners
+  moved to `codedoc/agents/response_cleaning.py` and now also clean the triple-mode
+  `StructureAgent` / `DependencyAgent` / `DocumentationAgent` subresponses, so both
+  modes enforce the same documented keys, bounds, de-duplication, and boolean/malformed
+  rejection. Prompts in both families share precise definitions: `functions`/`classes`
+  are symbols *defined in* the file, `exports` are deliberately exposed names
+  (including package re-exports), imported names are never relabeled as local symbols,
+  and `usage_example` is included only when supported by the file's real public API —
+  never a placeholder path.
+- **Head-plus-tail source context.** Files larger than `max_content_chars` now send a
+  leading *and* a trailing slice (~70/30) with the truncation marker between them,
+  within the same character ceiling, so late class/function definitions and entry
+  points are no longer invisible. The single shared helper is used by both modes and
+  dry-run estimation, and at most one truncation warning is logged per file.
+- **Cache identity advances to `file-doc-v2`.** Because prompt and cleaning semantics
+  changed, `ANALYSIS_REVISION` advances from `file-doc-v1` to `file-doc-v2`. Existing
+  0.10.0 outputs and recovery files remain readable, but matching `file-doc-v1`
+  records are regenerated **once** under the corrected contract before reuse, so the
+  first 0.10.1 run over an existing project re-documents previously cached files and
+  incurs a one-time provider cost. Mode identity (`single`/`triple`) is still required.
+
+Provider selection, call counts, retries, rate limits, usage accounting, the public
+JSON/Markdown schema, and crash-recovery semantics are otherwise unchanged. Windows
+improvements do not regress Linux or macOS behavior.
+
+## 0.10.0 - 2026-06-22
+
+### Selectable per-file call mode (default one call)
+
+A feature release that makes normal analysis default to **one** validated provider
+call per processed file, while keeping the legacy three-call path available as an
+opt-in. The public record shape, pipeline scheduling, incremental reuse, rate-limit
+handling, and output behavior are unchanged.
+
+- **`analysis_mode` (`single` | `triple`).** New configuration key,
+  `CODEDOC_ANALYSIS_MODE` environment variable, and `--analysis-mode {single,triple}`
+  CLI flag. `single` (default) runs one combined `FileDocumentationAgent` call per
+  file; `triple` runs the legacy StructureAgent/DependencyAgent/DocumentationAgent
+  path (three calls). Validated at the loader; the CLI flag defaults to `None` so an
+  absent flag never overwrites a config-resolved value, and absence from every source
+  resolves to `single`.
+- **Default call count goes from three to one.** `estimated_calls`, `planned_calls`,
+  `disconnected_planned_calls`, and usage accounting all reflect the resolved mode
+  via a single `initial_calls_per_file()` helper (one for `single`, three for
+  `triple`), in both dry-run and real paths. Two new stats — `analysis_mode` and
+  `initial_calls_per_file` — are reported on every stats path, and CLI summaries show
+  them so the default one-call behavior is not silent.
+- **The combined agent is provider-neutral.** OpenAI, Anthropic, and Gemini all run
+  the one-call contract through their existing JSON mechanisms and the same
+  `LLMError` / retry / rate-limit / usage-accounting / file-failure paths. Response
+  cleaning is strict (unknown keys removed, malformed items dropped, booleans
+  rejected, order-preserving de-duplication, named item/length caps, and a global
+  response cap with a fixed lower-priority-first trim order).
+- **Cache identity is revision- and mode-aware.** Records carry private
+  `_analysis_revision` and `_analysis_mode` keys, registered in a dedicated
+  `CACHE_IDENTITY_KEYS` registry. A single centralized predicate governs every reuse
+  source (same-path, identical-content, live-backup, legacy checkpoint): reuse
+  requires a matching content hash **and** every cache-identity key. Pre-0.10.0
+  records (no revision) are reprocessed exactly once; a mode switch invalidates reuse.
+- **Documentation-quality scope (deterministic only).** Deterministic fixture
+  assertions verify that a correct combined response maps losslessly into the public
+  record shape and the catalog/graph for Python, TypeScript/TSX, Dart, and Java
+  fixtures. This checks plumbing, not live-model prose: the default change to
+  `single` is an explicit cost/latency decision, and one-call live prose quality is
+  **not** claimed to equal or exceed the three-call path.
+- **Compatibility.** The three agent classes remain importable and power `triple`
+  mode. `PipelinePlan.documented_rels` is now the canonical dataclass field, with
+  `selected_rels` retained as a read-only delegating alias; the `entry_excluded`
+  statistic is retained while CLI wording derives the excluded count from the
+  reachable/disconnected counts. No `SCHEMA_VERSION` bump — the new keys are private
+  and additive. `parallel_agents` / `--no-parallel` affects only `triple` mode and
+  has no per-file effect in `single` mode.
+
 ## 0.9.9 - 2026-06-20
 
 ### Complete coverage and managed output

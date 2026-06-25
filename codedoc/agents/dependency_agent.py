@@ -10,6 +10,7 @@ Analyses import relationships:
 from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
+from codedoc.agents.response_cleaning import clean_dependency_response
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -89,8 +90,9 @@ class DependencyAgent(BaseAgent):
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
+        cleaned = clean_dependency_response(result, file_path)
 
-        dep_analysis = result.get("dependencies_analysis", {})
+        dep_analysis = cleaned.get("dependencies_analysis", {})
         logger.debug(
             "DependencyAgent: %s → %d internal, %d external, %d warnings",
             file_path,
@@ -98,4 +100,4 @@ class DependencyAgent(BaseAgent):
             len(dep_analysis.get("external", [])),
             len(dep_analysis.get("warnings", [])),
         )
-        return result
+        return cleaned

@@ -73,10 +73,13 @@ class TestStructureAgent:
         from codedoc.agents.structure_agent import StructureAgent
         agent = StructureAgent(mock_llm)
         result = agent.run("src/App.tsx", "const App = () => {};", [], "tsx")
+        # 0.10.1 (Workstream G4): triple-mode responses now pass through the same
+        # strict cleaners as single mode, so empty keys are omitted rather than
+        # returned as empty lists.
         assert "description" in result
         assert "functions" in result
-        assert "classes" in result
         assert "exports" in result
+        assert "classes" not in result  # mock returns an empty classes list
 
     def test_functions_is_list(self, mock_llm):
         from codedoc.agents.structure_agent import StructureAgent
@@ -94,7 +97,10 @@ class TestDependencyAgent:
         da = result["dependencies_analysis"]
         assert "internal" in da
         assert "external" in da
-        assert "warnings" in da
+        # 0.10.1 (Workstream G4): an empty warnings list is omitted by the shared
+        # strict cleaner; the populated usage_notes survive.
+        assert "warnings" not in da
+        assert "usage_notes" in da
 
 
 class TestDocumentationAgent:
