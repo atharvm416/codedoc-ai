@@ -16,9 +16,13 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from codedoc.core.db import compute_file_hash
+from codedoc.core.db import compute_file_hash, source_char_count
 from codedoc.core.graph import DependencyGraph
-from codedoc.core.record_meta import CACHE_IDENTITY_KEYS, expected_analysis_identity
+from codedoc.core.record_meta import (
+    CACHE_IDENTITY_KEYS,
+    expected_analysis_identity,
+    expected_max_context_revision,
+)
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
@@ -185,10 +189,33 @@ def build_pipeline_plan(
         else:
             effective_forced.add(rel)
 
-    # 0.10.0: the expected cache identity for this run (revision + resolved mode).
-    expected_identity = expected_analysis_identity(
+    # 0.10.0: the run-level part of the expected cache identity (revision + mode),
+    # shared by every file.
+    base_identity = expected_analysis_identity(
         config.get("analysis_mode", "single")
     )
+
+    # 0.10.3: the per-file part — the truncation revision for a file large enough
+    # to be truncated under the current ceiling / head ratio.  Read-only and
+    # memoized; a file whose byte size is within the ceiling never reads its text
+    # (it cannot be truncated).  The char count is computed exactly as the
+    # orchestrator computes ``len(content)``, so the expected and stored values
+    # agree for every file.
+    max_content_chars = int(config.get("max_content_chars", 12000) or 12000)
+    head_ratio = float(config.get("truncation_head_ratio", 0.70) or 0.70)
+    _mcr_cache: dict[str, str | None] = {}
+
+    def _expected_identity_for(rel: str) -> dict[str, str]:
+        if rel not in _mcr_cache:
+            _mcr_cache[rel] = expected_max_context_revision(
+                source_char_count(file_map[rel]["path"], ceiling=max_content_chars),
+                max_chars=max_content_chars,
+                head_ratio=head_ratio,
+            )
+        mcr = _mcr_cache[rel]
+        if mcr is None:
+            return base_identity
+        return {**base_identity, "_max_context_revision": mcr}
 
     # 0.10.0: index reusable candidates by content hash, retaining *all* records
     # with the same hash (was a single-record-per-hash last-writer-wins map).
@@ -212,7 +239,7 @@ def build_pipeline_plan(
         if not _record_is_reusable(
             existing_docs.get(rel),
             compute_file_hash(file_map[rel]["path"]),
-            expected_identity,
+            _expected_identity_for(rel),
         )
     }
     changed_rels |= effective_forced
@@ -253,7 +280,7 @@ def build_pipeline_plan(
                 (
                     doc
                     for doc in docs_by_hash[content_hash]
-                    if _record_is_reusable(doc, content_hash, expected_identity)
+                    if _record_is_reusable(doc, content_hash, _expected_identity_for(rel_path))
                 ),
                 None,
             )
@@ -275,7 +302,7 @@ def build_pipeline_plan(
                 )
                 agent_rels.add(rel_path)
             elif not _record_is_reusable(
-                checkpoint_candidate, content_hash, expected_identity
+                checkpoint_candidate, content_hash, _expected_identity_for(rel_path)
             ):
                 if content_hash == stored_hash:
                     logger.info(

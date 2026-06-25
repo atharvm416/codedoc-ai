@@ -26,11 +26,25 @@ from __future__ import annotations
 # are reprocessed exactly once under the corrected contract before reuse.
 ANALYSIS_REVISION = "file-doc-v2"
 
+# 0.10.3: per-file truncation identity token.  The head-plus-tail truncation of
+# an oversized file depends on the effective ``max_content_chars`` ceiling and
+# the ``truncation_head_ratio``.  Before 0.10.3 neither participated in cache
+# identity, so changing either changed the truncated prompt but did *not*
+# invalidate cached records — an incremental re-run silently reused stale
+# documentation (the remedy the truncation warning recommends, "raise
+# max_content_chars", had no effect on a cached run).  ``_max_context_revision``
+# now encodes both for any file large enough to be truncated; a file that fits
+# within the ceiling carries no value and stays reusable across ceiling/ratio
+# changes.  Bump the token below if the truncation algorithm itself changes.
+MAX_CONTEXT_REVISION = "truncate-v1"
+
 # Cache-identity keys: private keys that, together with the content hash, decide
 # whether a stored record may be reused.  This is a *narrower* set than
 # ``PRIVATE_RECORD_KEYS`` — private metadata is persisted, but only these keys
 # gate reuse.  Every reuse source must compare all of these.
-CACHE_IDENTITY_KEYS: frozenset[str] = frozenset({"_analysis_revision", "_analysis_mode"})
+CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
+    {"_analysis_revision", "_analysis_mode", "_max_context_revision"}
+)
 
 # Registered private record keys: persisted through JSON / Markdown / live
 # backups / resume, never rendered into visible prose.  Must include every
@@ -39,8 +53,39 @@ PRIVATE_RECORD_KEYS: frozenset[str] = frozenset(CACHE_IDENTITY_KEYS)
 
 
 def expected_analysis_identity(analysis_mode: str) -> dict[str, str]:
-    """Return the cache-identity keys a freshly generated record must carry."""
+    """Return the run-level cache-identity keys a freshly generated record carries.
+
+    This is the part shared by every file in a run.  The per-file truncation part
+    (:func:`expected_max_context_revision`) is merged in separately because it
+    depends on each file's source length.
+    """
     return {"_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": analysis_mode}
+
+
+def expected_max_context_revision(
+    source_chars: int,
+    *,
+    max_chars: int,
+    head_ratio: float,
+) -> str | None:
+    """Return the per-file truncation cache-identity value, or ``None``.
+
+    ``None`` when the file fits within *max_chars* (``source_chars <= max_chars``):
+    it is sent whole, so neither the ceiling nor the head ratio affects its prompt
+    and the record stays reusable across ceiling/ratio changes.  For a file large
+    enough to be truncated (``source_chars > max_chars``), a stable string
+    encoding the effective ceiling and head ratio, e.g.
+    ``"truncate-v1:max=12000:head=0.7000"``.  The head ratio is rendered with a
+    fixed 4-place decimal so byte-identical configuration yields byte-identical
+    identities.
+
+    The value never encodes *source_chars* itself, so two truncated files under
+    the same configuration share an identity — only whether a file is truncated,
+    plus the ceiling and ratio, matter.
+    """
+    if source_chars > max_chars:
+        return f"{MAX_CONTEXT_REVISION}:max={int(max_chars)}:head={float(head_ratio):.4f}"
+    return None
 
 
 def carry_private_keys(source: dict, target: dict) -> None:

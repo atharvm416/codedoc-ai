@@ -23,7 +23,10 @@ from codedoc.agents.file_documentation_agent import FileDocumentationAgent
 from codedoc.agents.structure_agent import StructureAgent
 from codedoc.agents.dependency_agent import DependencyAgent
 from codedoc.agents.documentation_agent import DocumentationAgent
-from codedoc.core.record_meta import expected_analysis_identity
+from codedoc.core.record_meta import (
+    expected_analysis_identity,
+    expected_max_context_revision,
+)
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.logger import get_logger
@@ -152,6 +155,17 @@ class Orchestrator:
         # documentation) are never recorded, so they must not carry the identity.
         if result.get("state") == "checked" and not _result_has_agent_error(result):
             result.update(expected_analysis_identity(self.analysis_mode))
+            # 0.10.3: stamp the truncation identity only for a file actually large
+            # enough to be truncated (omit it otherwise so files that fit the
+            # ceiling stay reusable across ceiling/ratio changes).  ``original_chars``
+            # is the pre-truncation source length.
+            mcr = expected_max_context_revision(
+                original_chars,
+                max_chars=self.max_content_chars,
+                head_ratio=self.truncation_head_ratio,
+            )
+            if mcr is not None:
+                result["_max_context_revision"] = mcr
         return result
 
     # ------------------------------------------------------------------

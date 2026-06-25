@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.10.3 - 2026-06-25
+
+### Truncation parameters now participate in cache identity
+
+A patch release that fixes a cache-invalidation gap left by the configurable truncation
+controls. Before 0.10.3, changing `max_content_chars` or `truncation_head_ratio` altered the
+truncated prompt sent for an oversized file but did **not** invalidate that file's cached
+record, so an incremental re-run silently reused stale documentation — the exact remedy the
+truncation warning recommends ("raise `max_content_chars`") had no effect on a cached run.
+
+- **`_max_context_revision` cache-identity key (`codedoc/core/record_meta.py`).** A new private
+  per-file cache-identity key encodes the effective `max_content_chars` ceiling and
+  `truncation_head_ratio` (e.g. `truncate-v1:max=12000:head=0.7000`) for any file large enough
+  to be truncated. A file that fits within the ceiling carries no value and stays reusable
+  across ceiling/ratio changes — only files whose prompt is actually truncated are affected.
+  The key joins the single centralized reuse predicate alongside `_analysis_revision` and
+  `_analysis_mode`; no second reuse path is introduced.
+
+- **Precise, minimal invalidation.** Changing `max_content_chars` or `truncation_head_ratio`
+  reprocesses exactly the files large enough to be truncated and no others; files that fit the
+  ceiling remain byte-for-byte reusable. On the first run after upgrade, legacy oversized
+  records (which lack the key) are reprocessed once; every other record is reused.
+
+- **Consistent character counting.** Planning computes each file's character count exactly as
+  the orchestrator does (`utf-8-sig`, `errors="replace"`, via a shared `read_source_text`
+  helper in `codedoc/core/db.py`), with a cheap byte-size short-circuit so files within the
+  ceiling are never re-read. `_analysis_revision` and `SCHEMA_VERSION` are not bumped; the
+  public document schema is unchanged (`schema_version` stays `1.4`).
+
+Existing configuration, API, CLI, and output formats are fully backward-compatible.
+
 ## 0.10.2 - 2026-06-24
 
 ### Dependency projection fix, configurable truncation ratio, and error classifier extraction
