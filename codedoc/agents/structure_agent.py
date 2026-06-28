@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import clean_structure_response
+from codedoc.core.prompt_profiles import (
+    ResolvedShapeBlock,
+    default_shape_block,
+    filter_cleaned_response_for_profile,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -29,18 +34,7 @@ Imports: {imports}
 Code:
 {content}
 
-Return EXACTLY this JSON shape:
-{{
-  "description": "<one paragraph describing what this file does>",
-  "role_in_system": "<how this file fits into the broader system>",
-  "functions": [
-    {{"name": "<function or method defined IN this file>", "description": "<what it does>"}}
-  ],
-  "classes": [
-    {{"name": "<class defined IN this file>", "description": "<what it does>"}}
-  ],
-  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"]
-}}
+{shape_block}
 
 Rules:
 - Use only information from the provided code
@@ -60,18 +54,31 @@ Rules:
 
 
 def build_prompt(
-    file_path: str, content: str, imports: list[str], language: str
+    file_path: str,
+    content: str,
+    imports: list[str],
+    language: str,
+    requested_shape: ResolvedShapeBlock | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, prompt)`` exactly as sent to the provider.
 
     *content* must already be truncated by the caller.  Used by ``run()`` and
     by dry-run usage estimation so estimates match real prompts.
+
+    *requested_shape* supplies the requested-shape block; ``None`` reproduces the
+    developer-standard block byte for byte.
     """
+    shape_block = (
+        requested_shape.text
+        if requested_shape is not None
+        else default_shape_block("triple", "structure")
+    )
     prompt = _PROMPT_TEMPLATE.format(
         language=language,
         file_path=file_path,
         imports=imports,
         content=content,
+        shape_block=shape_block,
     )
     return _SYSTEM, prompt
 
@@ -79,13 +86,24 @@ def build_prompt(
 class StructureAgent(BaseAgent):
     agent_name = "StructureAgent"
 
-    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: ResolvedShapeBlock | None = None,
+    ) -> dict:
         system, prompt = build_prompt(
-            file_path, self._truncate(content, file_path), imports, language
+            file_path, self._truncate(content, file_path), imports, language,
+            requested_shape,
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
         cleaned = clean_structure_response(result, file_path)
+        cleaned = filter_cleaned_response_for_profile(
+            cleaned, requested_shape, mode="triple", agent="structure"
+        )
 
         logger.debug(
             "StructureAgent: %s → %d functions, %d classes",

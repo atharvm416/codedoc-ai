@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.10.3`.
+Current release: `0.11.0`.
 
 ## What It Does
 
@@ -15,6 +15,7 @@ Current release: `0.10.3`.
 - If no entry file is found, documents all supported project files.
 - Lets you choose coverage with `--documentation-scope`: `entry` (default — only files reachable from the entry) or `all` (every scanned source file, including disconnected ones). Each file's public record carries a `reachable_from_entry` flag.
 - Defaults to one combined provider call per file (`--analysis-mode single`); opt into the legacy three-agent path with `--analysis-mode triple`.
+- Supports validated, mode-specific JSON prompt profiles that customize only the requested response-shape block while fixed system, factuality, safety, parser, cleaner, and output rules remain authoritative.
 - Optionally manages a codedoc-owned block in the output directory's `.gitignore` (`--manage-output-gitignore`), off by default.
 - Parses imports locally before calling an LLM.
 - Processes dependencies before dependent files where possible.
@@ -310,6 +311,10 @@ Create `codedoc.config.json` in the project being documented:
   "entry_file": null,
   "documentation_scope": "entry",
   "analysis_mode": "single",
+  "prompt_profiles": null,
+  "prompt_profile_file": null,
+  "prompt_profile_auto_detect": true,
+  "prompt_customization_allow_risky": false,
   "output_dir": "codedoc",
   "output_format": "json",
   "manage_output_gitignore": false,
@@ -433,6 +438,540 @@ Coverage, analysis, and managed-output settings:
 
 Every public file record also gains an additive `reachable_from_entry` boolean: `true` for files reachable from the configured entry (and for all files when there is no entry), `false` for disconnected files included only by `documentation_scope: "all"`. It appears in JSON, the lossless Markdown embed, and as one `**Reachable from entry:** Yes|No` line per file section in the visible Markdown.
 
+## Prompt profiles
+
+Version 0.11.0 can replace only the `Return EXACTLY this JSON shape:` block in
+per-file prompts. System roles, fixed factuality/safety rules, scanning, parser
+facts, provider/model/key selection, response cleaners, retries, recovery, and
+output paths cannot be changed by a profile. Unknown fields and wrong types are
+rejected before provider creation.
+
+Profiles may be supplied inline as `prompt_profiles`, by `prompt_profile_file`,
+with `--prompt-profile FILE`, or as `codedoc-prompt-profiles.json` at the project
+root. `--no-prompt-profile` disables every source. Precedence is disable flag,
+CLI file, configured/environment file, inline object, auto-detected file, then
+the built-in developer standard.
+
+```json
+{
+  "schema_version": 1,
+  "single": {
+    "fields": [
+      {"key": "description", "type": "string", "instruction": "Explain this file accurately."},
+      {"key": "functions", "type": "symbol_list", "instruction": "Describe what it does."},
+      {"key": "dependencies_analysis.external", "type": "string_list", "instruction": "List third-party packages."}
+    ],
+    "per_language": {}
+  }
+}
+```
+
+`description` is required in the single combined and triple documentation
+profiles, including language overrides. Every triple profile contains all three
+agent objects. Supported fields are:
+
+| Mode / agent | Registered paths and types |
+| --- | --- |
+| `single/combined` | `description` (`string`, required), `role_in_system` (`string`), `functions` (`symbol_list`), `classes` (`symbol_list`), `exports` (`string_list`), `dependencies_analysis.internal` (`string_list`), `dependencies_analysis.external` (`string_list`), `dependencies_analysis.dependency_refs` (`string_list`), `dependencies_analysis.catalog_updates` (`catalog_list`), `dependencies_analysis.usage_notes` (`usage_note_list`), `dependencies_analysis.warnings` (`string_list`), `key_concepts` (`string_list`), `usage_example` (`string`) |
+| `triple/structure` | `description` (`string`), `role_in_system` (`string`), `functions` (`symbol_list`), `classes` (`symbol_list`), `exports` (`string_list`) |
+| `triple/dependency` | The six `dependencies_analysis.*` fields listed for `single/combined` |
+| `triple/documentation` | `description` (`string`, required), `role_in_system` (`string`), `key_concepts` (`string_list`), `usage_example` (`string`) |
+
+The list types have fixed member structure: `symbol_list` is
+`[{name, description}]`, `catalog_list` is `[{name, type, used_for}]`, and
+`usage_note_list` is `[{import, used_for}]`. Only each field's primary instruction
+is editable. `codedoc --describe-prompt-schema` prints exact defaults;
+`codedoc --export-prompt-profile [PATH]` exports a complete inert default.
+
+Active customization destined for planned calls receives a mandatory semantic
+standards/safety review through the configured provider. The reported calls are
+paid usage and results are not persisted. `SAFE` proceeds, `RISKY` warns, and
+`TOO_RISKY` blocks unless `--allow-risky-prompt-customization` (or the matching
+config key) is explicit. This verdict is probabilistic; deterministic validation
+and strict cleaners cannot be overridden. Dry-run makes no review call and reports
+the exact pending batch count.
+
+<!-- BEGIN CODEDOC PROMPT SCHEMA -->
+### `single/combined` requested shape
+
+```json
+{
+  "description": "<clear paragraph describing what this file does and why it exists>",
+  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+  "functions": [
+    {"name": "<function or method defined IN this file>", "description": "<what it does>"}
+  ],
+  "classes": [
+    {"name": "<class defined IN this file>", "description": "<what it does>"}
+  ],
+  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"],
+  "dependencies_analysis": {
+    "internal": ["<relative import paths that are project files>"],
+    "external": ["<package names from node_modules / pip / pub / maven>"],
+    "dependency_refs": ["<normalized dependency names used by this file>"],
+    "catalog_updates": [
+      {"name": "<normalized dependency name>", "type": "internal|external", "used_for": "<stable project-level purpose>"}
+    ],
+    "usage_notes": [
+      {"import": "<import string>", "used_for": "<file-specific note only>"}
+    ],
+    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
+  },
+  "key_concepts": ["<important concept or pattern used in this file>"],
+  "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
+}
+```
+
+| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
+| --- | --- | --- | --- | --- | --- | --- |
+| description | string | required | combined | A clear paragraph describing what this file does and why it exists. | <clear paragraph describing what this file does and why it exists> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| role_in_system | string | optional | combined | How this file connects to and supports the rest of the codebase. | <how this file connects to and supports the rest of the codebase> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| functions | symbol_list | optional | combined | Functions/methods defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| classes | symbol_list | optional | combined | Classes defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| exports | string_list | optional | combined | Symbols this module deliberately exposes (including re-exports). | <symbol this module deliberately exposes, including intentional re-exports> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.internal | string_list | optional | combined | Relative import paths that resolve to project files. | <relative import paths that are project files> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.external | string_list | optional | combined | Third-party package names (node_modules / pip / pub / maven). | <package names from node_modules / pip / pub / maven> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.dependency_refs | string_list | optional | combined | Normalized dependency names used by this file. | <normalized dependency names used by this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.catalog_updates | catalog_list | optional | combined | Reusable project-level dependency knowledge; each item is {name, type, used_for}. | <stable project-level purpose> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.usage_notes | usage_note_list | optional | combined | File-specific dependency notes; each item is {import, used_for}. | <file-specific note only> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.warnings | string_list | optional | combined | Dependency concerns, e.g. unused import or potential cycle. | <any dependency concern, e.g. unused import, potential cycle> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| key_concepts | string_list | optional | combined | Important concepts or patterns used in this file. | <important concept or pattern used in this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| usage_example | string | optional | combined | One-line example of how another file imports or uses this file. | <one-line example of how another file imports or uses this file, or empty string> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+
+### `triple/structure` requested shape
+
+```json
+{
+  "description": "<one paragraph describing what this file does>",
+  "role_in_system": "<how this file fits into the broader system>",
+  "functions": [
+    {"name": "<function or method defined IN this file>", "description": "<what it does>"}
+  ],
+  "classes": [
+    {"name": "<class defined IN this file>", "description": "<what it does>"}
+  ],
+  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"]
+}
+```
+
+| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
+| --- | --- | --- | --- | --- | --- | --- |
+| description | string | optional | structure | One paragraph describing what this file does. | <one paragraph describing what this file does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| role_in_system | string | optional | structure | How this file fits into the broader system. | <how this file fits into the broader system> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| functions | symbol_list | optional | structure | Functions/methods defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| classes | symbol_list | optional | structure | Classes defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| exports | string_list | optional | structure | Symbols this module deliberately exposes (including re-exports). | <symbol this module deliberately exposes, including intentional re-exports> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+
+### `triple/dependency` requested shape
+
+```json
+{
+  "dependencies_analysis": {
+    "internal": ["<relative import paths that are project files>"],
+    "external": ["<package names from node_modules / pip / pub / maven>"],
+    "dependency_refs": ["<normalized dependency names used by this file>"],
+    "catalog_updates": [
+      {
+        "name": "<normalized dependency name>",
+        "type": "internal|external",
+        "used_for": "<stable project-level purpose for this dependency>"
+      }
+    ],
+    "usage_notes": [
+      {"import": "<import string>", "used_for": "<file-specific note only>"}
+    ],
+    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
+  }
+}
+```
+
+| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
+| --- | --- | --- | --- | --- | --- | --- |
+| dependencies_analysis.internal | string_list | optional | dependency | Relative import paths that resolve to project files. | <relative import paths that are project files> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.external | string_list | optional | dependency | Third-party package names (node_modules / pip / pub / maven). | <package names from node_modules / pip / pub / maven> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.dependency_refs | string_list | optional | dependency | Normalized dependency names used by this file. | <normalized dependency names used by this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.catalog_updates | catalog_list | optional | dependency | Reusable project-level dependency knowledge; each item is {name, type, used_for}. | <stable project-level purpose for this dependency> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.usage_notes | usage_note_list | optional | dependency | File-specific dependency notes; each item is {import, used_for}. | <file-specific note only> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| dependencies_analysis.warnings | string_list | optional | dependency | Dependency concerns, e.g. unused import or potential cycle. | <any dependency concern, e.g. unused import, potential cycle> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+
+### `triple/documentation` requested shape
+
+```json
+{
+  "description": "<clear, detailed paragraph describing what this file does and why it exists>",
+  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+  "key_concepts": ["<important concept or pattern used in this file>"],
+  "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
+}
+```
+
+| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
+| --- | --- | --- | --- | --- | --- | --- |
+| description | string | required | documentation | A clear, detailed paragraph describing what this file does and why it exists. | <clear, detailed paragraph describing what this file does and why it exists> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| role_in_system | string | optional | documentation | How this file connects to and supports the rest of the codebase. | <how this file connects to and supports the rest of the codebase> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| key_concepts | string_list | optional | documentation | Important concepts or patterns used in this file. | <important concept or pattern used in this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+| usage_example | string | optional | documentation | One-line example of how another file would import or use this file. | <one-line example of how another file would import or use this file, or empty string> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
+
+### Complete profile examples
+
+Inline `single` (`prompt_profiles` value):
+
+```json
+{
+  "schema_version": 1,
+  "single": {
+    "fields": [
+      {
+        "key": "description",
+        "type": "string",
+        "instruction": "<clear paragraph describing what this file does and why it exists>"
+      },
+      {
+        "key": "role_in_system",
+        "type": "string",
+        "instruction": "<how this file connects to and supports the rest of the codebase>"
+      },
+      {
+        "key": "functions",
+        "type": "symbol_list",
+        "instruction": "<what it does>"
+      },
+      {
+        "key": "classes",
+        "type": "symbol_list",
+        "instruction": "<what it does>"
+      },
+      {
+        "key": "exports",
+        "type": "string_list",
+        "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
+      },
+      {
+        "key": "dependencies_analysis.internal",
+        "type": "string_list",
+        "instruction": "<relative import paths that are project files>"
+      },
+      {
+        "key": "dependencies_analysis.external",
+        "type": "string_list",
+        "instruction": "<package names from node_modules / pip / pub / maven>"
+      },
+      {
+        "key": "dependencies_analysis.dependency_refs",
+        "type": "string_list",
+        "instruction": "<normalized dependency names used by this file>"
+      },
+      {
+        "key": "dependencies_analysis.catalog_updates",
+        "type": "catalog_list",
+        "instruction": "<stable project-level purpose>"
+      },
+      {
+        "key": "dependencies_analysis.usage_notes",
+        "type": "usage_note_list",
+        "instruction": "<file-specific note only>"
+      },
+      {
+        "key": "dependencies_analysis.warnings",
+        "type": "string_list",
+        "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
+      },
+      {
+        "key": "key_concepts",
+        "type": "string_list",
+        "instruction": "<important concept or pattern used in this file>"
+      },
+      {
+        "key": "usage_example",
+        "type": "string",
+        "instruction": "<one-line example of how another file imports or uses this file, or empty string>"
+      }
+    ],
+    "per_language": {}
+  }
+}
+```
+
+Inline `triple` (`prompt_profiles` value):
+
+```json
+{
+  "schema_version": 1,
+  "triple": {
+    "structure": {
+      "fields": [
+        {
+          "key": "description",
+          "type": "string",
+          "instruction": "<one paragraph describing what this file does>"
+        },
+        {
+          "key": "role_in_system",
+          "type": "string",
+          "instruction": "<how this file fits into the broader system>"
+        },
+        {
+          "key": "functions",
+          "type": "symbol_list",
+          "instruction": "<what it does>"
+        },
+        {
+          "key": "classes",
+          "type": "symbol_list",
+          "instruction": "<what it does>"
+        },
+        {
+          "key": "exports",
+          "type": "string_list",
+          "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
+        }
+      ],
+      "per_language": {}
+    },
+    "dependency": {
+      "fields": [
+        {
+          "key": "dependencies_analysis.internal",
+          "type": "string_list",
+          "instruction": "<relative import paths that are project files>"
+        },
+        {
+          "key": "dependencies_analysis.external",
+          "type": "string_list",
+          "instruction": "<package names from node_modules / pip / pub / maven>"
+        },
+        {
+          "key": "dependencies_analysis.dependency_refs",
+          "type": "string_list",
+          "instruction": "<normalized dependency names used by this file>"
+        },
+        {
+          "key": "dependencies_analysis.catalog_updates",
+          "type": "catalog_list",
+          "instruction": "<stable project-level purpose for this dependency>"
+        },
+        {
+          "key": "dependencies_analysis.usage_notes",
+          "type": "usage_note_list",
+          "instruction": "<file-specific note only>"
+        },
+        {
+          "key": "dependencies_analysis.warnings",
+          "type": "string_list",
+          "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
+        }
+      ],
+      "per_language": {}
+    },
+    "documentation": {
+      "fields": [
+        {
+          "key": "description",
+          "type": "string",
+          "instruction": "<clear, detailed paragraph describing what this file does and why it exists>"
+        },
+        {
+          "key": "role_in_system",
+          "type": "string",
+          "instruction": "<how this file connects to and supports the rest of the codebase>"
+        },
+        {
+          "key": "key_concepts",
+          "type": "string_list",
+          "instruction": "<important concept or pattern used in this file>"
+        },
+        {
+          "key": "usage_example",
+          "type": "string",
+          "instruction": "<one-line example of how another file would import or use this file, or empty string>"
+        }
+      ],
+      "per_language": {}
+    }
+  }
+}
+```
+
+External `codedoc-prompt-profiles.json` (both modes):
+
+```json
+{
+  "schema_version": 1,
+  "single": {
+    "fields": [
+      {
+        "key": "description",
+        "type": "string",
+        "instruction": "<clear paragraph describing what this file does and why it exists>"
+      },
+      {
+        "key": "role_in_system",
+        "type": "string",
+        "instruction": "<how this file connects to and supports the rest of the codebase>"
+      },
+      {
+        "key": "functions",
+        "type": "symbol_list",
+        "instruction": "<what it does>"
+      },
+      {
+        "key": "classes",
+        "type": "symbol_list",
+        "instruction": "<what it does>"
+      },
+      {
+        "key": "exports",
+        "type": "string_list",
+        "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
+      },
+      {
+        "key": "dependencies_analysis.internal",
+        "type": "string_list",
+        "instruction": "<relative import paths that are project files>"
+      },
+      {
+        "key": "dependencies_analysis.external",
+        "type": "string_list",
+        "instruction": "<package names from node_modules / pip / pub / maven>"
+      },
+      {
+        "key": "dependencies_analysis.dependency_refs",
+        "type": "string_list",
+        "instruction": "<normalized dependency names used by this file>"
+      },
+      {
+        "key": "dependencies_analysis.catalog_updates",
+        "type": "catalog_list",
+        "instruction": "<stable project-level purpose>"
+      },
+      {
+        "key": "dependencies_analysis.usage_notes",
+        "type": "usage_note_list",
+        "instruction": "<file-specific note only>"
+      },
+      {
+        "key": "dependencies_analysis.warnings",
+        "type": "string_list",
+        "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
+      },
+      {
+        "key": "key_concepts",
+        "type": "string_list",
+        "instruction": "<important concept or pattern used in this file>"
+      },
+      {
+        "key": "usage_example",
+        "type": "string",
+        "instruction": "<one-line example of how another file imports or uses this file, or empty string>"
+      }
+    ],
+    "per_language": {}
+  },
+  "triple": {
+    "structure": {
+      "fields": [
+        {
+          "key": "description",
+          "type": "string",
+          "instruction": "<one paragraph describing what this file does>"
+        },
+        {
+          "key": "role_in_system",
+          "type": "string",
+          "instruction": "<how this file fits into the broader system>"
+        },
+        {
+          "key": "functions",
+          "type": "symbol_list",
+          "instruction": "<what it does>"
+        },
+        {
+          "key": "classes",
+          "type": "symbol_list",
+          "instruction": "<what it does>"
+        },
+        {
+          "key": "exports",
+          "type": "string_list",
+          "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
+        }
+      ],
+      "per_language": {}
+    },
+    "dependency": {
+      "fields": [
+        {
+          "key": "dependencies_analysis.internal",
+          "type": "string_list",
+          "instruction": "<relative import paths that are project files>"
+        },
+        {
+          "key": "dependencies_analysis.external",
+          "type": "string_list",
+          "instruction": "<package names from node_modules / pip / pub / maven>"
+        },
+        {
+          "key": "dependencies_analysis.dependency_refs",
+          "type": "string_list",
+          "instruction": "<normalized dependency names used by this file>"
+        },
+        {
+          "key": "dependencies_analysis.catalog_updates",
+          "type": "catalog_list",
+          "instruction": "<stable project-level purpose for this dependency>"
+        },
+        {
+          "key": "dependencies_analysis.usage_notes",
+          "type": "usage_note_list",
+          "instruction": "<file-specific note only>"
+        },
+        {
+          "key": "dependencies_analysis.warnings",
+          "type": "string_list",
+          "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
+        }
+      ],
+      "per_language": {}
+    },
+    "documentation": {
+      "fields": [
+        {
+          "key": "description",
+          "type": "string",
+          "instruction": "<clear, detailed paragraph describing what this file does and why it exists>"
+        },
+        {
+          "key": "role_in_system",
+          "type": "string",
+          "instruction": "<how this file connects to and supports the rest of the codebase>"
+        },
+        {
+          "key": "key_concepts",
+          "type": "string_list",
+          "instruction": "<important concept or pattern used in this file>"
+        },
+        {
+          "key": "usage_example",
+          "type": "string",
+          "instruction": "<one-line example of how another file would import or use this file, or empty string>"
+        }
+      ],
+      "per_language": {}
+    }
+  }
+}
+```
+
+A language override uses `per_language.<tag>.fields` with the same field objects. Its list fully replaces the parent agent's `fields` list; it is not merged. For example: `"per_language": {"python": {"fields": [{"key": "description", "type": "string", "instruction": "Explain this Python module."}]}}`.
+
+| Editable | Fixed / non-overridable |
+| --- | --- |
+| Registered field order; optional-field inclusion; bounded instruction text | System prompts; fixed rules; required fields; key/type vocabulary; deterministic parser/graph facts; provider/model/key; scanning and control flow; retries/recovery/cache policy; public output vocabulary |
+
+Sequence: resolve source precedence → deterministic schema/type/bound/render validation → read-only scan and plan → paid cap and exact review batching → SAFE continues / RISKY warns / TOO_RISKY blocks unless explicitly overridden → generation → strict cleaning and profile filtering → cache-digest stamping → recovery/final output. Dry-run stops after planning and reports pending review calls without contacting a provider.
+
+<!-- END CODEDOC PROMPT SCHEMA -->
+
 ## Environment Variables
 
 Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
@@ -462,6 +1001,9 @@ Supported variables:
 | `CODEDOC_MAX_FILES` | Non-negative paid-file cap; `0` is unlimited. |
 | `CODEDOC_FORCE_FILES` | Semicolon-separated forced project paths. |
 | `CODEDOC_ALLOW_PARTIAL` | Boolean partial-output exit-code override. |
+| `CODEDOC_PROMPT_PROFILE_FILE` | Explicit prompt-profile JSON path. |
+| `CODEDOC_PROMPT_PROFILE_AUTO_DETECT` | Strict boolean controlling root profile auto-detection. |
+| `CODEDOC_PROMPT_CUSTOMIZATION_ALLOW_RISKY` | Strict boolean allowing only a well-formed `TOO_RISKY` semantic verdict to proceed. |
 
 Example `.env` for OpenAI:
 

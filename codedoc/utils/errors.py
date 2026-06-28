@@ -138,6 +138,29 @@ class ProviderInitError(ConfigError):
     """
 
 
+class PromptCustomizationValidationError(ConfigError):
+    """Raised when a prompt-customization profile is rejected (0.11.0).
+
+    Covers two non-overridable outcomes and one overridable-by-flag outcome that
+    nonetheless stops the run:
+
+    - a deterministic schema/type/bound/rendering failure;
+    - a ``TOO_RISKY`` standards/safety verdict that is *not* overridden by the
+      explicit ``prompt_customization_allow_risky`` user flag;
+    - a fail-closed malformed / empty / ambiguous / transport-failed / unknown
+      verdict, or a batch-contract mismatch, which can **never** be overridden.
+
+    Subclasses :class:`ConfigError` so the CLI maps it to exit code 2 (a
+    setup-class problem the user must correct) without special-casing.  It is
+    raised before any source file is processed and before any crash-recovery,
+    live-backup, or output artifact is written, so the run leaves nothing behind.
+    """
+
+    def __init__(self, message: str, *, stats: dict | None = None) -> None:
+        super().__init__(message)
+        self.stats = dict(stats or {})
+
+
 class AgentError(CodeDocError):
     """Raised when an agent fails to produce valid output."""
 

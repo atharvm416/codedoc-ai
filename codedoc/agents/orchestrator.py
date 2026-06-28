@@ -27,6 +27,7 @@ from codedoc.core.record_meta import (
     expected_analysis_identity,
     expected_max_context_revision,
 )
+from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST, ResolvedProfile
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.logger import get_logger
@@ -78,6 +79,7 @@ class Orchestrator:
         usage: UsageAccumulator | None = None,
         analysis_mode: str = "single",
         truncation_head_ratio: float = 0.70,
+        resolved_profile: ResolvedProfile | None = None,
     ) -> None:
         if analysis_mode not in VALID_ANALYSIS_MODES:
             raise ValueError(
@@ -89,6 +91,7 @@ class Orchestrator:
         self.max_content_chars = max_content_chars
         self.analysis_mode = analysis_mode
         self.truncation_head_ratio = truncation_head_ratio
+        self.resolved_profile = resolved_profile
         # The combined agent powers the default single-call path.
         self._file_agent = FileDocumentationAgent(
             llm, max_content_chars=max_content_chars, usage=usage
@@ -166,6 +169,10 @@ class Orchestrator:
             )
             if mcr is not None:
                 result["_max_context_revision"] = mcr
+            if self.resolved_profile is not None:
+                digest = self.resolved_profile.file_digest(language)
+                if digest != NO_PROMPT_PROFILE_DIGEST:
+                    result["_prompt_profile_digest"] = digest
         return result
 
     # ------------------------------------------------------------------
@@ -178,7 +185,14 @@ class Orchestrator:
         """One combined provider call, merged into the flat record."""
         file_path = descriptor["rel_path"]
         t_start = time.monotonic()
-        cleaned = self._file_agent._safe_run(file_path, content, imports, language)
+        shape = (
+            self.resolved_profile.resolve_block("combined", language)
+            if self.resolved_profile is not None
+            else None
+        )
+        cleaned = self._call_agent(
+            self._file_agent, file_path, content, imports, language, shape
+        )
         elapsed = time.monotonic() - t_start
 
         if isinstance(cleaned, dict) and cleaned.get("error"):
@@ -283,9 +297,16 @@ class Orchestrator:
 
         # DocumentationAgent always gets the other agents' context
         t_doc_start = time.monotonic()
-        documentation = self._doc_agent._safe_run_with_context(
-            file_path, content, imports, language, structure, dependencies
-        )
+        doc_shape = self._profile_block("documentation", language)
+        if doc_shape is None:
+            documentation = self._doc_agent._safe_run_with_context(
+                file_path, content, imports, language, structure, dependencies
+            )
+        else:
+            documentation = self._doc_agent._safe_run_with_context(
+                file_path, content, imports, language, structure, dependencies,
+                doc_shape,
+            )
         elapsed_doc = time.monotonic() - t_doc_start
         if isinstance(documentation, dict) and documentation.get("error"):
             logger.warning(
@@ -310,10 +331,14 @@ class Orchestrator:
             t_start = time.monotonic()
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
             future_struct = pool.submit(
-                self._structure_agent._safe_run, file_path, content, imports, language
+                self._call_agent, self._structure_agent,
+                file_path, content, imports, language,
+                self._profile_block("structure", language),
             )
             future_dep = pool.submit(
-                self._dependency_agent._safe_run, file_path, content, imports, language
+                self._call_agent, self._dependency_agent,
+                file_path, content, imports, language,
+                self._profile_block("dependency", language),
             )
             structure = future_struct.result()
             dependencies = future_dep.result()
@@ -329,15 +354,32 @@ class Orchestrator:
     ) -> tuple[dict, dict]:
         if t_start is None:
             t_start = time.monotonic()
-        structure = self._structure_agent._safe_run(file_path, content, imports, language)
+        structure = self._call_agent(
+            self._structure_agent, file_path, content, imports, language,
+            self._profile_block("structure", language),
+        )
         elapsed_struct = time.monotonic() - t_start
         self._log_agent_result("structure", file_path, structure, elapsed_struct)
 
         t_dep = time.monotonic()
-        dependencies = self._dependency_agent._safe_run(file_path, content, imports, language)
+        dependencies = self._call_agent(
+            self._dependency_agent, file_path, content, imports, language,
+            self._profile_block("dependency", language),
+        )
         elapsed_dep = time.monotonic() - t_dep
         self._log_agent_result("dependencies", file_path, dependencies, elapsed_dep)
         return structure, dependencies
+
+    def _profile_block(self, agent: str, language: str):
+        if self.resolved_profile is None:
+            return None
+        return self.resolved_profile.resolve_block(agent, language)
+
+    @staticmethod
+    def _call_agent(agent, file_path, content, imports, language, shape):
+        if shape is None:
+            return agent._safe_run(file_path, content, imports, language)
+        return agent._safe_run(file_path, content, imports, language, shape)
 
     def _log_agent_result(self, agent_label: str, file_path: str, result: dict, elapsed: float) -> None:
         if isinstance(result, dict) and result.get("error"):

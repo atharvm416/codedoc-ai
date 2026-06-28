@@ -18,10 +18,12 @@ from pathlib import Path
 
 from codedoc.core.db import compute_file_hash, source_char_count
 from codedoc.core.graph import DependencyGraph
+from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST, ResolvedProfile
 from codedoc.core.record_meta import (
     CACHE_IDENTITY_KEYS,
     expected_analysis_identity,
     expected_max_context_revision,
+    normalized_identity_value,
 )
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
@@ -32,13 +34,16 @@ logger = get_logger(__name__)
 def _identity_matches(stored: dict, expected: dict) -> bool:
     """Compare every key in :data:`CACHE_IDENTITY_KEYS`.
 
-    An absent expected key and absent stored key compare equal; a
-    present-but-mismatched key blocks reuse.
+    Both the stored and the expected side are normalized through the shared
+    absent-default mapping (:func:`normalized_identity_value`), so an absent key
+    and an explicitly stored default (e.g. ``_prompt_profile_digest`` ==
+    ``NO_PROMPT_PROFILE_DIGEST``) compare equal; a present-but-mismatched key
+    blocks reuse.
     """
     if not isinstance(stored, dict):
         return False
     for key in CACHE_IDENTITY_KEYS:
-        if stored.get(key) != expected.get(key):
+        if normalized_identity_value(key, stored) != normalized_identity_value(key, expected):
             return False
     return True
 
@@ -142,6 +147,7 @@ def build_pipeline_plan(
     checkpoint_records: dict[str, dict],
     forced_paths: list[str],
     config: dict,
+    resolved_profile: ResolvedProfile | None = None,
 ) -> tuple[PipelinePlan, PlanMaterials]:
     """Compute the full routing plan for one pipeline run, read-only.
 
@@ -213,9 +219,19 @@ def build_pipeline_plan(
                 head_ratio=head_ratio,
             )
         mcr = _mcr_cache[rel]
-        if mcr is None:
-            return base_identity
-        return {**base_identity, "_max_context_revision": mcr}
+        identity = dict(base_identity)
+        if mcr is not None:
+            identity["_max_context_revision"] = mcr
+        # 0.11.0: an active prompt-customization profile contributes a per-file
+        # digest keyed on the file's language.  Omitted when no profile is active
+        # for that language, so the absent-default normalization keeps no-profile
+        # records reusable.
+        if resolved_profile is not None:
+            language = file_map[rel].get("language", "generic")
+            digest = resolved_profile.file_digest(language)
+            if digest != NO_PROMPT_PROFILE_DIGEST:
+                identity["_prompt_profile_digest"] = digest
+        return identity
 
     # 0.10.0: index reusable candidates by content hash, retaining *all* records
     # with the same hash (was a single-record-per-hash last-writer-wins map).

@@ -175,6 +175,24 @@ DEFAULTS: dict[str, Any] = {
     # produces a ~70/30 head/tail split, identical to the 0.10.1 hardcoded value.
     # Must be a float strictly between 0.0 and 1.0 (exclusive).
     "truncation_head_ratio": 0.70,
+    # -----------------------------------------------------------------------
+    # 0.11.0 mode-based JSON prompt profiles
+    # -----------------------------------------------------------------------
+    # Inline profile object (single and/or triple sections) customizing the
+    # requested JSON shape block. ``None`` means no inline profile.
+    "prompt_profiles": None,
+    # Path to an external profile JSON file (relative to the project root, or an
+    # absolute path). Never merged with ``prompt_profiles``.
+    "prompt_profile_file": None,
+    # When True (default), auto-detect ``codedoc-prompt-profiles.json`` at the
+    # project root if no inline/explicit profile is given.
+    "prompt_profile_auto_detect": True,
+    # Internal disable flag set by ``--no-prompt-profile``; highest precedence.
+    "prompt_profile_disabled": False,
+    # Explicit user override that lets a TOO_RISKY standards/safety verdict
+    # proceed at the user's own risk. Never relaxes deterministic validation or
+    # the strict cleaners.
+    "prompt_customization_allow_risky": False,
 }
 
 _CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
@@ -198,6 +216,9 @@ _ENV_KEY_MAP = {
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
     "CODEDOC_ANALYSIS_MODE": "analysis_mode",
     "CODEDOC_TRUNCATION_HEAD_RATIO": "truncation_head_ratio",
+    "CODEDOC_PROMPT_PROFILE_FILE": "prompt_profile_file",
+    "CODEDOC_PROMPT_PROFILE_AUTO_DETECT": "prompt_profile_auto_detect",
+    "CODEDOC_PROMPT_CUSTOMIZATION_ALLOW_RISKY": "prompt_customization_allow_risky",
 }
 
 # 0.10.0: allowed values for the selectable per-file analysis mode.
@@ -795,6 +816,30 @@ def _validate(config: dict[str, Any]) -> None:
             f"(exclusive); got {ratio_val!r}."
         )
     config["truncation_head_ratio"] = ratio_val
+
+    # 0.11.0: prompt-profile keys.  Structural profile validation happens later in
+    # prompt_profiles.resolve_profile_source; here we only enforce the config-level
+    # value types and strict booleans so an unrecognized value is a hard error.
+    inline_profiles = config.get("prompt_profiles")
+    if inline_profiles is not None and not isinstance(inline_profiles, dict):
+        raise ConfigError("prompt_profiles must be an inline JSON object or null.")
+    profile_file = config.get("prompt_profile_file")
+    if profile_file is not None and not (
+        isinstance(profile_file, str) and not isinstance(profile_file, bool)
+    ):
+        raise ConfigError("prompt_profile_file must be a path string or null.")
+    if isinstance(profile_file, str) and not profile_file.strip():
+        raise ConfigError("prompt_profile_file must be a non-empty path string or null.")
+    config["prompt_profile_auto_detect"] = _coerce_strict_bool(
+        config.get("prompt_profile_auto_detect", True), "prompt_profile_auto_detect"
+    )
+    config["prompt_customization_allow_risky"] = _coerce_strict_bool(
+        config.get("prompt_customization_allow_risky", False),
+        "prompt_customization_allow_risky",
+    )
+    config["prompt_profile_disabled"] = _coerce_strict_bool(
+        config.get("prompt_profile_disabled", False), "prompt_profile_disabled"
+    )
 
 
 _WINDOWS_RESERVED_NAMES = {

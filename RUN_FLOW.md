@@ -38,7 +38,9 @@ known to be safe.
    conflicts and reports them. The `ErrorReporter` is constructed in memory only
    (nothing is written until `flush()`).
 
-4. **Scan and plan.** `scan_files` walks the project (skipping the output
+4. **Prompt-profile validation, then scan and plan.** Any inline, explicit, or
+   auto-detected mode-based prompt profile is resolved and deterministically
+   validated before scanning. `scan_files` walks the project (skipping the output
    directory) with an iterative, symlink-safe walk: deep trees cannot raise
    `RecursionError`, every directory's resolved identity is tracked so cycles
    and aliases are visited once, and — with the default `follow_symlinks=false`
@@ -60,13 +62,24 @@ known to be safe.
    the agent-file count by `initial_calls_per_file(analysis_mode)` — one for the
    default `single` mode, three for `triple`. Reuse eligibility is decided by a
    single predicate over the content hash plus the cache-identity keys
-   (`_analysis_revision`, `_analysis_mode`), so a record whose revision or mode no
-   longer matches is reprocessed once. A dry run returns its projected statistics
-   here and performs no mutation.
+   (`_analysis_revision`, `_analysis_mode`, `_max_context_revision`, and
+   `_prompt_profile_digest`), normalized through one shared absent-default map so an
+   omitted key and an explicit no-profile sentinel compare equal. A record whose
+   revision, mode, truncation identity, or active prompt-profile digest no longer
+   matches is reprocessed once. A dry run returns its projected statistics here and
+   performs no mutation.
 
 5. **Paid-file safety cap.** After the full plan exists and before any mutation,
    writer initialization, or provider creation, a plan that exceeds the
    configured `max_files` limit stops with a `ConfigError`.
+
+   When active customization will reach planned provider calls, the plan also
+   constructs complete deterministic review batches and reports their exact paid
+   call count. Dry-run reports them as pending and makes no call. A real run
+   completes every semantic standards/safety review batch here, before mutation.
+   `SAFE` proceeds, `RISKY` proceeds with warnings, and `TOO_RISKY` blocks unless
+   explicitly overridden. The verdict is probabilistic; deterministic validation
+   and strict cleaners remain non-overridable.
 
 6. **Mutation boundary.** Everything below may write to the filesystem. The
    output directory is created, then a **provider-free output accessibility
@@ -89,12 +102,12 @@ known to be safe.
    reuse or checkpoint reuse are materialized in memory. If no files need agent
    work, the run finalizes immediately (phase 10) and returns.
 
-8. **Recovery-file initialization, then provider creation.** `initialize_empty()`
-   flushes the in-progress banner to the dedicated recovery file *before* the LLM
-   provider is created. A recovery-write failure here raises
-   `LiveBackupWriteError` before any provider exists, so initialization failure
-   makes **zero** provider calls. Only after the recovery file is initialized is
-   the provider created and the orchestrator built. The orchestrator is given
+8. **Recovery initialization and provider reuse/creation.** `initialize_empty()`
+   flushes the in-progress banner to the dedicated recovery file. When semantic
+   review was not required, this still occurs before provider creation and a
+   recovery-write failure makes zero provider calls. When review was required,
+   the already-reviewed provider is reused; recovery initialization still occurs
+   before any documentation call. The orchestrator is then built and given
    the resolved `analysis_mode` once: `single` (default) dispatches one combined
    `FileDocumentationAgent` call per file, while `triple` runs the three legacy
    agents (three calls); both modes produce the identical flat record and route

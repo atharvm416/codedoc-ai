@@ -16,6 +16,8 @@ synthetic key to exercise the carry behaviour.
 
 from __future__ import annotations
 
+from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
+
 # Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
 # changes in a way that should invalidate previously cached records.
 #
@@ -42,14 +44,45 @@ MAX_CONTEXT_REVISION = "truncate-v1"
 # whether a stored record may be reused.  This is a *narrower* set than
 # ``PRIVATE_RECORD_KEYS`` — private metadata is persisted, but only these keys
 # gate reuse.  Every reuse source must compare all of these.
+#
+# 0.11.0: ``_prompt_profile_digest`` joins the set so an active prompt-customization
+# profile precisely invalidates the files it affects.  It is omitted from a record
+# when no profile is active (developer-standard); the absent-default mapping below
+# makes an omitted key and an explicit ``NO_PROMPT_PROFILE_DIGEST`` compare equal,
+# so legacy and no-profile records stay reusable.
 CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
-    {"_analysis_revision", "_analysis_mode", "_max_context_revision"}
+    {
+        "_analysis_revision",
+        "_analysis_mode",
+        "_max_context_revision",
+        "_prompt_profile_digest",
+    }
 )
+
+# Absent-default mapping for cache-identity comparison (0.11.0).  A key listed
+# here compares as its default value when absent from a record, so an omitted key
+# and an explicitly stored default are equivalent.  Keys not listed here default
+# to ``None`` when absent (the historical behaviour for the other identity keys).
+_CACHE_KEY_ABSENT_DEFAULTS: dict[str, str] = {
+    "_prompt_profile_digest": NO_PROMPT_PROFILE_DIGEST,
+}
 
 # Registered private record keys: persisted through JSON / Markdown / live
 # backups / resume, never rendered into visible prose.  Must include every
 # cache-identity key so the carrier preserves them.
 PRIVATE_RECORD_KEYS: frozenset[str] = frozenset(CACHE_IDENTITY_KEYS)
+
+
+def normalized_identity_value(key: str, source: dict) -> object:
+    """Return ``source[key]`` normalized through :data:`_CACHE_KEY_ABSENT_DEFAULTS`.
+
+    An absent key resolves to its registered absent-default (or ``None`` when the
+    key has no mapping), so the centralized reuse predicate can normalize both the
+    stored and the expected side identically.
+    """
+    if key in source:
+        return source[key]
+    return _CACHE_KEY_ABSENT_DEFAULTS.get(key)
 
 
 def expected_analysis_identity(analysis_mode: str) -> dict[str, str]:

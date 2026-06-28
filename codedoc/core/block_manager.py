@@ -45,7 +45,9 @@ __all__ = [
     "WINDOWS_TRANSIENT_LOCK_ERRORS",
     "BlockError",
     "atomic_write_text",
+    "create_text_exclusive",
     "merge_managed_block",
+    "replace_text_with_backup",
     "write_owned_block",
 ]
 
@@ -181,6 +183,81 @@ def atomic_write_text(path: Path, text: str) -> None:
         if isinstance(exc, OSError):
             raise
         raise OSError(f"Could not write UTF-8 text to '{path}'") from exc
+
+
+def create_text_exclusive(path: Path, text: str) -> None:
+    """Create *path* with *text* (UTF-8), refusing any existing target.
+
+    Uses ``O_CREAT | O_EXCL`` so creation is atomic and race-safe: if anything
+    already exists at *path* — a regular file, a directory, or a symlink — the
+    operation raises :class:`BlockError` rather than overwriting it.  Used by the
+    ``--export-prompt-profile`` utility for no-overwrite creation.
+    """
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(str(path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+    except FileExistsError as exc:
+        raise BlockError(
+            f"refusing to overwrite the existing path '{path}'. "
+            "Choose a different path or pass --force."
+        ) from exc
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        _silent_unlink(path)
+        raise
+
+
+def replace_text_with_backup(path: Path, text: str) -> None:
+    """Replace a regular-file *path* with *text* after an exclusive backup.
+
+    The ``--force`` path for ``--export-prompt-profile``.  Only a regular file may
+    be replaced: a symlink or directory at *path* raises :class:`BlockError`.  An
+    exclusive, timestamped sibling backup of the current bytes is written first;
+    the target is then re-read and verified unchanged before the atomic
+    replacement (so a concurrent writer cannot have its change silently lost).
+    An absent target is simply created.
+    """
+    path = Path(path)
+    if path.is_symlink():
+        raise BlockError(f"refusing to replace symlink '{path}' with --force.")
+    if path.exists() and path.is_dir():
+        raise BlockError(f"refusing to replace directory '{path}' with --force.")
+    if not path.exists():
+        create_text_exclusive(path, text)
+        return
+    if not path.is_file():
+        raise BlockError(f"refusing to replace non-regular file '{path}' with --force.")
+
+    original = path.read_bytes()
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    attempt = 0
+    while True:
+        suffix = f".bak-{stamp}" if attempt == 0 else f".bak-{stamp}({attempt})"
+        backup = path.with_name(path.name + suffix)
+        try:
+            fd = os.open(str(backup), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
+            break
+        except FileExistsError:
+            attempt += 1
+            if attempt > 1000:
+                raise BlockError(
+                    f"could not create a unique backup for '{path}'."
+                ) from None
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(original)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+    if path.read_bytes() != original:
+        raise BlockError(
+            f"target '{path}' changed during backup; aborting --force replacement."
+        )
+    atomic_write_text(path, text)
 
 
 def _replace_with_lock_retry(tmp: Path, path: Path) -> None:

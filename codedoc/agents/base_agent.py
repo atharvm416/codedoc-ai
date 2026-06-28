@@ -92,7 +92,14 @@ class BaseAgent(ABC):
         self._usage = usage
 
     @abstractmethod
-    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: "object | None" = None,
+    ) -> dict:
         """
         Analyse one file and return a result dict.
 
@@ -101,6 +108,8 @@ class BaseAgent(ABC):
             content:   raw file content
             imports:   list of import strings extracted by the parser
             language:  detected language tag
+            requested_shape: optional resolved prompt-profile block for this
+                file/agent.  ``None`` means the developer-standard shape (0.11.0).
 
         Returns:
             dict of results — structure depends on the agent subclass
@@ -185,13 +194,22 @@ class BaseAgent(ABC):
                 f"JSON parse error: {exc}. Raw snippet: {json_str[:200]}"
             ) from exc
 
-    def _safe_run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def _safe_run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: "object | None" = None,
+    ) -> dict:
         """
         Wrapper that catches all errors and returns a fallback dict
         instead of crashing the pipeline.
         """
         try:
-            return self.run(file_path, content, imports, language)
+            if requested_shape is None:
+                return self.run(file_path, content, imports, language)
+            return self.run(file_path, content, imports, language, requested_shape)
         except AgentError as exc:
             logger.warning("%s failed on %s: %s", self.agent_name, file_path, exc)
             return {"error": str(exc), "agent": self.agent_name}

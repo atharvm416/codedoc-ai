@@ -11,6 +11,11 @@ from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import clean_dependency_response
+from codedoc.core.prompt_profiles import (
+    ResolvedShapeBlock,
+    default_shape_block,
+    filter_cleaned_response_for_profile,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,25 +33,7 @@ Imports found by static parser: {imports}
 Code:
 {content}
 
-Return EXACTLY this JSON shape:
-{{
-  "dependencies_analysis": {{
-    "internal": ["<relative import paths that are project files>"],
-    "external": ["<package names from node_modules / pip / pub / maven>"],
-    "dependency_refs": ["<normalized dependency names used by this file>"],
-    "catalog_updates": [
-      {{
-        "name": "<normalized dependency name>",
-        "type": "internal|external",
-        "used_for": "<stable project-level purpose for this dependency>"
-      }}
-    ],
-    "usage_notes": [
-      {{"import": "<import string>", "used_for": "<file-specific note only>"}}
-    ],
-    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
-  }}
-}}
+{shape_block}
 
 Rules:
 - Internal imports start with ./ or ../ (JS/TS) or are relative paths (Python/Dart/Java)
@@ -65,18 +52,28 @@ Rules:
 
 
 def build_prompt(
-    file_path: str, content: str, imports: list[str], language: str
+    file_path: str,
+    content: str,
+    imports: list[str],
+    language: str,
+    requested_shape: ResolvedShapeBlock | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, prompt)`` exactly as sent to the provider.
 
     *content* must already be truncated by the caller.  Used by ``run()`` and
     by dry-run usage estimation so estimates match real prompts.
     """
+    shape_block = (
+        requested_shape.text
+        if requested_shape is not None
+        else default_shape_block("triple", "dependency")
+    )
     prompt = _PROMPT_TEMPLATE.format(
         language=language,
         file_path=file_path,
         imports=imports,
         content=content,
+        shape_block=shape_block,
     )
     return _SYSTEM, prompt
 
@@ -84,13 +81,24 @@ def build_prompt(
 class DependencyAgent(BaseAgent):
     agent_name = "DependencyAgent"
 
-    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: ResolvedShapeBlock | None = None,
+    ) -> dict:
         system, prompt = build_prompt(
-            file_path, self._truncate(content, file_path), imports, language
+            file_path, self._truncate(content, file_path), imports, language,
+            requested_shape,
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
         cleaned = clean_dependency_response(result, file_path)
+        cleaned = filter_cleaned_response_for_profile(
+            cleaned, requested_shape, mode="triple", agent="dependency"
+        )
 
         dep_analysis = cleaned.get("dependencies_analysis", {})
         logger.debug(

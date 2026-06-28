@@ -29,6 +29,7 @@ Subsequent runs (entry auto-read from previous docs when available):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -248,6 +249,52 @@ examples:
             "per file (default); 'triple' runs the three-agent path "
             "(structure + dependency + documentation)."
         ),
+    )
+    profile_group = parser.add_mutually_exclusive_group()
+    profile_group.add_argument(
+        "--prompt-profile",
+        metavar="FILE",
+        default=None,
+        help="Use an explicit mode-based JSON prompt profile.",
+    )
+    profile_group.add_argument(
+        "--no-prompt-profile",
+        action="store_true",
+        default=False,
+        help="Disable inline, explicit, and auto-detected prompt profiles.",
+    )
+    risk_group = parser.add_mutually_exclusive_group()
+    risk_group.add_argument(
+        "--allow-risky-prompt-customization",
+        dest="allow_risky_prompt_customization",
+        action="store_true",
+        default=None,
+        help="Proceed after a well-formed TOO_RISKY semantic review verdict.",
+    )
+    risk_group.add_argument(
+        "--no-allow-risky-prompt-customization",
+        dest="allow_risky_prompt_customization",
+        action="store_false",
+        help="Block a TOO_RISKY semantic review verdict (default).",
+    )
+    utility_group = parser.add_mutually_exclusive_group()
+    utility_group.add_argument(
+        "--describe-prompt-schema",
+        action="store_true",
+        help="Print the supported prompt-profile schema as JSON and exit.",
+    )
+    utility_group.add_argument(
+        "--export-prompt-profile",
+        nargs="?",
+        const="-",
+        default=None,
+        metavar="PATH",
+        help="Export an editable default profile to PATH, or stdout when omitted.",
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --export-prompt-profile, back up and replace a regular file.",
     )
     parser.add_argument(
         "--max-parallel-files",
@@ -480,6 +527,87 @@ def run_cli(argv: list[str] | None = None) -> int:
             raise
         return int(exc.code or 2)
 
+    if args.describe_prompt_schema or args.export_prompt_profile is not None:
+        unrelated = any(
+            (
+                args.root != ".",
+                args.entry is not None,
+                args.documentation_scope is not None,
+                args.manage_output_gitignore is not None,
+                args.provider is not None,
+                args.model is not None,
+                args.output is not None,
+                bool(args.ignore),
+                args.skip_dirs is not None,
+                bool(args.add_skip_dirs),
+                bool(args.remove_skip_dirs),
+                args.safe_mode,
+                args.dry_run,
+                args.max_files is not None,
+                bool(args.force_files),
+                args.allow_partial,
+                args.no_parallel,
+                args.max_parallel_files is not None,
+                args.truncation_head_ratio is not None,
+                args.verbose,
+                args.prompt_profile is not None,
+                args.no_prompt_profile,
+                args.allow_risky_prompt_customization is not None,
+            )
+        )
+        if unrelated or (args.export_prompt_profile is not None and args.format is not None):
+            print(
+                "Error: prompt schema describe/export utilities cannot be combined "
+                "with a documentation run or unrelated run options.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            from codedoc.core.block_manager import (
+                create_text_exclusive,
+                replace_text_with_backup,
+            )
+            from codedoc.core.prompt_profiles import (
+                export_default_profile_dict,
+                render_prompt_schema_reference,
+                schema_reference_data,
+            )
+
+            mode = args.analysis_mode
+            if args.describe_prompt_schema:
+                if args.force:
+                    parser.error("--force is valid only with --export-prompt-profile")
+                if args.format == "md":
+                    print(render_prompt_schema_reference(mode))
+                else:
+                    print(json.dumps(schema_reference_data(mode), indent=2, ensure_ascii=False))
+                return 0
+            data = json.dumps(
+                export_default_profile_dict(mode), indent=2, ensure_ascii=False
+            ) + "\n"
+            target = args.export_prompt_profile
+            if target in (None, "-"):
+                if args.force:
+                    parser.error("--force is not valid for stdout export")
+                print(data, end="")
+                return 0
+            path = Path(target)
+            if args.force:
+                replace_text_with_backup(path, data)
+            else:
+                create_text_exclusive(path, data)
+            print(f"Exported prompt profile: {path}")
+            return 0
+        except SystemExit as exc:
+            return int(exc.code or 2)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.force:
+        print("Error: --force requires --export-prompt-profile", file=sys.stderr)
+        return 2
+
     root = Path(args.root).resolve()
     if not root.exists() or not root.is_dir():
         print(f"Error: project root is not a directory: {root}", file=sys.stderr)
@@ -514,6 +642,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["parallel_agents"] = False
     if args.analysis_mode is not None:
         overrides["analysis_mode"] = args.analysis_mode
+    if args.prompt_profile is not None:
+        overrides["prompt_profile_file"] = args.prompt_profile
+    if args.no_prompt_profile:
+        overrides["prompt_profile_disabled"] = True
+    if args.allow_risky_prompt_customization is not None:
+        overrides["prompt_customization_allow_risky"] = (
+            args.allow_risky_prompt_customization
+        )
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.truncation_head_ratio is not None:

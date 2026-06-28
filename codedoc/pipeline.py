@@ -42,6 +42,9 @@ from pathlib import Path
 
 from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
+from codedoc.agents.prompt_customization_validation_agent import (
+    PromptCustomizationValidationAgent,
+)
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.discovery import (
@@ -69,6 +72,14 @@ from codedoc.core.planning import (
     build_pipeline_plan,
     normalize_force_files,
 )
+from codedoc.core.prompt_profiles import (
+    ProfileResolution,
+    ResolvedProfile,
+    ReviewBatch,
+    build_resolved_profile,
+    build_review_batches,
+    resolve_profile_source,
+)
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import (
     _build_documentation_records,
@@ -83,7 +94,7 @@ from codedoc.core.resume import (
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
-from codedoc.llm.factory import create_provider
+from codedoc.llm.factory import create_provider, describe_provider_selection
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
 from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import (
@@ -153,6 +164,34 @@ def run_pipeline(
 
     config = load_config(root, config_overrides)
     _resolve_entry_and_docs(root, config)
+
+    analysis_mode = config.get("analysis_mode", "single")
+    known_languages = frozenset(config["extension_language_map"].values())
+    profile_resolution = resolve_profile_source(
+        config,
+        root,
+        known_languages=known_languages,
+        active_mode=analysis_mode,
+    )
+    resolved_profile = build_resolved_profile(profile_resolution, analysis_mode)
+    no_work_profile_stats = {
+        "prompt_profile_source": profile_resolution.source,
+        "prompt_profile_file": (
+            str(profile_resolution.source_path)
+            if profile_resolution.source_path is not None
+            else None
+        ),
+        "prompt_profile_active": False,
+        "prompt_profile_affected_files": 0,
+        "prompt_customization_security_review": "not-required",
+        "prompt_customization_security_review_calls_planned": 0,
+        "prompt_customization_security_review_calls_completed": 0,
+        "prompt_customization_security_warnings": 0,
+        "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_allow_risky": bool(
+            config.get("prompt_customization_allow_risky", False)
+        ),
+    }
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
@@ -317,6 +356,7 @@ def run_pipeline(
                 "output_dir": str(output_dir),
                 "output_files": [],
                 **_initial_ignore_stats(config, ignore_target),
+                **no_work_profile_stats,
             }
         output_dir.mkdir(parents=True, exist_ok=True)
         _remove_legacy_db(output_dir)
@@ -340,6 +380,7 @@ def run_pipeline(
             "disconnected_paid_files": 0,
             "disconnected_planned_calls": 0,
             **_initial_ignore_stats(config, ignore_target),
+            **no_work_profile_stats,
         }
 
     graph, file_map, unresolved_imports_by_path = _build_graph(all_files, root, error_reporter)
@@ -385,11 +426,25 @@ def run_pipeline(
         checkpoint_records=checkpoint_results,
         forced_paths=forced_paths,
         config=config,
+        resolved_profile=resolved_profile,
     )
+
+    planned_languages = frozenset(
+        file_map[rel].get("language", "generic") for rel in plan.agent_rels
+    )
+    review_batches = build_review_batches(resolved_profile, planned_languages)
 
     if dry_run:
         return _build_dry_run_stats(
-            plan, file_map, config, output_dir, ownership_conflicts, reachable_rels
+            plan,
+            file_map,
+            config,
+            output_dir,
+            ownership_conflicts,
+            reachable_rels,
+            resolved_profile,
+            profile_resolution,
+            review_batches,
         )
 
     scope_stats = _build_scope_stats(
@@ -405,6 +460,78 @@ def run_pipeline(
             "Inspect the plan first with --dry-run, and raise --max-files only "
             "after reviewing it."
         )
+
+    usage = UsageAccumulator()
+    llm = None
+    review_stats = _base_profile_stats(
+        resolved_profile, profile_resolution, plan, file_map, review_batches
+    )
+    review_stats["prompt_customization_allow_risky"] = bool(
+        config.get("prompt_customization_allow_risky", False)
+    )
+    if review_batches:
+        # This is a probabilistic semantic standards/safety gate. TOO_RISKY
+        # blocks by default and only the explicit user override may bypass that
+        # well-formed verdict. Deterministic validation and strict cleaners are
+        # the non-overridable structural boundary.
+        review_provider, review_model = describe_provider_selection(config)
+        print(
+            "Prompt customization standards/safety review will make "
+            f"{len(review_batches)} paid provider call(s) using "
+            f"provider={review_provider}, model={review_model}. No profile content "
+            "is persisted in run statistics.",
+            flush=True,
+        )
+        llm = create_provider(config)
+        reviewer = PromptCustomizationValidationAgent(llm, usage=usage)
+        outcome = reviewer.review(review_batches)
+        review_stats["prompt_customization_security_review_calls_completed"] = (
+            outcome.calls_completed
+        )
+        review_stats["prompt_customization_security_warnings"] = len(outcome.warnings)
+        review_stats["prompt_customization_security_blocking_reasons"] = len(
+            outcome.reasons
+        )
+        if outcome.verdict == "SAFE":
+            review_stats["prompt_customization_security_review"] = "safe"
+            print("Prompt customization standards/safety review: SAFE — continuing.")
+        elif outcome.verdict == "RISKY":
+            review_stats["prompt_customization_security_review"] = "risky"
+            print("Prompt customization standards/safety review: RISKY — proceeding with warnings:")
+            for warning in outcome.warnings:
+                print(f"  - {warning}")
+            print("Review the flagged items; re-run with a corrected profile to clear them.")
+        else:
+            shown = _reviewed_shape_text(review_batches, analysis_mode)
+            if config.get("prompt_customization_allow_risky", False):
+                review_stats["prompt_customization_security_review"] = (
+                    "too-risky-overridden"
+                )
+                print(
+                    "Prompt customization standards/safety review: TOO RISKY — "
+                    "proceeding ONLY because --allow-risky-prompt-customization is set."
+                )
+                for reason in outcome.reasons:
+                    print(f"  - {reason}")
+                print(f"Customization applied (effective requested-shape JSON for {analysis_mode}):\n{shown}")
+            else:
+                review_stats["prompt_customization_security_review"] = (
+                    "too-risky-blocked"
+                )
+                from codedoc.utils.errors import PromptCustomizationValidationError
+
+                raise PromptCustomizationValidationError(
+                    "Prompt customization standards/safety review: TOO RISKY — "
+                    "blocked and not applied.\n"
+                    + "\n".join(f"- {reason}" for reason in outcome.reasons)
+                    + f"\nCustomization under review (effective requested-shape JSON for {analysis_mode}):\n"
+                    + shown
+                    + "\nTo override the semantic review and proceed at your own risk, "
+                    "re-run with --allow-risky-prompt-customization (or set "
+                    "prompt_customization_allow_risky: true). Deterministic "
+                    "validation and the strict cleaners cannot be overridden.",
+                    stats=review_stats,
+                )
 
     # ------------------------------------------------------------------
     # Mutation boundary — everything below may write to the filesystem.
@@ -453,8 +580,6 @@ def run_pipeline(
     resumed = len(plan.checkpoint_reuse_rels)
 
     agent_rels = set(plan.agent_rels)
-    usage = UsageAccumulator()
-
     rate_limit_warnings: list[dict] = []
 
     if not agent_rels:
@@ -470,6 +595,8 @@ def run_pipeline(
             "output_dir": str(output_dir),
             "rate_limit_warnings": rate_limit_warnings,
             **_initial_ignore_stats(config, ignore_target),
+            **no_work_profile_stats,
+            **review_stats,
         }
         output_files = write_project_outputs(
             _build_documentation_records(
@@ -514,7 +641,8 @@ def run_pipeline(
     recorder.initialize_empty()
 
     try:
-        llm = create_provider(config)
+        if llm is None:
+            llm = create_provider(config)
         logger.info("LLM provider: %s", llm.provider_name)
     except Exception as exc:
         error_reporter.record(exc, context="LLM provider init")
@@ -542,6 +670,7 @@ def run_pipeline(
         usage=usage,
         analysis_mode=config.get("analysis_mode", "single"),
         truncation_head_ratio=config.get("truncation_head_ratio", 0.70),
+        resolved_profile=resolved_profile,
     )
     stats = {
         "checked": 0,
@@ -553,6 +682,7 @@ def run_pipeline(
         **scope_stats,
         "rate_limit_warnings": rate_limit_warnings,
         **_initial_ignore_stats(config, ignore_target),
+        **review_stats,
     }
 
     max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
@@ -820,6 +950,9 @@ def _build_dry_run_stats(
     output_dir: Path,
     ownership_conflicts: list[dict],
     reachable_rels: set[str],
+    resolved_profile: ResolvedProfile | None = None,
+    profile_resolution: ProfileResolution | None = None,
+    review_batches: list[ReviewBatch] | None = None,
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -840,6 +973,20 @@ def _build_dry_run_stats(
     # single mode embeds only known inputs, so its input estimate is exact;
     # triple mode's documentation prompt estimate is a lower bound.
     estimate_is_lower_bound = analysis_mode == "triple"
+    review_batches = review_batches or []
+    profile_stats = (
+        _base_profile_stats(
+            resolved_profile, profile_resolution, plan, file_map, review_batches
+        )
+        if resolved_profile is not None and profile_resolution is not None
+        else {}
+    )
+    if review_batches:
+        profile_stats["prompt_customization_security_review"] = "pending"
+    if profile_stats:
+        profile_stats["prompt_customization_allow_risky"] = bool(
+            config.get("prompt_customization_allow_risky", False)
+        )
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
@@ -855,7 +1002,9 @@ def _build_dry_run_stats(
         "would_resume": len(plan.checkpoint_reuse_rels),
         "forced": len(plan.forced_rels),
         "estimated_calls": len(plan.agent_rels) * per_file,
-        "estimated_input_tokens": _estimate_planned_input_tokens(plan, file_map, config),
+        "estimated_input_tokens": _estimate_planned_input_tokens(
+            plan, file_map, config, resolved_profile
+        ),
         "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
         "max_files_exceeded": plan.max_files_exceeded,
@@ -863,7 +1012,51 @@ def _build_dry_run_stats(
         "output_dir": str(output_dir),
         "output_files": [],
         **_initial_ignore_stats(config, ignore_target),
+        **profile_stats,
     }
+
+
+def _base_profile_stats(
+    resolved: ResolvedProfile,
+    resolution: ProfileResolution,
+    plan: PipelinePlan,
+    file_map: dict[str, dict],
+    batches: list[ReviewBatch],
+) -> dict:
+    affected_rels = {
+        rel
+        for rel in plan.documented_rels
+        if resolved.is_active_for(file_map[rel].get("language", "generic"))
+    }
+    affected = len(affected_rels)
+    return {
+        "prompt_profile_source": resolution.source,
+        "prompt_profile_file": (
+            str(resolution.source_path) if resolution.source_path is not None else None
+        ),
+        "prompt_profile_active": affected > 0,
+        "prompt_profile_affected_files": affected,
+        "prompt_customization_security_review": (
+            "pending" if batches else "not-required"
+        ),
+        "prompt_customization_security_review_calls_planned": len(batches),
+        "prompt_customization_security_review_calls_completed": 0,
+        "prompt_customization_security_warnings": 0,
+        "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_allow_risky": False,
+    }
+
+
+def _reviewed_shape_text(batches: list[ReviewBatch], mode: str) -> str:
+    seen: set[str] = set()
+    blocks: list[str] = []
+    for batch in batches:
+        for component in batch.components:
+            if component.component in seen:
+                continue
+            seen.add(component.component)
+            blocks.append(f"[{component.component}]\n{component.block_text}")
+    return "\n\n".join(blocks) or f"[{mode}: no active blocks]"
 
 
 def _build_scope_stats(
@@ -896,6 +1089,7 @@ def _estimate_planned_input_tokens(
     plan: PipelinePlan,
     file_map: dict[str, dict],
     config: dict,
+    resolved_profile: ResolvedProfile | None = None,
 ) -> int:
     """Estimate input tokens for the planned LLM calls — a lower bound.
 
@@ -929,14 +1123,42 @@ def _estimate_planned_input_tokens(
         head_fraction = config.get("truncation_head_ratio", 0.70)
         content = truncate_for_llm(content, max_chars, head_fraction=head_fraction)
         if analysis_mode == "triple":
+            structure_shape = (
+                resolved_profile.resolve_block("structure", language)
+                if resolved_profile is not None
+                else None
+            )
+            dependency_shape = (
+                resolved_profile.resolve_block("dependency", language)
+                if resolved_profile is not None
+                else None
+            )
+            documentation_shape = (
+                resolved_profile.resolve_block("documentation", language)
+                if resolved_profile is not None
+                else None
+            )
             prompts = (
-                structure_agent.build_prompt(rel_path, content, imports, language),
-                dependency_agent.build_prompt(rel_path, content, imports, language),
-                documentation_agent.build_prompt(rel_path, content, language, {}, {}),
+                structure_agent.build_prompt(
+                    rel_path, content, imports, language, structure_shape
+                ),
+                dependency_agent.build_prompt(
+                    rel_path, content, imports, language, dependency_shape
+                ),
+                documentation_agent.build_prompt(
+                    rel_path, content, language, {}, {}, documentation_shape
+                ),
             )
         else:
+            combined_shape = (
+                resolved_profile.resolve_block("combined", language)
+                if resolved_profile is not None
+                else None
+            )
             prompts = (
-                file_documentation_agent.build_prompt(rel_path, content, imports, language),
+                file_documentation_agent.build_prompt(
+                    rel_path, content, imports, language, combined_shape
+                ),
             )
         for system, prompt in prompts:
             total += estimate_tokens(system) + estimate_tokens(prompt)

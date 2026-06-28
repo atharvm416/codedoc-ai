@@ -50,6 +50,23 @@ _FALLBACK_PREFIXES: dict[str, list[str]] = {
     "openai":    list(_OPENAI_PREFIXES),
 }
 
+_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
+    "gemini": "gemini-2.5-flash",
+}
+
+
+def describe_provider_selection(config: dict) -> tuple[str, str]:
+    """Return the provider/model pair that :func:`create_provider` will use."""
+    model = str(config.get("model_name", "") or "")
+    selected = _resolve_api_provider(
+        str(config.get("llm_provider", "auto")),
+        model.lower(),
+        config.get("provider_prefixes") or {},
+    )
+    return selected, model or _DEFAULT_MODELS[selected]
+
 
 def create_provider(config: dict) -> LLMProvider:
     """
@@ -110,21 +127,21 @@ def _make_api(
         from codedoc.llm.api_provider import AnthropicProvider
         return AnthropicProvider(
             api_key=api_key,
-            model=model or "claude-haiku-4-5-20251001",
+            model=model or _DEFAULT_MODELS["anthropic"],
         )
 
     if selected == "gemini":
         from codedoc.llm.api_provider import GeminiProvider
         return GeminiProvider(
             api_key=api_key,
-            model=model or "gemini-2.5-flash",
+            model=model or _DEFAULT_MODELS["gemini"],
         )
 
     # OpenAI or compatible endpoint (default)
     from codedoc.llm.api_provider import OpenAIProvider
     return OpenAIProvider(
         api_key=api_key,
-        model=model or "gpt-4o-mini",
+        model=model or _DEFAULT_MODELS["openai"],
         base_url=base_url,
     )
 

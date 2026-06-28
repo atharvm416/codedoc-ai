@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.0 - 2026-06-28
+
+### Mode-based JSON prompt profiles
+
+- Added one canonical registry for the requested JSON shapes used by `single`
+  and `triple` analysis. Profiles may reorder registered fields, rewrite their
+  bounded instruction strings, omit optional fields, and select per-language
+  overrides without changing system prompts, fixed rules, cleaner types, parser
+  facts, provider configuration, or output paths.
+- Added inline, explicit-file, and root auto-detected profile resolution plus
+  `--prompt-profile`, `--no-prompt-profile`, strict environment booleans, schema
+  description, and safe default-profile export utilities.
+- Active customization that will reach planned documentation calls receives a
+  mandatory, bounded, paid semantic standards/safety review through the configured
+  provider. `SAFE` proceeds, `RISKY` proceeds with warnings, and `TOO_RISKY` blocks
+  unless the explicit risky-customization override is set. Deterministic validation
+  and strict response cleaning are never overridable.
+- Added a shared post-clean filter and `_prompt_profile_digest` private cache
+  identity so omitted fields cannot reappear and only affected files are
+  invalidated. The public schema remains `1.4`; default/no-profile prompts and
+  legacy cache reuse remain compatible.
+
+
 ## 0.10.3 - 2026-06-25
 
 ### Truncation parameters now participate in cache identity
