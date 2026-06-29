@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.11.1 - 2026-06-29
+
+### Config-embedded AI output structures
+
+- Added a literal version-2 `requested_shape` prompt-profile format whose JSON
+  keys and containers resemble the desired output, so output customization can
+  live entirely inside `codedoc.config.json` without a second profile file. The
+  legacy version-1 `fields` format, external profile files, auto-detection, and
+  `--prompt-profile` remain fully compatible. `schema_version` is optional and
+  inferred from the block syntax (version 1 from `fields`, version 2 from
+  `requested_shape`); version 2 is accepted only inline. Equivalent version-1 and
+  version-2 profiles render an identical prompt and share the same
+  `_prompt_profile_digest`, so existing caches are reused unchanged.
+- Added a deterministic strict-JSON loader (`codedoc/utils/json_utils.py`) shared
+  by the config loader, external-profile reader, and the security/routing control
+  responses; it rejects duplicate object keys at every nesting depth.
+- Added an opt-in single-to-triple conversion proposal: selecting `triple` mode
+  with only a *customized* `single` structure runs the ordinary paid security
+  review plus one separately disclosed paid routing call (new
+  `PromptProfileRoutingAgent`), prints a config-ready `triple` proposal, and stops
+  without generating documentation. The proposal is bounded, deterministically
+  validated, fail-closed, and never written to config automatically. A
+  developer-standard-equivalent single structure in triple mode resolves to the
+  built-in defaults with no paid call.
+- Added separate documentation/security-review/routing call-attempt accounting
+  that reconciles exactly to the aggregate attempt total, plus dedicated CLI
+  conversion summaries and a config-ready stdout export
+  (`--export-prompt-profile`); `--describe-prompt-schema` now documents both
+  formats and rejects `--format both`. Path export still emits a version-1
+  external profile.
+- Reduced duplicate dependency-cycle warning noise: the cycle count is logged at
+  WARNING at most once per run and the full path list at DEBUG, with no change to
+  topological ordering or cycle handling. The public document `SCHEMA_VERSION`
+  (`1.4`), `ANALYSIS_REVISION` (`file-doc-v2`), output vocabulary, and no-profile
+  prompt/cache behavior are unchanged.
+
+
 ## 0.11.0 - 2026-06-28
 
 ### Mode-based JSON prompt profiles

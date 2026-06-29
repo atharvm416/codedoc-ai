@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.11.0`.
+Current release: `0.11.1`.
 
 ## What It Does
 
@@ -416,7 +416,7 @@ Configurable settings added in 0.9.0:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
-| `max_content_chars` | `12000` | Maximum characters sent to the LLM per file. Long files are truncated once, one WARNING reports the path and counts, and the marker stays inside the ceiling. Must be at least `1000`. |
+| `max_content_chars` | `12000` | Maximum characters sent to the LLM per file. Long files are truncated once, one WARNING reports the path and counts, and the marker stays inside the ceiling. Raising this improves coverage of large files but increases token usage and cost. Must be at least `1000`. |
 
 Planning and CI settings added in 0.9.2:
 
@@ -440,17 +440,37 @@ Every public file record also gains an additive `reachable_from_entry` boolean: 
 
 ## Prompt profiles
 
-Version 0.11.0 can replace only the `Return EXACTLY this JSON shape:` block in
+A prompt profile replaces only the `Return EXACTLY this JSON shape:` block in
 per-file prompts. System roles, fixed factuality/safety rules, scanning, parser
 facts, provider/model/key selection, response cleaners, retries, recovery, and
 output paths cannot be changed by a profile. Unknown fields and wrong types are
 rejected before provider creation.
 
-Profiles may be supplied inline as `prompt_profiles`, by `prompt_profile_file`,
-with `--prompt-profile FILE`, or as `codedoc-prompt-profiles.json` at the project
-root. `--no-prompt-profile` disables every source. Precedence is disable flag,
-CLI file, configured/environment file, inline object, auto-detected file, then
-the built-in developer standard.
+Two equivalent formats are accepted from one registry. The **version-2** literal
+`requested_shape` format (0.11.1) keeps your output structures directly inside
+`codedoc.config.json` — its keys and containers resemble the output you want, and
+string values are instruction text:
+
+```json
+{
+  "analysis_mode": "single",
+  "prompt_profiles": {
+    "single": {
+      "requested_shape": {
+        "description": "Explain what this file does and why it exists.",
+        "functions": [
+          {"name": "<function or method defined IN this file>",
+           "description": "Explain its responsibility."}
+        ],
+        "key_concepts": ["Important concept or pattern"]
+      }
+    }
+  }
+}
+```
+
+The legacy **version-1** `fields` format remains valid (inline or as an external
+profile file):
 
 ```json
 {
@@ -458,13 +478,41 @@ the built-in developer standard.
   "single": {
     "fields": [
       {"key": "description", "type": "string", "instruction": "Explain this file accurately."},
-      {"key": "functions", "type": "symbol_list", "instruction": "Describe what it does."},
-      {"key": "dependencies_analysis.external", "type": "string_list", "instruction": "List third-party packages."}
+      {"key": "functions", "type": "symbol_list", "instruction": "Describe what it does."}
     ],
     "per_language": {}
   }
 }
 ```
+
+`schema_version` is optional — version 1 is inferred from `fields` and version 2
+from `requested_shape`. Equivalent version-1 and version-2 profiles render an
+identical prompt and share the same cache identity, so changing the syntax never
+re-documents a file. Version 2 is accepted **only inline** in
+`codedoc.config.json` (or the Python API `config_overrides`); external profile
+files keep the version-1 `fields` format. In a version-2 object template the
+`name`/`type`/`import` members are fixed structural placeholders (copy them from
+`codedoc --export-prompt-profile`); only `description`/`used_for` and scalar
+string instructions are editable.
+
+Profiles may be supplied inline as `prompt_profiles`, by `prompt_profile_file`,
+with `--prompt-profile FILE`, or as `codedoc-prompt-profiles.json` at the project
+root. `--no-prompt-profile` disables every source. Precedence is disable flag,
+CLI file, configured/environment file, inline object, auto-detected file, then
+the built-in developer standard.
+
+### Single-to-triple conversion proposal (0.11.1)
+
+If you select `analysis_mode: "triple"` but configure only a customized `single`
+structure, CodeDoc does not silently fall back to the built-in triple defaults.
+It runs the ordinary paid security review over your single structure plus **one**
+separately disclosed paid routing call, prints a config-ready `triple` proposal,
+and stops without generating documentation. Paste the printed `prompt_profiles`
+block into `codedoc.config.json` and rerun; the confirmed triple structures are
+then reviewed again before any documentation call. CodeDoc never rewrites the
+config automatically. A developer-standard-equivalent single structure in triple
+mode needs no call and proceeds normally; a single-only profile that also defines
+per-language overrides must instead be given explicit `triple` structures.
 
 `description` is required in the single combined and triple documentation
 profiles, including language overrides. Every triple profile contains all three
@@ -480,8 +528,12 @@ agent objects. Supported fields are:
 The list types have fixed member structure: `symbol_list` is
 `[{name, description}]`, `catalog_list` is `[{name, type, used_for}]`, and
 `usage_note_list` is `[{import, used_for}]`. Only each field's primary instruction
-is editable. `codedoc --describe-prompt-schema` prints exact defaults;
-`codedoc --export-prompt-profile [PATH]` exports a complete inert default.
+is editable. `codedoc --describe-prompt-schema` (accepts `--format json` or `md`,
+not `both`) prints exact defaults for both formats. `codedoc --export-prompt-profile`
+with no path prints the version-2 config-ready `{"prompt_profiles": {...}}` wrapper
+to stdout (paste it into `codedoc.config.json`); with a `PATH` it writes a
+version-1 external profile usable with `--prompt-profile PATH`. Both exports are
+developer-standard-equivalent and inert until edited.
 
 Active customization destined for planned calls receives a mandatory semantic
 standards/safety review through the configured provider. The reported calls are
@@ -492,7 +544,11 @@ and strict cleaners cannot be overridden. Dry-run makes no review call and repor
 the exact pending batch count.
 
 <!-- BEGIN CODEDOC PROMPT SCHEMA -->
+CodeDoc accepts two equivalent prompt-profile formats from this one registry. The **version-2** literal `requested_shape` form (keys and containers resemble the output you want; string values are instruction text) is the recommended config-inline format. The legacy **version-1** `fields` form remains valid. Version 2 is accepted only inline in `codedoc.config.json` (the `prompt_profiles` value) or the Python API; version-1 `fields` works inline and as an external profile file. The `name`/`type`/`import` members in object templates are fixed structural placeholders — only `description`/`used_for` and scalar instructions are editable.
+
 ### `single/combined` requested shape
+
+Version-2 `requested_shape` (literal):
 
 ```json
 {
@@ -540,6 +596,8 @@ the exact pending batch count.
 
 ### `triple/structure` requested shape
 
+Version-2 `requested_shape` (literal):
+
 ```json
 {
   "description": "<one paragraph describing what this file does>",
@@ -563,6 +621,8 @@ the exact pending batch count.
 | exports | string_list | optional | structure | Symbols this module deliberately exposes (including re-exports). | <symbol this module deliberately exposes, including intentional re-exports> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
 
 ### `triple/dependency` requested shape
+
+Version-2 `requested_shape` (literal):
 
 ```json
 {
@@ -596,6 +656,8 @@ the exact pending batch count.
 
 ### `triple/documentation` requested shape
 
+Version-2 `requested_shape` (literal):
+
 ```json
 {
   "description": "<clear, detailed paragraph describing what this file does and why it exists>",
@@ -614,7 +676,197 @@ the exact pending batch count.
 
 ### Complete profile examples
 
-Inline `single` (`prompt_profiles` value):
+Version-2 config-ready (paste into `codedoc.config.json`; both modes). This is exactly what `codedoc --export-prompt-profile` prints to stdout, and is developer-standard-equivalent (inert until you edit it):
+
+```json
+{
+  "prompt_profiles": {
+    "schema_version": 2,
+    "single": {
+      "requested_shape": {
+        "description": "<clear paragraph describing what this file does and why it exists>",
+        "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+        "functions": [
+          {
+            "name": "<function or method defined IN this file>",
+            "description": "<what it does>"
+          }
+        ],
+        "classes": [
+          {
+            "name": "<class defined IN this file>",
+            "description": "<what it does>"
+          }
+        ],
+        "exports": [
+          "<symbol this module deliberately exposes, including intentional re-exports>"
+        ],
+        "dependencies_analysis": {
+          "internal": [
+            "<relative import paths that are project files>"
+          ],
+          "external": [
+            "<package names from node_modules / pip / pub / maven>"
+          ],
+          "dependency_refs": [
+            "<normalized dependency names used by this file>"
+          ],
+          "catalog_updates": [
+            {
+              "name": "<normalized dependency name>",
+              "type": "internal|external",
+              "used_for": "<stable project-level purpose>"
+            }
+          ],
+          "usage_notes": [
+            {
+              "import": "<import string>",
+              "used_for": "<file-specific note only>"
+            }
+          ],
+          "warnings": [
+            "<any dependency concern, e.g. unused import, potential cycle>"
+          ]
+        },
+        "key_concepts": [
+          "<important concept or pattern used in this file>"
+        ],
+        "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
+      }
+    },
+    "triple": {
+      "structure": {
+        "requested_shape": {
+          "description": "<one paragraph describing what this file does>",
+          "role_in_system": "<how this file fits into the broader system>",
+          "functions": [
+            {
+              "name": "<function or method defined IN this file>",
+              "description": "<what it does>"
+            }
+          ],
+          "classes": [
+            {
+              "name": "<class defined IN this file>",
+              "description": "<what it does>"
+            }
+          ],
+          "exports": [
+            "<symbol this module deliberately exposes, including intentional re-exports>"
+          ]
+        }
+      },
+      "dependency": {
+        "requested_shape": {
+          "dependencies_analysis": {
+            "internal": [
+              "<relative import paths that are project files>"
+            ],
+            "external": [
+              "<package names from node_modules / pip / pub / maven>"
+            ],
+            "dependency_refs": [
+              "<normalized dependency names used by this file>"
+            ],
+            "catalog_updates": [
+              {
+                "name": "<normalized dependency name>",
+                "type": "internal|external",
+                "used_for": "<stable project-level purpose for this dependency>"
+              }
+            ],
+            "usage_notes": [
+              {
+                "import": "<import string>",
+                "used_for": "<file-specific note only>"
+              }
+            ],
+            "warnings": [
+              "<any dependency concern, e.g. unused import, potential cycle>"
+            ]
+          }
+        }
+      },
+      "documentation": {
+        "requested_shape": {
+          "description": "<clear, detailed paragraph describing what this file does and why it exists>",
+          "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+          "key_concepts": [
+            "<important concept or pattern used in this file>"
+          ],
+          "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
+        }
+      }
+    }
+  }
+}
+```
+
+Version-2 `single` only (config-ready):
+
+```json
+{
+  "prompt_profiles": {
+    "schema_version": 2,
+    "single": {
+      "requested_shape": {
+        "description": "<clear paragraph describing what this file does and why it exists>",
+        "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+        "functions": [
+          {
+            "name": "<function or method defined IN this file>",
+            "description": "<what it does>"
+          }
+        ],
+        "classes": [
+          {
+            "name": "<class defined IN this file>",
+            "description": "<what it does>"
+          }
+        ],
+        "exports": [
+          "<symbol this module deliberately exposes, including intentional re-exports>"
+        ],
+        "dependencies_analysis": {
+          "internal": [
+            "<relative import paths that are project files>"
+          ],
+          "external": [
+            "<package names from node_modules / pip / pub / maven>"
+          ],
+          "dependency_refs": [
+            "<normalized dependency names used by this file>"
+          ],
+          "catalog_updates": [
+            {
+              "name": "<normalized dependency name>",
+              "type": "internal|external",
+              "used_for": "<stable project-level purpose>"
+            }
+          ],
+          "usage_notes": [
+            {
+              "import": "<import string>",
+              "used_for": "<file-specific note only>"
+            }
+          ],
+          "warnings": [
+            "<any dependency concern, e.g. unused import, potential cycle>"
+          ]
+        },
+        "key_concepts": [
+          "<important concept or pattern used in this file>"
+        ],
+        "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
+      }
+    }
+  }
+}
+```
+
+A version-2 language override uses `per_language.<tag>.requested_shape` with the same literal shape; its shape fully replaces the parent agent's shape (it is not merged).
+
+Version-1 `fields` (legacy; still valid inline and as an external `codedoc-prompt-profiles.json`). Inline `single`:
 
 ```json
 {
@@ -692,107 +944,7 @@ Inline `single` (`prompt_profiles` value):
 }
 ```
 
-Inline `triple` (`prompt_profiles` value):
-
-```json
-{
-  "schema_version": 1,
-  "triple": {
-    "structure": {
-      "fields": [
-        {
-          "key": "description",
-          "type": "string",
-          "instruction": "<one paragraph describing what this file does>"
-        },
-        {
-          "key": "role_in_system",
-          "type": "string",
-          "instruction": "<how this file fits into the broader system>"
-        },
-        {
-          "key": "functions",
-          "type": "symbol_list",
-          "instruction": "<what it does>"
-        },
-        {
-          "key": "classes",
-          "type": "symbol_list",
-          "instruction": "<what it does>"
-        },
-        {
-          "key": "exports",
-          "type": "string_list",
-          "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
-        }
-      ],
-      "per_language": {}
-    },
-    "dependency": {
-      "fields": [
-        {
-          "key": "dependencies_analysis.internal",
-          "type": "string_list",
-          "instruction": "<relative import paths that are project files>"
-        },
-        {
-          "key": "dependencies_analysis.external",
-          "type": "string_list",
-          "instruction": "<package names from node_modules / pip / pub / maven>"
-        },
-        {
-          "key": "dependencies_analysis.dependency_refs",
-          "type": "string_list",
-          "instruction": "<normalized dependency names used by this file>"
-        },
-        {
-          "key": "dependencies_analysis.catalog_updates",
-          "type": "catalog_list",
-          "instruction": "<stable project-level purpose for this dependency>"
-        },
-        {
-          "key": "dependencies_analysis.usage_notes",
-          "type": "usage_note_list",
-          "instruction": "<file-specific note only>"
-        },
-        {
-          "key": "dependencies_analysis.warnings",
-          "type": "string_list",
-          "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
-        }
-      ],
-      "per_language": {}
-    },
-    "documentation": {
-      "fields": [
-        {
-          "key": "description",
-          "type": "string",
-          "instruction": "<clear, detailed paragraph describing what this file does and why it exists>"
-        },
-        {
-          "key": "role_in_system",
-          "type": "string",
-          "instruction": "<how this file connects to and supports the rest of the codebase>"
-        },
-        {
-          "key": "key_concepts",
-          "type": "string_list",
-          "instruction": "<important concept or pattern used in this file>"
-        },
-        {
-          "key": "usage_example",
-          "type": "string",
-          "instruction": "<one-line example of how another file would import or use this file, or empty string>"
-        }
-      ],
-      "per_language": {}
-    }
-  }
-}
-```
-
-External `codedoc-prompt-profiles.json` (both modes):
+External `codedoc-prompt-profiles.json` (version-1, both modes — written by `codedoc --export-prompt-profile PATH`):
 
 ```json
 {
@@ -962,13 +1114,13 @@ External `codedoc-prompt-profiles.json` (both modes):
 }
 ```
 
-A language override uses `per_language.<tag>.fields` with the same field objects. Its list fully replaces the parent agent's `fields` list; it is not merged. For example: `"per_language": {"python": {"fields": [{"key": "description", "type": "string", "instruction": "Explain this Python module."}]}}`.
+A version-1 language override uses `per_language.<tag>.fields` with the same field objects. Its list fully replaces the parent agent's `fields` list; it is not merged. For example: `"per_language": {"python": {"fields": [{"key": "description", "type": "string", "instruction": "Explain this Python module."}]}}`.
 
 | Editable | Fixed / non-overridable |
 | --- | --- |
-| Registered field order; optional-field inclusion; bounded instruction text | System prompts; fixed rules; required fields; key/type vocabulary; deterministic parser/graph facts; provider/model/key; scanning and control flow; retries/recovery/cache policy; public output vocabulary |
+| Registered field order; optional-field inclusion; bounded instruction text | System prompts; fixed rules; required fields; key/type vocabulary; object-template identity placeholders (name/type/import); deterministic parser/graph facts; provider/model/key; scanning and control flow; retries/recovery/cache policy; public output vocabulary |
 
-Sequence: resolve source precedence → deterministic schema/type/bound/render validation → read-only scan and plan → paid cap and exact review batching → SAFE continues / RISKY warns / TOO_RISKY blocks unless explicitly overridden → generation → strict cleaning and profile filtering → cache-digest stamping → recovery/final output. Dry-run stops after planning and reports pending review calls without contacting a provider.
+Sequence: resolve source precedence -> schema-version inference -> deterministic schema/type/bound/render validation -> read-only scan and plan -> paid cap and exact review batching -> SAFE continues / RISKY warns / TOO_RISKY blocks unless explicitly overridden -> generation -> strict cleaning and profile filtering -> cache-digest stamping -> recovery/final output. A customized single-only structure selected in triple mode instead runs one paid security review plus one paid routing call and prints a config-ready triple proposal without generating documentation. Dry-run stops after planning and reports pending paid calls without contacting a provider.
 
 <!-- END CODEDOC PROMPT SCHEMA -->
 

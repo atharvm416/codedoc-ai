@@ -52,29 +52,10 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
-      - name: Ruff check (production and this release's tests)
-        # Production code (codedoc/) is fully Ruff-clean and gated here in full.
-        # The legacy test suite has pre-existing findings that are out of scope
-        # for this behavior-changing release; bundling that behavior-free
-        # cleanup here is explicitly disallowed, so it is tracked as a separate
-        # lint-only change.  Linting is scoped to production plus the tests
-        # added or modified in this release so new code stays clean.  Widen this
-        # to `codedoc tests` once the legacy findings are resolved.
-        run: >
-          python -m ruff check codedoc
-          tests/test_095_dependency_catalog.py
-          tests/test_095_atomic_output.py
-          tests/test_095_persistence_failures.py
-          tests/test_095_artifact_paths.py
-          tests/test_095_provider_contracts.py
-          tests/test_095_installed_smoke.py
-          tests/test_093_dependency_view.py
-          tests/test_graph.py
-          tests/test_agents.py
-          tests/test_080_features.py
-          tests/test_097_error_classification.py
-          tests/test_097_fail_fast.py
-          tests/test_097_rate_limit_bound.py
+      - name: Ruff check
+        # The repository is Ruff-clean in full. Keep production and every test,
+        # including the 0.11.1 schema/conversion suites, under the same gate.
+        run: python -m ruff check .
 
   package:
     name: Build, twine check, installed-wheel smoke

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 
 from codedoc.agents.base_agent import BaseAgent
@@ -14,6 +13,7 @@ from codedoc.core.prompt_profiles import (
     clean_review_verdict,
 )
 from codedoc.utils.errors import PromptCustomizationValidationError
+from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
 
 
 @dataclass(frozen=True)
@@ -38,7 +38,7 @@ class PromptCustomizationValidationAgent(BaseAgent):
             # Unlike documentation responses, a safety verdict is fail-closed:
             # markdown fences, preambles, trailing text, and multiple objects are
             # malformed rather than being repaired or extracted.
-            parsed = json.loads(raw.strip())
+            parsed = loads_no_duplicate_keys(raw.strip())
             return clean_review_verdict(
                 parsed,
                 expected_review_id=batch.review_id,
@@ -47,6 +47,11 @@ class PromptCustomizationValidationAgent(BaseAgent):
             )
         except PromptCustomizationValidationError:
             raise
+        except DuplicateJSONKeyError as exc:
+            raise PromptCustomizationValidationError(
+                "prompt customization standards/safety review failed closed for "
+                f"batch {batch.ordinal}/{batch.count}: duplicate key {exc.key!r}."
+            ) from exc
         except Exception as exc:
             raise PromptCustomizationValidationError(
                 "prompt customization standards/safety review failed closed for "

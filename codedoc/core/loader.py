@@ -16,6 +16,7 @@ except ImportError:
         return False
 
 from codedoc.utils.errors import ConfigError
+from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -246,7 +247,11 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
         candidate = root / filename
         if candidate.exists():
             try:
-                data = json.loads(candidate.read_text(encoding="utf-8"))
+                # 0.11.1: parse through the shared strict loader so a duplicate
+                # object key anywhere in the file (including nested inside
+                # ``prompt_profiles``) is rejected instead of silently
+                # last-key-wins.
+                data = loads_no_duplicate_keys(candidate.read_text(encoding="utf-8"))
                 if not isinstance(data, dict):
                     raise ConfigError(
                         f"'{filename}' must be a JSON object, got {type(data).__name__}"
@@ -255,6 +260,10 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
                 logger.info("Config loaded from %s", candidate)
                 json_loaded = True
                 break
+            except DuplicateJSONKeyError as exc:
+                raise ConfigError(
+                    f"Invalid JSON in '{filename}': duplicate key {exc.key!r}."
+                ) from exc
             except json.JSONDecodeError as exc:
                 raise ConfigError(f"Invalid JSON in '{filename}': {exc}") from exc
 

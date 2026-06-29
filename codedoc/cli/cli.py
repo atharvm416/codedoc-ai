@@ -281,7 +281,7 @@ examples:
     utility_group.add_argument(
         "--describe-prompt-schema",
         action="store_true",
-        help="Print the supported prompt-profile schema as JSON and exit.",
+        help="Print the supported prompt-profile schema as JSON or Markdown and exit.",
     )
     utility_group.add_argument(
         "--export-prompt-profile",
@@ -289,7 +289,10 @@ examples:
         const="-",
         default=None,
         metavar="PATH",
-        help="Export an editable default profile to PATH, or stdout when omitted.",
+        help=(
+            "Export an editable default: stdout is a config-ready version-2 "
+            "wrapper; PATH is a legacy version-1 external profile."
+        ),
     )
     parser.add_argument(
         "--force",
@@ -345,6 +348,48 @@ def _print_ignore_status(stats: dict, dry_run: bool) -> None:
         print("  Managed ignore         : enabled; no eligible artifact change")
 
 
+def _has_resolved_prompt_profile(stats: dict) -> bool:
+    """Whether a real profile source won resolution for this run."""
+    return stats.get("prompt_profile_source") in {"inline", "explicit", "auto"}
+
+
+def _print_prompt_profile_dry_run(stats: dict) -> None:
+    """Print projected profile/review costs without changing no-profile output."""
+    if not _has_resolved_prompt_profile(stats):
+        return
+    documentation = stats.get("documentation_calls_planned", 0)
+    review = stats.get("prompt_customization_security_review_calls_planned", 0)
+    print("\n  Prompt profile:")
+    print(f"    Source                : {stats.get('prompt_profile_source')}")
+    print(f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}")
+    print(f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}")
+    print(f"    Documentation calls   : {documentation} planned")
+    print(f"    Security-review calls : {review} planned")
+    print(f"    Total paid calls      : {documentation + review} planned")
+
+
+def _print_prompt_profile_run(stats: dict) -> None:
+    """Print actual profile/review category costs for an ordinary real run."""
+    if not _has_resolved_prompt_profile(stats):
+        return
+    documentation = stats.get("documentation_calls_attempted", 0)
+    review = stats.get("prompt_customization_security_review_calls_attempted", 0)
+    routing = stats.get("prompt_profile_conversion_calls_attempted", 0)
+    print("\n  Prompt profile:")
+    print(f"    Source                : {stats.get('prompt_profile_source')}")
+    print(f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}")
+    print(f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}")
+    print(
+        "    Security review       : "
+        f"{stats.get('prompt_customization_security_review', 'not-required')} "
+        f"({review} attempted, "
+        f"{stats.get('prompt_customization_security_review_calls_completed', 0)} completed)"
+    )
+    print(f"    Documentation calls   : {documentation} attempted")
+    print(f"    Routing calls         : {routing} attempted")
+    print(f"    Total attempted calls : {documentation + review + routing}")
+
+
 def _print_dry_run_summary(stats: dict) -> None:
     """Print the planning summary for a --dry-run invocation."""
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
@@ -398,6 +443,7 @@ def _print_dry_run_summary(stats: dict) -> None:
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
     _print_ignore_status(stats, dry_run=True)
+    _print_prompt_profile_dry_run(stats)
 
     if stats.get("max_files_exceeded"):
         print(
@@ -471,6 +517,7 @@ def _print_run_summary(stats: dict) -> None:
             f"~{stats.get('estimated_output_tokens', 0)} out "
             "(character estimate, not a tokenizer)"
         )
+    _print_prompt_profile_run(stats)
 
     # 0.8.1: compact rate-limit summary — only shown when events occurred.
     # Per-event messages were already printed in real time during the run.
@@ -497,6 +544,64 @@ def _print_run_summary(stats: dict) -> None:
             print(f"\n  {issues} issue(s) recorded (all recovered). See {error_log} for details.")
     elif issues and stats.get("issue_log_warning"):
         print(f"\n  Issue log warning: {stats['issue_log_warning']}")
+
+
+def _print_conversion_summary(stats: dict) -> None:
+    """Print the dedicated single-to-triple conversion result (Review Addendum 10).
+
+    Branches before the generic dry-run/run summaries; never requires the ordinary
+    ``checked``/``failed``/``output_*`` completion fields.
+    """
+    status = stats.get("prompt_profile_conversion")
+    if status == "pending":
+        review = stats.get("prompt_customization_security_review_calls_planned", 0)
+        routing = stats.get("prompt_profile_conversion_calls_planned", 0)
+        print(
+            "\ncodedoc single-to-triple conversion (dry run) — no provider was contacted."
+        )
+        print(f"  Analysis mode               : {stats.get('analysis_mode', 'triple')}")
+        print("  Conversion status           : pending (customized single -> triple)")
+        print(f"  Planned source review calls : {review}")
+        print(f"  Planned routing calls       : {routing}")
+        print(f"  Total paid proposal calls   : {review + routing}")
+        print(
+            "  Documentation calls are deferred until you paste the proposal and rerun."
+        )
+        print(
+            "  The confirmed triple structures will be reviewed again before generation."
+        )
+        return
+
+    # generated-awaiting-confirmation
+    print(
+        "\ncodedoc single-to-triple conversion proposal — no documentation was "
+        "generated and no files were written."
+    )
+    factors = stats.get("prompt_profile_conversion_factors", [])
+    if factors:
+        print("  Division rationale:")
+        for factor in factors:
+            print(f"    - {factor}")
+    print(
+        "  Source review calls : "
+        f"{stats.get('prompt_customization_security_review_calls_attempted', 0)} attempted "
+        f"({stats.get('prompt_customization_security_review_calls_completed', 0)} completed)"
+    )
+    print(
+        "  Routing calls       : "
+        f"{stats.get('prompt_profile_conversion_calls_attempted', 0)} attempted "
+        f"({stats.get('prompt_profile_conversion_calls_completed', 0)} completed)"
+    )
+    print(f"  Documentation calls : {stats.get('documentation_calls_attempted', 0)}")
+    print(
+        "\nReplace ONLY the 'prompt_profiles' value in codedoc.config.json with the "
+        "block below (keep all other settings), then rerun:\n"
+    )
+    print(stats.get("prompt_profile_conversion_fragment", ""))
+    print(
+        "\nThe confirmed triple structures will be reviewed again before any "
+        "documentation call."
+    )
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -568,6 +673,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 replace_text_with_backup,
             )
             from codedoc.core.prompt_profiles import (
+                export_default_profile_config,
                 export_default_profile_dict,
                 render_prompt_schema_reference,
                 schema_reference_data,
@@ -577,20 +683,36 @@ def run_cli(argv: list[str] | None = None) -> int:
             if args.describe_prompt_schema:
                 if args.force:
                     parser.error("--force is valid only with --export-prompt-profile")
+                # The describe utility has a single stdout representation per
+                # format; 'both' has no meaning here (Review Addendum 12).
+                if args.format == "both":
+                    print(
+                        "Error: --describe-prompt-schema accepts --format json or "
+                        "--format md, not 'both'.",
+                        file=sys.stderr,
+                    )
+                    return 2
                 if args.format == "md":
                     print(render_prompt_schema_reference(mode))
                 else:
                     print(json.dumps(schema_reference_data(mode), indent=2, ensure_ascii=False))
                 return 0
+            target = args.export_prompt_profile
+            if target in (None, "-"):
+                # 0.11.1: stdout export is the version-2 config-ready wrapper —
+                # paste its 'prompt_profiles' value straight into
+                # codedoc.config.json.  Path export (below) keeps the version-1
+                # external-profile format usable with --prompt-profile PATH.
+                if args.force:
+                    parser.error("--force is not valid for stdout export")
+                stdout_data = json.dumps(
+                    export_default_profile_config(mode), indent=2, ensure_ascii=False
+                ) + "\n"
+                print(stdout_data, end="")
+                return 0
             data = json.dumps(
                 export_default_profile_dict(mode), indent=2, ensure_ascii=False
             ) + "\n"
-            target = args.export_prompt_profile
-            if target in (None, "-"):
-                if args.force:
-                    parser.error("--force is not valid for stdout export")
-                print(data, end="")
-                return 0
             path = Path(target)
             if args.force:
                 replace_text_with_backup(path, data)
@@ -668,6 +790,15 @@ def run_cli(argv: list[str] | None = None) -> int:
     try:
         from codedoc.pipeline import run_pipeline
         stats = run_pipeline(root, config_overrides=overrides)
+
+        # 0.11.1: a single-to-triple conversion is a distinct terminal result —
+        # branch before the generic dry-run/run summaries (Review Addendum 10).
+        if stats.get("prompt_profile_conversion") in (
+            "pending",
+            "generated-awaiting-confirmation",
+        ):
+            _print_conversion_summary(stats)
+            return 0
 
         if stats.get("dry_run"):
             _print_dry_run_summary(stats)
@@ -750,7 +881,29 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
-            # ownership conflicts, and the max_files cap.
+            # ownership conflicts, the max_files cap, and prompt-customization /
+            # conversion fail-closed errors.
+            # 0.11.1: a fail-closed conversion/review carries bounded numeric
+            # attempt statistics (never profile text) before the ordinary setup
+            # error, so the paid cost of the aborted proposal is visible
+            # (Review Addendum 10).
+            err_stats = getattr(exc, "stats", None)
+            if isinstance(err_stats, dict) and (
+                "prompt_profile_conversion_calls_attempted" in err_stats
+                or "prompt_customization_security_review_calls_attempted" in err_stats
+            ):
+                print(
+                    "  Paid calls before stop: review "
+                    f"{err_stats.get('prompt_customization_security_review_calls_attempted', 0)} "
+                    f"attempted/"
+                    f"{err_stats.get('prompt_customization_security_review_calls_completed', 0)} "
+                    "completed, routing "
+                    f"{err_stats.get('prompt_profile_conversion_calls_attempted', 0)} "
+                    f"attempted/"
+                    f"{err_stats.get('prompt_profile_conversion_calls_completed', 0)} "
+                    "completed, documentation 0.",
+                    file=sys.stderr,
+                )
             print(f"Error: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback

@@ -88,6 +88,9 @@ def test_no_profile_makes_no_review_and_no_digest(monkeypatch, project):
     stats = _run(monkeypatch, project, {"entry_file": "main.py"}, fake)
     assert fake.review_calls == 0 and stats["checked"] == 1
     assert stats["prompt_customization_security_review"] == "not-required"
+    assert stats["documentation_calls_attempted"] == stats["attempted_calls"] == 1
+    assert stats["prompt_customization_security_review_calls_attempted"] == 0
+    assert stats["prompt_profile_conversion_calls_attempted"] == 0
     rec = json.loads(_output(project).read_text())["files"][0]
     assert "_prompt_profile_digest" not in rec
 
@@ -99,6 +102,12 @@ def test_active_profile_safe_reviews_filters_and_stamps(monkeypatch, project):
     assert stats["prompt_customization_security_review"] == "safe"
     assert stats["prompt_profile_active"] is True
     assert stats["prompt_profile_source"] == "inline"
+    category_total = (
+        stats["documentation_calls_attempted"]
+        + stats["prompt_customization_security_review_calls_attempted"]
+        + stats["prompt_profile_conversion_calls_attempted"]
+    )
+    assert category_total == stats["attempted_calls"] == 2
     rec = json.loads(_output(project).read_text())["files"][0]
     assert rec["description"] == "A file."
     assert "functions" not in rec          # profile omitted -> filtered
@@ -168,6 +177,9 @@ def test_first_activation_invalidates_then_reuses(monkeypatch, project):
     fake3 = SmartFake("SAFE")
     s3 = _run(monkeypatch, project, {"entry_file": "main.py", "prompt_profiles": INLINE}, fake3)
     assert s3["checked"] == 0 and fake3.doc_calls == 0 and fake3.review_calls == 0  # reused
+    assert s3["documentation_calls_attempted"] == 0
+    assert s3["prompt_customization_security_review_calls_attempted"] == 0
+    assert s3["prompt_profile_conversion_calls_attempted"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -194,9 +206,15 @@ def test_describe_is_deterministic(capsys):
 
 
 def test_export_stdout(capsys):
+    # 0.11.1: stdout export is the version-2 config-ready wrapper.
     assert run_cli(["--export-prompt-profile"]) == 0
     data = json.loads(capsys.readouterr().out)
-    assert "single" in data and "triple" in data
+    assert set(data) == {"prompt_profiles"}
+    profiles = data["prompt_profiles"]
+    assert profiles["schema_version"] == 2
+    assert "single" in profiles and "triple" in profiles
+    assert "requested_shape" in profiles["single"]
+    assert set(profiles["triple"]) == {"structure", "dependency", "documentation"}
 
 
 def test_export_refuses_overwrite_and_force_backs_up(tmp_path):

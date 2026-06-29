@@ -40,7 +40,17 @@ known to be safe.
 
 4. **Prompt-profile validation, then scan and plan.** Any inline, explicit, or
    auto-detected mode-based prompt profile is resolved and deterministically
-   validated before scanning. `scan_files` walks the project (skipping the output
+   validated before scanning. The profile accepts two equivalent formats from one
+   registry: the legacy version-1 `fields` list and the 0.11.1 literal version-2
+   `requested_shape` form (inline-only); the absent `schema_version` is inferred
+   from the block syntax and normalized, and equivalent version-1/version-2
+   profiles render and digest identically. The resolved profile is then classified
+   before any read or planning (so the conversion branch runs before entry
+   resolution): an ordinary executable profile continues; a developer-standard-
+   equivalent single-only structure in triple mode resolves to the built-in triple
+   defaults (no paid call); and a **customized** single-only structure in triple
+   mode is routed into the single-to-triple conversion proposal (step 4a) instead
+   of silently documenting with defaults. `scan_files` walks the project (skipping the output
    directory) with an iterative, symlink-safe walk: deep trees cannot raise
    `RecursionError`, every directory's resolved identity is tracked so cycles
    and aliases are visited once, and — with the default `follow_symlinks=false`
@@ -68,6 +78,21 @@ known to be safe.
    revision, mode, truncation identity, or active prompt-profile digest no longer
    matches is reprocessed once. A dry run returns its projected statistics here and
    performs no mutation.
+
+4a. **Single-to-triple conversion proposal (0.11.1).** When the classification in
+   step 4 is "conversion-required", the pipeline performs only its bounded,
+   disclosed work and stops before any scan, mutation, recovery, or documentation
+   call. A dry run reports the pending plan (one routing call plus the exact
+   source-review batch count) and contacts no provider. A real run prints the
+   combined paid-cost warning, runs the ordinary security review over the
+   customized single structure (`SAFE` proceeds, `RISKY` warns, `TOO_RISKY` blocks
+   unless explicitly overridden), then makes exactly one paid routing call. The
+   routed triple structures pass the full version-2 deterministic validator and
+   fail closed on any malformed/duplicate-keyed/over-limit/contradictory response.
+   On success it returns the `generated-awaiting-confirmation` status carrying a
+   canonical config-ready `prompt_profiles` fragment (printed by the CLI) and makes
+   no documentation call; the per-category attempt counters (documentation,
+   security review, routing) reconcile exactly to the aggregate `attempted_calls`.
 
 5. **Paid-file safety cap.** After the full plan exists and before any mutation,
    writer initialization, or provider creation, a plan that exceeds the

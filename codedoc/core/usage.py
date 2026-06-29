@@ -84,6 +84,12 @@ class UsageAccumulator:
         with self._lock:
             return self._failed_calls
 
+    @property
+    def attempted_calls(self) -> int:
+        """Total provider attempts so far (successful + failed)."""
+        with self._lock:
+            return self._successful_calls + self._failed_calls
+
     def snapshot(self) -> dict:
         """Return a consistent snapshot of all counters."""
         with self._lock:

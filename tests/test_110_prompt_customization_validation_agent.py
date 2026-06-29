@@ -307,6 +307,22 @@ def test_preamble_or_fenced_response_fails_closed():
         PromptCustomizationValidationAgent(Raw()).review(batches)
 
 
+def test_duplicate_key_response_fails_closed():
+    class Raw:
+        provider_name = "fake"
+
+        def complete_json(self, prompt, system=""):
+            return (
+                '{"review_id":"rev-x","batch_index":1,"batch_count":1,'
+                '"verdict":"SAFE","verdict":"TOO_RISKY",'
+                '"reasons":[],"warnings":[]}'
+            )
+
+    batches = build_review_batches(_active_single(), frozenset({"python"}))
+    with pytest.raises(PromptCustomizationValidationError, match="duplicate key"):
+        PromptCustomizationValidationAgent(Raw()).review(batches)
+
+
 @pytest.mark.parametrize(
     ("installer", "class_name", "response_kw"),
     [

@@ -45,6 +45,7 @@ from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
+from codedoc.agents.prompt_profile_routing_agent import PromptProfileRoutingAgent
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.discovery import (
@@ -73,12 +74,18 @@ from codedoc.core.planning import (
     normalize_force_files,
 )
 from codedoc.core.prompt_profiles import (
+    PROFILE_ACTION_CONVERSION_REQUIRED,
     ProfileResolution,
     ResolvedProfile,
     ReviewBatch,
+    build_conversion_proposal_fragment,
+    build_conversion_review_batches,
     build_resolved_profile,
     build_review_batches,
+    build_routing_request,
+    classify_profile_action,
     resolve_profile_source,
+    routing_conversion_id,
 )
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import (
@@ -101,6 +108,7 @@ from codedoc.utils.errors import (
     ConfigError,
     ErrorReporter,
     LiveBackupWriteError,
+    PromptCustomizationValidationError,
     UnrecoverableProviderError,
 )
 from codedoc.utils.logger import get_logger, set_level
@@ -163,17 +171,37 @@ def run_pipeline(
         config_overrides = {}
 
     config = load_config(root, config_overrides)
-    _resolve_entry_and_docs(root, config)
+
+    set_level(config.get("log_level", "INFO"))
+    logger.info("codedoc starting: root=%s", root)
+    dry_run = bool(config.get("dry_run", False))
 
     analysis_mode = config.get("analysis_mode", "single")
     known_languages = frozenset(config["extension_language_map"].values())
+    # 0.11.1 (Review Addendum 11): resolve and classify the prompt profile BEFORE
+    # entry resolution, artifact/ownership inspection, existing-output reads,
+    # source scanning, graph building, and planning.  Both calls are read-only and
+    # provider-free.  A customized single-only structure selected in triple mode is
+    # routed into the conversion-proposal workflow here so it can never silently
+    # resolve to inactive built-in triple defaults.
     profile_resolution = resolve_profile_source(
         config,
         root,
         known_languages=known_languages,
         active_mode=analysis_mode,
     )
-    resolved_profile = build_resolved_profile(profile_resolution, analysis_mode)
+    profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
+    if profile_action.action == PROFILE_ACTION_CONVERSION_REQUIRED:
+        return _run_single_to_triple_conversion(
+            config=config,
+            profile_resolution=profile_resolution,
+            profile_action=profile_action,
+            analysis_mode=analysis_mode,
+            dry_run=dry_run,
+        )
+
+    _resolve_entry_and_docs(root, config)
+    resolved_profile = build_resolved_profile(profile_action, analysis_mode)
     no_work_profile_stats = {
         "prompt_profile_source": profile_resolution.source,
         "prompt_profile_file": (
@@ -191,14 +219,12 @@ def run_pipeline(
         "prompt_customization_allow_risky": bool(
             config.get("prompt_customization_allow_risky", False)
         ),
+        **_conversion_stats_defaults(),
     }
 
-    set_level(config.get("log_level", "INFO"))
-    logger.info("codedoc starting: root=%s", root)
     output_format = config.get("output_format", "json")
     logger.info("Output format: %s", output_format)
 
-    dry_run = bool(config.get("dry_run", False))
     if dry_run:
         logger.info("Dry run: planning only — no writes, no provider, no LLM calls.")
 
@@ -484,10 +510,28 @@ def run_pipeline(
         )
         llm = create_provider(config)
         reviewer = PromptCustomizationValidationAgent(llm, usage=usage)
-        outcome = reviewer.review(review_batches)
+        try:
+            outcome = reviewer.review(review_batches)
+        except PromptCustomizationValidationError as exc:
+            # A fail-closed review (transport/binding/contradiction/malformed)
+            # aborts before any documentation call.  Every batch whose provider
+            # call was attempted is reflected by the shared usage accumulator, so
+            # category attempts reconcile to attempted_calls.
+            review_stats["prompt_customization_security_review"] = "failed-closed"
+            review_stats["prompt_customization_security_review_calls_attempted"] = (
+                usage.attempted_calls
+            )
+            review_stats.update(usage.snapshot())
+            raise PromptCustomizationValidationError(str(exc), stats=review_stats) from exc
         review_stats["prompt_customization_security_review_calls_completed"] = (
             outcome.calls_completed
         )
+        # On a non-raising return every batch's provider call completed, so
+        # attempted equals completed for the review category.
+        review_stats["prompt_customization_security_review_calls_attempted"] = (
+            outcome.calls_completed
+        )
+        review_stats.update(usage.snapshot())
         review_stats["prompt_customization_security_warnings"] = len(outcome.warnings)
         review_stats["prompt_customization_security_blocking_reasons"] = len(
             outcome.reasons
@@ -518,8 +562,6 @@ def run_pipeline(
                 review_stats["prompt_customization_security_review"] = (
                     "too-risky-blocked"
                 )
-                from codedoc.utils.errors import PromptCustomizationValidationError
-
                 raise PromptCustomizationValidationError(
                     "Prompt customization standards/safety review: TOO RISKY — "
                     "blocked and not applied.\n"
@@ -833,6 +875,224 @@ def run_pipeline(
     return stats
 
 
+# ---------------------------------------------------------------------------
+# Single-to-triple conversion proposal (Workstream D)
+# ---------------------------------------------------------------------------
+
+def _conversion_stats_defaults() -> dict:
+    """Stable conversion/attempt stat keys, zeroed (present on every return path)."""
+    return {
+        "documentation_calls_planned": 0,
+        "documentation_calls_attempted": 0,
+        "prompt_profile_conversion": "not-required",
+        "prompt_profile_conversion_calls_planned": 0,
+        "prompt_profile_conversion_calls_attempted": 0,
+        "prompt_profile_conversion_calls_completed": 0,
+        "prompt_customization_security_review_calls_attempted": 0,
+    }
+
+
+def _conversion_base_stats(
+    profile_resolution: ProfileResolution,
+    config: dict,
+    analysis_mode: str,
+    review_planned: int,
+) -> dict:
+    """Shared stat skeleton for every conversion return/raise path."""
+    return {
+        "analysis_mode": analysis_mode,
+        "prompt_profile_source": profile_resolution.source,
+        "prompt_profile_file": (
+            str(profile_resolution.source_path)
+            if profile_resolution.source_path is not None
+            else None
+        ),
+        "prompt_profile_active": True,
+        "prompt_profile_affected_files": 0,
+        "prompt_customization_allow_risky": bool(
+            config.get("prompt_customization_allow_risky", False)
+        ),
+        "prompt_customization_security_review": (
+            "pending" if review_planned else "not-required"
+        ),
+        "prompt_customization_security_review_calls_planned": review_planned,
+        "prompt_customization_security_review_calls_completed": 0,
+        "prompt_customization_security_review_calls_attempted": 0,
+        "prompt_customization_security_warnings": 0,
+        "prompt_customization_security_blocking_reasons": 0,
+        "documentation_calls_planned": 0,
+        "documentation_calls_attempted": 0,
+        "prompt_profile_conversion": "pending",
+        "prompt_profile_conversion_calls_planned": 1,
+        "prompt_profile_conversion_calls_attempted": 0,
+        "prompt_profile_conversion_calls_completed": 0,
+        "estimated_input_tokens": 0,
+        "estimated_output_tokens": 0,
+        "successful_calls": 0,
+        "failed_calls": 0,
+        "attempted_calls": 0,
+    }
+
+
+def _inline_profile_comment(config: dict) -> object | None:
+    """Return a bounded inline ``$comment`` to preserve in the proposal, if any."""
+    inline = config.get("prompt_profiles")
+    if isinstance(inline, dict):
+        comment = inline.get("$comment")
+        if comment is not None:
+            return comment
+    return None
+
+
+def _run_single_to_triple_conversion(
+    *,
+    config: dict,
+    profile_resolution: ProfileResolution,
+    profile_action,
+    analysis_mode: str,
+    dry_run: bool,
+) -> dict:
+    """Run the bounded single-to-triple conversion proposal and stop.
+
+    Performs only its disclosed review/routing calls; never scans source, mutates
+    the filesystem, initializes recovery, or makes a documentation call.  Returns
+    a distinct conversion status; raises a setup-class error (with attached
+    statistics) on any fail-closed condition (Workstream D, Review Addenda 3/10).
+    """
+    single_profile = profile_action.single_profile
+    review_batches = build_conversion_review_batches(single_profile)
+    review_planned = len(review_batches)
+    conversion_id = routing_conversion_id(single_profile)
+
+    base = _conversion_base_stats(profile_resolution, config, analysis_mode, review_planned)
+
+    # Complete the bounded deterministic conversion preflight for both dry and
+    # real runs.  This keeps a dry-run projection from claiming a proposal is
+    # viable when the corresponding real request would be rejected locally.
+    try:
+        build_routing_request(single_profile, conversion_id)
+    except PromptCustomizationValidationError as exc:
+        raise PromptCustomizationValidationError(str(exc), stats=dict(base)) from exc
+
+    if dry_run:
+        # No provider contact: project the paid plan only.
+        base["prompt_profile_conversion"] = "pending"
+        return {
+            "dry_run": True,
+            "analysis_mode": analysis_mode,
+            "prompt_profile_conversion_id": conversion_id,
+            "total_paid_proposal_calls": review_planned + 1,
+            **base,
+        }
+
+    review_provider, review_model = describe_provider_selection(config)
+    print(
+        f"Single-to-triple profile conversion will make {review_planned} paid "
+        "security-review call(s) plus 1 paid routing call using "
+        f"provider={review_provider}, model={review_model}. It will print a "
+        "proposal and stop without generating documentation.",
+        flush=True,
+    )
+
+    usage = UsageAccumulator()
+    llm = create_provider(config)
+
+    # --- Source security review (the customized single structure) ---
+    review_status = "not-required"
+    reasons: tuple[str, ...] = ()
+    warnings: tuple[str, ...] = ()
+    if review_batches:
+        reviewer = PromptCustomizationValidationAgent(llm, usage=usage)
+        try:
+            outcome = reviewer.review(review_batches)
+        except PromptCustomizationValidationError as exc:
+            stats = dict(base)
+            stats["prompt_customization_security_review"] = "failed-closed"
+            stats["prompt_customization_security_review_calls_attempted"] = (
+                usage.attempted_calls
+            )
+            stats.update(usage.snapshot())
+            raise PromptCustomizationValidationError(str(exc), stats=stats) from exc
+        reasons = outcome.reasons
+        warnings = outcome.warnings
+        base["prompt_customization_security_review_calls_completed"] = outcome.calls_completed
+        base["prompt_customization_security_review_calls_attempted"] = outcome.calls_completed
+        base.update(usage.snapshot())
+        base["prompt_customization_security_warnings"] = len(warnings)
+        base["prompt_customization_security_blocking_reasons"] = len(reasons)
+        if outcome.verdict == "SAFE":
+            review_status = "safe"
+            print("Conversion source review: SAFE — continuing to routing.", flush=True)
+        elif outcome.verdict == "RISKY":
+            review_status = "risky"
+            print("Conversion source review: RISKY — proceeding with warnings:", flush=True)
+            for warning in warnings:
+                print(f"  - {warning}", flush=True)
+        else:  # TOO_RISKY
+            if config.get("prompt_customization_allow_risky", False):
+                review_status = "too-risky-overridden"
+                print(
+                    "Conversion source review: TOO RISKY — proceeding ONLY because "
+                    "--allow-risky-prompt-customization is set.",
+                    flush=True,
+                )
+                for reason in reasons:
+                    print(f"  - {reason}", flush=True)
+            else:
+                stats = dict(base)
+                stats["prompt_customization_security_review"] = "too-risky-blocked"
+                raise PromptCustomizationValidationError(
+                    "Conversion source review: TOO RISKY — blocked and not converted.\n"
+                    + "\n".join(f"- {reason}" for reason in reasons)
+                    + "\nTo override the semantic review and proceed at your own risk, "
+                    "re-run with --allow-risky-prompt-customization (or set "
+                    "prompt_customization_allow_risky: true). Deterministic "
+                    "validation and the strict cleaners cannot be overridden.",
+                    stats=stats,
+                )
+        base["prompt_customization_security_review"] = review_status
+
+    # --- Paid routing call ---
+    routing_agent = PromptProfileRoutingAgent(llm, usage=usage)
+    review_attempted = base["prompt_customization_security_review_calls_attempted"]
+    try:
+        routing_outcome = routing_agent.route(single_profile, conversion_id)
+    except PromptCustomizationValidationError as exc:
+        stats = dict(base)
+        stats.update(usage.snapshot())
+        stats["prompt_profile_conversion_calls_attempted"] = max(
+            0, usage.attempted_calls - review_attempted
+        )
+        raise PromptCustomizationValidationError(str(exc), stats=stats) from exc
+
+    # --- Success: build the canonical config-ready proposal fragment ---
+    fragment = build_conversion_proposal_fragment(
+        single_profile,
+        routing_outcome.triple,
+        comment=_inline_profile_comment(config),
+    )
+    import json as _json
+
+    stats = dict(base)
+    stats["prompt_profile_conversion"] = "generated-awaiting-confirmation"
+    stats["prompt_profile_conversion_calls_attempted"] = routing_outcome.calls_attempted
+    stats["prompt_profile_conversion_calls_completed"] = routing_outcome.calls_completed
+    stats["prompt_profile_conversion_id"] = conversion_id
+    stats["prompt_profile_conversion_factors"] = list(routing_outcome.factors)
+    stats["prompt_profile_conversion_fragment"] = _json.dumps(
+        fragment, indent=2, ensure_ascii=False
+    )
+    stats.update(usage.snapshot())
+    # Documentation never ran; the three paid categories reconcile to the total.
+    stats["documentation_calls_attempted"] = max(
+        0,
+        stats["attempted_calls"]
+        - stats["prompt_customization_security_review_calls_attempted"]
+        - stats["prompt_profile_conversion_calls_attempted"],
+    )
+    return stats
+
+
 def _cleanup_stale_error_log(stats: dict, error_reporter: ErrorReporter) -> None:
     """Remove a stale CodeDoc-owned error log on a clean run; record any warning.
 
@@ -934,6 +1194,16 @@ def _set_usage_stats(
     stats["initial_calls_per_file"] = per_file
     stats["planned_calls"] = len(plan.agent_rels) * per_file
     stats["planned_files"] = len(plan.agent_rels)
+    # 0.11.1: documentation-call category accounting.  Every provider attempt is
+    # exactly one of three categories (documentation, customization review,
+    # routing).  Review and routing track their own attempts; documentation is the
+    # remainder so the three categories reconcile to ``attempted_calls`` exactly.
+    stats["documentation_calls_planned"] = stats["planned_calls"]
+    review_attempted = stats.get("prompt_customization_security_review_calls_attempted", 0)
+    routing_attempted = stats.get("prompt_profile_conversion_calls_attempted", 0)
+    stats["documentation_calls_attempted"] = max(
+        0, stats.get("attempted_calls", 0) - review_attempted - routing_attempted
+    )
     # Files the plan routed to the LLM that were neither completed nor failed
     # (e.g. a run aborted early by the consecutive-failure health check).
     stats["unattempted_files"] = max(
@@ -987,6 +1257,8 @@ def _build_dry_run_stats(
         profile_stats["prompt_customization_allow_risky"] = bool(
             config.get("prompt_customization_allow_risky", False)
         )
+        # Dry-run projects the documentation plan without attempting any call.
+        profile_stats["documentation_calls_planned"] = len(plan.agent_rels) * per_file
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
@@ -1044,6 +1316,7 @@ def _base_profile_stats(
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
         "prompt_customization_allow_risky": False,
+        **_conversion_stats_defaults(),
     }
 
 
