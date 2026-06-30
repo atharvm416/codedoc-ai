@@ -1,4 +1,4 @@
-"""Approximate LLM usage accounting for codedoc (0.9.2).
+"""Approximate LLM usage accounting for codedoc.
 
 Everything in this module is an *estimate*.  ``estimate_tokens`` is a
 character heuristic (~4 characters per token), not a provider tokenizer.

@@ -1,4 +1,4 @@
-"""Shared strict response cleaning for both analysis modes (0.10.1, Workstream G4).
+"""Shared strict response cleaning for both analysis modes.
 
 Single mode (``FileDocumentationAgent``) historically owned the only schema
 cleaning; triple mode passed the legacy agents' raw parsed dicts straight

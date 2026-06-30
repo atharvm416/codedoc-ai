@@ -1,7 +1,7 @@
 """Documentation pipeline lifecycle coordinator for codedoc.
 
-0.9.4 internal decomposition
-----------------------------
+Internal decomposition
+----------------------
 This module is now a thin lifecycle coordinator.  The heavy lifting has been
 moved into cohesive, single-responsibility modules:
 
@@ -25,9 +25,7 @@ moved into cohesive, single-responsibility modules:
 6. execution;
 7. final output, logs, cleanup, and statistics.
 
-Behavior is unchanged from 0.9.3; this release only reorganizes structure.
-
-Compatibility note (0.9.4)
+Compatibility note
 --------------------------
 Private helpers that moved to the modules above are re-exported here for one
 release because repository tests and documented integrations import them as
@@ -114,7 +112,7 @@ from codedoc.utils.errors import (
 from codedoc.utils.logger import get_logger, set_level
 
 # ---------------------------------------------------------------------------
-# Compatibility re-exports (0.9.4 — deprecated; import from the defining module)
+# Compatibility re-exports (deprecated; import from the defining module)
 # ---------------------------------------------------------------------------
 # These private helpers moved to resume/discovery/execution.  They are
 # re-exported here for one release because repository tests and documented
@@ -178,7 +176,7 @@ def run_pipeline(
 
     analysis_mode = config.get("analysis_mode", "single")
     known_languages = frozenset(config["extension_language_map"].values())
-    # 0.11.1 (Review Addendum 11): resolve and classify the prompt profile BEFORE
+    # Resolve and classify the prompt profile BEFORE
     # entry resolution, artifact/ownership inspection, existing-output reads,
     # source scanning, graph building, and planning.  Both calls are read-only and
     # provider-free.  A customized single-only structure selected in triple mode is
@@ -245,11 +243,11 @@ def run_pipeline(
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
-    # 0.9.8: crash-recovery data is staged in its own dedicated file, never the
+    # Crash-recovery data is staged in its own dedicated file, never the
     # stable output.  Derive the base recovery path, then deterministically
     # select the active candidate (absent → fresh; valid in-progress → resume;
     # invalid/foreign/completed → advance to the next ``(<n>)`` suffix).  The
-    # walk is read-only.  The legacy path is the pre-0.9.8 live-backup location,
+    # walk is read-only.  The legacy path is the older live-backup location,
     # read only as an in-progress overlay during resume/migration.
     base_recovery_path = _resolve_live_backup_path(
         output_dir, output_format, json_filename, md_filename
@@ -284,7 +282,7 @@ def run_pipeline(
         artifact_paths["output_gitignore"] = ignore_target
     validate_distinct_artifact_paths(artifact_paths)
 
-    # Read-only ownership inspection (0.9.2).  A real run fails fast before any
+    # Read-only ownership inspection.  A real run fails fast before any
     # filesystem side effect, scanning, or LLM call when a final output target
     # is foreign-owned; a dry run records the conflicts and reports them.  The
     # recovery file is NOT inspected here: a foreign file at a recovery name is
@@ -296,7 +294,7 @@ def run_pipeline(
     if ownership_conflicts and not dry_run:
         raise ConfigError(ownership_conflicts[0]["message"])
 
-    # 0.8.0: --safe-mode is deprecated; print at most one notice when it was
+    # --safe-mode is deprecated; print at most one notice when it was
     # explicitly enabled, then continue normally.
     if config.get("safe_mode", False):
         print(
@@ -307,7 +305,7 @@ def run_pipeline(
         )
         logger.info("--safe-mode flag noted; live backup is always on in 0.8.0.")
 
-    # 0.8.0: error.log lives in the output directory, not the project root.
+    # error.log lives in the output directory, not the project root.
     # Construction is in-memory only; nothing is written until flush(), which
     # dry-run never calls.
     error_reporter = ErrorReporter(output_dir / "error.log")
@@ -422,13 +420,13 @@ def run_pipeline(
     # Queue/topological order for the selected file set (all selected, not just agent files).
     ordered_selected = [p for p in graph.topological_order() if p in documented_rels]
 
-    # 0.9.2: normalize forced paths against the project root (raises
+    # Normalize forced paths against the project root (raises
     # ConfigError for paths outside the root).
     forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
     # Migration eligibility: legacy Checkpoint entries may be used only when no
     # existing records were recovered — read-only equivalent of the
-    # ``SafeWriter.size == 0`` check.  0.9.8: the recovery file is now a separate
+    # ``SafeWriter.size == 0`` check.  The recovery file is a separate
     # path, so eligibility is keyed on the merged reuse set (stable baseline +
     # legacy overlay + active recovery), i.e. exactly what seeds the writer.
     checkpoint_results: dict[str, dict] = {}
@@ -442,7 +440,7 @@ def run_pipeline(
                 len(checkpoint_results),
             )
 
-    # 0.9.2: one shared plan drives both dry-run and real execution.
+    # One shared plan drives both dry-run and real execution.
     plan, materials = build_pipeline_plan(
         file_map=file_map,
         graph=graph,
@@ -579,7 +577,7 @@ def run_pipeline(
     # Mutation boundary — everything below may write to the filesystem.
     # ------------------------------------------------------------------
     output_dir.mkdir(parents=True, exist_ok=True)
-    # 0.10.1 (Workstream C): a provider-free output accessibility probe before
+    # A provider-free output accessibility probe before
     # any provider is created.  Runs for every real finalization path — including
     # all-reused runs that still rewrite stable output — but never for dry-run
     # (which returns above).  Raises a classified OutputError if the directory
@@ -589,7 +587,7 @@ def run_pipeline(
     _remove_legacy_db(output_dir)
     _cleanup_stale_build_file(output_dir, json_filename)
 
-    # Always-on crash-recovery writer (Work Item 1).  Targets the dedicated
+    # Always-on crash-recovery writer.  Targets the dedicated
     # recovery file for every format; the stable output is untouched until
     # finalization.
     recorder = SafeWriter(live_backup_path, output_format, entry_rel, file_map)
@@ -699,7 +697,7 @@ def run_pipeline(
             )
         raise
     except KeyboardInterrupt as exc:
-        # 0.9.8: an interrupt during provider init still happens after the
+        # An interrupt during provider init still happens after the
         # recovery file was initialized; name it for the CLI (see below).
         if live_backup_path.exists():
             exc.recovery_path = str(live_backup_path)
@@ -740,7 +738,7 @@ def run_pipeline(
         max_consecutive_failures,
     )
 
-    # 0.9.4: build the execution context from resolved configuration.  The
+    # Build the execution context from resolved configuration.  The
     # provider-aware rate-limit profile and the execution policy are computed
     # here; execution.py never sees the configuration dictionary.
     custom_ladder = config.get("parallel_ladder")
@@ -766,7 +764,7 @@ def run_pipeline(
     try:
         execute_agent_files(context)
     except UnrecoverableProviderError as exc:
-        # 0.9.7: a confirmed unrecoverable provider abort (terminal
+        # A confirmed unrecoverable provider abort (terminal
         # billing/credentials/model/access, or a bounded zero-progress rate
         # limit).  Record + flush it to error.log here — where the ErrorReporter
         # lives — so the abort is logged exactly like other issues even though it
@@ -777,7 +775,7 @@ def run_pipeline(
         error_reporter.flush()
         raise
     except LiveBackupWriteError as exc:
-        # 0.10.1 (Workstream D3): the dedicated recovery file could not be
+        # The dedicated recovery file could not be
         # persisted, so crash-safety no longer holds and execution stopped
         # scheduling paid work.  The last valid recovery file is preserved by the
         # atomic writer.  Record the failure (target path + classified cause +
@@ -807,7 +805,7 @@ def run_pipeline(
         )
         raise
     except KeyboardInterrupt as exc:
-        # 0.9.8: the run was interrupted mid-processing.  The stable output was
+        # The run was interrupted mid-processing.  The stable output was
         # never opened; completed work is staged in the dedicated recovery file.
         # Attach the exact selected recovery path (only when it exists on disk)
         # so the CLI can name it in the interrupt message, then re-raise the same
@@ -839,7 +837,7 @@ def run_pipeline(
     )
     stats["output_files"] = [str(path) for path in output_files if path]
     error_reporter.flush()
-    # 0.10.1: a clean, issue-free run clears a stale CodeDoc-owned error.log left
+    # A clean, issue-free run clears a stale CodeDoc-owned error.log left
     # by a prior failed run so a historical failure no longer looks current.  A
     # foreign log is left byte-identical; a removal failure is an auxiliary
     # warning surfaced in stats, never a failure of valid documentation output.
@@ -848,7 +846,7 @@ def run_pipeline(
     # dedicated recovery file (all formats).  A deletion OSError raises
     # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
-    # Complete the migration of a pre-0.9.8 legacy in-progress sibling (md mode):
+    # Complete the migration of a legacy in-progress sibling (md mode):
     # its records are already in the stable output, so remove the leftover.
     _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
     _finalize_output_gitignore(
@@ -876,7 +874,7 @@ def run_pipeline(
 
 
 # ---------------------------------------------------------------------------
-# Single-to-triple conversion proposal (Workstream D)
+# Single-to-triple conversion proposal
 # ---------------------------------------------------------------------------
 
 def _conversion_stats_defaults() -> dict:
@@ -957,7 +955,7 @@ def _run_single_to_triple_conversion(
     Performs only its disclosed review/routing calls; never scans source, mutates
     the filesystem, initializes recovery, or makes a documentation call.  Returns
     a distinct conversion status; raises a setup-class error (with attached
-    statistics) on any fail-closed condition (Workstream D, Review Addenda 3/10).
+    statistics) on any fail-closed condition.
     """
     single_profile = profile_action.single_profile
     review_batches = build_conversion_review_batches(single_profile)
@@ -1183,7 +1181,7 @@ def _set_usage_stats(
     plan: PipelinePlan,
     config: dict,
 ) -> None:
-    """Populate planned/actual usage keys on *stats* in-place (0.9.2).
+    """Populate planned/actual usage keys on *stats* in-place.
 
     Token figures are character-heuristic estimates, not tokenizer counts.
     """
@@ -1194,7 +1192,7 @@ def _set_usage_stats(
     stats["initial_calls_per_file"] = per_file
     stats["planned_calls"] = len(plan.agent_rels) * per_file
     stats["planned_files"] = len(plan.agent_rels)
-    # 0.11.1: documentation-call category accounting.  Every provider attempt is
+    # Documentation-call category accounting.  Every provider attempt is
     # exactly one of three categories (documentation, customization review,
     # routing).  Review and routing track their own attempts; documentation is the
     # remainder so the three categories reconcile to ``attempted_calls`` exactly.

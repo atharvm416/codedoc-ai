@@ -1,19 +1,7 @@
-"""
-LLM provider factory.
+"""Create the configured LLM provider.
 
-Reads the loaded config dict and returns the correct LLMProvider.
-Adding a new provider only requires adding a branch here.
-
-0.8.1 changes
--------------
-- ``_ANTHROPIC_PREFIXES``, ``_GEMINI_PREFIXES``, and ``_OPENAI_PREFIXES`` are
-  kept as module-level constants for backward compatibility and as fallbacks,
-  but the authoritative values now live in
-  ``DEFAULTS["provider_prefixes"]`` in ``loader.py``.
-- ``create_provider()`` passes the resolved ``config["provider_prefixes"]``
-  dict through to ``_resolve_api_provider()`` and ``_provider_api_key()``
-  so that provider auto-detection and API-key lookup use the same source of
-  truth.
+Resolved ``provider_prefixes`` drive provider detection and API-key lookup;
+module-level prefix constants remain compatibility fallbacks.
 
 Active providers
 ----------------
@@ -21,8 +9,8 @@ Active providers
   anthropic — Anthropic Claude
   gemini    — Google Gemini
 
-Reserved (not exposed in this release)
----------------------------------------
+Reserved compatibility provider
+-------------------------------
   ``codedoc.llm.local_provider`` remains importable for compatibility, but the
   factory and CLI do not expose a local-provider choice.
 """
@@ -88,7 +76,7 @@ def create_provider(config: dict) -> LLMProvider:
     base_url = config.get("api_base_url") or None
 
     if mode == "api":
-        # 0.9.2: provider-initialization error boundary.  Construction, import,
+        # Provider-initialization error boundary.  Construction, import,
         # and auth-configuration failures from provider SDKs are classified as
         # ProviderInitError (a ConfigError subclass → CLI exit code 2).
         try:

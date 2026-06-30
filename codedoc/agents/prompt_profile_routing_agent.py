@@ -1,6 +1,6 @@
-"""Provider-backed single-to-triple prompt-profile routing agent (0.11.1).
+"""Provider-backed single-to-triple prompt-profile routing agent.
 
-Workstream D.  When triple mode is selected but only a *customized* ``single``
+When triple mode is selected but only a *customized* ``single``
 structure is configured, CodeDoc makes exactly one paid routing call (after the
 ordinary source security review) to propose three explicit triple structures.
 

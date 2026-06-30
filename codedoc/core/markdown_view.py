@@ -1,6 +1,6 @@
 """Markdown serialization and parsing for codedoc project views.
 
-0.9.4 — extracted from :mod:`codedoc.core.project_view` as part of the internal
+Extracted from :mod:`codedoc.core.project_view` as part of the internal module
 decomposition.  This module owns the Markdown side of the public view:
 
 - rendering a built project view to Markdown (``markdown_from_view``), including
@@ -65,7 +65,7 @@ _CODEDOC_META_COMMENT_RE = re.compile(
     r"<!--\s*codedoc-ai:\s*(\{.*?\})\s*-->", re.DOTALL
 )
 
-# Regex that matches the lossless base64-encoded full view comment added in 0.8.1:
+# Regex that matches the lossless base64-encoded full view comment:
 #   <!-- codedoc-ai-view-base64
 #   eyJ...
 #   -->
@@ -81,7 +81,7 @@ _CODEDOC_VIEW_BASE64_RE = re.compile(
 def markdown_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as Markdown.
 
-    0.8.1: A lossless ``<!-- codedoc-ai-view-base64 ... -->`` block is written
+    A lossless ``<!-- codedoc-ai-view-base64 ... -->`` block is written
     immediately after the lightweight metadata comment.  The visible Markdown
     sections are unchanged; they remain human-readable.  The hidden base64
     block allows :func:`markdown_to_view` to reconstruct the full public JSON
@@ -164,12 +164,12 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
 def markdown_to_view(markdown: str) -> dict:
     """Parse codedoc Markdown output back into the public JSON view shape.
 
-    0.8.1 fast path: when the Markdown contains a ``codedoc-ai-view-base64``
-    block (written by :func:`markdown_from_view` since 0.8.1), the embedded
-    view is decoded and returned directly — this is a lossless round-trip.
+    Fast path: when the Markdown contains a ``codedoc-ai-view-base64`` block
+    (written by :func:`markdown_from_view`), the embedded view is decoded and
+    returned directly — this is a lossless round-trip.
 
-    Legacy fallback: for Markdown produced before 0.8.1 (no embedded block),
-    the visible Markdown sections are parsed as before.  This path is lossy
+    Legacy fallback: for Markdown with no embedded block, the visible Markdown
+    sections are parsed directly.  This path is lossy
     (dependency metadata and some internal fields are not recoverable from the
     visible text alone) but still produces a best-effort result.
     """
@@ -178,7 +178,7 @@ def markdown_to_view(markdown: str) -> dict:
     if embedded is not None:
         return embedded
 
-    # Legacy visible-text parser (pre-0.8.1 Markdown).
+    # Legacy visible-text parser (Markdown with no embedded block).
     project = _parse_project_overview(markdown)
     run = _parse_run_summary(markdown)
     files = _parse_markdown_files(markdown)
@@ -240,7 +240,7 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
 
 
 # ---------------------------------------------------------------------------
-# Embedded lossless view helpers (0.8.1)
+# Embedded lossless view helpers
 # ---------------------------------------------------------------------------
 
 def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
@@ -322,7 +322,7 @@ def _public_view_for_embedding(view: dict) -> dict:
     Strips crash-safety markers, the ``_codedoc`` wrapper (which is added by
     :func:`~codedoc.core.project_view.json_from_view` at JSON render time and
     must not appear in the embedded block), and the deprecated run-varying
-    ``generated_at`` field (0.9.3 determinism).
+    ``generated_at`` field (for run determinism).
     """
     excluded = {"_crash_safety", "_codedoc", "generated_at"}
     return {k: v for k, v in view.items() if k not in excluded}

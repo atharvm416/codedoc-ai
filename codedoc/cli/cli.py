@@ -178,9 +178,9 @@ examples:
             "Example: --remove-skip-dir codedoc  (allows scanning the package source)"
         ),
     )
-    # [DEPRECATED] Live JSON backup is always on since 0.8.0.  The flag is
-    # still accepted for backwards compatibility but hidden from --help
-    # (0.9.2); the pipeline prints one compatibility warning when enabled.
+    # [DEPRECATED] Live JSON backup is always on.  The flag is
+    # still accepted for backwards compatibility but hidden from --help;
+    # the pipeline prints one compatibility warning when enabled.
     parser.add_argument(
         "--safe-mode",
         action="store_true",
@@ -404,7 +404,7 @@ def _print_dry_run_summary(stats: dict) -> None:
     )
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
-    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # Derive the excluded count from the clearer reachable/disconnected
     # counts.  Under scope 'entry' the disconnected files are exactly the ones
     # excluded from documentation; scope 'all' documents them so none are
     # excluded.  The compatibility ``entry_excluded`` stat is still returned.
@@ -481,7 +481,7 @@ def _print_run_summary(stats: dict) -> None:
     )
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
-    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # Derive the excluded count from the clearer reachable/disconnected
     # counts (see _print_dry_run_summary).  ``entry_excluded`` is still returned
     # in stats for compatibility.
     disconnected = stats.get("entry_disconnected", 0)
@@ -504,7 +504,7 @@ def _print_run_summary(stats: dict) -> None:
         print(f"  Output file      : {output_file}")
     _print_ignore_status(stats, dry_run=False)
 
-    # 0.9.2: approximate usage accounting — only when LLM work was planned.
+    # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
         print(
             f"  LLM calls        : {stats.get('attempted_calls', 0)} attempted "
@@ -519,7 +519,7 @@ def _print_run_summary(stats: dict) -> None:
         )
     _print_prompt_profile_run(stats)
 
-    # 0.8.1: compact rate-limit summary — only shown when events occurred.
+    # Compact rate-limit summary — only shown when events occurred.
     # Per-event messages were already printed in real time during the run.
     rate_limit_warnings = stats.get("rate_limit_warnings", [])
     if rate_limit_warnings:
@@ -533,7 +533,7 @@ def _print_run_summary(stats: dict) -> None:
             "Details in error.log."
         )
 
-    # Always print issue log path when any issue was recorded (Work Item 4).
+    # Always print issue log path when any issue was recorded.
     issues = stats.get("issues_recorded", 0)
     error_log = stats.get("error_log")
     if issues and error_log:
@@ -547,7 +547,7 @@ def _print_run_summary(stats: dict) -> None:
 
 
 def _print_conversion_summary(stats: dict) -> None:
-    """Print the dedicated single-to-triple conversion result (Review Addendum 10).
+    """Print the dedicated single-to-triple conversion result.
 
     Branches before the generic dry-run/run summaries; never requires the ordinary
     ``checked``/``failed``/``output_*`` completion fields.
@@ -607,7 +607,7 @@ def _print_conversion_summary(stats: dict) -> None:
 def run_cli(argv: list[str] | None = None) -> int:
     """Run the CLI and return the process exit code.
 
-    Exit-code contract (0.9.2):
+    Exit-code contract:
       0   — complete success, dry-run success, or --allow-partial
       1   — file-processing failures, output/write failure, unexpected fatal error
       2   — invalid path/input/config, ownership conflict, cap exceeded,
@@ -684,7 +684,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 if args.force:
                     parser.error("--force is valid only with --export-prompt-profile")
                 # The describe utility has a single stdout representation per
-                # format; 'both' has no meaning here (Review Addendum 12).
+                # format; 'both' has no meaning here.
                 if args.format == "both":
                     print(
                         "Error: --describe-prompt-schema accepts --format json or "
@@ -699,7 +699,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 return 0
             target = args.export_prompt_profile
             if target in (None, "-"):
-                # 0.11.1: stdout export is the version-2 config-ready wrapper —
+                # Stdout export is the version-2 config-ready wrapper —
                 # paste its 'prompt_profiles' value straight into
                 # codedoc.config.json.  Path export (below) keeps the version-1
                 # external-profile format usable with --prompt-profile PATH.
@@ -791,8 +791,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         from codedoc.pipeline import run_pipeline
         stats = run_pipeline(root, config_overrides=overrides)
 
-        # 0.11.1: a single-to-triple conversion is a distinct terminal result —
-        # branch before the generic dry-run/run summaries (Review Addendum 10).
+        # A single-to-triple conversion is a distinct terminal result —
+        # branch before the generic dry-run/run summaries.
         if stats.get("prompt_profile_conversion") in (
             "pending",
             "generated-awaiting-confirmation",
@@ -832,7 +832,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as exc:
-        # 0.9.8: the pipeline attaches the exact selected crash-recovery path to
+        # The pipeline attaches the exact selected crash-recovery path to
         # the interrupt as ``recovery_path`` only when that file exists on disk.
         # The stable output is never touched mid-run, so it is always preserved;
         # we just report which file enables resume (or that none was created).
@@ -860,7 +860,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             UnrecoverableProviderError,
         )
         if isinstance(exc, UnrecoverableProviderError):
-            # 0.9.7: a doomed-run safe stop — not an unexpected crash.  The
+            # A doomed-run safe stop — not an unexpected crash.  The
             # pipeline already recorded and flushed it to error.log; here we only
             # present it.  Completed files are in the live JSON backup and
             # re-running resumes.  A *terminal* abort (billing/credentials/model/
@@ -883,10 +883,9 @@ def run_cli(argv: list[str] | None = None) -> int:
             # Includes ProviderInitError (provider initialization failures),
             # ownership conflicts, the max_files cap, and prompt-customization /
             # conversion fail-closed errors.
-            # 0.11.1: a fail-closed conversion/review carries bounded numeric
+            # A fail-closed conversion/review carries bounded numeric
             # attempt statistics (never profile text) before the ordinary setup
             # error, so the paid cost of the aborted proposal is visible
-            # (Review Addendum 10).
             err_stats = getattr(exc, "stats", None)
             if isinstance(err_stats, dict) and (
                 "prompt_profile_conversion_calls_attempted" in err_stats
@@ -910,7 +909,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 traceback.print_exc()
             return 2
         if isinstance(exc, OutputError):
-            # 0.10.1: the OutputError message already carries the sanitized OS
+            # The OutputError message already carries the sanitized OS
             # cause/category and the affected path.  Add concrete next-step
             # guidance keyed on whether this was a transient lock or a persistent
             # accessibility failure.  CodeDoc never names the locking process

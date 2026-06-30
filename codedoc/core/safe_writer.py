@@ -1,10 +1,10 @@
 """
 Live JSON backup writer for the codedoc pipeline.
 
-0.8.0: This writer is the **default** crash-safety mechanism for every run —
+This writer is the **default** crash-safety mechanism for every run —
 no longer opt-in via ``--safe-mode``.
 
-0.9.8: crash-recovery data is kept in its own dedicated file named
+Crash-recovery data is kept in its own dedicated file named
 ``crash_recovery_<stem>.json`` (or a ``(<n>)``-suffixed sibling), **never** the
 stable output.  The recovery file is created before AI work begins and updated
 after each completed file.  The stable completed output (the final JSON for
@@ -143,13 +143,13 @@ class SafeWriter:
         Parameters
         ----------
         preloaded:
-            0.9.8 — the merged reuse record set computed by the canonical resume
+            The merged reuse record set computed by the canonical resume
             boundary (``_load_existing_file_docs``: stable completed output +
             legacy in-progress overlay + active recovery overlay).  Seeding the
             writer with this set means every partial flush of the dedicated
             recovery file is a self-contained snapshot, so an interrupted run
             resumes correctly even if a later source is removed.  This replaces
-            the pre-0.9.8 behaviour where the live backup *was* the stable output
+            the older behaviour where the live backup *was* the stable output
             and ``load()`` re-read it directly.
 
         Ownership guard
@@ -187,7 +187,7 @@ class SafeWriter:
                 f"  • Delete or rename the conflicting file:  {self._path}"
             )
 
-        # 0.9.3: ownership + parsing via the centralized reader.  A foreign or
+        # Ownership + parsing via the centralized reader.  A foreign or
         # malformed file raises before any LLM work begins.
         try:
             document = read_codedoc_document(self._path)
@@ -317,7 +317,7 @@ class SafeWriter:
     def delete(self) -> None:
         """Remove the dedicated crash-recovery file after a clean completion.
 
-        0.9.8 — the recovery file is now a distinct ``crash_recovery_<stem>.json``
+        The recovery file is a distinct ``crash_recovery_<stem>.json``
         for **every** output format, never the stable output.  Clean completion
         writes the stable output first (via ``write_project_outputs``) and only
         then calls this to remove the recovery file.  Deletion is therefore a
@@ -431,7 +431,7 @@ class SafeWriter:
             # The prior valid backup is left intact by atomic_write_text.  A
             # serialization or persistence failure is fatal — surface it so
             # execution stops and record() can roll back its in-memory markers.
-            # 0.10.1: include the sanitized OS cause/category and an actionable
+            # Include the sanitized OS cause/category and an actionable
             # resume note (no secrets — only the local path and OS metadata).
             category = classify_os_error(exc)
             cause = describe_cause(exc)

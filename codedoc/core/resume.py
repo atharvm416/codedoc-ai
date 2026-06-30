@@ -1,13 +1,13 @@
 """Resume and recovery helpers for the documentation pipeline.
 
-0.9.4 — extracted verbatim from ``codedoc.pipeline`` as part of the internal
-decomposition.  This module owns:
+Extracted from ``codedoc.pipeline`` as part of the internal module decomposition.
+This module owns:
 
 - live-backup path resolution;
 - loading existing per-file documentation from prior JSON / Markdown output;
 - reconstructing the internal documentation shape from a public JSON record;
 - building the final documentation records handed to ``write_project_outputs``;
-- cleaning up stale 0.7.x build files and the legacy ``codedoc_db.json``.
+- cleaning up stale build files and the legacy ``codedoc_db.json``.
 
 It depends on the read-only document reader, output/project-view helpers,
 hashing, and paths.  It must not scan source files, create providers, or
@@ -29,7 +29,7 @@ from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# 0.9.8: crash-recovery (live-backup) data lives in its own dedicated file so a
+# Crash-recovery (live-backup) data lives in its own dedicated file so a
 # run never overwrites the user's last stable completed output while it is still
 # in progress.  The recovery file is named ``crash_recovery_<stem>.json`` where
 # ``<stem>`` is the stem of the final output file.  This is a fixed internal
@@ -37,12 +37,12 @@ logger = get_logger(__name__)
 # for it, and the same constant guards ``--output`` (see ``loader._resolve_output_spec``).
 CRASH_RECOVERY_PREFIX = "crash_recovery_"
 
-# Bound on the suffix walk for an occupied/invalid recovery name (Workstream B).
+# Bound on the suffix walk for an occupied/invalid recovery name.
 _MAX_RECOVERY_CANDIDATES = 1000
 
 
 # ---------------------------------------------------------------------------
-# Recovery path helpers (Work Item 1 / 0.9.8)
+# Recovery path helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_live_backup_path(
@@ -82,12 +82,12 @@ def _resolve_legacy_backup_path(
     json_filename: str,
     md_filename: str,
 ) -> Path:
-    """Return the *legacy* (pre-0.9.8) live-backup location for this scenario.
+    """Return the *legacy* live-backup location for this scenario.
 
-    Earlier versions aliased the live backup onto the final JSON (for
+    Older versions aliased the live backup onto the final JSON (for
     ``json``/``both``) or onto a JSON sibling of the Markdown file (for ``md``).
-    An interrupted pre-0.9.8 run may therefore have left in-progress
-    ``_crash_safety`` records at that location.  This release reads that file as
+    An interrupted older run may therefore have left in-progress
+    ``_crash_safety`` records at that location.  codedoc reads that file as
     a *legacy in-progress overlay* during resume; the value is otherwise pure.
     """
     if output_format == "md":
@@ -167,12 +167,12 @@ def _load_existing_file_docs(
 ) -> dict[str, dict]:
     """Load per-file documentation from existing output files.
 
-    With ``read_only=True`` (planning / dry-run) a stale 0.7.x build file is
+    With ``read_only=True`` (planning / dry-run) a stale build file is
     skipped without being unlinked; routing results are identical.  Real runs
     delete the stale file later, behind the mutation boundary, via
     :func:`_cleanup_stale_build_file`.
 
-    0.9.8 — the dedicated recovery file (``live_backup_path``, now always a
+    The dedicated recovery file (``live_backup_path``, always a
     distinct ``crash_recovery_<stem>.json``) is no longer a short-circuit source.
     The stable completed output is read first as the reuse baseline, and the
     active in-progress recovery records overlay it.  Records are merged by
@@ -185,10 +185,10 @@ def _load_existing_file_docs(
          ``_crash_safety`` document — either way the reuse base for this path);
        - ``md``: the Markdown output (same-stem sibling or configured
          ``md_filename``).
-       The stale 0.7.x build file (``.codedoc_build.json``) is migrated into this
+       The stale build file (``.codedoc_build.json``) is migrated into this
        baseline when newer than the JSON.
     2. **Legacy in-progress stable-path records** overlay the baseline — for
-       ``md`` runs this is the pre-0.9.8 JSON sibling (``legacy_recovery_path``)
+       ``md`` runs this is the legacy JSON sibling (``legacy_recovery_path``)
        when it is an in-progress document.  (For ``json``/``both`` the legacy
        location *is* the baseline path, so it is already covered by step 1.)
     3. **Active dedicated recovery records** (``live_backup_path``) overlay both
@@ -213,7 +213,7 @@ def _load_existing_file_docs(
                 "Optional resume candidate '%s' rejected: %s", json_path.name, exc
             )
 
-    # --- 1b. Stale 0.7.x build file migration overlay.
+    # --- 1b. Stale build file migration overlay.
     build_path = output_dir / BUILD_FILENAME
     if build_path.exists():
         try:
@@ -339,7 +339,7 @@ def _load_existing_file_docs_from_md(md_path: Path) -> dict[str, dict]:
         if path:
             # Prefer the hash from the lightweight metadata comment (authoritative
             # for incremental reuse).  When the embedded view already contains a
-            # hash (0.8.1+ Markdown), use that as the fallback so we never
+            # hash (embedded-view Markdown), use that as the fallback so we never
             # overwrite a good hash with an empty string.
             file_hash = file_hashes.get(path) or file_record.get("hash", "")
             result[path] = {**file_record, "hash": file_hash}
@@ -366,7 +366,7 @@ def _public_record_to_doc(file_record: dict) -> dict:
         "dependencies_analysis": deps,
     }
     cleaned = {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
-    # 0.9.3: carry registered private keys from the public record into the
+    # Carry registered private keys from the public record into the
     # reconstructed flat documentation result so they survive resume/reuse.
     carry_private_keys(file_record, cleaned)
     return cleaned
@@ -420,11 +420,11 @@ def _cleanup_legacy_recovery(
 ) -> None:
     """Remove a migrated legacy in-progress recovery sibling after clean success.
 
-    0.9.8 — for ``md`` runs the pre-0.9.8 live backup was a JSON sibling of the
+    For ``md`` runs the legacy live backup was a JSON sibling of the
     Markdown file (e.g. ``codedoc.json`` next to ``codedoc.md``).  After a clean
-    completion the new layout writes only the Markdown stable output and the
+    completion the current layout writes only the Markdown stable output and the
     dedicated recovery file is removed by :meth:`SafeWriter.delete`; this removes
-    the now-migrated legacy sibling too, so the old "only the Markdown remains"
+    the now-migrated legacy sibling too, so the "only the Markdown remains"
     guarantee holds and the user is never required to delete anything by hand.
 
     Acts only on a distinct, codedoc-owned, **in-progress** legacy file — never a
@@ -461,7 +461,7 @@ def _cleanup_legacy_recovery(
 
 
 def _cleanup_stale_build_file(output_dir: Path, json_filename: str) -> None:
-    """Remove a stale 0.7.x build file — mutation-phase counterpart of the
+    """Remove a stale build file — mutation-phase counterpart of the
     skip in ``_load_existing_file_docs(read_only=True)``."""
     build_path = output_dir / BUILD_FILENAME
     json_path = output_dir / json_filename

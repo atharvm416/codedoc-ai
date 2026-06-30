@@ -1,21 +1,7 @@
-"""
-Custom exceptions and error reporter for codedoc.
-All modules raise these instead of bare exceptions so the pipeline
-can catch, log, and report them uniformly.
+"""Shared exceptions and bounded issue reporting.
 
-0.8.0 changes
--------------
-- ``ErrorReporter.record()`` now accepts a ``level`` parameter (``"error"`` or
-  ``"warning"``).  Warning-level entries appear in ``error.log`` but are
-  excluded from ``summary()`` so they never leak into the final ``codedoc.json``
-  ``errors`` field or the Markdown ``## Errors`` section.
-- ``has_errors()`` / ``error_count()`` count only ``"error"``-level entries.
-- ``has_issues()`` / ``issue_count()`` count all entries.
-- ``flush()`` header changed from ``error(s)`` to ``issue(s)`` to avoid alarm
-  on warning-only logs.
-- ``summary()`` returns ``""`` (empty string) when there are no error-level
-  entries; callers that used to check ``!= "No errors."`` treat ``""`` as
-  falsy and skip the errors field.
+Warnings may be persisted to ``error.log`` but are excluded from the public
+error summary. Error counters include only errors; issue counters include both.
 """
 
 from __future__ import annotations
@@ -24,12 +10,12 @@ import traceback
 from pathlib import Path
 
 # ---------------------------------------------------------------------------
-# error.log ownership markers (0.10.1)
+# error.log ownership markers
 # ---------------------------------------------------------------------------
 # A CodeDoc-owned log starts with one of these ASCII markers on its first line.
-# The new marker is written by ``ErrorReporter.flush()``; the legacy prefix is
-# recognized for safe cleanup of logs created before 0.10.1.  A file whose first
-# line matches neither is foreign and is never deleted, truncated, or replaced.
+# The marker is written by ``ErrorReporter.flush()``; the legacy prefix is
+# recognized for safe cleanup of older logs.  A file whose first line matches
+# neither is foreign and is never deleted, truncated, or replaced.
 LOG_OWNERSHIP_MARKER = "# codedoc-ai issue log"
 _LEGACY_LOG_MARKER_PREFIX = "codedoc issue log"
 
@@ -82,7 +68,7 @@ class UnrecoverableProviderError(LLMError):
     """Raised at the execution layer when a provider error cannot recover by
     retrying, so the run is stopped immediately to save tokens, money, and time.
 
-    0.9.7 — this is the only error type that aborts the per-file loop on a
+    This is the only error type that aborts the per-file loop on a
     *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
@@ -103,10 +89,10 @@ class UnrecoverableProviderError(LLMError):
 
         ``"terminal"``
             A confirmed billing/credit, credentials, unknown-model, or
-            forbidden/permission abort (Workstream B).  Setup/credentials class
+            forbidden/permission abort.  Setup/credentials class
             → CLI exit code 2.
         ``"rate_limit_exhausted"``
-            The bounded zero-progress rate-limit / quota stop (Workstream C).  A
+            The bounded zero-progress rate-limit / quota stop.  A
             transient "retry later" condition, not a credentials fault → CLI
             exit code 1.
 
@@ -139,7 +125,7 @@ class ProviderInitError(ConfigError):
 
 
 class PromptCustomizationValidationError(ConfigError):
-    """Raised when a prompt-customization profile is rejected (0.11.0).
+    """Raised when a prompt-customization profile is rejected.
 
     Covers two non-overridable outcomes and one overridable-by-flag outcome that
     nonetheless stops the run:
@@ -273,7 +259,7 @@ class ErrorReporter:
         ``False`` when there were no issues or a foreign file occupied the log
         path.
 
-        0.10.1: the log begins with a stable ASCII ownership marker so a later
+        The log begins with a stable ASCII ownership marker so a later
         successful run can recognize and clear it.  When a *foreign* file already
         occupies the path it is never replaced — its bytes are left intact and a
         warning is logged instead of raising.  Writing is routed through the

@@ -39,7 +39,7 @@ DEFAULTS: dict[str, Any] = {
     # the resolved extension_language_map.  The value listed here is the legacy
     # default set and acts as the detection baseline: if a caller passes a
     # *different* list, _apply_config_overrides() treats it as a filter on the
-    # extension_language_map (backward-compat bridge for pre-0.8.1 configs).
+    # extension_language_map (backward-compat bridge for older configs).
     "supported_extensions": [
         ".py", ".ts", ".tsx", ".js", ".jsx", ".dart",
         ".java", ".cs", ".html",
@@ -51,18 +51,18 @@ DEFAULTS: dict[str, Any] = {
     "max_consecutive_failures": 5,
     "log_level": "INFO",
     "max_file_size_kb": 500,
-    # 0.9.6 scanner safety: when False (default) symlinked directories and files
+    # Scanner safety: when False (default) symlinked directories and files
     # are skipped, preventing symlink cycles and escapes outside the project
     # root.  Settable via JSON config or the Python API only (no CLI flag/env).
     "follow_symlinks": False,
     "propagate_changes": True,
-    # 0.8.0 rate-limit adaptive parallelism
+    # Rate-limit adaptive parallelism
     "rate_limit_adaptive": True,
     "parallel_ladder": None,
     "respect_retry_after": True,
     "retry_after_cap_s": 30,
     # -----------------------------------------------------------------------
-    # 0.8.1 skip_dirs — single source of truth (was split across loader + scanner)
+    # skip_dirs — single source of truth (was split across loader + scanner)
     # -----------------------------------------------------------------------
     "skip_dirs": [
         "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", "myenv",
@@ -76,7 +76,7 @@ DEFAULTS: dict[str, Any] = {
     # directory name appears in the default list (e.g. "codedoc").
     "skip_dirs_remove": [],
     # -----------------------------------------------------------------------
-    # 0.8.1 extension_language_map — replaces the hardcoded EXTENSION_LANGUAGE_MAP
+    # extension_language_map — replaces the hardcoded EXTENSION_LANGUAGE_MAP
     # in scanner.py.  Any extension in the resolved map is automatically
     # supported — no need to edit both this and supported_extensions.
     # -----------------------------------------------------------------------
@@ -106,7 +106,7 @@ DEFAULTS: dict[str, Any] = {
     # Remove extensions from the map (list of extension strings, e.g. [".htm"]).
     "extension_language_map_remove": [],
     # -----------------------------------------------------------------------
-    # 0.8.1 auto_entry_candidates — replaces the hardcoded common_entries list
+    # auto_entry_candidates — replaces the hardcoded common_entries list
     # in scanner.detect_entry_file().
     # -----------------------------------------------------------------------
     "auto_entry_candidates": [
@@ -122,7 +122,7 @@ DEFAULTS: dict[str, Any] = {
     "auto_entry_candidates_add": [],
     "auto_entry_candidates_remove": [],
     # -----------------------------------------------------------------------
-    # 0.8.1 provider_prefixes — replaces the hardcoded _*_PREFIXES tuples in
+    # provider_prefixes — replaces the hardcoded _*_PREFIXES tuples in
     # factory.py.  Used by provider auto-detection and API-key lookup.
     # -----------------------------------------------------------------------
     "provider_prefixes": {
@@ -135,7 +135,7 @@ DEFAULTS: dict[str, Any] = {
     # Remove prefixes per provider: {"openai": ["o1"]}.
     "provider_prefixes_remove": {},
     # -----------------------------------------------------------------------
-    # 0.8.1 rate-limit profile config overrides
+    # Rate-limit profile config overrides
     # -----------------------------------------------------------------------
     # Override min_backoff_s for all providers globally (float or None).
     # Set to 0 to disable computed inter-rung backoff entirely.
@@ -149,10 +149,10 @@ DEFAULTS: dict[str, Any] = {
     "rate_limit_signals_remove": [],
     # -----------------------------------------------------------------------
     "ignore_paths": [],
-    # 0.9.0: configurable per-file content limit sent to the LLM.
+    # Configurable per-file content limit sent to the LLM.
     "max_content_chars": 12000,
     # -----------------------------------------------------------------------
-    # 0.9.2 planning / CI safety
+    # Planning / CI safety
     # -----------------------------------------------------------------------
     # Read-only planning run: no filesystem mutation, no provider creation.
     "dry_run": False,
@@ -163,21 +163,21 @@ DEFAULTS: dict[str, Any] = {
     # Exit 0 even when some files failed (completed runs only).
     "allow_partial": False,
     # -----------------------------------------------------------------------
-    # 0.10.0 selectable per-file analysis mode
+    # Selectable per-file analysis mode
     # -----------------------------------------------------------------------
     # "single" — one combined provider call per file (default).
     # "triple" — the legacy StructureAgent/DependencyAgent/DocumentationAgent
     #            three-call path.
     "analysis_mode": "single",
     # -----------------------------------------------------------------------
-    # 0.10.2 configurable truncation head ratio
+    # Configurable truncation head ratio
     # -----------------------------------------------------------------------
     # Head fraction of the head-plus-tail truncation split.  The default 0.70
-    # produces a ~70/30 head/tail split, identical to the 0.10.1 hardcoded value.
+    # produces a ~70/30 head/tail split.
     # Must be a float strictly between 0.0 and 1.0 (exclusive).
     "truncation_head_ratio": 0.70,
     # -----------------------------------------------------------------------
-    # 0.11.0 mode-based JSON prompt profiles
+    # Mode-based JSON prompt profiles
     # -----------------------------------------------------------------------
     # Inline profile object (single and/or triple sections) customizing the
     # requested JSON shape block. ``None`` means no inline profile.
@@ -222,7 +222,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_PROMPT_CUSTOMIZATION_ALLOW_RISKY": "prompt_customization_allow_risky",
 }
 
-# 0.10.0: allowed values for the selectable per-file analysis mode.
+# Allowed values for the selectable per-file analysis mode.
 VALID_ANALYSIS_MODES = ("single", "triple")
 
 # Config keys whose environment values are parsed as semicolon-separated lists.
@@ -247,7 +247,7 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
         candidate = root / filename
         if candidate.exists():
             try:
-                # 0.11.1: parse through the shared strict loader so a duplicate
+                # Parse through the shared strict loader so a duplicate
                 # object key anywhere in the file (including nested inside
                 # ``prompt_profiles``) is rejected instead of silently
                 # last-key-wins.
@@ -296,7 +296,7 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
 
 
 # ---------------------------------------------------------------------------
-# Override-resolution helpers (0.8.1)
+# Override-resolution helpers
 # ---------------------------------------------------------------------------
 
 def _resolve_list_override(
@@ -410,11 +410,10 @@ def _apply_config_overrides(config: dict[str, Any]) -> None:
     )
     # Backward-compat bridge for explicit supported_extensions overrides.
     #
-    # Pre-0.8.1 users may have "supported_extensions": [".py", ".ts"] in their
-    # config file to restrict scanning.  After 0.8.1, extension_language_map is
-    # the single source of truth, but we honour an *explicit* supported_extensions
-    # override by applying it as a filter on the resolved map — so old configs
-    # keep working without migration.
+    # Older configs may set "supported_extensions": [".py", ".ts"] to restrict
+    # scanning.  extension_language_map is the single source of truth, but we
+    # honour an *explicit* supported_extensions override by applying it as a
+    # filter on the resolved map — so old configs keep working without migration.
     #
     # Detection rule: if config["supported_extensions"] differs from
     # DEFAULTS["supported_extensions"] it was explicitly set by the user
@@ -479,9 +478,9 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
             "ending in '.json' or '.md' (e.g. 'docs/report.json')."
         )
 
-    # 0.9.8: ``crash_recovery_*`` filenames are reserved for codedoc's dedicated
+    # ``crash_recovery_*`` filenames are reserved for codedoc's dedicated
     # crash-recovery file and must never be a user output target — that is the
-    # exact file this release keeps separate from the stable output.  Check only
+    # exact file codedoc keeps separate from the stable output.  Check only
     # the user-supplied filename's own stem (covering both ``.json`` and ``.md``
     # forms, and the ``(<n>)``-suffixed forms whose stem still begins with the
     # prefix).  The same constant guards the recovery-path writer so the two
@@ -596,7 +595,7 @@ def _validate(config: dict[str, Any]) -> None:
     if config.get("documentation_scope", "entry") not in ("entry", "all"):
         raise ConfigError("documentation_scope must be 'entry' or 'all'.")
 
-    # 0.10.0: selectable per-file analysis mode — reject unknown values before
+    # Selectable per-file analysis mode — reject unknown values before
     # provider creation.
     if config.get("analysis_mode", "single") not in VALID_ANALYSIS_MODES:
         raise ConfigError(
@@ -604,11 +603,11 @@ def _validate(config: dict[str, Any]) -> None:
             "'triple' (the three-agent path)."
         )
 
-    # 0.9.2: normalize booleans early — dry_run gates the API-key warning below.
+    # Normalize booleans early — dry_run gates the API-key warning below.
     config["dry_run"] = _coerce_bool(config.get("dry_run", False))
     config["allow_partial"] = _coerce_bool(config.get("allow_partial", False))
 
-    # 0.9.6: follow_symlinks is a safety control — coerce strictly so an
+    # follow_symlinks is a safety control — coerce strictly so an
     # unrecognized string is a hard error rather than a silent False.
     config["follow_symlinks"] = _coerce_strict_bool(
         config.get("follow_symlinks", False), "follow_symlinks"
@@ -660,7 +659,7 @@ def _validate(config: dict[str, Any]) -> None:
             "provider_prefixes must be a dict mapping provider names to lists of model prefixes."
         )
 
-    # Validate 0.8.1 rate-limit profile override keys
+    # Validate rate-limit profile override keys
     _rls = config.get("rate_limit_backoff_s")
     if _rls is not None:
         try:
@@ -723,7 +722,7 @@ def _validate(config: dict[str, Any]) -> None:
     if config["max_consecutive_failures"] < 1:
         raise ConfigError("max_consecutive_failures must be at least 1.")
 
-    # Validate and normalise parallel_ladder (0.8.0)
+    # Validate and normalise parallel_ladder
     ladder = config.get("parallel_ladder")
     if ladder is not None:
         if not isinstance(ladder, list) or not all(
@@ -776,7 +775,7 @@ def _validate(config: dict[str, Any]) -> None:
     if config["max_content_chars"] < 1000:
         raise ConfigError("max_content_chars must be at least 1000.")
 
-    # 0.9.2: max_files — integer >= 0; 0 means unlimited; booleans rejected.
+    # max_files — integer >= 0; 0 means unlimited; booleans rejected.
     raw_max_files = config.get("max_files", 0)
     if isinstance(raw_max_files, bool):
         raise ConfigError("max_files must be an integer greater than or equal to 0.")
@@ -797,7 +796,7 @@ def _validate(config: dict[str, Any]) -> None:
     if config["max_files"] < 0:
         raise ConfigError("max_files must be an integer greater than or equal to 0.")
 
-    # 0.9.2: force_files — a list of non-empty path strings.
+    # force_files — a list of non-empty path strings.
     force_files = config.get("force_files", [])
     if not isinstance(force_files, list) or not all(
         isinstance(p, str) and p.strip() for p in force_files
@@ -805,7 +804,7 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("force_files must be a list of non-empty path strings.")
     config["force_files"] = [p.strip() for p in force_files]
 
-    # 0.10.2: truncation_head_ratio — float strictly between 0.0 and 1.0.
+    # truncation_head_ratio — float strictly between 0.0 and 1.0.
     raw_ratio = config.get("truncation_head_ratio", 0.70)
     if isinstance(raw_ratio, bool):
         raise ConfigError(
@@ -826,7 +825,7 @@ def _validate(config: dict[str, Any]) -> None:
         )
     config["truncation_head_ratio"] = ratio_val
 
-    # 0.11.0: prompt-profile keys.  Structural profile validation happens later in
+    # Prompt-profile keys.  Structural profile validation happens later in
     # prompt_profiles.resolve_profile_source; here we only enforce the config-level
     # value types and strict booleans so an unrecognized value is a hard error.
     inline_profiles = config.get("prompt_profiles")

@@ -1,4 +1,4 @@
-"""Strict JSON text loading with nested duplicate-key rejection (0.11.1).
+"""Strict JSON text loading with nested duplicate-key rejection.
 
 This is a deliberately dependency-light module: it imports **only** the standard
 library so it can be shared by both file parse sites (``loader.load_config`` for

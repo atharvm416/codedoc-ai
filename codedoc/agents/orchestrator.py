@@ -121,7 +121,7 @@ class Orchestrator:
         file_path = descriptor["rel_path"]
         language = descriptor.get("language", "generic")
 
-        # 0.9.2: truncate once here so all three agents receive the exact same
+        # Truncate once here so all three agents receive the exact same
         # string and the marker stays inside the configured ceiling.  One
         # WARNING per processed file — the agents' own fallback is DEBUG.
         original_chars = len(content)
@@ -158,7 +158,7 @@ class Orchestrator:
         # documentation) are never recorded, so they must not carry the identity.
         if result.get("state") == "checked" and not _result_has_agent_error(result):
             result.update(expected_analysis_identity(self.analysis_mode))
-            # 0.10.3: stamp the truncation identity only for a file actually large
+            # Stamp the truncation identity only for a file actually large
             # enough to be truncated (omit it otherwise so files that fit the
             # ceiling stay reusable across ceiling/ratio changes).  ``original_chars``
             # is the pre-truncation source length.

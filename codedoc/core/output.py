@@ -1,17 +1,7 @@
-"""Output writer for codedoc.
+"""Write final artifacts with ownership checks and atomic replacement.
 
-0.8.0 changes
--------------
-- The intermediate ``.codedoc_build.json`` write for ``format="md"`` has been
-  removed.  Crash safety for MD-only runs is now provided by the always-on
-  live JSON backup written by ``SafeWriter`` throughout the pipeline run.
-  ``write_project_outputs`` writes the final Markdown directly without an
-  intermediate build file.
-- ``BUILD_FILENAME`` is kept as a constant so ``_load_existing_file_docs``
-  can still read and migrate stale ``.codedoc_build.json`` files left by
-  0.7.x runs.
-- ``_check_file_ownership`` is unchanged — it still validates both ``.json``
-  and ``.md`` files before any overwrite.
+Markdown-only runs rely on ``SafeWriter`` recovery rather than an intermediate
+build file. ``BUILD_FILENAME`` remains available for migrating stale files.
 """
 
 from __future__ import annotations
@@ -33,8 +23,8 @@ logger = get_logger(__name__)
 PROJECT_JSON = "codedoc.json"
 PROJECT_MARKDOWN = "codedoc.md"
 
-# Kept for reading/migrating stale 0.7.x build files.  No longer written by
-# write_project_outputs in 0.8.0.
+# Kept for reading/migrating stale build files.  No longer written by
+# write_project_outputs.
 BUILD_FILENAME = ".codedoc_build.json"
 
 
@@ -73,7 +63,7 @@ def inspect_output_ownership(
         if not _is_codedoc_owned(target):
             _add_conflict(target)
 
-    # Compatibility for callers using the pre-0.9.8 API. The 0.9.8 pipeline
+    # Compatibility for callers using the legacy API. The current pipeline
     # does not pass the dedicated recovery path here because occupied recovery
     # names are handled by the suffix-selection walk instead.
     if output_format == "md" and live_backup_path is not None:
@@ -107,7 +97,7 @@ def preflight_output_targets(
 def preflight_output_accessibility(output_dir: Path) -> None:
     """Verify *output_dir* can actually be written before any provider is created.
 
-    Workstream C (0.10.1).  This is a non-destructive, provider-free probe run
+    This is a non-destructive, provider-free probe run
     only for a real run that may write output (never for ``--dry-run``).  It:
 
     - creates *output_dir* when absent (a real run will need it anyway);
@@ -170,7 +160,7 @@ def read_existing_records(path: Path) -> dict[str, dict] | None:
     missing, unreadable, or not codedoc-owned.  Never writes or deletes
     anything — safe for planning and dry-run.
 
-    0.9.3: parsing/validation is delegated to the centralized document reader.
+    Parsing/validation is delegated to the centralized document reader.
     Malformed or foreign files return ``None`` for this optional discovery use;
     ownership is enforced separately by :func:`inspect_output_ownership`.
     """
@@ -268,7 +258,7 @@ def _is_codedoc_owned(path: Path) -> bool:
     Files that do not yet exist, or whose extension is not ``.json`` / ``.md``,
     are always allowed through.  Malformed or foreign files return ``False``.
 
-    0.9.3: ownership is decided by the centralized document reader.  This
+    Ownership is decided by the centralized document reader.  This
     intentionally tightens the old behaviour — Markdown that merely *contains*
     a ``<!-- codedoc-ai:`` marker but whose metadata is malformed is now treated
     as foreign and will not be overwritten.
@@ -324,9 +314,9 @@ def validate_distinct_artifact_paths(paths: dict[str, Path | None]) -> None:
     probe files. Raises :class:`ConfigError` naming both logical artifacts when
     two of them resolve to the same path.
 
-    0.9.8 — the dedicated crash-recovery file is its own ``"live_backup"``
+    The dedicated crash-recovery file is its own ``"live_backup"``
     artifact, always distinct from the final JSON (``"json"``), Markdown
-    (``"markdown"``), and the diagnostic log (``"error_log"``); the pre-0.9.8
+    (``"markdown"``), and the diagnostic log (``"error_log"``); the legacy
     ``json_live_backup`` self-alias (final JSON and live backup sharing one path)
     no longer exists, so any overlap between them is now a real collision.  The
     helper is generic: any future generated artifact can join the same call.
@@ -392,7 +382,7 @@ def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Pat
     ]
     if error_summary:
         lines += ["\n## Errors\n\n```\n", error_summary, "\n```\n"]
-    # 0.9.6: route through the canonical atomic writer so a failed write leaves
+    # Route through the canonical atomic writer so a failed write leaves
     # the prior file intact instead of truncating it in place.
     atomic_write_text(summary_path, "".join(lines))
     return summary_path

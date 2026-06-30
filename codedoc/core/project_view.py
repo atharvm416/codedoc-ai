@@ -1,7 +1,7 @@
 """Build clean public project documentation views from cached records.
 
-0.9.4 — Markdown serialization and parsing were extracted into
-:mod:`codedoc.core.markdown_view`.  This module retains project-view
+Markdown serialization and parsing live in :mod:`codedoc.core.markdown_view`.
+This module retains project-view
 *assembly*: ``build_project_view``, ``json_from_view``, ``clean_file_record`` /
 ``_clean_file``, folder/tree/graph-index construction, dependency-catalog
 assembly, empty-value pruning, usage-example sanitization, and
@@ -73,10 +73,10 @@ def build_project_view(
             True if reachable_rels is None else path in reachable_rels
         )
         internal_paths = internal_by_from.get(path, [])
-        # 0.10.1 (Workstream F): external/sdk links are projected deterministically
+        # External/sdk links are projected deterministically
         # from this file's parser imports + finalized graph edges, never from
         # model output, so single and triple modes produce identical links.
-        # 0.10.2 (Workstream C): for Python and generic-parser languages, use the
+        # For Python and generic-parser languages, use the
         # per-file unresolved imports (graph-filtered) as the authoritative source.
         unresolved = (
             unresolved_imports_by_path.get(path)
@@ -141,7 +141,7 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
             "schema_version": view.get("schema_version", SCHEMA_VERSION),
         }
     }
-    # Determinism (0.9.3): completed output carries no run-varying timestamp.
+    # Determinism: completed output carries no run-varying timestamp.
     # A caller-provided legacy view may still contain ``generated_at`` — never
     # propagate it into the completed payload.
     payload.pop("generated_at", None)
@@ -167,7 +167,7 @@ def read_codedoc_meta(file_path: Path) -> dict:
     (e.g. the ``_codedoc`` block for JSON, or the ``<!-- codedoc-ai: ... -->``
     comment for Markdown).
 
-    0.9.3: parsing and structural ownership are delegated to the centralized
+    Parsing and structural ownership are delegated to the centralized
     read-only document reader.  A function-local import keeps the dependency
     acyclic (``document`` imports low-level helpers from this module at module
     load time).
@@ -218,7 +218,7 @@ def _clean_file(record: dict) -> dict:
     language = result.get("language") or record.get("language", "")
     dependencies = result.get("dependencies_analysis", {})
 
-    # 0.10.1 (Workstream F): public external/sdk dependency links are no longer
+    # Public external/sdk dependency links are no longer
     # derived from the model's ``dependencies_analysis.external``.  They are
     # projected deterministically from the parser ``imports`` and finalized graph
     # edges in :func:`build_project_view`, so the same source produces identical
@@ -252,7 +252,7 @@ def _clean_file(record: dict) -> dict:
     }
     cleaned = {key: value for key, value in file.items() if value not in (None, "", [], {})}
 
-    # 0.9.3: registered private keys survive empty-value pruning.  Carry from the
+    # Registered private keys survive empty-value pruning.  Carry from the
     # nested orchestrator result first, then the top-level record so a persisted
     # top-level value wins when both layers contain the same key.
     carry_private_keys(result, cleaned)
@@ -261,7 +261,7 @@ def _clean_file(record: dict) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Usage-example sanitizer (0.8.1 — Workstream B)
+# Usage-example sanitizer
 # ---------------------------------------------------------------------------
 
 def _sanitize_usage_example(usage_example: str) -> str:
@@ -326,7 +326,7 @@ def _prune_empty(value: Any) -> Any:
 def _dependency_usage_map(usage_notes: list) -> dict[str, str]:
     """Map each raw usage-note import to its ``used_for`` text.
 
-    0.9.3: names are kept *raw* here; classification (external vs sdk) and
+    Names are kept *raw* here; classification (external vs sdk) and
     canonicalization are deferred to :func:`_dependency_catalog`, which knows
     each file's language.
     """
@@ -347,7 +347,7 @@ _RECOGNIZED_TYPE_HINTS = ("internal", "external", "sdk")
 def _clean_catalog_updates(catalog_updates: list) -> list[dict]:
     """Shape-clean agent catalog updates only.
 
-    0.9.3: runs *before* graph links are attached, so it cannot validate
+    Runs *before* graph links are attached, so it cannot validate
     internal hints or classify names.  It retains the trimmed raw name, a
     recognized raw type hint, and the trimmed ``used_for``.  All
     classification and internal-hint validation happen later in
@@ -391,12 +391,12 @@ def _project_dependency_links(
 ) -> tuple[list[str], list[str]]:
     """Project deterministic ``(external, sdk)`` links for one file.
 
-    Workstream F (0.10.1).  Dependency identity is no longer taken from model
+    Dependency identity is no longer taken from model
     type labels; it is projected through :func:`classify_non_project_dependency`
     from an authoritative name source, then de-duplicated and sorted so both
     analysis modes emit identical links for identical source.
 
-    Workstream C (0.10.2).  The authoritative name source depends on the language:
+    The authoritative name source depends on the language:
 
     - **Python** — the unresolved parser imports (graph-filtered): imports that
       did not resolve to an internal project file.  A relative import yields an
@@ -781,7 +781,7 @@ def _top_folder(path: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Compatibility shim (0.9.4 — deprecated; import from codedoc.core.markdown_view)
+# Compatibility shim (deprecated; import from codedoc.core.markdown_view)
 # ---------------------------------------------------------------------------
 
 _MARKDOWN_VIEW_COMPAT_NAMES = frozenset(
@@ -804,7 +804,7 @@ def __getattr__(name: str) -> Any:
     """Lazily forward moved serializer/parser helpers to ``markdown_view``.
 
     Markdown serialization/parsing moved to :mod:`codedoc.core.markdown_view`
-    in 0.9.4.  Repository tests and documented integrations still import those
+    during internal decomposition.  Repository tests and documented integrations still import those
     names from this module, so they are forwarded here for one release.  The
     import is function-local so ``markdown_view`` (which imports a few pure
     assembly helpers from this module at load time) does not create a cycle.

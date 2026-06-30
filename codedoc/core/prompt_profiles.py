@@ -1,12 +1,12 @@
-"""Mode-based JSON prompt profiles (0.11.0).
+"""Mode-based JSON prompt profiles.
 
 This module is the single source of truth for the **requested JSON shape block**
-embedded in CodeDoc's per-file provider prompts.  Before 0.11.0 each agent
+embedded in CodeDoc's per-file provider prompts.  The agents
 (:mod:`codedoc.agents.file_documentation_agent`,
 :mod:`codedoc.agents.structure_agent`,
 :mod:`codedoc.agents.dependency_agent`,
-:mod:`codedoc.agents.documentation_agent`) carried a literal block beginning with
-``Return EXACTLY this JSON shape:``.  This module:
+:mod:`codedoc.agents.documentation_agent`) render that block beginning with
+``Return EXACTLY this JSON shape:`` from this registry.  This module:
 
 - defines :data:`PROMPT_SHAPE_REGISTRY`, a canonical registry of the editable
   fields for each ``(analysis_mode, agent)`` pair, with the exact default
@@ -43,15 +43,15 @@ from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
 from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
 
 # ---------------------------------------------------------------------------
-# Versioned constants and bounds (Workstream C)
+# Versioned constants and bounds
 # ---------------------------------------------------------------------------
 
-# Schema versions.  Version 1 is the 0.11.0 ``fields`` format; version 2 is the
-# 0.11.1 literal ``requested_shape`` format.  An absent ``schema_version`` is
-# inferred from the present block syntax and normalized internally (Workstream A).
+# Schema versions.  Version 1 is the ``fields`` format; version 2 is the literal
+# ``requested_shape`` format.  An absent ``schema_version`` is inferred from the
+# present block syntax and normalized internally.
 LEGACY_PROMPT_PROFILE_SCHEMA_VERSION = 1
 CURRENT_PROMPT_PROFILE_SCHEMA_VERSION = 2
-# Back-compat alias retained for callers that referenced the 0.11.0 name.  It now
+# Back-compat alias retained for callers that referenced the original name.  It now
 # means "the legacy version" rather than "the only supported version".
 PROMPT_PROFILE_SCHEMA_VERSION = LEGACY_PROMPT_PROFILE_SCHEMA_VERSION
 LEGACY_UNVERSIONED_PROMPT_PROFILE_SCHEMA_VERSION = LEGACY_PROMPT_PROFILE_SCHEMA_VERSION
@@ -69,7 +69,7 @@ NO_PROMPT_PROFILE_DIGEST = "no-prompt-profile-v1"
 MAX_INSTRUCTION_CHARS = 2_000
 MAX_LANGUAGE_OVERRIDES_PER_AGENT = 64
 
-# Bounds for the paid single-to-triple conversion routing call (Workstream D).
+# Bounds for the paid single-to-triple conversion routing call.
 MAX_PROMPT_PROFILE_ROUTING_REQUEST_CHARS = 64_000
 MAX_PROMPT_PROFILE_ROUTING_RESPONSE_CHARS = 64_000
 MAX_PROMPT_PROFILE_ROUTING_FACTORS = 16
@@ -142,7 +142,7 @@ RegistryEntry = ShapeField | ContainerField
 
 
 # ---------------------------------------------------------------------------
-# Canonical default instruction text (extracted verbatim from the 0.10.3 prompts)
+# Canonical default instruction text (extracted verbatim from the prompts)
 # ---------------------------------------------------------------------------
 
 def _dep_members(*, multiline_catalog: bool, catalog_used_for: str) -> tuple[ShapeField, ...]:
@@ -554,7 +554,7 @@ def default_shape_block(mode: str, agent: str) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Validated profile data contracts (Workstream C)
+# Validated profile data contracts
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -603,7 +603,7 @@ class ProfileResolution:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic schema validation (Workstream D)
+# Deterministic schema validation
 # ---------------------------------------------------------------------------
 
 def _err(message: str) -> ConfigError:
@@ -652,7 +652,7 @@ def _collect_block_syntaxes(raw: dict) -> set[str]:
 
 
 def _resolve_schema_version(raw: dict, *, source: str) -> int:
-    """Determine the normalized schema version (Workstream A).
+    """Determine the normalized schema version.
 
     Infers the version from the present block syntax when ``schema_version`` is
     absent, validates an explicit version against the syntax, rejects mixed
@@ -788,7 +788,7 @@ def _validate_field_list(
 
 
 # ---------------------------------------------------------------------------
-# Version-2 literal ``requested_shape`` parsing (Workstream B)
+# Version-2 literal ``requested_shape`` parsing
 # ---------------------------------------------------------------------------
 
 def _require_instruction(value: object, loc: str) -> str:
@@ -1109,7 +1109,7 @@ def validate_profile(
         raise _err(
             "analysis_mode is 'single' but the profile has no 'single' section."
         )
-    # NOTE (0.11.1): the historical "triple mode requires a 'triple' section"
+    # NOTE: the historical "triple mode requires a 'triple' section"
     # rejection is intentionally relaxed here for inline sources so the
     # single-to-triple conversion workflow can classify a customized single-only
     # profile (see classify_profile_action).  External (explicit/auto) sources
@@ -1129,7 +1129,7 @@ def validate_profile(
 
 
 # ---------------------------------------------------------------------------
-# Source resolution (Workstream A)
+# Source resolution
 # ---------------------------------------------------------------------------
 
 def _read_profile_file(path: Path) -> dict:
@@ -1161,7 +1161,7 @@ def _read_profile_file(path: Path) -> dict:
     except UnicodeDecodeError as exc:
         raise _err(f"profile file '{path}' is not valid UTF-8.") from exc
     try:
-        # 0.11.1: reject duplicate keys at every nesting depth, matching the
+        # Reject duplicate keys at every nesting depth, matching the
         # config loader, so an external profile file cannot smuggle a
         # last-key-wins override past validation.
         obj = loads_no_duplicate_keys(text)
@@ -1264,7 +1264,8 @@ class ResolvedProfile:
     """Renders requested-shape blocks and digests for one analysis mode.
 
     A ``profile`` of ``None`` (no profile, disabled, or absent) means every
-    block is the developer standard: blocks are byte-identical to 0.10.3, the
+    block is the developer standard: blocks are byte-identical to the frozen
+    developer-standard prompt, the
     digest is :data:`NO_PROMPT_PROFILE_DIGEST`, and the post-clean filter is an
     identity operation.
     """
@@ -1360,7 +1361,7 @@ class ResolvedProfile:
 
 
 # ---------------------------------------------------------------------------
-# Deterministic action classification (Workstream C, Review Addendum 11)
+# Deterministic action classification
 # ---------------------------------------------------------------------------
 
 # Stable action names for the pre-planning classification.
@@ -1408,7 +1409,7 @@ def classify_profile_action(
 
     Deterministic and provider-free.  Runs before ``build_resolved_profile`` so a
     customized single-only triple-mode profile is routed into conversion instead of
-    silently resolving to inactive built-in triple defaults (Review Addendum 11).
+    silently resolving to inactive built-in triple defaults.
     """
     if profile is None:
         return ProfileActionPlan(PROFILE_ACTION_EXECUTABLE, None)
@@ -1419,7 +1420,7 @@ def classify_profile_action(
         return ProfileActionPlan(PROFILE_ACTION_EXECUTABLE, profile)
     # Triple mode with only a 'single' section.  Conversion and the relaxed
     # active-mode rule are inline-only; external sources never reach here because
-    # validate_profile keeps the 0.11.0 rejection for them.
+    # validate_profile keeps the rejection for them.
     if profile.source != "inline" or profile.single is None:
         raise _err(
             "analysis_mode is 'triple' but the profile has no 'triple' section."
@@ -1445,7 +1446,7 @@ def build_resolved_profile(
     """Build a :class:`ResolvedProfile` from a classified, executable action plan.
 
     Defensively rejects a ``conversion-required`` plan: that state must be handled
-    by the conversion workflow before documentation planning (Review Addendum 11).
+    by the conversion workflow before documentation planning.
     A ``local-default`` plan resolves to built-in defaults (``profile=None``) so a
     single-only triple-mode profile can never silently map to inactive triple
     defaults via ``profile.triple is None``.
@@ -1462,7 +1463,7 @@ def build_resolved_profile(
 
 
 # ---------------------------------------------------------------------------
-# Shared post-clean filter (Workstream F)
+# Shared post-clean filter
 # ---------------------------------------------------------------------------
 
 def filter_cleaned_response_for_profile(
@@ -1500,7 +1501,7 @@ def filter_cleaned_response_for_profile(
 
 
 # ---------------------------------------------------------------------------
-# Shared bounded standards / safety review (Workstreams D & E)
+# Shared bounded standards / safety review
 # ---------------------------------------------------------------------------
 
 REVIEW_VERDICTS = ("SAFE", "RISKY", "TOO_RISKY")
@@ -1513,7 +1514,7 @@ REVIEW_SYSTEM = (
     "ONLY with one JSON object — no markdown, no explanation."
 )
 
-# Fixed, non-overridable standards summary embedded in every batch (Workstream E).
+# Fixed, non-overridable standards summary embedded in every batch.
 _REVIEW_STANDARDS = (
     "CodeDoc non-overridable standards (a profile can NEVER change these):\n"
     "- The system role, factuality rules, and safety rules are fixed.\n"
@@ -1813,7 +1814,7 @@ def build_conversion_review_units(
     """Build review units for a customized single/combined conversion source.
 
     The conversion branch reviews the customized ``single`` block even though the
-    selected documentation mode is triple (Workstream D).  Single-only profiles
+    selected documentation mode is triple.  Single-only profiles
     with per-language overrides never reach conversion (they are rejected at
     classification), so only the base block is reviewed here.
     """
@@ -1843,7 +1844,7 @@ def build_conversion_review_batches(single_profile: AgentProfile) -> list[Review
 
 
 # ---------------------------------------------------------------------------
-# Single-to-triple conversion routing request/response (Workstream D)
+# Single-to-triple conversion routing request/response
 # ---------------------------------------------------------------------------
 
 ROUTING_SYSTEM = (
@@ -2035,7 +2036,7 @@ def validate_routing_response(
 
 
 # ---------------------------------------------------------------------------
-# Strict verdict cleaning (Workstream E)
+# Strict verdict cleaning
 # ---------------------------------------------------------------------------
 
 def _clean_message_list(value: object, bound: int, what: str) -> list[str]:
@@ -2043,7 +2044,7 @@ def _clean_message_list(value: object, bound: int, what: str) -> list[str]:
 
     Fail-closed (structural): a non-array, or a non-string item, raises
     :class:`PromptCustomizationValidationError`.  Cosmetic issues are cleaned per
-    Workstream E ("Enforce ... while cleaning" + "de-duplication"): empty/
+    Empty/
     whitespace items are dropped, each message is trimmed and truncated to
     :data:`MAX_PROFILE_SECURITY_MESSAGE_CHARS`, duplicates are removed in
     first-seen order, and the count is clamped to *bound*.
@@ -2133,7 +2134,7 @@ def clean_review_verdict(
 
 
 # ---------------------------------------------------------------------------
-# Schema reference + export (Workstreams B & H)
+# Schema reference + export
 # ---------------------------------------------------------------------------
 
 def schema_reference_data(mode: str | None = None) -> dict:
@@ -2314,7 +2315,7 @@ def export_default_profile_dict(mode: str | None = None) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Version-2 ``requested_shape`` rendering and config-ready export (Workstream G)
+# Version-2 ``requested_shape`` rendering and config-ready export
 # ---------------------------------------------------------------------------
 
 def _leaf_requested_value(fld: ShapeField, instruction: str) -> object:

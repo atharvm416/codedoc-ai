@@ -1,4 +1,4 @@
-"""Shared pipeline planning for codedoc (0.9.2).
+"""Shared pipeline planning for codedoc.
 
 The planning helper computes every routing decision — selection, forcing,
 propagation, unchanged skipping, identical-content reuse, legacy checkpoint
@@ -49,7 +49,7 @@ def _identity_matches(stored: dict, expected: dict) -> bool:
 
 
 def _record_is_reusable(stored: dict | None, content_hash: str, expected: dict) -> bool:
-    """The single centralized reuse predicate (0.10.0).
+    """The single centralized reuse predicate.
 
     A stored record may be reused only when its content hash matches *and* every
     cache-identity key matches the expected revision/mode.  A record that matches
@@ -81,11 +81,10 @@ class PipelinePlan:
 
     @property
     def selected_rels(self) -> frozenset[str]:
-        """Read-only compatibility alias for :attr:`documented_rels` (0.10.0).
+        """Read-only compatibility alias for :attr:`documented_rels`.
 
-        The canonical field is now ``documented_rels``; ``selected_rels`` is
-        retained as a non-settable delegating property so existing callers do
-        not break.  Do not remove it in this release.
+        ``documented_rels`` is canonical; this non-settable delegating property
+        preserves compatibility for existing callers.
         """
         return self.documented_rels
 
@@ -195,13 +194,13 @@ def build_pipeline_plan(
         else:
             effective_forced.add(rel)
 
-    # 0.10.0: the run-level part of the expected cache identity (revision + mode),
+    # The run-level part of the expected cache identity (revision + mode),
     # shared by every file.
     base_identity = expected_analysis_identity(
         config.get("analysis_mode", "single")
     )
 
-    # 0.10.3: the per-file part — the truncation revision for a file large enough
+    # The per-file part — the truncation revision for a file large enough
     # to be truncated under the current ceiling / head ratio.  Read-only and
     # memoized; a file whose byte size is within the ceiling never reads its text
     # (it cannot be truncated).  The char count is computed exactly as the
@@ -222,7 +221,7 @@ def build_pipeline_plan(
         identity = dict(base_identity)
         if mcr is not None:
             identity["_max_context_revision"] = mcr
-        # 0.11.0: an active prompt-customization profile contributes a per-file
+        # An active prompt-customization profile contributes a per-file
         # digest keyed on the file's language.  Omitted when no profile is active
         # for that language, so the absent-default normalization keeps no-profile
         # records reusable.
@@ -233,7 +232,7 @@ def build_pipeline_plan(
                 identity["_prompt_profile_digest"] = digest
         return identity
 
-    # 0.10.0: index reusable candidates by content hash, retaining *all* records
+    # Index reusable candidates by content hash, retaining *all* records
     # with the same hash (was a single-record-per-hash last-writer-wins map).
     # Two records with identical content can carry different cache identities, so
     # the per-file loop must be free to pick a candidate that passes the

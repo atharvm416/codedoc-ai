@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.2 - 2026-06-30
+
+### Version-reference decluttering
+
+- Removed historical, changelog-style version tags from source comments and
+  docstrings — leading `# X.Y.Z:` markers, `(Workstream …)` / `(Work Item …)`
+  provenance labels, parenthetical `(0.X.Y …)` module/section tags, and inline
+  "since / before / as of X.Y" references — so the code reads as a description of
+  current behavior. This CHANGELOG remains the single record of version history.
+- Removed "available since `<version>`" framing from `README.md` prose: settings
+  and feature section headers, the run-determinism and one-time-reprocessing
+  notes, and similar dated phrasing, keeping all descriptive content.
+- Documentation/comment-only release. No executable logic, public document schema
+  (`SCHEMA_VERSION` `1.4`), cache identity (`ANALYSIS_REVISION` `file-doc-v2`,
+  `pp-v1`, `truncate-v1`, `no-prompt-profile-v1`), prompt bytes, model ids, or
+  supported Python versions changed. The full test suite, Ruff, `compileall`, and
+  the README/default-block drift guards pass with the same pass/skip counts as
+  0.11.1.
+
 ## 0.11.1 - 2026-06-29
 
 ### Config-embedded AI output structures

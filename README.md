@@ -4,7 +4,7 @@
 
 The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
 
-Current release: `0.11.1`.
+Current release: `0.11.2`.
 
 ## What It Does
 
@@ -61,7 +61,7 @@ codedoc run
 | File retry attempts | `1` |
 | Max consecutive failures | `5` |
 | Change propagation | `true` |
-| Live JSON backup | always on (0.8.0 default) |
+| Live JSON backup | always on |
 | Rate-limit adaptive | `true` |
 | Max file size | `500 KB` |
 | Max content chars | `12000` |
@@ -403,7 +403,7 @@ Parallelism settings:
 | `max_file_size_kb` | Files larger than this are skipped. Must be a positive integer (at least `1`). Default: `500`. |
 | `follow_symlinks` | When `false` (default) symlinked directories and files are skipped, so a scan never follows a link cycle or escapes the project root. When `true`, links are followed only when their target exists, has the expected type, and resolves inside the project root. Settable via config file or the Python API only — there is no CLI flag or environment variable for it. |
 
-Configurable defaults added in 0.8.1:
+Configurable defaults:
 
 | Setting | Purpose |
 | --- | --- |
@@ -412,13 +412,13 @@ Configurable defaults added in 0.8.1:
 | `auto_entry_candidates`, `auto_entry_candidates_add`, `auto_entry_candidates_remove` | Control first-run entry auto-detection when `--entry` is omitted. |
 | `provider_prefixes`, `provider_prefixes_add`, `provider_prefixes_remove` | Control model-name based provider auto-detection and matching API-key lookup. |
 
-Configurable settings added in 0.9.0:
+Configurable settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | `max_content_chars` | `12000` | Maximum characters sent to the LLM per file. Long files are truncated once, one WARNING reports the path and counts, and the marker stays inside the ceiling. Raising this improves coverage of large files but increases token usage and cost. Must be at least `1000`. |
 
-Planning and CI settings added in 0.9.2:
+Planning and CI settings:
 
 | Setting | Default | Purpose |
 | --- | --- | --- |
@@ -447,7 +447,7 @@ output paths cannot be changed by a profile. Unknown fields and wrong types are
 rejected before provider creation.
 
 Two equivalent formats are accepted from one registry. The **version-2** literal
-`requested_shape` format (0.11.1) keeps your output structures directly inside
+`requested_shape` format keeps your output structures directly inside
 `codedoc.config.json` — its keys and containers resemble the output you want, and
 string values are instruction text:
 
@@ -501,7 +501,7 @@ root. `--no-prompt-profile` disables every source. Precedence is disable flag,
 CLI file, configured/environment file, inline object, auto-detected file, then
 the built-in developer standard.
 
-### Single-to-triple conversion proposal (0.11.1)
+### Single-to-triple conversion proposal
 
 If you select `analysis_mode: "triple"` but configure only a customized `single`
 structure, CodeDoc does not silently fall back to the built-in triple defaults.
@@ -1142,7 +1142,7 @@ Supported variables:
 | `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
 | `OUTPUT_DIR` | Output directory. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
-| `CODEDOC_SAFE_MODE` | Deprecated — crash recovery is always on since 0.8.0. |
+| `CODEDOC_SAFE_MODE` | Deprecated — crash recovery is always on. |
 | `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
@@ -1264,8 +1264,6 @@ In JSON files the block is the first key in the document:
 }
 ```
 
-Since 0.9.3 the completed output contains no run-varying timestamp: two runs over identical sources, documentation, configuration, and stats produce byte-identical JSON and Markdown. Older outputs that still contain a `generated_at` field remain fully readable. (The dedicated crash-recovery file keeps `created_at` / `updated_at` diagnostics.)
-
 In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
 
 ```text
@@ -1280,8 +1278,6 @@ If a JSON output file is missing but an identically-named Markdown file is prese
 
 Incremental state lives inside the output file itself — there is no separate cache database. On each run, `codedoc` reads the existing output file, extracts per-file hashes and documentation records, and compares them against current file content. Only files whose content has changed are sent to the LLM.
 
-> **One-time reprocessing in 0.10.1.** The analysis cache identity advanced from `file-doc-v1` to `file-doc-v2` because the prompt semantics and response cleaning changed (precise local-symbol/export/usage-example rules and the head-plus-tail truncation marker). Records produced by 0.10.0 remain readable, but each one is regenerated **once** under the corrected contract before it is reused — so the first 0.10.1 run over an existing project re-documents previously cached files and incurs the corresponding one-time provider cost. The public document schema is unchanged (`schema_version` stays `1.4`); subsequent runs resume incrementally as usual.
-
 The CLI logs the selected output format and the exact output file path during execution for better visibility.
 
 The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readable output files. They include:
@@ -1295,9 +1291,9 @@ The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readabl
 - Imports, exports, functions, classes.
 - Internal, external, SDK/standard-library, and reverse dependencies (`imported_by`).
 
-Since 0.9.3, third-party packages and language standard-library / SDK modules are separated: each file's `links` carry `external_dependencies` (third-party) and `sdk_dependencies` (e.g. Python stdlib, Dart `dart:*`, Node built-ins). The `SDK / Standard Library` Markdown section is rendered only when non-empty, and `internal_dependencies` / `imported_by` are derived **only** from resolved project-graph edges — unresolved agent text can never become an internal link. Missing `sdk_dependencies` loads as an empty list for older outputs.
+Third-party packages and language standard-library / SDK modules are separated: each file's `links` carry `external_dependencies` (third-party) and `sdk_dependencies` (e.g. Python stdlib, Dart `dart:*`, Node built-ins). The `SDK / Standard Library` Markdown section is rendered only when non-empty, and `internal_dependencies` / `imported_by` are derived **only** from resolved project-graph edges — unresolved agent text can never become an internal link. Missing `sdk_dependencies` loads as an empty list for older outputs.
 
-Since 0.10.1, dependency links are projected deterministically rather than from model type labels. For Python, the projection is fully parser-authoritative: `external_dependencies` and `sdk_dependencies` come from parser-extracted imports classified against the standard library, and model output can never add, remove, or reclassify a Python link. Since 0.10.2, generic-parser languages also derive public external/SDK links from graph-filtered unresolved parser imports, so `single` and `triple` modes produce identical links for identical source. React/Node languages still use model-reported external dependencies for bare npm packages because the JS/TS parser intentionally omits those package names; model `catalog_updates` / `usage_notes` may only attach purpose text to a dependency that already exists.
+Dependency links are projected deterministically rather than from model type labels. For Python, the projection is fully parser-authoritative: `external_dependencies` and `sdk_dependencies` come from parser-extracted imports classified against the standard library, and model output can never add, remove, or reclassify a Python link. Generic-parser languages also derive public external/SDK links from graph-filtered unresolved parser imports, so `single` and `triple` modes produce identical links for identical source. React/Node languages still use model-reported external dependencies for bare npm packages because the JS/TS parser intentionally omits those package names; model `catalog_updates` / `usage_notes` may only attach purpose text to a dependency that already exists.
 
 They exclude internal processing data such as raw LLM responses and per-file history.
 
@@ -1376,8 +1372,7 @@ Every run stages in-progress work in a **dedicated crash-recovery file** in the
 output directory, written **before the first AI call** and updated atomically
 after each completed file. Crucially, your last stable completed output is
 **never overwritten while a run is in progress** — it is written once, only on
-clean completion. You do not need to enable anything; `--safe-mode` is deprecated
-since 0.8.0.
+clean completion. You do not need to enable anything; `--safe-mode` is deprecated.
 
 - The recovery file is `crash_recovery_<stem>.json`, derived from the final
   output stem (`codedoc/crash_recovery_codedoc.json` by default,
@@ -1410,7 +1405,7 @@ codedoc uses the next `crash_recovery_<stem>(2).json`, `(3).json`, … instead.
 **MD-only and named-MD runs.** The recovery file is derived from the Markdown
 stem (`codedoc/crash_recovery_codedoc.json` for `--format md`,
 `docs/crash_recovery_report.json` for `--output docs/report.md`) and is removed
-after the clean Markdown write. A pre-0.9.8 interrupted Markdown run that left a
+after the clean Markdown write. An older interrupted Markdown run that left a
 `codedoc.json` / `report.json` sibling is detected, used as a resume source, and
 migrated into the new layout automatically — no manual cleanup needed.
 
@@ -1418,7 +1413,7 @@ migrated into the new layout automatically — no manual cleanup needed.
 and now has no effect — crash recovery is always on. Passing it prints a
 deprecation notice. It will be removed in a future release.
 
-### Adaptive rate-limit parallelism (0.8.1)
+### Adaptive rate-limit parallelism
 
 When a provider signals 429 / rate-limit / quota-exceeded, codedoc automatically
 steps down file-level concurrency instead of hammering the API:
@@ -1445,7 +1440,7 @@ Provider-specific rate-limit signals are recognised for OpenAI (`429`, `rate lim
 (`529`, `overloaded`, `rate_limit`, `429`), and Gemini (`resource_exhausted`,
 `quota`, `429`, `503`). Non-rate-limit errors never trigger a step-down.
 
-In 0.8.1, codedoc sleeps between parallel step-down rungs using provider-aware
+codedoc sleeps between parallel step-down rungs using provider-aware
 backoff. You can tune this in config:
 
 ```json
@@ -1460,7 +1455,7 @@ backoff. You can tune this in config:
 Set `rate_limit_backoff_s` to `0` to disable computed inter-rung backoff.
 `Retry-After` hints are still honored when `respect_retry_after` is true.
 
-### Unrecoverable-error fast stop (0.9.7)
+### Unrecoverable-error fast stop
 
 Not every provider error can recover by retrying. codedoc inspects the text
 already present in the raised exception chain — no extra network call, no
@@ -1488,7 +1483,7 @@ retryable or rate-limited errors. Every stop preserves the stable output intact
 and the dedicated crash-recovery file; re-running the same command resumes and
 re-documents only the unfinished files.
 
-### Lossless Markdown regeneration (0.8.1)
+### Lossless Markdown regeneration
 
 Markdown output remains human-readable, but codedoc now embeds a hidden
 base64-encoded public JSON view in a `<!-- codedoc-ai-view-base64 ... -->`
@@ -1519,7 +1514,7 @@ in Markdown). If the file is foreign, malformed, or empty, the run stops with a
 clear `ConfigError`. Choose a different `--output` directory or remove the
 conflicting file to proceed.
 
-**Preflight (0.9.0).** The ownership check now runs *before* any filesystem
+**Preflight.** The ownership check now runs *before* any filesystem
 changes, directory creation, scanning, or LLM calls. A foreign target that would
 block the final write is caught immediately — no tokens are spent and no output
 directory is created.

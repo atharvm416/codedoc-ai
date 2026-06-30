@@ -1,4 +1,4 @@
-"""Private OS-error classification and sanitized diagnostic formatting (0.10.1).
+"""Private OS-error classification and sanitized diagnostic formatting.
 
 This module turns a raw local I/O failure into a small, stable *category* and a
 concise, secret-free, user-facing message.  It is pure: it never reads file

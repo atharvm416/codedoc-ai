@@ -17,7 +17,7 @@ class DependencyGraph:
         self._edges: dict[str, set[str]] = defaultdict(set)
         self._reverse: dict[str, set[str]] = defaultdict(set)
         self._nodes: set[str] = set()
-        # 0.11.1 (Workstream H): topological_order() is called several times per
+        # topological_order() is called several times per
         # run; emit the cycle warning at most once per graph instance (i.e. per
         # pipeline run) so a real cycle is not reported repeatedly.
         self._cycle_warning_emitted = False

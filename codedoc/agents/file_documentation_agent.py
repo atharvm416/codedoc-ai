@@ -1,4 +1,4 @@
-"""Combined per-file documentation agent (0.10.0 — default ``single`` mode).
+"""Combined per-file documentation agent (default ``single`` mode).
 
 This is the default one-call analysis path.  A single provider call produces the
 same flat record the legacy three-agent path produced, by asking the model for
@@ -8,7 +8,7 @@ extension, parser imports) are merged by the :class:`~codedoc.agents.orchestrato
 and can never be replaced by model output.
 
 The opt-in ``triple`` mode still runs ``StructureAgent`` / ``DependencyAgent`` /
-``DocumentationAgent``; 0.10.1 makes them share this module's strict cleaners via
+``DocumentationAgent``; both share this module's strict cleaners via
 :mod:`codedoc.agents.response_cleaning`.
 
 Factuality boundary: the current parser contract supplies deterministic imports
@@ -17,7 +17,7 @@ but no deterministic function/class inventory, so ``functions``, ``classes``,
 bounded *model enrichment*, not verified AST facts.  They are cleaned and
 capped, never presented as parser-verified.
 
-0.10.1: the response-cleaning primitives, bounds, and ``clean_combined_response``
+The response-cleaning primitives, bounds, and ``clean_combined_response``
 moved to :mod:`codedoc.agents.response_cleaning` so single and triple modes share
 one strict contract.  They are re-exported here for backward compatibility.
 """
@@ -118,7 +118,7 @@ def build_prompt(
     the dry-run estimate is exact because the prompt embeds only known inputs.
 
     *requested_shape* supplies the requested-shape block.  When ``None`` the
-    developer-standard block is used, reproducing the 0.10.3 prompt byte for byte.
+    developer-standard block is used, reproducing the frozen prompt byte for byte.
     """
     shape_block = (
         requested_shape.text

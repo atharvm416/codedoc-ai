@@ -20,13 +20,13 @@ logger = get_logger(__name__)
 
 TRUNCATION_MARKER = "\n... [truncated] ...\n"
 
-# Head/tail split policy (0.10.1, Workstream H).  When a file exceeds the
+# Head/tail split policy.  When a file exceeds the
 # character ceiling we keep a larger leading segment (module docstring, imports,
 # early definitions) and a bounded trailing segment (late definitions, entry
 # points) with the marker between them, instead of a leading prefix only.  The
 # fractions apply to the budget left after reserving room for the marker.  A
 # ~70/30 head/tail split keeps import/context bias while making late class and
-# function definitions visible.  Not user-configurable in this release.
+# function definitions visible.
 TRUNCATION_HEAD_FRACTION = 0.70
 
 
@@ -37,11 +37,9 @@ def truncate_for_llm(
 ) -> str:
     """Truncate *content* to a head-plus-tail slice within *max_chars*.
 
-    Workstream H (0.10.1).  Files larger than the ceiling previously sent only a
-    leading prefix, so definitions near the end of a long file were invisible to
-    every agent.  This keeps a leading segment *and* a trailing segment, joined
-    by :data:`TRUNCATION_MARKER`, so late definitions and entry points remain
-    visible.  Guarantees:
+    Content above the ceiling keeps leading and trailing segments joined by
+    :data:`TRUNCATION_MARKER`, preserving late definitions and entry points.
+    Guarantees:
 
     - the result — both complete character slices plus the marker — never exceeds
       *max_chars* (the marker is counted inside the ceiling);
@@ -51,8 +49,8 @@ def truncate_for_llm(
       agent's defensive fallback, and dry-run estimation), so single and triple
       modes and the dry-run estimate all see exactly the same truncated text.
 
-    0.10.2: the *head_fraction* parameter (default :data:`TRUNCATION_HEAD_FRACTION`
-    = 0.70) is now configurable via ``truncation_head_ratio`` in the config
+    The *head_fraction* parameter (default :data:`TRUNCATION_HEAD_FRACTION`
+    = 0.70) is configurable via ``truncation_head_ratio`` in the config
     or ``--truncation-head-ratio`` on the CLI.  Callers that omit the argument
     continue to use the 0.70 default and produce byte-identical output.
     """
@@ -109,7 +107,7 @@ class BaseAgent(ABC):
             imports:   list of import strings extracted by the parser
             language:  detected language tag
             requested_shape: optional resolved prompt-profile block for this
-                file/agent.  ``None`` means the developer-standard shape (0.11.0).
+                file/agent.  ``None`` means the developer-standard shape.
 
         Returns:
             dict of results — structure depends on the agent subclass

@@ -33,8 +33,8 @@ from codedoc.core.io_diagnostics import (
 )
 from codedoc.utils.errors import ConfigError
 
-# Bounded transient-lock retry budget for the final atomic replacement step
-# (Workstream B).  The first attempt is immediate; these are the sleeps *between*
+# Bounded transient-lock retry budget for the final atomic replacement step.
+# The first attempt is immediate; these are the sleeps *between*
 # subsequent retries, so the total added wait is deliberately below one second.
 # Only a Windows sharing/lock violation (see ``WINDOWS_TRANSIENT_LOCK_ERRORS``)
 # is retried; every other failure raises immediately.

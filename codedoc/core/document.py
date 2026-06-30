@@ -1,4 +1,4 @@
-"""Centralized read-only parser for CodeDoc JSON / Markdown documents (0.9.3).
+"""Centralized read-only parser for CodeDoc JSON / Markdown documents.
 
 This module owns CodeDoc document parsing and structural ownership validation.
 It is strictly read-only: it never writes, migrates, renames, or deletes.
@@ -38,9 +38,8 @@ from codedoc.core.markdown_view import (
 from codedoc.core.project_view import SCHEMA_VERSION
 from codedoc.utils.errors import ConfigError
 
-# Schema versions this release reads.  Parsed as integer components, never
-# floats.  SCHEMA_VERSION (today "1.4") is imported so this stays in sync with
-# the single production owner of the current version.
+# Accepted schema versions, parsed as integer components rather than floats.
+# Importing SCHEMA_VERSION keeps this synchronized with its production owner.
 _CURRENT_SCHEMA_COMPONENTS = tuple(int(part) for part in SCHEMA_VERSION.split("."))
 _ACCEPTED_SCHEMAS: frozenset[tuple[int, ...]] = frozenset({
     (1, 3),

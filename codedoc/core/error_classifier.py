@@ -1,7 +1,7 @@
 """Provider-error classification helpers.
 
-0.10.2 — extracted from ``codedoc.core.execution`` as part of a structural
-decomposition (same pattern as the 0.9.4 pipeline decomposition).  This module
+Extracted from ``codedoc.core.execution`` as part of a structural decomposition.
+This module
 owns all signal-constant tuples, exception-chain walking, and the fixed failure
 precedence classifier.  It has no dependency on execution state, the orchestrator,
 or file-processing logic.
@@ -46,7 +46,7 @@ _RATE_LIMIT_SIGNALS = (
 )
 
 # ---------------------------------------------------------------------------
-# Terminal-billing / credential / access / model signals (0.9.7)
+# Terminal-billing / credential / access / model signals
 # ---------------------------------------------------------------------------
 
 _TERMINAL_BILLING_SIGNALS = (
@@ -159,7 +159,7 @@ def _is_rate_limit_error(
     exc:
         The exception to classify.
     profile:
-        0.8.1 — when supplied, only ``profile.signals`` are used for detection,
+        When supplied, only ``profile.signals`` are used for detection,
         giving provider-specific accuracy.  When ``None`` (backward-compat),
         the module-level ``_RATE_LIMIT_SIGNALS`` tuple is used so that existing
         callers without a profile continue to work unchanged.
@@ -232,7 +232,7 @@ def _classify_failure(
     exc: BaseException,
     profile: "RateLimitProfile | None",
 ) -> str:
-    """Apply the fixed 0.9.7 failure precedence to *exc* and return a verdict.
+    """Apply the fixed failure precedence to *exc* and return a verdict.
 
     Returns one of ``"terminal_billing"``, ``"rate_limit"``, ``"global"``,
     ``"input"``, or ``"transient"``.  Precedence:

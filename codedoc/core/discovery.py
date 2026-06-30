@@ -1,7 +1,7 @@
 """File discovery, graph construction, and entry-based selection.
 
-0.9.4 — extracted verbatim from ``codedoc.pipeline`` as part of the internal
-decomposition.  This module owns:
+Extracted from ``codedoc.pipeline`` as part of the internal module decomposition.
+This module owns:
 
 - entry recovery from existing CodeDoc metadata (``_resolve_entry_and_docs``);
 - dependency-graph construction from scanned descriptors (``_build_graph``);
@@ -49,7 +49,7 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
         output_format = config.get("output_format", "json")
 
         json_cand = out_dir / json_filename
-        # 0.8.0: also probe the live backup sibling for MD-only format.
+        # Also probe the live backup sibling for MD-only format.
         live_backup_cand = _resolve_live_backup_path(out_dir, output_format, json_filename, md_filename)
         md_cand = out_dir / md_filename
         candidates = [json_cand]
@@ -112,8 +112,7 @@ def _build_graph(
     ``unresolved_imports_by_path`` maps each file's ``rel_path`` to the list of
     raw import strings that the parser emitted but that did not resolve to any
     internal project file via ``resolve_import()``.  These are the candidates for
-    external / SDK dependency projection in ``_project_dependency_links()``
-    (Workstream C, 0.10.2).
+    external / SDK dependency projection in ``_project_dependency_links()``.
     """
     graph = DependencyGraph()
     all_rel_paths = {d["rel_path"] for d in all_files}
@@ -202,11 +201,8 @@ def _select_files(
     reachable = graph.reachable_dependencies(entry_rel) | {entry_rel}
     documented = all_rel_paths if scope == "all" else reachable
 
-    # Visibility for the known entry-reachability limitation (A1): files that are
-    # not transitively imported from the entry are NOT documented.  Previously
-    # this exclusion was silent.  We now warn loudly and list a sample so the
-    # omission is never invisible.  The structural fix (how selection should
-    # behave) is deferred to 0.10.0; this only surfaces the current behaviour.
+    # Entry scope excludes files not transitively imported from the entry. Warn
+    # with a sample so that omission remains visible.
     excluded = all_rel_paths - reachable
     if excluded:
         sample = ", ".join(sorted(excluded)[:10])
