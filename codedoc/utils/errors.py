@@ -1,42 +1,14 @@
-"""Shared exceptions and bounded issue reporting.
+"""Shared exceptions and bounded in-memory issue reporting.
 
-Warnings may be persisted to ``error.log`` but are excluded from the public
-error summary. Error counters include only errors; issue counters include both.
+Issues are collected in memory only — CodeDoc never writes a persistent
+``error.log``.  Bounded diagnostics are printed to the terminal and embedded in
+the final output (and preserved in ``crash_recovery.json`` while a run is
+interrupted).  Error counters include only errors; issue counters include both.
 """
 
 from __future__ import annotations
 
 import traceback
-from pathlib import Path
-
-# ---------------------------------------------------------------------------
-# error.log ownership markers
-# ---------------------------------------------------------------------------
-# A CodeDoc-owned log starts with one of these ASCII markers on its first line.
-# The marker is written by ``ErrorReporter.flush()``; the legacy prefix is
-# recognized for safe cleanup of older logs.  A file whose first line matches
-# neither is foreign and is never deleted, truncated, or replaced.
-LOG_OWNERSHIP_MARKER = "# codedoc-ai issue log"
-_LEGACY_LOG_MARKER_PREFIX = "codedoc issue log"
-
-
-def is_codedoc_owned_log(path: Path) -> bool:
-    """Return True only if *path* is a recognized CodeDoc-owned ``error.log``.
-
-    Reads just the first line.  A missing or unreadable file is treated as
-    not-owned (the caller must never delete it).  Both the new ``# codedoc-ai
-    issue log`` marker and the legacy ``codedoc issue log`` header are accepted.
-    """
-    try:
-        with path.open("r", encoding="utf-8", errors="strict") as handle:
-            first_line = handle.readline()
-    except (OSError, UnicodeDecodeError):
-        return False
-    stripped = first_line.lstrip("﻿").strip()
-    return stripped.startswith(LOG_OWNERSHIP_MARKER) or stripped.startswith(
-        _LEGACY_LOG_MARKER_PREFIX
-    )
-
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -127,14 +99,12 @@ class ProviderInitError(ConfigError):
 class PromptCustomizationValidationError(ConfigError):
     """Raised when a prompt-customization profile is rejected.
 
-    Covers two non-overridable outcomes and one overridable-by-flag outcome that
-    nonetheless stops the run:
+    Every outcome is non-overridable and stops the run:
 
     - a deterministic schema/type/bound/rendering failure;
-    - a ``TOO_RISKY`` standards/safety verdict that is *not* overridden by the
-      explicit ``prompt_customization_allow_risky`` user flag;
+    - a ``TOO_RISKY`` standards/safety verdict (there is no bypass);
     - a fail-closed malformed / empty / ambiguous / transport-failed / unknown
-      verdict, or a batch-contract mismatch, which can **never** be overridden.
+      verdict, or a batch-contract mismatch.
 
     Subclasses :class:`ConfigError` so the CLI maps it to exit code 2 (a
     setup-class problem the user must correct) without special-casing.  It is
@@ -184,8 +154,12 @@ class LiveBackupWriteError(OutputError):
 
 class ErrorReporter:
     """
-    Collects issues during a pipeline run and writes a summary to
-    ``error.log`` in the output directory when the run finishes.
+    Collects issues during a pipeline run in memory only.
+
+    CodeDoc never writes a persistent ``error.log``.  Bounded diagnostics are
+    printed to the terminal and hard-error summaries are embedded in the final
+    output; while a run is interrupted, completed work and context live in
+    ``crash_recovery.json``.
 
     Severity levels
     ---------------
@@ -195,14 +169,15 @@ class ErrorReporter:
         section.  Also counted by ``has_errors()`` and ``error_count()``.
     ``"warning"``
         Recovered issue (e.g. a rate-limit that was retried successfully).
-        Written to ``error.log`` for diagnostics but excluded from
-        ``summary()`` so the clean final output is not alarmed.
+        Excluded from ``summary()`` so the clean final output is not alarmed.
     """
 
-    def __init__(self, log_path: Path):
-        self.log_path = log_path
+    # Bound the in-memory entry list so a pathological run cannot grow it without
+    # limit; the summary/display is derived from these bounded entries.
+    _MAX_ENTRIES = 1000
+
+    def __init__(self) -> None:
         self._entries: list[dict] = []
-        self._last_flush_persisted: bool = False
 
     def record(self, error: Exception, context: str = "", level: str = "error") -> None:
         """Record an issue without stopping execution.
@@ -217,6 +192,8 @@ class ErrorReporter:
             ``"error"`` (default) for hard failures, ``"warning"`` for
             recovered issues that should not alarm the final output.
         """
+        if len(self._entries) >= self._MAX_ENTRIES:
+            return
         entry = {
             "type": type(error).__name__,
             "message": str(error),
@@ -249,87 +226,6 @@ class ErrorReporter:
     # ------------------------------------------------------------------
     # Output helpers
     # ------------------------------------------------------------------
-
-    def flush(self) -> bool:
-        """Atomically write all recorded issues to the log file.
-
-        Creates the log file's parent directory if needed (output_dir may
-        not exist yet when flush is called on an early-exit code path).
-        Returns ``True`` when a CodeDoc-owned log was actually persisted, and
-        ``False`` when there were no issues or a foreign file occupied the log
-        path.
-
-        The log begins with a stable ASCII ownership marker so a later
-        successful run can recognize and clear it.  When a *foreign* file already
-        occupies the path it is never replaced — its bytes are left intact and a
-        warning is logged instead of raising.  Writing is routed through the
-        canonical atomic-write helper so a stale owned log is replaced in one
-        atomic rename rather than appended to or truncated in place.
-        """
-        self._last_flush_persisted = False
-        if not self._entries:
-            return False
-        if self.log_path.exists() and not is_codedoc_owned_log(self.log_path):
-            # A foreign file sits at the log path: never overwrite it.
-            from codedoc.utils.logger import get_logger
-
-            get_logger(__name__).warning(
-                "A foreign file occupies the issue-log path '%s'; codedoc will "
-                "not overwrite it. %d issue(s) were not persisted to disk.",
-                self.log_path,
-                len(self._entries),
-            )
-            return False
-        lines = [
-            f"{LOG_OWNERSHIP_MARKER} — {len(self._entries)} issue(s)\n",
-            "=" * 60 + "\n",
-        ]
-        for i, e in enumerate(self._entries, 1):
-            level_label = e.get("level", "error").upper()
-            lines.append(f"\n[{i}] [{level_label}] {e['type']}: {e['message']}\n")
-            if e["context"]:
-                lines.append(f"    Context: {e['context']}\n")
-            if e.get("level", "error") == "error":
-                lines.append(f"    Root cause:\n{e['traceback']}\n")
-            lines.append("-" * 60 + "\n")
-        # Function-local import avoids a module-load cycle (block_manager imports
-        # io_diagnostics which imports nothing from this module, but routing the
-        # canonical writer lazily keeps errors.py free of core imports at load).
-        from codedoc.core.block_manager import atomic_write_text
-
-        atomic_write_text(self.log_path, "".join(lines))
-        self._last_flush_persisted = True
-        return True
-
-    def has_persisted_log(self) -> bool:
-        """True when the last successful ``flush()`` wrote a CodeDoc-owned log."""
-        return self._last_flush_persisted and self.log_path.exists() and is_codedoc_owned_log(
-            self.log_path
-        )
-
-    def clear_stale_owned_log(self) -> str | None:
-        """Remove a stale CodeDoc-owned ``error.log`` after a clean, issue-free run.
-
-        Returns ``None`` when nothing needed removal or removal succeeded, or a
-        short warning string when an owned log could not be removed.  A foreign
-        file is left byte-identical and reported as ``None`` (not our file).  A
-        missing file is a no-op.  Never raises — a stale-log removal failure is an
-        auxiliary warning, not a failure of otherwise valid documentation output.
-        """
-        if self._entries:
-            return None
-        if not self.log_path.exists():
-            return None
-        if not is_codedoc_owned_log(self.log_path):
-            return None
-        try:
-            self.log_path.unlink()
-        except OSError as exc:
-            return (
-                f"a stale codedoc issue log '{self.log_path.name}' could not be "
-                f"removed: {exc}"
-            )
-        return None
 
     def summary(self) -> str:
         """Return a summary string for error-level entries only.

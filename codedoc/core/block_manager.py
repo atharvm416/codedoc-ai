@@ -46,97 +46,12 @@ __all__ = [
     "BlockError",
     "atomic_write_text",
     "create_text_exclusive",
-    "merge_managed_block",
-    "replace_text_with_backup",
-    "write_owned_block",
+    "replace_text_atomic_no_backup",
 ]
 
 
 class BlockError(ConfigError):
     """Existing owned-block markers are malformed or unsafe."""
-
-
-def _validate_block_arguments(
-    interior_lines: list[str], start_marker: str, end_marker: str
-) -> None:
-    for name, marker in (("start_marker", start_marker), ("end_marker", end_marker)):
-        if not isinstance(marker, str) or not marker or "\n" in marker or "\r" in marker:
-            raise ValueError(f"{name} must be one non-empty logical line")
-    if start_marker == end_marker:
-        raise ValueError("start_marker and end_marker must be distinct")
-    if not isinstance(interior_lines, list):
-        raise ValueError("interior_lines must be a list of logical lines")
-    for line in interior_lines:
-        if (
-            not isinstance(line, str)
-            or "\n" in line
-            or "\r" in line
-            or line in {start_marker, end_marker}
-        ):
-            raise ValueError("interior_lines must contain valid non-marker logical lines")
-
-
-def merge_managed_block(
-    existing_text: str | None,
-    interior_lines: list[str],
-    start_marker: str,
-    end_marker: str,
-) -> str:
-    """Return text with exactly one validated owned block merged into it."""
-    _validate_block_arguments(interior_lines, start_marker, end_marker)
-    newline = "\r\n" if existing_text and "\r\n" in existing_text else "\n"
-    block = newline.join([start_marker, *interior_lines, end_marker]) + newline
-    if not existing_text:
-        return block
-
-    lines = existing_text.splitlines(keepends=True)
-    logical = [line.rstrip("\r\n") for line in lines]
-    starts = [index for index, line in enumerate(logical) if line == start_marker]
-    ends = [index for index, line in enumerate(logical) if line == end_marker]
-    if not starts and not ends:
-        return existing_text.rstrip("\r\n") + newline * 2 + block
-    if len(starts) != 1 or len(ends) != 1 or starts[0] >= ends[0]:
-        raise BlockError("Existing managed-block markers are malformed")
-
-    start_index, end_index = starts[0], ends[0]
-    for line in logical[start_index + 1 : end_index]:
-        if line in {start_marker, end_marker}:
-            raise BlockError("Existing managed-block markers are nested")
-
-    prefix = "".join(lines[: start_index + 1])
-    if not prefix.endswith(("\n", "\r")):
-        prefix += newline
-    suffix = "".join(lines[end_index:])
-    replacement = newline.join(interior_lines)
-    if replacement:
-        replacement += newline
-    merged = prefix + replacement + suffix
-    return existing_text if merged == existing_text else merged
-
-
-def write_owned_block(
-    path: Path,
-    interior_lines: list[str],
-    start_marker: str,
-    end_marker: str,
-) -> None:
-    """Strictly read and atomically update one owned block in *path*."""
-    _validate_block_arguments(interior_lines, start_marker, end_marker)
-    path = Path(path)
-    if path.is_symlink():
-        raise BlockError(f"Owned-block target '{path}' is a symbolic link")
-    if path.exists() and path.is_dir():
-        raise BlockError(f"Owned-block target '{path}' is a directory")
-
-    existing: str | None = None
-    if path.exists():
-        try:
-            existing = path.read_bytes().decode("utf-8")
-        except UnicodeDecodeError as exc:
-            raise BlockError(f"Owned-block target '{path}' is not valid UTF-8") from exc
-    merged = merge_managed_block(existing, interior_lines, start_marker, end_marker)
-    if existing != merged:
-        atomic_write_text(path, merged)
 
 
 def atomic_write_text(path: Path, text: str) -> None:
@@ -191,7 +106,8 @@ def create_text_exclusive(path: Path, text: str) -> None:
     Uses ``O_CREAT | O_EXCL`` so creation is atomic and race-safe: if anything
     already exists at *path* — a regular file, a directory, or a symlink — the
     operation raises :class:`BlockError` rather than overwriting it.  Used by the
-    ``--export-prompt-profile`` utility for no-overwrite creation.
+    config generators (``--init-config`` / ``--init-instructions``) for the
+    no-``--force`` no-overwrite creation path.
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -212,15 +128,21 @@ def create_text_exclusive(path: Path, text: str) -> None:
         raise
 
 
-def replace_text_with_backup(path: Path, text: str) -> None:
-    """Replace a regular-file *path* with *text* after an exclusive backup.
+def replace_text_atomic_no_backup(path: Path, text: str) -> None:
+    """Atomically replace a regular-file *path* with *text*, keeping no backup.
 
-    The ``--force`` path for ``--export-prompt-profile``.  Only a regular file may
-    be replaced: a symlink or directory at *path* raises :class:`BlockError`.  An
-    exclusive, timestamped sibling backup of the current bytes is written first;
-    the target is then re-read and verified unchanged before the atomic
-    replacement (so a concurrent writer cannot have its change silently lost).
-    An absent target is simply created.
+    The ``--force`` path for the config generators (``--init-config`` /
+    ``--init-instructions``).  The resolved 0.11.3 product contract permits only
+    one active config/support file, so ``--force`` is the user's explicit
+    permission to discard the old bytes — no timestamped ``.bak-`` sibling is
+    written.
+
+    Only a regular file may be replaced: a symlink or directory at *path* raises
+    :class:`BlockError`.  An absent target is created exclusively.  The current
+    bytes are captured on entry and re-read immediately before the atomic
+    replacement; a concurrent change in that window aborts with :class:`BlockError`
+    rather than being silently overwritten.  On any failure the original file is
+    left byte-identical (``atomic_write_text`` never truncates in place).
     """
     path = Path(path)
     if path.is_symlink():
@@ -234,28 +156,11 @@ def replace_text_with_backup(path: Path, text: str) -> None:
         raise BlockError(f"refusing to replace non-regular file '{path}' with --force.")
 
     original = path.read_bytes()
-    stamp = time.strftime("%Y%m%d-%H%M%S")
-    attempt = 0
-    while True:
-        suffix = f".bak-{stamp}" if attempt == 0 else f".bak-{stamp}({attempt})"
-        backup = path.with_name(path.name + suffix)
-        try:
-            fd = os.open(str(backup), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o666)
-            break
-        except FileExistsError:
-            attempt += 1
-            if attempt > 1000:
-                raise BlockError(
-                    f"could not create a unique backup for '{path}'."
-                ) from None
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(original)
-        handle.flush()
-        os.fsync(handle.fileno())
-
+    # Concurrent-change guard: re-read immediately before the atomic replace so a
+    # change that slipped in since inspection is not silently discarded.
     if path.read_bytes() != original:
         raise BlockError(
-            f"target '{path}' changed during backup; aborting --force replacement."
+            f"target '{path}' changed during inspection; aborting --force replacement."
         )
     atomic_write_text(path, text)
 

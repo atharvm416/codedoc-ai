@@ -299,22 +299,22 @@ def test_B2_second_run_json_file_changed_reprocesses(tmp_path, monkeypatch):
     assert "Fresh content." in out
 
 
-def test_B3_second_run_md_reads_json_state(tmp_path, monkeypatch):
-    """B3: --format md run, but codedoc.json exists from a previous run → reads JSON for hashes,
-    writes only MD, JSON still present."""
+def test_B3_second_run_md_does_not_read_json_state(tmp_path, monkeypatch):
+    """B3 (0.11.3): --format md does NOT read codedoc.json for reuse (exact target
+    only), so the file is reprocessed; the existing JSON is left untouched."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
     src.write_text("x=1\n")
     write_existing_json(tmp_path / "codedoc" / "codedoc.json",
                         compute_file_hash(src), "From JSON cache.")
-    no_llm(monkeypatch)
+    patch_provider(monkeypatch, "Re-documented.")
     stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
                                      "propagate_changes": False})
-    assert stats["checked"] == 0
+    assert stats["checked"] == 1  # md mode does not cross-read JSON
     assert (tmp_path / "codedoc" / "codedoc.md").exists()
-    assert "From JSON cache." in (tmp_path / "codedoc" / "codedoc.md").read_text()
-    # JSON is NOT removed (format switch doesn't delete other format)
+    assert "Re-documented." in (tmp_path / "codedoc" / "codedoc.md").read_text()
+    # JSON is NOT removed (format switch doesn't touch the other format)
     assert (tmp_path / "codedoc" / "codedoc.json").exists()
 
 
@@ -383,24 +383,25 @@ def test_B6_second_run_format_both_reads_json(tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_C1_switch_json_to_md(tmp_path, monkeypatch):
-    """C1: have codedoc.json, run --format md → reads JSON for hashes, writes MD,
-    JSON stays (not deleted)."""
+    """C1 (0.11.3): have codedoc.json, run --format md → md does not cross-read the
+    JSON, so it reprocesses and writes MD; JSON stays (not deleted)."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
     src.write_text("x=1\n")
     write_existing_json(tmp_path / "codedoc" / "codedoc.json",
                         compute_file_hash(src), "JSON switch.")
-    no_llm(monkeypatch)
-    run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
-                             "propagate_changes": False})
+    patch_provider(monkeypatch, "Re-documented.")
+    stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
+                                     "propagate_changes": False})
+    assert stats["checked"] == 1
     assert (tmp_path / "codedoc" / "codedoc.md").exists()
     assert (tmp_path / "codedoc" / "codedoc.json").exists()  # NOT deleted
 
 
 def test_C2_switch_md_to_json(tmp_path, monkeypatch):
-    """C2: have codedoc.md (with hashes), run --format json → reads MD hashes,
-    writes JSON, MD stays."""
+    """C2 (0.11.3): have codedoc.md, run --format json → json does not cross-read the
+    MD, so it reprocesses and writes JSON; MD stays."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
@@ -408,10 +409,10 @@ def test_C2_switch_md_to_json(tmp_path, monkeypatch):
     write_existing_md(tmp_path / "codedoc" / "codedoc.md",
                       compute_file_hash(src), "MD switch.")
     assert not (tmp_path / "codedoc" / "codedoc.json").exists()
-    no_llm(monkeypatch)
+    patch_provider(monkeypatch, "Re-documented.")
     stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "json",
                                      "propagate_changes": False})
-    assert stats["checked"] == 0
+    assert stats["checked"] == 1
     assert (tmp_path / "codedoc" / "codedoc.json").exists()
     assert (tmp_path / "codedoc" / "codedoc.md").exists()  # NOT deleted
 
@@ -434,16 +435,18 @@ def test_C3_switch_both_to_json(tmp_path, monkeypatch):
 
 
 def test_C4_switch_both_to_md(tmp_path, monkeypatch):
-    """C4: have both files, run --format md → reads JSON for hashes (preferred), writes MD."""
+    """C4 (0.11.3): have codedoc.json, run --format md → md does not cross-read the
+    JSON, so it reprocesses and writes MD."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
     src.write_text("x=1\n")
     write_existing_json(tmp_path / "codedoc" / "codedoc.json",
                         compute_file_hash(src), "Both to MD.")
-    no_llm(monkeypatch)
-    run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
-                             "propagate_changes": False})
+    patch_provider(monkeypatch, "Re-documented.")
+    stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "md",
+                                     "propagate_changes": False})
+    assert stats["checked"] == 1
     assert (tmp_path / "codedoc" / "codedoc.md").exists()
 
 
@@ -482,9 +485,10 @@ def test_D2_custom_md_incremental(tmp_path, monkeypatch):
     assert stats["checked"] == 0
 
 
-def test_D3_cross_format_resume_json_after_md(tmp_path, monkeypatch):
-    """D3: --output docs/claude.json, only docs/claude.md exists → reads entry + hashes
-    from claude.md, writes claude.json (cross-format resume)."""
+def test_D3_no_cross_format_resume_json_after_md(tmp_path, monkeypatch):
+    """D3 (0.11.3): --output docs/claude.json with only docs/claude.md present →
+    json target does NOT cross-read the .md sibling for entry or reuse, so the
+    entry is auto-detected and the file is reprocessed into claude.json."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
@@ -492,10 +496,10 @@ def test_D3_cross_format_resume_json_after_md(tmp_path, monkeypatch):
     write_existing_md(tmp_path / "docs" / "claude.md",
                       compute_file_hash(src), "Cross format cached.")
     assert not (tmp_path / "docs" / "claude.json").exists()
-    no_llm(monkeypatch)
+    patch_provider(monkeypatch, "Re-documented.")
     stats = run_pipeline(tmp_path, {"output_dir": "docs/claude.json",
                                      "propagate_changes": False})
-    assert stats["checked"] == 0
+    assert stats["checked"] == 1
     assert (tmp_path / "docs" / "claude.json").exists()
 
 
@@ -659,8 +663,9 @@ def test_F3_json_metadata_contains_entry_file(tmp_path, monkeypatch):
 # Group G — Legacy migration
 # ---------------------------------------------------------------------------
 
-def test_G1_legacy_db_deleted_on_run(tmp_path, monkeypatch):
-    """G1: codedoc_db.json in output dir is deleted automatically on any run."""
+def test_G1_legacy_db_left_untouched(tmp_path, monkeypatch):
+    """G1 (0.11.3): a legacy codedoc_db.json is outside the runtime allowlist and is
+    never probed or deleted — it is left byte-identical."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
     src = tmp_path / "main.py"
@@ -673,7 +678,8 @@ def test_G1_legacy_db_deleted_on_run(tmp_path, monkeypatch):
     no_llm(monkeypatch)
     run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "json",
                              "propagate_changes": False})
-    assert not legacy.exists()
+    assert legacy.exists()
+    assert legacy.read_text(encoding="utf-8") == '{"files": {}}'
 
 
 # ---------------------------------------------------------------------------
@@ -914,60 +920,39 @@ def test_K3_safewriter_preloads_completed_records(tmp_path):
     assert paths == ["a.py", "b.py", "c.py"], paths
 
 
-def test_K4_stale_build_file_does_not_override_newer_json(tmp_path):
-    """K4 (Scenario S): a build file older than codedoc.json is treated as stale."""
-    from codedoc.pipeline import _load_existing_file_docs
-    from codedoc.core.output import BUILD_FILENAME
-    import time
-
-    out = tmp_path / "codedoc"
-    _codedoc_json(out / BUILD_FILENAME, [{"path": "main.py", "hash": "OLD"}])
-    time.sleep(0.05)
-    _codedoc_json(out / "codedoc.json", [{"path": "main.py", "hash": "NEW"}])
-
-    res = _load_existing_file_docs(out, "codedoc.json")
-    assert res["main.py"]["hash"] == "NEW"
-    assert not (out / BUILD_FILENAME).exists()  # stale build file removed
-
-
-def test_K5_newer_build_file_overrides_older_json(tmp_path):
-    """K5 (Scenario N): a build file newer than codedoc.json still wins per-file."""
-    from codedoc.pipeline import _load_existing_file_docs
-    from codedoc.core.output import BUILD_FILENAME
-    import time
-
-    out = tmp_path / "codedoc"
-    _codedoc_json(out / "codedoc.json", [{"path": "main.py", "hash": "OLD"}])
-    time.sleep(0.05)
-    _codedoc_json(out / BUILD_FILENAME, [{"path": "main.py", "hash": "NEW"}], status="in_progress")
-
-    res = _load_existing_file_docs(out, "codedoc.json")
-    assert res["main.py"]["hash"] == "NEW"
-
-
-def test_K6_old_checkpoint_without_hash_is_reprocessed(tmp_path, monkeypatch):
-    """K6 (Scenario F): a checkpoint entry with no _checkpoint_hash is reprocessed, not resumed.
-
-    Checkpoints written before 0.7.2 carry no hash and cannot be verified, so the
-    routing loop must re-send those files to the LLM rather than silently
-    restoring potentially stale documentation.
-    """
-    patch_provider(monkeypatch)
-    (tmp_path / "main.py").write_text("x=1\n")
+def test_K4_legacy_build_file_left_untouched(tmp_path, monkeypatch):
+    """K4 (0.11.3): a legacy .codedoc_build.json is outside the runtime allowlist —
+    never probed, migrated, or deleted; the exact JSON target is the only source."""
+    from codedoc.core.db import compute_file_hash
+    from codedoc.pipeline import run_pipeline
+    src = tmp_path / "main.py"
+    src.write_text("x=1\n")
     out = tmp_path / "codedoc"
     out.mkdir()
-    (out / ".codedoc_progress.json").write_text(json.dumps({
-        "codedoc_checkpoint": True,
-        "version": "1",
-        "created_at": "2026-05-29T00:00:00+00:00",
-        "updated_at": "2026-05-29T00:00:00+00:00",
-        "entry_file": "main.py",
-        "total_recorded": 1,
-        "results": {"main.py": {"language": "python", "description": "stale"}},
-    }), encoding="utf-8")
+    build = out / ".codedoc_build.json"
+    build.write_text('{"files": []}', encoding="utf-8")
+    write_existing_json(out / "codedoc.json", compute_file_hash(src), "Cached.")
+    no_llm(monkeypatch)
+    run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "json",
+                             "propagate_changes": False})
+    assert build.exists()
+    assert build.read_text(encoding="utf-8") == '{"files": []}'
 
+
+def test_K6_legacy_progress_file_left_untouched(tmp_path, monkeypatch):
+    """K6 (0.11.3): a legacy .codedoc_progress.json checkpoint is never migrated or
+    probed; the run documents from the exact target only."""
+    from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
+    src = tmp_path / "main.py"
+    src.write_text("x=1\n")
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    progress = out / ".codedoc_progress.json"
+    progress.write_text('{"codedoc_checkpoint": true}', encoding="utf-8")
+    write_existing_json(out / "codedoc.json", compute_file_hash(src), "Cached.")
+    no_llm(monkeypatch)
     stats = run_pipeline(tmp_path, {"entry_file": "main.py",
                                      "propagate_changes": False, "parallel_agents": False})
-    assert stats["checked"] == 1          # re-sent to the LLM
-    assert stats.get("resumed", 0) == 0   # not restored from the hash-less checkpoint
+    assert stats["checked"] == 0          # reused from the exact JSON target
+    assert progress.exists()              # legacy checkpoint left byte-identical

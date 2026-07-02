@@ -973,7 +973,7 @@ def test_read_embedded_view_returns_none_for_empty_string():
 # A15 (which tests a clean first run with no prior crash backup).
 # ---------------------------------------------------------------------------
 
-def test_A18_crash_resume_final_md_embedded_view_complete(tmp_path, monkeypatch):
+def test_A18_md_run_ignores_and_preserves_legacy_json_sibling(tmp_path, monkeypatch):
     """A18: After resuming from a JSON crash backup, the final MD embedded view
     contains ALL records — both those pre-loaded from the backup and newly
     processed ones — and the JSON backup is removed."""
@@ -1012,6 +1012,7 @@ def test_A18_crash_resume_final_md_embedded_view_complete(tmp_path, monkeypatch)
             }
         ],
     }), encoding="utf-8")
+    legacy_bytes = crash_backup.read_bytes()
 
     # Resume run: should load a.py from the crash backup, process b.py via LLM.
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
@@ -1026,9 +1027,8 @@ def test_A18_crash_resume_final_md_embedded_view_complete(tmp_path, monkeypatch)
 
     md_path = out_dir / "codedoc.md"
     assert md_path.exists(), "Final Markdown must be written after crash resume"
-    assert not crash_backup.exists(), (
-        "JSON crash backup must be removed after successful Markdown write"
-    )
+    assert crash_backup.read_bytes() == legacy_bytes
+    assert not (out_dir / "crash_recovery.json").exists()
 
     # The embedded view must contain BOTH a.py (from crash backup) and b.py (newly processed)
     from codedoc.core.project_view import read_embedded_view

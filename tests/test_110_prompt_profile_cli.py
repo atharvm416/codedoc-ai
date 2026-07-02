@@ -12,10 +12,10 @@ import codedoc.pipeline as pipe
 from codedoc.cli.cli import run_cli
 from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
 
-INLINE = {"schema_version": 1, "single": {"fields": [
+INLINE = {"schema_version": 1, "single": {"common": {"fields": [
     {"key": "description", "type": "string", "instruction": "Describe the file."},
     {"key": "key_concepts", "type": "string_list", "instruction": "List concepts."},
-]}}
+]}}}
 
 
 class SmartFake:
@@ -76,7 +76,7 @@ def _output(project):
 
 
 def _recovery(project):
-    return project / "codedoc" / "crash_recovery_codedoc.json"
+    return project / "codedoc" / "crash_recovery.json"
 
 
 # ---------------------------------------------------------------------------
@@ -90,7 +90,6 @@ def test_no_profile_makes_no_review_and_no_digest(monkeypatch, project):
     assert stats["prompt_customization_security_review"] == "not-required"
     assert stats["documentation_calls_attempted"] == stats["attempted_calls"] == 1
     assert stats["prompt_customization_security_review_calls_attempted"] == 0
-    assert stats["prompt_profile_conversion_calls_attempted"] == 0
     rec = json.loads(_output(project).read_text())["files"][0]
     assert "_prompt_profile_digest" not in rec
 
@@ -105,7 +104,6 @@ def test_active_profile_safe_reviews_filters_and_stamps(monkeypatch, project):
     category_total = (
         stats["documentation_calls_attempted"]
         + stats["prompt_customization_security_review_calls_attempted"]
-        + stats["prompt_profile_conversion_calls_attempted"]
     )
     assert category_total == stats["attempted_calls"] == 2
     rec = json.loads(_output(project).read_text())["files"][0]
@@ -136,15 +134,6 @@ def test_paid_review_warning_names_resolved_provider_and_model(
     out = capsys.readouterr().out
     assert "provider=anthropic" in out
     assert "model=claude-test" in out
-
-
-def test_too_risky_override_proceeds(monkeypatch, project):
-    fake = SmartFake("TOO_RISKY")
-    stats = _run(monkeypatch, project, {
-        "entry_file": "main.py", "prompt_profiles": INLINE,
-        "prompt_customization_allow_risky": True}, fake)
-    assert stats["prompt_customization_security_review"] == "too-risky-overridden"
-    assert fake.doc_calls == 1 and _output(project).exists()
 
 
 def test_dry_run_reports_pending_and_creates_no_provider(monkeypatch, project):
@@ -179,7 +168,6 @@ def test_first_activation_invalidates_then_reuses(monkeypatch, project):
     assert s3["checked"] == 0 and fake3.doc_calls == 0 and fake3.review_calls == 0  # reused
     assert s3["documentation_calls_attempted"] == 0
     assert s3["prompt_customization_security_review_calls_attempted"] == 0
-    assert s3["prompt_profile_conversion_calls_attempted"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -205,30 +193,18 @@ def test_describe_is_deterministic(capsys):
     assert capsys.readouterr().out == first
 
 
-def test_export_stdout(capsys):
-    # 0.11.1: stdout export is the version-2 config-ready wrapper.
-    assert run_cli(["--export-prompt-profile"]) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert set(data) == {"prompt_profiles"}
-    profiles = data["prompt_profiles"]
-    assert profiles["schema_version"] == 2
-    assert "single" in profiles and "triple" in profiles
-    assert "requested_shape" in profiles["single"]
-    assert set(profiles["triple"]) == {"structure", "dependency", "documentation"}
+def test_describe_schema_shows_common_envelope(capsys):
+    assert run_cli(["--describe-prompt-schema", "--format", "md"]) == 0
+    out = capsys.readouterr().out
+    assert '"common"' in out
+    assert "--export-prompt-profile" not in out
+    assert "codedoc-prompt-profiles.json" not in out
 
 
-def test_export_refuses_overwrite_and_force_backs_up(tmp_path):
-    target = tmp_path / "profile.json"
-    assert run_cli(["--export-prompt-profile", str(target)]) == 0
-    original = target.read_text(encoding="utf-8")
-    assert run_cli(["--export-prompt-profile", str(target)]) == 2  # refuse overwrite
-    assert run_cli(["--export-prompt-profile", str(target), "--force"]) == 0
-    backups = list(tmp_path.glob("profile.json.bak-*"))
-    assert backups and backups[0].read_text(encoding="utf-8") == original
-
-
-def test_export_stdout_rejects_force():
-    assert run_cli(["--export-prompt-profile", "-", "--force"]) == 2
+def test_describe_rejects_format_both(capsys):
+    assert run_cli(["--describe-prompt-schema", "--format", "both"]) == 2
+    err = capsys.readouterr().err
+    assert "both" in err.lower()
 
 
 def test_utilities_are_mutually_exclusive_with_run_options():
@@ -236,5 +212,5 @@ def test_utilities_are_mutually_exclusive_with_run_options():
     assert run_cli(["--describe-prompt-schema", "--entry", "main.py"]) == 2
 
 
-def test_force_without_export_is_rejected():
+def test_force_without_init_utility_is_rejected():
     assert run_cli(["--force"]) == 2

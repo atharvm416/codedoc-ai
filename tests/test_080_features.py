@@ -189,12 +189,12 @@ def test_2_md_run_backup_removed_on_clean_success(tmp_path, monkeypatch):
 
 
 def test_2b_md_backup_survives_interrupted_run(tmp_path):
-    """Test 2b: an interrupted MD run leaves codedoc.json with crash banner."""
-    from codedoc.pipeline import _resolve_live_backup_path
+    """Test 2b: an interrupted MD run leaves crash_recovery.json with the banner."""
+    from codedoc.core.resume import RECOVERY_FILENAME
     from codedoc.core.safe_writer import SafeWriter
 
     out = tmp_path / "codedoc"
-    backup_path = _resolve_live_backup_path(out, "md", "codedoc.json", "codedoc.md")
+    backup_path = out / RECOVERY_FILENAME
 
     sw = SafeWriter(backup_path, "md", "main.py", {})
     sw.set_queue_order(["main.py", "utils.py"])
@@ -233,17 +233,14 @@ def test_3_named_md_output_uses_json_sibling(tmp_path, monkeypatch):
 
 
 def test_3b_named_md_sibling_persists_on_interrupt(tmp_path):
-    """Test 3b: interrupted named-MD run keeps the recovery file with crash banner.
-
-    0.9.8: the recovery file is the dedicated ``crash_recovery_report.json``,
-    derived from the Markdown stem — not the old ``report.json`` sibling.
-    """
-    from codedoc.pipeline import _resolve_live_backup_path
+    """Test 3b: interrupted named-MD run keeps the single fixed recovery file with
+    the crash banner (``crash_recovery.json`` in the output directory)."""
+    from codedoc.core.resume import RECOVERY_FILENAME
     from codedoc.core.safe_writer import SafeWriter
 
     out = tmp_path / "docs"
-    backup_path = _resolve_live_backup_path(out, "md", "codedoc.json", "report.md")
-    assert backup_path.name == "crash_recovery_report.json"
+    backup_path = out / RECOVERY_FILENAME
+    assert backup_path.name == "crash_recovery.json"
 
     sw = SafeWriter(backup_path, "md", "main.py", {})
     sw.initialize_empty()
@@ -361,7 +358,7 @@ def test_6_foreign_json_sibling_does_not_block_md_run(tmp_path, monkeypatch):
 
     Pre-0.9.8 the live backup for ``--output docs/report.md`` *was*
     ``report.json``, so a foreign file there blocked the run.  The recovery file
-    is now the dedicated ``crash_recovery_report.json`` and the stable output is
+    is now the exact ``crash_recovery.json`` and the stable output is
     ``report.md``; an unrelated ``report.json`` is neither, so it is left
     byte-identical and the run proceeds.
     """
@@ -385,7 +382,7 @@ def test_6_foreign_json_sibling_does_not_block_md_run(tmp_path, monkeypatch):
     # the dedicated recovery file was cleaned up on success.
     assert (tmp_path / "docs" / "report.md").exists()
     assert foreign.read_bytes() == foreign_bytes
-    assert not (tmp_path / "docs" / "crash_recovery_report.json").exists()
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -481,103 +478,6 @@ def test_7b_changed_hash_triggers_reprocess_and_replaces_slot(tmp_path, monkeypa
 # Test 8 — Old checkpoint migration
 # ---------------------------------------------------------------------------
 
-def test_8_checkpoint_migration_restores_valid_entries(tmp_path, monkeypatch):
-    """Test 8: .codedoc_progress.json entries with matching hash are migrated."""
-    from codedoc.core.checkpoint import CHECKPOINT_FILENAME
-    from codedoc.core.db import compute_file_hash
-
-    main_py = tmp_path / "main.py"
-    main_py.write_text("x=1\n")
-    h = compute_file_hash(main_py)
-
-    # Write an old-style checkpoint
-    cp_path = tmp_path / "codedoc" / CHECKPOINT_FILENAME
-    cp_path.parent.mkdir(parents=True, exist_ok=True)
-    cp_path.write_text(json.dumps({
-        "codedoc_checkpoint": True,
-        "version": "1",
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "entry_file": "main.py",
-        "total_recorded": 1,
-        "results": {
-            "main.py": {
-                "language": "python",
-                "description": "Checkpointed.",
-                "_checkpoint_hash": h,
-                "_analysis_revision": ANALYSIS_REVISION,
-                "_analysis_mode": "single",
-            }
-        },
-    }), encoding="utf-8")
-
-    call_count = {"n": 0}
-    real_provider = _make_fake_provider()
-    original = real_provider.complete_json
-
-    def counted(prompt, system=""):
-        call_count["n"] += 1
-        return original(prompt, system)
-
-    real_provider.complete_json = counted
-    _patch_provider(monkeypatch, real_provider)
-
-    from codedoc.pipeline import run_pipeline
-    run_pipeline(tmp_path, {
-        "entry_file": "main.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-    })
-
-    assert call_count["n"] == 0, "Checkpoint entry with matching hash must be reused"
-
-
-def test_8b_checkpoint_with_no_hash_triggers_reprocess(tmp_path, monkeypatch):
-    """Test 8b: checkpoint entry with no _checkpoint_hash must be re-processed."""
-    from codedoc.core.checkpoint import CHECKPOINT_FILENAME
-
-    main_py = tmp_path / "main.py"
-    main_py.write_text("x=1\n")
-
-    cp_path = tmp_path / "codedoc" / CHECKPOINT_FILENAME
-    cp_path.parent.mkdir(parents=True, exist_ok=True)
-    cp_path.write_text(json.dumps({
-        "codedoc_checkpoint": True,
-        "version": "1",
-        "created_at": "2026-01-01T00:00:00+00:00",
-        "updated_at": "2026-01-01T00:00:00+00:00",
-        "entry_file": "main.py",
-        "total_recorded": 1,
-        "results": {
-            "main.py": {
-                "language": "python",
-                "description": "Checkpointed.",
-                # No _checkpoint_hash
-            }
-        },
-    }), encoding="utf-8")
-
-    call_count = {"n": 0}
-    real_provider = _make_fake_provider()
-    original = real_provider.complete_json
-
-    def counted(prompt, system=""):
-        call_count["n"] += 1
-        return original(prompt, system)
-
-    real_provider.complete_json = counted
-    _patch_provider(monkeypatch, real_provider)
-
-    from codedoc.pipeline import run_pipeline
-    run_pipeline(tmp_path, {
-        "entry_file": "main.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-    })
-
-    assert call_count["n"] > 0, "Entry with no hash must be re-processed"
-
-
 # ---------------------------------------------------------------------------
 # Test 9 — Rate-limit ladder
 # ---------------------------------------------------------------------------
@@ -664,7 +564,7 @@ def test_9b_non_rate_limit_errors_do_not_step_down(tmp_path, monkeypatch):
 
 
 def test_9c_non_rate_limit_parallel_failures_counted_in_stats(tmp_path, monkeypatch):
-    """Test 9c: non-rate-limit failures in parallel mode increment stats['failed'] and appear in error.log."""
+    """Non-rate-limit failures are counted without a persistent issue log."""
     # Files import each other so all 3 are reachable in parallel
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("from c import y\nx=1\n")
@@ -702,9 +602,9 @@ def test_9c_non_rate_limit_parallel_failures_counted_in_stats(tmp_path, monkeypa
     assert len(stats.get("rate_limit_warnings", [])) == 0, (
         "Non-rate-limit errors must not cause rate-limit step-down"
     )
-    # error.log must be written
-    assert stats.get("error_log") is not None, "error.log must be set when files fail"
-    assert Path(stats["error_log"]).exists(), "error.log file must exist"
+    assert stats["issues_recorded"] == stats["failed"]
+    assert "error_log" not in stats
+    assert not (tmp_path / "codedoc" / "error.log").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -828,91 +728,9 @@ def test_10b_no_warning_on_successful_run(tmp_path, monkeypatch, capsys):
 # Test 11 — error.log in output_dir; always surfaced
 # ---------------------------------------------------------------------------
 
-def test_11_error_log_in_output_dir(tmp_path, monkeypatch):
-    """Test 11: error.log is written in output_dir when issues occur."""
-    (tmp_path / "main.py").write_text("x=1\n")
-
-    from codedoc.utils.errors import LLMError
-
-    class FailProvider:
-        provider_name = "fake"
-
-        def complete_json(self, prompt, system=""):
-            raise LLMError("fake", "network error (not rate-limit)")
-
-        def complete(self, prompt, system="", temperature=0.1):
-            return self.complete_json(prompt)
-
-    _patch_provider(monkeypatch, FailProvider())
-    from codedoc.pipeline import run_pipeline
-
-    stats = run_pipeline(tmp_path, {
-        "entry_file": "main.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-        "file_retry_attempts": 0,
-    })
-
-    # error.log must be in output_dir, not project root
-    assert stats.get("error_log") is not None
-    log_path = Path(stats["error_log"])
-    assert log_path.parent == (tmp_path / "codedoc").resolve(), (
-        f"error.log should be in output_dir, got {log_path.parent}"
-    )
-    assert log_path.exists()
-    assert stats.get("issues_recorded", 0) > 0
-
-
-def test_11_error_log_not_in_root(tmp_path, monkeypatch):
-    """Test 11b: error.log must NOT be in the project root."""
-    (tmp_path / "main.py").write_text("x=1\n")
-
-    from codedoc.utils.errors import LLMError
-
-    class FailProvider:
-        provider_name = "fake"
-
-        def complete_json(self, prompt, system=""):
-            raise LLMError("fake", "some error")
-
-        def complete(self, prompt, system="", temperature=0.1):
-            return self.complete_json(prompt)
-
-    _patch_provider(monkeypatch, FailProvider())
-    from codedoc.pipeline import run_pipeline
-
-    run_pipeline(tmp_path, {
-        "entry_file": "main.py",
-        "parallel_agents": False,
-        "propagate_changes": False,
-        "file_retry_attempts": 0,
-    })
-
-    # error.log must NOT appear in the project root
-    assert not (tmp_path / "error.log").exists(), (
-        "error.log must not be written to the project root"
-    )
-
-
 # ---------------------------------------------------------------------------
 # Test 12 — --safe-mode deprecation warning
 # ---------------------------------------------------------------------------
-
-def test_12_safe_mode_deprecation_notice(tmp_path, monkeypatch, capsys):
-    """Test 12: passing safe_mode=True prints a deprecation notice and run succeeds."""
-    (tmp_path / "main.py").write_text("x=1\n")
-    stats = _run(
-        tmp_path, monkeypatch,
-        entry_file="main.py",
-        safe_mode=True,
-    )
-
-    captured = capsys.readouterr()
-    assert "deprecated" in captured.out.lower() or "default" in captured.out.lower(), (
-        "Expected deprecation notice for --safe-mode, got: " + captured.out
-    )
-    assert stats["checked"] == 1, "Run must complete normally with safe_mode=True"
-
 
 # ---------------------------------------------------------------------------
 # Test 13 — --format both: live backup kept after clean finish
@@ -947,19 +765,15 @@ def test_13_format_both_keeps_json_after_clean_finish(tmp_path, monkeypatch):
 # Test 14 — live_backup_path in stats
 # ---------------------------------------------------------------------------
 
-def test_14_live_backup_path_in_stats_default(tmp_path, monkeypatch):
-    """Test 14a: stats['live_backup_path'] names the dedicated recovery file (0.9.8)."""
+def test_14_completed_default_run_removes_recovery(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text("x=1\n")
     stats = _run(tmp_path, monkeypatch, entry_file="main.py")
 
-    assert "live_backup_path" in stats
-    assert stats["live_backup_path"] is not None
-    expected = str((tmp_path / "codedoc" / "crash_recovery_codedoc.json").resolve())
-    assert stats["live_backup_path"] == expected
+    assert stats["live_backup_path"] is None
+    assert not (tmp_path / "codedoc" / "crash_recovery.json").exists()
 
 
-def test_14_live_backup_path_in_stats_named_md(tmp_path, monkeypatch):
-    """Test 14b: stats['live_backup_path'] points to report.json for named-MD run."""
+def test_14_completed_named_md_run_removes_recovery(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text("x=1\n")
     stats = _run(
         tmp_path, monkeypatch,
@@ -967,9 +781,8 @@ def test_14_live_backup_path_in_stats_named_md(tmp_path, monkeypatch):
         output_dir="docs/report.md",
     )
 
-    assert "live_backup_path" in stats
-    assert stats["live_backup_path"] is not None
-    assert "report.json" in stats["live_backup_path"]
+    assert stats["live_backup_path"] is None
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -1055,7 +868,7 @@ def test_17_recovered_warnings_not_in_final_json(tmp_path):
     output_dir = tmp_path / "codedoc"
     output_dir.mkdir()
 
-    reporter = ErrorReporter(output_dir / "error.log")
+    reporter = ErrorReporter()
     reporter.record(
         RuntimeError("429 rate_limit_exceeded"),
         context="rate limit step-down",
@@ -1101,7 +914,7 @@ def test_17_hard_errors_still_appear_in_final_json(tmp_path):
     output_dir = tmp_path / "codedoc"
     output_dir.mkdir()
 
-    reporter = ErrorReporter(output_dir / "error.log")
+    reporter = ErrorReporter()
     reporter.record(RuntimeError("parse failed"), context="test", level="error")
 
     assert reporter.has_errors()
@@ -1132,65 +945,6 @@ def test_17_hard_errors_still_appear_in_final_json(tmp_path):
 # ---------------------------------------------------------------------------
 # Test — _resolve_live_backup_path helper
 # ---------------------------------------------------------------------------
-
-def test_provider_init_failure_prints_error_log_path(tmp_path, monkeypatch, capsys):
-    """Provider init failure must print error.log path to stderr before raising."""
-    (tmp_path / "main.py").write_text("x=1\n")
-
-    def boom(_config):
-        raise RuntimeError("API key not found")
-
-    monkeypatch.setattr("codedoc.pipeline.create_provider", boom)
-
-    from codedoc.pipeline import run_pipeline
-
-    raised = False
-    try:
-        run_pipeline(tmp_path, {
-            "entry_file": "main.py",
-            "parallel_agents": False,
-            "propagate_changes": False,
-        })
-    except Exception:
-        raised = True
-
-    assert raised, "run_pipeline must re-raise when provider init fails"
-    captured = capsys.readouterr()
-    assert "error.log" in captured.err or "issue" in captured.err.lower(), (
-        f"Provider init failure must print error.log path to stderr; got: {captured.err!r}"
-    )
-
-
-def test_resolve_live_backup_path_scenarios(tmp_path):
-    """Verify the dedicated recovery base path for every output scenario (0.9.8).
-
-    The recovery file is always ``crash_recovery_<stem>.json``, distinct from the
-    stable JSON / Markdown output, derived from the final output stem.
-    """
-    from codedoc.pipeline import _resolve_live_backup_path
-
-    out = tmp_path / "codedoc"
-
-    # Default JSON
-    p = _resolve_live_backup_path(out, "json", "codedoc.json", "codedoc.md")
-    assert p == out / "crash_recovery_codedoc.json"
-
-    # Both
-    p = _resolve_live_backup_path(out, "both", "codedoc.json", "codedoc.md")
-    assert p == out / "crash_recovery_codedoc.json"
-
-    # Default MD
-    p = _resolve_live_backup_path(out, "md", "codedoc.json", "codedoc.md")
-    assert p == out / "crash_recovery_codedoc.json"
-
-    # Named JSON: stem derived from json_filename
-    p = _resolve_live_backup_path(out, "json", "report.json", "codedoc.md")
-    assert p == out / "crash_recovery_report.json"
-
-    # Named MD: stem derived from md_filename, NOT json_filename
-    p = _resolve_live_backup_path(out, "md", "codedoc.json", "report.md")
-    assert p == out / "crash_recovery_report.json"
-
 
 # ---------------------------------------------------------------------------
 # Test — _build_default_ladder

@@ -193,7 +193,7 @@ class TestPreflightOutputTargets:
     def test_foreign_json_sibling_does_not_fail_preflight_for_md(self, tmp_path, monkeypatch):
         """0.9.8: a foreign JSON sibling of an MD target no longer fails preflight.
 
-        The recovery file is the dedicated ``crash_recovery_report.json`` and the
+        The recovery file is the exact ``crash_recovery.json`` and the
         stable output is ``report.md``; an unrelated ``report.json`` is neither,
         so it does not block the run and is left untouched.
         """

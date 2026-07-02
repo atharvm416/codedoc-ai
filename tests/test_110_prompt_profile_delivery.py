@@ -17,11 +17,43 @@ from codedoc.core.prompt_profiles import (
 LANGS = frozenset({"python", "java"})
 
 
+def _to_envelope(raw):
+    """Wrap a legacy flat profile dict into the 0.11.3 ``common`` envelope."""
+    if not isinstance(raw, dict):
+        return raw
+    out = {k: v for k, v in raw.items() if k in ("schema_version", "$comment")}
+    if isinstance(raw.get("single"), dict) and "common" not in raw["single"]:
+        sec = raw["single"]
+        common = {k: sec[k] for k in ("fields", "requested_shape") if k in sec}
+        new_sec = {"common": common}
+        if "per_language" in sec:
+            new_sec["per_language"] = sec["per_language"]
+        out["single"] = new_sec
+    elif "single" in raw:
+        out["single"] = raw["single"]
+    if isinstance(raw.get("triple"), dict) and "common" not in raw["triple"]:
+        sec = raw["triple"]
+        agents = ("structure", "dependency", "documentation")
+        common, per_lang = {}, {}
+        for agent in agents:
+            block = sec.get(agent, {})
+            common[agent] = {k: block[k] for k in ("fields", "requested_shape") if k in block}
+            for lang, ov in (block.get("per_language") or {}).items():
+                per_lang.setdefault(lang, {})[agent] = ov
+        new_sec = {"common": common}
+        if per_lang:
+            new_sec["per_language"] = per_lang
+        out["triple"] = new_sec
+    elif "triple" in raw:
+        out["triple"] = raw["triple"]
+    return out
+
+
 def _profile(raw, mode="single"):
     return ResolvedProfile(
         mode,
         validate_profile(
-            raw, active_mode=mode, known_languages=LANGS,
+            _to_envelope(raw), active_mode=mode, known_languages=LANGS,
             source="inline", source_path=None,
         ),
     )
@@ -90,9 +122,9 @@ def test_no_profile_delivery_is_identity_and_unstamped():
 
 
 def test_default_equivalent_profile_is_inactive_and_unstamped():
-    from codedoc.core.prompt_profiles import export_default_profile_dict
+    from codedoc.core.prompt_profiles import default_prompt_profiles
 
-    resolved = _profile(export_default_profile_dict("single"))
+    resolved = _profile(default_prompt_profiles("single", schema_version=1))
     result = Orchestrator(CombinedProvider(), resolved_profile=resolved).process(
         _descriptor(), "x = 1", []
     )

@@ -1,14 +1,12 @@
 """Strict JSON text loading with nested duplicate-key rejection.
 
 This is a deliberately dependency-light module: it imports **only** the standard
-library so it can be shared by both file parse sites (``loader.load_config`` for
-``codedoc.config.json`` and ``prompt_profiles._read_profile_file`` for external
-profile files) and by the AI control-response parsers (the customization reviewer
-and the routing agent) without creating an import cycle between ``loader.py`` and
-``prompt_profiles.py``.
+library so it can be shared by the exact ``codedoc.config.json`` loader and by AI
+control-response parsers without creating an import cycle between ``loader.py``
+and ``prompt_profiles.py``.
 
 Standard ``json.loads`` keeps the *last* value when an object contains the same
-key twice.  For configuration and for security/routing control responses that is
+key twice.  For configuration and security-review control responses that is
 unsafe: a duplicate ``"verdict"``, binding field, or generated ``triple`` member
 could silently override an earlier one.  :func:`loads_no_duplicate_keys` installs
 an ``object_pairs_hook`` that fails closed on a repeated key at **every** nesting

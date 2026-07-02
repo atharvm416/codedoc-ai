@@ -431,9 +431,8 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
 
 
 def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
-    import json
-
     from codedoc.core.db import compute_file_hash
+    from codedoc.core.output import write_project_outputs
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -444,22 +443,18 @@ def test_pipeline_cached_run_honors_markdown_format(tmp_path, monkeypatch):
 
     file_hash = compute_file_hash(main)
 
-    # Pre-write a valid public JSON so _load_existing_file_docs can recover the docs.
-    (docs_output / "codedoc.json").write_text(
-        json.dumps({
-            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
-            "files": [
-                {
-                    "path": "main.py",
-                    "hash": file_hash,
-                    "description": "Main entry point.",
-                    "language": "python",
-                    "format": "py",
-                    **_PRIOR_RUN_IDENTITY,
-                }
-            ],
-        }),
-        encoding="utf-8",
+    write_project_outputs(
+        [{
+            "file_path": "main.py",
+            "hash": file_hash,
+            "language": "python",
+            "documentation": {"description": "Main entry point."},
+            **_PRIOR_RUN_IDENTITY,
+        }],
+        {"checked": 1, "failed": 0, "skipped": 0},
+        docs_output,
+        output_format="md",
+        entry_file="main.py",
     )
 
     def fail_if_llm_is_created(config):
@@ -538,9 +533,8 @@ def test_pipeline_cached_run_can_switch_back_to_json(tmp_path, monkeypatch):
 
 
 def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
-    import json
-
     from codedoc.core.db import compute_file_hash
+    from codedoc.core.output import write_project_outputs
     from codedoc.pipeline import run_pipeline
 
     main = tmp_path / "main.py"
@@ -551,22 +545,18 @@ def test_python_api_accepts_config_as_first_argument(tmp_path, monkeypatch):
 
     file_hash = compute_file_hash(main)
 
-    # Pre-write public JSON so docs can be recovered.
-    (docs_output / "codedoc.json").write_text(
-        json.dumps({
-            "_codedoc": {"entry_file": "main.py", "schema_version": "1.3"},
-            "files": [
-                {
-                    "path": "main.py",
-                    "hash": file_hash,
-                    "description": "Current directory API.",
-                    "language": "python",
-                    "format": "py",
-                    **_PRIOR_RUN_IDENTITY,
-                }
-            ],
-        }),
-        encoding="utf-8",
+    write_project_outputs(
+        [{
+            "file_path": "main.py",
+            "hash": file_hash,
+            "language": "python",
+            "documentation": {"description": "Current directory API."},
+            **_PRIOR_RUN_IDENTITY,
+        }],
+        {"checked": 1, "failed": 0, "skipped": 0},
+        docs_output,
+        output_format="md",
+        entry_file="main.py",
     )
 
     def fail_if_llm_is_created(config):
@@ -1016,7 +1006,8 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
     assert not (output_dir / "codedoc.json").exists()
 
 
-def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
+def test_cross_format_sibling_is_not_used_for_resume(tmp_path, monkeypatch):
+    import json
     """--output docs/claude.json after a previous --format md run that wrote
     docs/claude.md must read the entry from claude.md and resume without error."""
     from codedoc.core.db import compute_file_hash
@@ -1055,10 +1046,31 @@ def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
     assert (docs_dir / "claude.md").exists()
     assert not (docs_dir / "claude.json").exists()
 
+    calls = {"count": 0}
+
+    class Provider:
+        provider_name = "fake"
+
+        def complete_json(self, prompt, system=""):
+            calls["count"] += 1
+            return json.dumps({
+                "description": "Fresh exact-target analysis.",
+                "role_in_system": "entry",
+                "functions": [],
+                "classes": [],
+                "exports": [],
+                "key_concepts": [],
+                "usage_example": "",
+                "dependencies_analysis": {"internal": [], "external": []},
+            })
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt, system)
+
     def fail_if_llm_used(config):
         raise AssertionError("LLM must not be called — file is unchanged")
 
-    monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_used)
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: Provider())
 
     # Now run with --output docs/claude.json — should find claude.md as sibling
     stats = run_pipeline(
@@ -1069,10 +1081,12 @@ def test_cross_format_resume_finds_entry_from_md_sibling(tmp_path, monkeypatch):
         },
     )
 
-    assert stats["checked"] == 0
+    assert stats["checked"] == 1
+    assert calls["count"] == 1
     assert (docs_dir / "claude.json").exists()
     json_content = (docs_dir / "claude.json").read_text(encoding="utf-8")
-    assert "Entry module." in json_content
+    assert "Fresh exact-target analysis." in json_content
+    assert "Entry module." not in json_content
 
 
 def test_select_files_raises_when_entry_not_in_file_map(tmp_path, monkeypatch):
@@ -1246,7 +1260,7 @@ def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     queue = ProcessingQueue()
     queue.add(descriptor)
     stats = {"checked": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [descriptor], _RateLimitOrch(), queue, stats, reporter,
@@ -1286,7 +1300,7 @@ def test_A4_preloaded_stale_record_is_retried_not_restored(tmp_path):
     queue = ProcessingQueue()
     queue.add(descriptor)
     stats = {"checked": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [descriptor], _RateLimitOrch(), queue, stats, reporter,

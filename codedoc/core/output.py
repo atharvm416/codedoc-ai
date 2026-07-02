@@ -1,7 +1,8 @@
 """Write final artifacts with ownership checks and atomic replacement.
 
-Markdown-only runs rely on ``SafeWriter`` recovery rather than an intermediate
-build file. ``BUILD_FILENAME`` remains available for migrating stale files.
+Every output format writes only the exact selected final target(s) and relies on
+``SafeWriter`` recovery for in-progress crash-safety — there is no intermediate
+build file.
 """
 
 from __future__ import annotations
@@ -22,10 +23,6 @@ logger = get_logger(__name__)
 
 PROJECT_JSON = "codedoc.json"
 PROJECT_MARKDOWN = "codedoc.md"
-
-# Kept for reading/migrating stale build files.  No longer written by
-# write_project_outputs.
-BUILD_FILENAME = ".codedoc_build.json"
 
 
 def inspect_output_ownership(
@@ -63,9 +60,10 @@ def inspect_output_ownership(
         if not _is_codedoc_owned(target):
             _add_conflict(target)
 
-    # Compatibility for callers using the legacy API. The current pipeline
-    # does not pass the dedicated recovery path here because occupied recovery
-    # names are handled by the suffix-selection walk instead.
+    # Compatibility for callers using the legacy API. The current pipeline does
+    # not pass the dedicated recovery path here because the fixed recovery file
+    # is validated through the exact recovery-reader path, not via output-target
+    # ownership inspection.
     if output_format == "md" and live_backup_path is not None:
         if not _is_codedoc_owned(live_backup_path):
             _add_conflict(live_backup_path)
@@ -307,19 +305,18 @@ def validate_distinct_artifact_paths(paths: dict[str, Path | None]) -> None:
     """Reject two distinct generated artifacts targeting the same path.
 
     *paths* maps a logical artifact name (e.g. ``"json"``, ``"markdown"``,
-    ``"live_backup"``, ``"error_log"``) to its target ``Path``.  ``None`` values
-    are ignored.  The check is read-only: targets are normalized to absolute
-    paths without being created, existing aliases are resolved where possible,
-    and case behavior is detected from the target filesystem without creating
-    probe files. Raises :class:`ConfigError` naming both logical artifacts when
-    two of them resolve to the same path.
+    ``"live_backup"``) to its target ``Path``.  ``None`` values are ignored.  The
+    check is read-only: targets are normalized to absolute paths without being
+    created, existing aliases are resolved where possible, and case behavior is
+    detected from the target filesystem without creating probe files. Raises
+    :class:`ConfigError` naming both logical artifacts when two of them resolve to
+    the same path.
 
-    The dedicated crash-recovery file is its own ``"live_backup"``
-    artifact, always distinct from the final JSON (``"json"``), Markdown
-    (``"markdown"``), and the diagnostic log (``"error_log"``); the legacy
-    ``json_live_backup`` self-alias (final JSON and live backup sharing one path)
-    no longer exists, so any overlap between them is now a real collision.  The
-    helper is generic: any future generated artifact can join the same call.
+    The dedicated crash-recovery file (``crash_recovery.json``) is its own
+    ``"live_backup"`` artifact, always distinct from the final JSON (``"json"``)
+    and Markdown (``"markdown"``) targets, so any overlap between them is a real
+    collision.  The helper is generic: any future generated artifact can join the
+    same call.
     """
     seen: dict[str, tuple[str, Path]] = {}
     for name, path in paths.items():

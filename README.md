@@ -1,1675 +1,304 @@
 # codedoc-ai
 
-`codedoc-ai` is a Python library and CLI that generates structured, reusable documentation memory for source codebases. It is built for AI coding agents, human maintainers, and teams that want a stable map of a project before making changes.
+`codedoc-ai` generates structured, incrementally reusable documentation for source
+repositories. It scans source locally, builds a deterministic dependency graph,
+sends only files that need analysis to a configured LLM, and writes JSON,
+Markdown, or both.
 
-The tool scans source files, resolves project-local imports into a dependency graph, sends only files that need analysis to an LLM, and writes one combined, structured documentation artifact designed for both humans and AI. By default that artifact is JSON.
+Current release: `0.11.3`.
 
-Current release: `0.11.2`.
+## Highlights
 
-## What It Does
-
-- Finds supported source files in a project.
-- Starts from an explicit entry file when provided.
-- Otherwise auto-detects common entry files such as `main.py`, `main.tsx`, `index.html`, `Main.java`, and related names.
-- If an entry file is found, documents that file and its reachable project dependencies.
-- If no entry file is found, documents all supported project files.
-- Lets you choose coverage with `--documentation-scope`: `entry` (default — only files reachable from the entry) or `all` (every scanned source file, including disconnected ones). Each file's public record carries a `reachable_from_entry` flag.
-- Defaults to one combined provider call per file (`--analysis-mode single`); opt into the legacy three-agent path with `--analysis-mode triple`.
-- Supports validated, mode-specific JSON prompt profiles that customize only the requested response-shape block while fixed system, factuality, safety, parser, cleaner, and output rules remain authoritative.
-- Optionally manages a codedoc-owned block in the output directory's `.gitignore` (`--manage-output-gitignore`), off by default.
-- Parses imports locally before calling an LLM.
-- Processes dependencies before dependent files where possible.
-- Processes up to 5 files at a time by default.
-- Retries failed parallel files sequentially for clearer diagnostics.
-- Stops early with actionable provider/API health messages when many files fail consecutively.
-- Uses SHA-256 content hashes as smart file IDs.
-- Reuses existing documentation for unchanged files.
-- Reuses existing documentation when another file has identical content.
-- Embeds metadata (entry point, schema version, and per-file hashes) in every output file so the next run can resume incrementally without re-specifying the entry.
-- Survives interruptions: stages work in a dedicated `crash_recovery_<stem>.json` file before any AI work starts and updates it after every completed file, so your last stable output is never overwritten mid-run. A Ctrl-C or crash leaves the stable output intact plus a resumable recovery file — no results are lost, and re-running the same command resumes automatically from where it stopped.
-- Adaptive rate-limit parallelism: when a provider signals 429 / rate-limit, file concurrency is stepped down (`5 → 2 → 1`) and a provider-specific warning is printed to the terminal. No manual intervention needed.
-- Refuses to overwrite any file it did not create (ownership guard), protecting your data from accidental output collisions.
-- Provides a filesystem-read-only `--dry-run` with approximate lower-bound call and token estimates.
-- Supports a pre-call `--max-files` cap and repeatable `--force-files` reprocessing.
-- Reports stable CI-oriented exit codes and optional `--allow-partial` behavior.
-- Writes a clean, structured public project view to `codedoc/codedoc.json` by default, or Markdown when requested.
-- Public output includes project overview, file tree, folder map, dependency graph, dependency catalog, and flattened file summaries.
-- Converts public JSON to Markdown without another AI call.
-- Parses generated Markdown back into the public JSON shape when needed.
-
-## Defaults
-
-If the user runs:
-
-```bash
-codedoc run
-```
-
-`codedoc` uses these defaults:
-
-| Setting | Default |
-| --- | --- |
-| LLM provider | `auto` (OpenAI) |
-| API model | provider default (OpenAI/auto → `gpt-4o-mini`) |
-| Output directory | `codedoc` |
-| Output format | `json` |
-| Output file | `codedoc/codedoc.json` |
-| Documentation scope | `entry` (only files reachable from the entry) |
-| Manage output `.gitignore` | `false` |
-| Parallel agents | `true` |
-| Max parallel files | `5` |
-| File retry attempts | `1` |
-| Max consecutive failures | `5` |
-| Change propagation | `true` |
-| Live JSON backup | always on |
-| Rate-limit adaptive | `true` |
-| Max file size | `500 KB` |
-| Max content chars | `12000` |
-| Dry run | `false` |
-| Maximum paid files | `0` (unlimited) |
-| Forced files | `[]` |
-| Allow partial output | `false` |
-
-Because the default provider uses the OpenAI API, a user must supply an API key unless they select a different provider.
-
-If no model is specified (neither `--model` nor `model_name` in config), each provider falls back to its own default:
-
-| Provider | Default model |
-| --- | --- |
-| OpenAI / `auto` | `gpt-4o-mini` |
-| Anthropic | `claude-haiku-4-5-20251001` |
-| Gemini | `gemini-2.5-flash` |
+- Explicit or auto-detected entry files, with `entry` or `all` documentation scope.
+- One combined provider call per file by default; optional triple-agent analysis.
+- Exact-output incremental reuse based on source hashes and analysis identity.
+- One fixed crash-recovery file that preserves completed work after interruption.
+- Config-only, validated instruction customization with mandatory semantic review.
+- OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoint support.
+- Read-only dry runs, paid-file caps, deterministic ownership guards, and stable
+  CI-oriented exit codes.
 
 ## Installation
-
-Install from PyPI:
 
 ```bash
 pip install codedoc-ai
 ```
 
-The package installs the hosted-provider SDKs needed for OpenAI, Anthropic, and Gemini:
+## Quick start
 
-```text
-openai
-anthropic
-google-genai
-```
-
-## Quick Start
-
-### First Run
-
-Provide an entry point when you want CodeDoc to document only the reachable project dependencies from that file, then save the result to the `codedoc/` folder:
+Set a provider credential in the process environment, then run CodeDoc:
 
 ```bash
+export OPENAI_API_KEY="your-key"
 codedoc run --entry src/main.py
 ```
 
-`codedoc/codedoc.json` is written by default. The entry point is embedded as metadata in the output file so you never need to specify it again.
+PowerShell:
 
-Write to a custom location:
-
-```bash
-codedoc run --entry src/main.py --output docs/report.json
+```powershell
+$env:OPENAI_API_KEY="your-key"
+codedoc run --entry src/main.py
 ```
 
-Write only Markdown:
-
-```bash
-codedoc run --entry src/main.py --format md
-```
-
-### Subsequent Runs
-
-After the first run, just run:
-
-```bash
-codedoc run
-```
-
-CodeDoc finds `codedoc/codedoc.json` automatically, reads the entry point from its metadata, and only reprocesses files that have changed.
-
-Point to a specific previously generated file:
-
-```bash
-codedoc run --output docs/report.json
-```
-
-Convert format without any AI calls (served entirely from the cache):
+The default output is `codedoc/codedoc.json`. Common alternatives:
 
 ```bash
 codedoc run --format md
 codedoc run --format both
+codedoc run --output docs/report.json
+codedoc run --documentation-scope all
+codedoc run --dry-run --max-files 25
 ```
 
-Limit file-level concurrency (useful with strict API rate limits):
+On later runs, use the same output selection. CodeDoc reads only the exact
+selected target(s), reuses unchanged owned records, and reprocesses changed files.
 
-```bash
-codedoc run --max-parallel-files 3
-```
+## File contract
 
-## CLI Help
+CodeDoc automatically manages a deliberately small set of persistent files:
 
-Use `--help` to see every CLI option supported by the installed version:
+| Phase | Exact file | Purpose |
+| --- | --- | --- |
+| Configuration | `<project>/codedoc.config.json` | Optional runtime configuration and inline instructions. |
+| Active run | `<output>/crash_recovery.json` | In-progress recovery state. |
+| Final output | Exact selected `.json`, `.md`, or both | Stable CodeDoc-owned result. |
 
-```bash
-codedoc --help
-```
+There is no alternate-config search, external prompt-profile search, prompt
+directory, `.env` loading, checkpoint/build/database migration, sibling-output
+discovery, persistent issue log, or managed `.gitignore` behavior. Stray legacy
+files are not opened, migrated, renamed, or deleted.
 
-The recommended command is `codedoc run`. The CLI also accepts a project path after `run`; omitting the path means "document the current working directory":
-
-```bash
-codedoc run
-codedoc run /path/to/project
-codedoc run --entry src/main.py --format both --max-parallel-files 5
-```
-
-For backward compatibility, `codedoc .` and `codedoc /path/to/project` still work.
-
-Common commands:
-
-| Command | Purpose |
-| --- | --- |
-| `codedoc run --entry src/main.py` | First run — specify entry file; output to `codedoc/`. |
-| `codedoc run` | Subsequent run — entry read from `codedoc/codedoc.json` metadata. |
-| `codedoc run --documentation-scope all` | Document every scanned source file, including files not reachable from the entry. |
-| `codedoc run --manage-output-gitignore` | Maintain a codedoc-owned block in the output directory `.gitignore`. |
-| `codedoc execute` | Alias for `codedoc run`. |
-| `codedoc run --format json` | Write only `codedoc/codedoc.json`. |
-| `codedoc run --format md` | Write only `codedoc/codedoc.md`. |
-| `codedoc run --format both` | Write both JSON and Markdown. |
-| `codedoc run --output docs` | Write output to `docs/` directory. |
-| `codedoc run --output docs/report.json` | Write a single named JSON file. |
-| `codedoc run --output docs/report.md` | Write a single named Markdown file. |
-| `codedoc run --provider gemini --model gemini-2.5-flash` | Use Google Gemini. |
-| `codedoc run --provider anthropic --model claude-haiku-4-5-20251001` | Use Anthropic Claude. |
-| `codedoc run --ignore /myenv --ignore generated` | Ignore project paths. |
-| `codedoc run --dry-run --max-files 25` | Inspect the plan without writes, provider creation, or API calls. |
-| `codedoc run --max-files 25` | Stop before mutation or API calls if more than 25 files need LLM work. |
-| `codedoc run --force-files src/a.py --force-files src/b.py` | Explicitly reprocess selected files. |
-| `codedoc run --allow-partial` | Exit 0 for completed partial runs, with a prominent warning. |
-| `codedoc run --max-parallel-files 3` | Limit concurrent file processing. |
-| `codedoc .` | Legacy shorthand for documenting the current directory. |
-| `codedoc --version` | Print the installed version. |
-
-## Choosing a Provider
-
-| Use case | Recommended provider |
-| --- | --- |
-| Best default quality with minimal setup | OpenAI (`gpt-4o-mini` or `gpt-4o`) |
-| Claude-specific documentation style or Anthropic account | Anthropic Claude |
-| Google AI Studio / Gemini account | Google Gemini |
-| OpenAI-compatible gateway such as LiteLLM or a custom endpoint | OpenAI mode with `api_base_url` |
-
-Provider selection is deterministic:
-
-- `llm_provider = "openai"` uses OpenAI or any OpenAI-compatible API.
-- `llm_provider = "anthropic"` uses Anthropic Claude.
-- `llm_provider = "gemini"` uses Google Gemini through the official `google-genai` SDK.
-- `llm_provider = "auto"` with a model name starting with `claude` uses Anthropic.
-- `llm_provider = "auto"` with a model name starting with `gemini` uses Gemini.
-- `llm_provider = "auto"` with any other model uses OpenAI or an OpenAI-compatible API.
-- If OpenAI/`auto` is selected and no model is provided, `gpt-4o-mini` is used.
-- If Gemini is selected and no model is provided, `gemini-2.5-flash` is used.
-- If Anthropic is selected and no model is provided, `claude-haiku-4-5-20251001` is used.
-
-## OpenAI API Setup
-
-Use OpenAI when you want the default hosted API path.
-
-Windows PowerShell:
-
-```powershell
-$env:OPENAI_API_KEY="sk-your-openai-key"
-codedoc run --model gpt-4o-mini
-```
-
-Windows Command Prompt:
-
-```bat
-set OPENAI_API_KEY=sk-your-openai-key
-codedoc run --model gpt-4o-mini
-```
-
-macOS/Linux:
-
-```bash
-export OPENAI_API_KEY="sk-your-openai-key"
-codedoc run --model gpt-4o-mini
-```
-
-OpenAI-compatible API example:
-
-```bash
-codedoc run --model your-model-name
-```
-
-For compatible APIs, set `api_base_url` in `codedoc.config.json` or `API_BASE_URL` in `.env`.
-
-## Anthropic API Setup
-
-Use Anthropic by selecting the `anthropic` provider or using a model name that starts with `claude`.
-
-Windows PowerShell:
-
-```powershell
-$env:ANTHROPIC_API_KEY="sk-ant-your-anthropic-key"
-codedoc run --provider anthropic --model claude-haiku-4-5-20251001
-```
-
-Windows Command Prompt:
-
-```bat
-set ANTHROPIC_API_KEY=sk-ant-your-anthropic-key
-codedoc run --provider anthropic --model claude-haiku-4-5-20251001
-```
-
-macOS/Linux:
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-your-anthropic-key"
-codedoc run --provider anthropic --model claude-haiku-4-5-20251001
-```
-
-## Gemini API Setup
-
-Use Gemini when you want Google's hosted Gemini models. Set `llm_provider` to `gemini`, or use a Gemini model name with `llm_provider` left as `auto`.
-
-Windows PowerShell:
-
-```powershell
-$env:GEMINI_API_KEY="your-gemini-api-key"
-codedoc run --provider gemini --model gemini-2.5-flash
-```
-
-Windows Command Prompt:
-
-```bat
-set GEMINI_API_KEY=your-gemini-api-key
-codedoc run --provider gemini --model gemini-2.5-flash
-```
-
-macOS/Linux:
-
-```bash
-export GEMINI_API_KEY="your-gemini-api-key"
-codedoc run --provider gemini --model gemini-2.5-flash
-```
-
-`GOOGLE_API_KEY` is also supported as an alias for `GEMINI_API_KEY`.
+Temporary atomic-write siblings and writability probes are short-lived
+implementation details. They use unique names in the target directory and are
+cleaned up best-effort.
 
 ## Configuration
 
-Create `codedoc.config.json` in the project being documented:
+Generate a complete, valid, editable configuration from the canonical defaults:
 
-```json
-{
-  "llm_provider": "auto",
-  "model_name": "gpt-4o-mini",
-  "api_base_url": null,
-  "entry_file": null,
-  "documentation_scope": "entry",
-  "analysis_mode": "single",
-  "prompt_profiles": null,
-  "prompt_profile_file": null,
-  "prompt_profile_auto_detect": true,
-  "prompt_customization_allow_risky": false,
-  "output_dir": "codedoc",
-  "output_format": "json",
-  "manage_output_gitignore": false,
-  "output_gitignore_filename": ".gitignore",
-  "supported_extensions": [".py", ".ts", ".tsx", ".js", ".jsx", ".dart", ".java", ".cs", ".html"],
-  "parallel_agents": true,
-  "max_parallel_files": 5,
-  "file_retry_attempts": 1,
-  "max_consecutive_failures": 5,
-  "log_level": "INFO",
-  "max_file_size_kb": 500,
-  "follow_symlinks": false,
-  "propagate_changes": true,
-  "rate_limit_adaptive": true,
-  "parallel_ladder": null,
-  "respect_retry_after": true,
-  "retry_after_cap_s": 30,
-  "rate_limit_backoff_s": null,
-  "rate_limit_backoff_scale": null,
-  "rate_limit_signals_add": [],
-  "rate_limit_signals_remove": [],
-  "skip_dirs": ["myenv", ".venv", "venv", "env", "node_modules", "__pycache__", "codedoc"],
-  "skip_dirs_add": [],
-  "skip_dirs_remove": [],
-  "max_content_chars": 12000,
-  "extension_language_map": {
-    ".py": "python",
-    ".ts": "typescript",
-    ".tsx": "tsx",
-    ".js": "javascript",
-    ".jsx": "jsx",
-    ".dart": "dart",
-    ".java": "java",
-    ".cs": "csharp",
-    ".html": "html",
-    ".htm": "html",
-    ".kt": "kotlin",
-    ".swift": "swift",
-    ".go": "go",
-    ".rb": "ruby",
-    ".rs": "rust",
-    ".cpp": "cpp",
-    ".c": "c",
-    ".h": "c",
-    ".hpp": "cpp"
-  },
-  "extension_language_map_add": {},
-  "extension_language_map_remove": [],
-  "auto_entry_candidates": ["index.html", "main.tsx", "main.ts", "main.js", "main.py", "main.dart", "Main.java", "Program.cs"],
-  "auto_entry_candidates_add": [],
-  "auto_entry_candidates_remove": [],
-  "provider_prefixes": {
-    "anthropic": ["claude"],
-    "gemini": ["gemini"],
-    "openai": ["gpt-", "o1", "o3", "text-"]
-  },
-  "provider_prefixes_add": {},
-  "provider_prefixes_remove": {},
-  "ignore_paths": ["/myenv", "services/generated"]
-}
+```bash
+codedoc --init-config
 ```
 
-Configuration precedence, from strongest to weakest:
+This writes `codedoc.config.json` in the current directory. It includes every
+public setting, `api_key: null`, and editable schema-v2 single/triple instruction
+defaults. Credentials are never copied into the file.
 
-1. CLI flags, such as `--model`, `--provider`, `--format`, and `--output`.
-2. Environment variables and values loaded from `.env`.
-3. `codedoc.config.json` or `config.json`.
-4. Built-in defaults.
+Generate an inactive help template under another portable filename:
 
-Supported output formats:
+```bash
+codedoc --init-config team-example
+```
 
-| Value | Result |
+This writes `team-example.json`; runtime does not discover it. Rename or copy it
+to `codedoc.config.json` to activate it. Existing targets are refused unless
+`--force` is supplied. Forced replacement is atomic and creates no backup.
+
+To add or replace only inline instructions while preserving all other semantic
+settings:
+
+```bash
+codedoc --init-instructions
+codedoc --init-instructions single
+codedoc --init-instructions triple --force
+```
+
+The default mode is `both`. A non-null existing `prompt_profiles` value requires
+`--force`; no provider, scan, output, or recovery work occurs during either
+initialization utility.
+
+Useful defaults include:
+
+| Setting | Default |
 | --- | --- |
-| `json` | Writes only `codedoc/codedoc.json`. |
-| `md` | Writes only `codedoc/codedoc.md`. |
-| `both` | Writes both combined files. |
+| `llm_provider` | `auto` |
+| `model_name` | provider default |
+| `documentation_scope` | `entry` |
+| `analysis_mode` | `single` |
+| `output_dir` | `codedoc` |
+| `output_format` | `json` |
+| `max_parallel_files` | `5` |
+| `file_retry_attempts` | `1` |
+| `max_file_size_kb` | `500` |
+| `max_content_chars` | `12000` |
+| `follow_symlinks` | `false` |
+| `propagate_changes` | `true` |
+| `rate_limit_adaptive` | `true` |
 
-Parallelism settings:
+Run `codedoc --init-config` rather than copying a partial example when you need
+the complete current key set.
 
-| Setting | Purpose |
-| --- | --- |
-| `parallel_agents` | Runs the structure and dependency agents for a single file in parallel. Only affects `triple` analysis mode; has no per-file effect in the default `single` mode (one call per file). |
-| `max_parallel_files` | Maximum number of files processed at the same time. Default: `5`. |
-| `file_retry_attempts` | Number of sequential retries for a failed file. Default: `1`. |
-| `max_consecutive_failures` | Stops the run after repeated failures so provider/API problems are visible quickly. Default: `5`. |
-| `max_file_size_kb` | Files larger than this are skipped. Must be a positive integer (at least `1`). Default: `500`. |
-| `follow_symlinks` | When `false` (default) symlinked directories and files are skipped, so a scan never follows a link cycle or escapes the project root. When `true`, links are followed only when their target exists, has the expected type, and resolves inside the project root. Settable via config file or the Python API only — there is no CLI flag or environment variable for it. |
+## Providers and environment variables
 
-Configurable defaults:
-
-| Setting | Purpose |
-| --- | --- |
-| `skip_dirs`, `skip_dirs_add`, `skip_dirs_remove` | Replace, extend, or reduce directory names skipped anywhere in the tree. Use `--remove-skip-dir codedoc` to document this package source while codedoc still skips its output directory. |
-| `extension_language_map`, `extension_language_map_add`, `extension_language_map_remove` | Control which extensions are scanned and what language label each gets. Any extension in the resolved map is supported. |
-| `auto_entry_candidates`, `auto_entry_candidates_add`, `auto_entry_candidates_remove` | Control first-run entry auto-detection when `--entry` is omitted. |
-| `provider_prefixes`, `provider_prefixes_add`, `provider_prefixes_remove` | Control model-name based provider auto-detection and matching API-key lookup. |
-
-Configurable settings:
-
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `max_content_chars` | `12000` | Maximum characters sent to the LLM per file. Long files are truncated once, one WARNING reports the path and counts, and the marker stays inside the ceiling. Raising this improves coverage of large files but increases token usage and cost. Must be at least `1000`. |
-
-Planning and CI settings:
-
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `dry_run` | `false` | Compute the real routing plan without filesystem mutation or provider/API interaction. |
-| `max_files` | `0` | Maximum files allowed to make LLM calls after reuse and resume decisions. `0` is unlimited. |
-| `force_files` | `[]` | Selected project paths to reprocess explicitly before dependency propagation. |
-| `allow_partial` | `false` | Exit 0 only for completed runs that produced partial output after file failures. |
-
-Coverage, analysis, and managed-output settings:
-
-| Setting | Default | Purpose |
-| --- | --- | --- |
-| `documentation_scope` | `entry` | `entry` documents only files reachable from the entry; `all` documents every scanned source file, including disconnected ones. This is run configuration, not resume metadata — it is never recovered from a prior output file, so a later run with no override returns to `entry`. For repeatable full coverage keep `documentation_scope: "all"` in config or pass `--documentation-scope all` each run. |
-| `analysis_mode` | `single` | `single` makes one combined provider call per file (lower cost and latency); `triple` runs the legacy three-agent path (structure + dependency + documentation) at three calls per file. Also settable via `CODEDOC_ANALYSIS_MODE` or `--analysis-mode {single,triple}`. Records carry the resolved mode in private cache-identity metadata, so switching modes reprocesses affected files once. The default `single` is a cost/latency choice; deterministic tests confirm a correct one-call response maps losslessly into the public record, but one-call live prose quality is not claimed to equal the three-call path. |
-| `manage_output_gitignore` | `false` | When `true`, maintains a codedoc-owned block in the output directory's ignore file listing the generated artifacts. Disabled by default; the ignore file is never read for write, created, or modified while off. Failure to update it never changes successful documentation output — it surfaces only as an auxiliary warning. |
-| `output_gitignore_filename` | `.gitignore` | Portable basename of the managed ignore file, resolved beneath the output directory. |
-
-Every public file record also gains an additive `reachable_from_entry` boolean: `true` for files reachable from the configured entry (and for all files when there is no entry), `false` for disconnected files included only by `documentation_scope: "all"`. It appears in JSON, the lossless Markdown embed, and as one `**Reachable from entry:** Yes|No` line per file section in the visible Markdown.
-
-## Prompt profiles
-
-A prompt profile replaces only the `Return EXACTLY this JSON shape:` block in
-per-file prompts. System roles, fixed factuality/safety rules, scanning, parser
-facts, provider/model/key selection, response cleaners, retries, recovery, and
-output paths cannot be changed by a profile. Unknown fields and wrong types are
-rejected before provider creation.
-
-Two equivalent formats are accepted from one registry. The **version-2** literal
-`requested_shape` format keeps your output structures directly inside
-`codedoc.config.json` — its keys and containers resemble the output you want, and
-string values are instruction text:
-
-```json
-{
-  "analysis_mode": "single",
-  "prompt_profiles": {
-    "single": {
-      "requested_shape": {
-        "description": "Explain what this file does and why it exists.",
-        "functions": [
-          {"name": "<function or method defined IN this file>",
-           "description": "Explain its responsibility."}
-        ],
-        "key_concepts": ["Important concept or pattern"]
-      }
-    }
-  }
-}
-```
-
-The legacy **version-1** `fields` format remains valid (inline or as an external
-profile file):
-
-```json
-{
-  "schema_version": 1,
-  "single": {
-    "fields": [
-      {"key": "description", "type": "string", "instruction": "Explain this file accurately."},
-      {"key": "functions", "type": "symbol_list", "instruction": "Describe what it does."}
-    ],
-    "per_language": {}
-  }
-}
-```
-
-`schema_version` is optional — version 1 is inferred from `fields` and version 2
-from `requested_shape`. Equivalent version-1 and version-2 profiles render an
-identical prompt and share the same cache identity, so changing the syntax never
-re-documents a file. Version 2 is accepted **only inline** in
-`codedoc.config.json` (or the Python API `config_overrides`); external profile
-files keep the version-1 `fields` format. In a version-2 object template the
-`name`/`type`/`import` members are fixed structural placeholders (copy them from
-`codedoc --export-prompt-profile`); only `description`/`used_for` and scalar
-string instructions are editable.
-
-Profiles may be supplied inline as `prompt_profiles`, by `prompt_profile_file`,
-with `--prompt-profile FILE`, or as `codedoc-prompt-profiles.json` at the project
-root. `--no-prompt-profile` disables every source. Precedence is disable flag,
-CLI file, configured/environment file, inline object, auto-detected file, then
-the built-in developer standard.
-
-### Single-to-triple conversion proposal
-
-If you select `analysis_mode: "triple"` but configure only a customized `single`
-structure, CodeDoc does not silently fall back to the built-in triple defaults.
-It runs the ordinary paid security review over your single structure plus **one**
-separately disclosed paid routing call, prints a config-ready `triple` proposal,
-and stops without generating documentation. Paste the printed `prompt_profiles`
-block into `codedoc.config.json` and rerun; the confirmed triple structures are
-then reviewed again before any documentation call. CodeDoc never rewrites the
-config automatically. A developer-standard-equivalent single structure in triple
-mode needs no call and proceeds normally; a single-only profile that also defines
-per-language overrides must instead be given explicit `triple` structures.
-
-`description` is required in the single combined and triple documentation
-profiles, including language overrides. Every triple profile contains all three
-agent objects. Supported fields are:
-
-| Mode / agent | Registered paths and types |
-| --- | --- |
-| `single/combined` | `description` (`string`, required), `role_in_system` (`string`), `functions` (`symbol_list`), `classes` (`symbol_list`), `exports` (`string_list`), `dependencies_analysis.internal` (`string_list`), `dependencies_analysis.external` (`string_list`), `dependencies_analysis.dependency_refs` (`string_list`), `dependencies_analysis.catalog_updates` (`catalog_list`), `dependencies_analysis.usage_notes` (`usage_note_list`), `dependencies_analysis.warnings` (`string_list`), `key_concepts` (`string_list`), `usage_example` (`string`) |
-| `triple/structure` | `description` (`string`), `role_in_system` (`string`), `functions` (`symbol_list`), `classes` (`symbol_list`), `exports` (`string_list`) |
-| `triple/dependency` | The six `dependencies_analysis.*` fields listed for `single/combined` |
-| `triple/documentation` | `description` (`string`, required), `role_in_system` (`string`), `key_concepts` (`string_list`), `usage_example` (`string`) |
-
-The list types have fixed member structure: `symbol_list` is
-`[{name, description}]`, `catalog_list` is `[{name, type, used_for}]`, and
-`usage_note_list` is `[{import, used_for}]`. Only each field's primary instruction
-is editable. `codedoc --describe-prompt-schema` (accepts `--format json` or `md`,
-not `both`) prints exact defaults for both formats. `codedoc --export-prompt-profile`
-with no path prints the version-2 config-ready `{"prompt_profiles": {...}}` wrapper
-to stdout (paste it into `codedoc.config.json`); with a `PATH` it writes a
-version-1 external profile usable with `--prompt-profile PATH`. Both exports are
-developer-standard-equivalent and inert until edited.
-
-Active customization destined for planned calls receives a mandatory semantic
-standards/safety review through the configured provider. The reported calls are
-paid usage and results are not persisted. `SAFE` proceeds, `RISKY` warns, and
-`TOO_RISKY` blocks unless `--allow-risky-prompt-customization` (or the matching
-config key) is explicit. This verdict is probabilistic; deterministic validation
-and strict cleaners cannot be overridden. Dry-run makes no review call and reports
-the exact pending batch count.
-
-<!-- BEGIN CODEDOC PROMPT SCHEMA -->
-CodeDoc accepts two equivalent prompt-profile formats from this one registry. The **version-2** literal `requested_shape` form (keys and containers resemble the output you want; string values are instruction text) is the recommended config-inline format. The legacy **version-1** `fields` form remains valid. Version 2 is accepted only inline in `codedoc.config.json` (the `prompt_profiles` value) or the Python API; version-1 `fields` works inline and as an external profile file. The `name`/`type`/`import` members in object templates are fixed structural placeholders — only `description`/`used_for` and scalar instructions are editable.
-
-### `single/combined` requested shape
-
-Version-2 `requested_shape` (literal):
-
-```json
-{
-  "description": "<clear paragraph describing what this file does and why it exists>",
-  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-  "functions": [
-    {"name": "<function or method defined IN this file>", "description": "<what it does>"}
-  ],
-  "classes": [
-    {"name": "<class defined IN this file>", "description": "<what it does>"}
-  ],
-  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"],
-  "dependencies_analysis": {
-    "internal": ["<relative import paths that are project files>"],
-    "external": ["<package names from node_modules / pip / pub / maven>"],
-    "dependency_refs": ["<normalized dependency names used by this file>"],
-    "catalog_updates": [
-      {"name": "<normalized dependency name>", "type": "internal|external", "used_for": "<stable project-level purpose>"}
-    ],
-    "usage_notes": [
-      {"import": "<import string>", "used_for": "<file-specific note only>"}
-    ],
-    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
-  },
-  "key_concepts": ["<important concept or pattern used in this file>"],
-  "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
-}
-```
-
-| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
-| --- | --- | --- | --- | --- | --- | --- |
-| description | string | required | combined | A clear paragraph describing what this file does and why it exists. | <clear paragraph describing what this file does and why it exists> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| role_in_system | string | optional | combined | How this file connects to and supports the rest of the codebase. | <how this file connects to and supports the rest of the codebase> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| functions | symbol_list | optional | combined | Functions/methods defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| classes | symbol_list | optional | combined | Classes defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| exports | string_list | optional | combined | Symbols this module deliberately exposes (including re-exports). | <symbol this module deliberately exposes, including intentional re-exports> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.internal | string_list | optional | combined | Relative import paths that resolve to project files. | <relative import paths that are project files> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.external | string_list | optional | combined | Third-party package names (node_modules / pip / pub / maven). | <package names from node_modules / pip / pub / maven> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.dependency_refs | string_list | optional | combined | Normalized dependency names used by this file. | <normalized dependency names used by this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.catalog_updates | catalog_list | optional | combined | Reusable project-level dependency knowledge; each item is {name, type, used_for}. | <stable project-level purpose> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.usage_notes | usage_note_list | optional | combined | File-specific dependency notes; each item is {import, used_for}. | <file-specific note only> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.warnings | string_list | optional | combined | Dependency concerns, e.g. unused import or potential cycle. | <any dependency concern, e.g. unused import, potential cycle> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| key_concepts | string_list | optional | combined | Important concepts or patterns used in this file. | <important concept or pattern used in this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| usage_example | string | optional | combined | One-line example of how another file imports or uses this file. | <one-line example of how another file imports or uses this file, or empty string> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-
-### `triple/structure` requested shape
-
-Version-2 `requested_shape` (literal):
-
-```json
-{
-  "description": "<one paragraph describing what this file does>",
-  "role_in_system": "<how this file fits into the broader system>",
-  "functions": [
-    {"name": "<function or method defined IN this file>", "description": "<what it does>"}
-  ],
-  "classes": [
-    {"name": "<class defined IN this file>", "description": "<what it does>"}
-  ],
-  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"]
-}
-```
-
-| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
-| --- | --- | --- | --- | --- | --- | --- |
-| description | string | optional | structure | One paragraph describing what this file does. | <one paragraph describing what this file does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| role_in_system | string | optional | structure | How this file fits into the broader system. | <how this file fits into the broader system> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| functions | symbol_list | optional | structure | Functions/methods defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| classes | symbol_list | optional | structure | Classes defined in this file; each item is {name, description}. | <what it does> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| exports | string_list | optional | structure | Symbols this module deliberately exposes (including re-exports). | <symbol this module deliberately exposes, including intentional re-exports> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-
-### `triple/dependency` requested shape
-
-Version-2 `requested_shape` (literal):
-
-```json
-{
-  "dependencies_analysis": {
-    "internal": ["<relative import paths that are project files>"],
-    "external": ["<package names from node_modules / pip / pub / maven>"],
-    "dependency_refs": ["<normalized dependency names used by this file>"],
-    "catalog_updates": [
-      {
-        "name": "<normalized dependency name>",
-        "type": "internal|external",
-        "used_for": "<stable project-level purpose for this dependency>"
-      }
-    ],
-    "usage_notes": [
-      {"import": "<import string>", "used_for": "<file-specific note only>"}
-    ],
-    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
-  }
-}
-```
-
-| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
-| --- | --- | --- | --- | --- | --- | --- |
-| dependencies_analysis.internal | string_list | optional | dependency | Relative import paths that resolve to project files. | <relative import paths that are project files> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.external | string_list | optional | dependency | Third-party package names (node_modules / pip / pub / maven). | <package names from node_modules / pip / pub / maven> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.dependency_refs | string_list | optional | dependency | Normalized dependency names used by this file. | <normalized dependency names used by this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.catalog_updates | catalog_list | optional | dependency | Reusable project-level dependency knowledge; each item is {name, type, used_for}. | <stable project-level purpose for this dependency> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.usage_notes | usage_note_list | optional | dependency | File-specific dependency notes; each item is {import, used_for}. | <file-specific note only> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| dependencies_analysis.warnings | string_list | optional | dependency | Dependency concerns, e.g. unused import or potential cycle. | <any dependency concern, e.g. unused import, potential cycle> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-
-### `triple/documentation` requested shape
-
-Version-2 `requested_shape` (literal):
-
-```json
-{
-  "description": "<clear, detailed paragraph describing what this file does and why it exists>",
-  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-  "key_concepts": ["<important concept or pattern used in this file>"],
-  "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
-}
-```
-
-| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |
-| --- | --- | --- | --- | --- | --- | --- |
-| description | string | required | documentation | A clear, detailed paragraph describing what this file does and why it exists. | <clear, detailed paragraph describing what this file does and why it exists> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| role_in_system | string | optional | documentation | How this file connects to and supports the rest of the codebase. | <how this file connects to and supports the rest of the codebase> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| key_concepts | string_list | optional | documentation | Important concepts or patterns used in this file. | <important concept or pattern used in this file> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-| usage_example | string | optional | documentation | One-line example of how another file would import or use this file. | <one-line example of how another file would import or use this file, or empty string> | Strict type cleaning; unknown keys and invalid/empty values are removed. |
-
-### Complete profile examples
-
-Version-2 config-ready (paste into `codedoc.config.json`; both modes). This is exactly what `codedoc --export-prompt-profile` prints to stdout, and is developer-standard-equivalent (inert until you edit it):
-
-```json
-{
-  "prompt_profiles": {
-    "schema_version": 2,
-    "single": {
-      "requested_shape": {
-        "description": "<clear paragraph describing what this file does and why it exists>",
-        "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-        "functions": [
-          {
-            "name": "<function or method defined IN this file>",
-            "description": "<what it does>"
-          }
-        ],
-        "classes": [
-          {
-            "name": "<class defined IN this file>",
-            "description": "<what it does>"
-          }
-        ],
-        "exports": [
-          "<symbol this module deliberately exposes, including intentional re-exports>"
-        ],
-        "dependencies_analysis": {
-          "internal": [
-            "<relative import paths that are project files>"
-          ],
-          "external": [
-            "<package names from node_modules / pip / pub / maven>"
-          ],
-          "dependency_refs": [
-            "<normalized dependency names used by this file>"
-          ],
-          "catalog_updates": [
-            {
-              "name": "<normalized dependency name>",
-              "type": "internal|external",
-              "used_for": "<stable project-level purpose>"
-            }
-          ],
-          "usage_notes": [
-            {
-              "import": "<import string>",
-              "used_for": "<file-specific note only>"
-            }
-          ],
-          "warnings": [
-            "<any dependency concern, e.g. unused import, potential cycle>"
-          ]
-        },
-        "key_concepts": [
-          "<important concept or pattern used in this file>"
-        ],
-        "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
-      }
-    },
-    "triple": {
-      "structure": {
-        "requested_shape": {
-          "description": "<one paragraph describing what this file does>",
-          "role_in_system": "<how this file fits into the broader system>",
-          "functions": [
-            {
-              "name": "<function or method defined IN this file>",
-              "description": "<what it does>"
-            }
-          ],
-          "classes": [
-            {
-              "name": "<class defined IN this file>",
-              "description": "<what it does>"
-            }
-          ],
-          "exports": [
-            "<symbol this module deliberately exposes, including intentional re-exports>"
-          ]
-        }
-      },
-      "dependency": {
-        "requested_shape": {
-          "dependencies_analysis": {
-            "internal": [
-              "<relative import paths that are project files>"
-            ],
-            "external": [
-              "<package names from node_modules / pip / pub / maven>"
-            ],
-            "dependency_refs": [
-              "<normalized dependency names used by this file>"
-            ],
-            "catalog_updates": [
-              {
-                "name": "<normalized dependency name>",
-                "type": "internal|external",
-                "used_for": "<stable project-level purpose for this dependency>"
-              }
-            ],
-            "usage_notes": [
-              {
-                "import": "<import string>",
-                "used_for": "<file-specific note only>"
-              }
-            ],
-            "warnings": [
-              "<any dependency concern, e.g. unused import, potential cycle>"
-            ]
-          }
-        }
-      },
-      "documentation": {
-        "requested_shape": {
-          "description": "<clear, detailed paragraph describing what this file does and why it exists>",
-          "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-          "key_concepts": [
-            "<important concept or pattern used in this file>"
-          ],
-          "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
-        }
-      }
-    }
-  }
-}
-```
-
-Version-2 `single` only (config-ready):
-
-```json
-{
-  "prompt_profiles": {
-    "schema_version": 2,
-    "single": {
-      "requested_shape": {
-        "description": "<clear paragraph describing what this file does and why it exists>",
-        "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-        "functions": [
-          {
-            "name": "<function or method defined IN this file>",
-            "description": "<what it does>"
-          }
-        ],
-        "classes": [
-          {
-            "name": "<class defined IN this file>",
-            "description": "<what it does>"
-          }
-        ],
-        "exports": [
-          "<symbol this module deliberately exposes, including intentional re-exports>"
-        ],
-        "dependencies_analysis": {
-          "internal": [
-            "<relative import paths that are project files>"
-          ],
-          "external": [
-            "<package names from node_modules / pip / pub / maven>"
-          ],
-          "dependency_refs": [
-            "<normalized dependency names used by this file>"
-          ],
-          "catalog_updates": [
-            {
-              "name": "<normalized dependency name>",
-              "type": "internal|external",
-              "used_for": "<stable project-level purpose>"
-            }
-          ],
-          "usage_notes": [
-            {
-              "import": "<import string>",
-              "used_for": "<file-specific note only>"
-            }
-          ],
-          "warnings": [
-            "<any dependency concern, e.g. unused import, potential cycle>"
-          ]
-        },
-        "key_concepts": [
-          "<important concept or pattern used in this file>"
-        ],
-        "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
-      }
-    }
-  }
-}
-```
-
-A version-2 language override uses `per_language.<tag>.requested_shape` with the same literal shape; its shape fully replaces the parent agent's shape (it is not merged).
-
-Version-1 `fields` (legacy; still valid inline and as an external `codedoc-prompt-profiles.json`). Inline `single`:
-
-```json
-{
-  "schema_version": 1,
-  "single": {
-    "fields": [
-      {
-        "key": "description",
-        "type": "string",
-        "instruction": "<clear paragraph describing what this file does and why it exists>"
-      },
-      {
-        "key": "role_in_system",
-        "type": "string",
-        "instruction": "<how this file connects to and supports the rest of the codebase>"
-      },
-      {
-        "key": "functions",
-        "type": "symbol_list",
-        "instruction": "<what it does>"
-      },
-      {
-        "key": "classes",
-        "type": "symbol_list",
-        "instruction": "<what it does>"
-      },
-      {
-        "key": "exports",
-        "type": "string_list",
-        "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
-      },
-      {
-        "key": "dependencies_analysis.internal",
-        "type": "string_list",
-        "instruction": "<relative import paths that are project files>"
-      },
-      {
-        "key": "dependencies_analysis.external",
-        "type": "string_list",
-        "instruction": "<package names from node_modules / pip / pub / maven>"
-      },
-      {
-        "key": "dependencies_analysis.dependency_refs",
-        "type": "string_list",
-        "instruction": "<normalized dependency names used by this file>"
-      },
-      {
-        "key": "dependencies_analysis.catalog_updates",
-        "type": "catalog_list",
-        "instruction": "<stable project-level purpose>"
-      },
-      {
-        "key": "dependencies_analysis.usage_notes",
-        "type": "usage_note_list",
-        "instruction": "<file-specific note only>"
-      },
-      {
-        "key": "dependencies_analysis.warnings",
-        "type": "string_list",
-        "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
-      },
-      {
-        "key": "key_concepts",
-        "type": "string_list",
-        "instruction": "<important concept or pattern used in this file>"
-      },
-      {
-        "key": "usage_example",
-        "type": "string",
-        "instruction": "<one-line example of how another file imports or uses this file, or empty string>"
-      }
-    ],
-    "per_language": {}
-  }
-}
-```
-
-External `codedoc-prompt-profiles.json` (version-1, both modes — written by `codedoc --export-prompt-profile PATH`):
-
-```json
-{
-  "schema_version": 1,
-  "single": {
-    "fields": [
-      {
-        "key": "description",
-        "type": "string",
-        "instruction": "<clear paragraph describing what this file does and why it exists>"
-      },
-      {
-        "key": "role_in_system",
-        "type": "string",
-        "instruction": "<how this file connects to and supports the rest of the codebase>"
-      },
-      {
-        "key": "functions",
-        "type": "symbol_list",
-        "instruction": "<what it does>"
-      },
-      {
-        "key": "classes",
-        "type": "symbol_list",
-        "instruction": "<what it does>"
-      },
-      {
-        "key": "exports",
-        "type": "string_list",
-        "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
-      },
-      {
-        "key": "dependencies_analysis.internal",
-        "type": "string_list",
-        "instruction": "<relative import paths that are project files>"
-      },
-      {
-        "key": "dependencies_analysis.external",
-        "type": "string_list",
-        "instruction": "<package names from node_modules / pip / pub / maven>"
-      },
-      {
-        "key": "dependencies_analysis.dependency_refs",
-        "type": "string_list",
-        "instruction": "<normalized dependency names used by this file>"
-      },
-      {
-        "key": "dependencies_analysis.catalog_updates",
-        "type": "catalog_list",
-        "instruction": "<stable project-level purpose>"
-      },
-      {
-        "key": "dependencies_analysis.usage_notes",
-        "type": "usage_note_list",
-        "instruction": "<file-specific note only>"
-      },
-      {
-        "key": "dependencies_analysis.warnings",
-        "type": "string_list",
-        "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
-      },
-      {
-        "key": "key_concepts",
-        "type": "string_list",
-        "instruction": "<important concept or pattern used in this file>"
-      },
-      {
-        "key": "usage_example",
-        "type": "string",
-        "instruction": "<one-line example of how another file imports or uses this file, or empty string>"
-      }
-    ],
-    "per_language": {}
-  },
-  "triple": {
-    "structure": {
-      "fields": [
-        {
-          "key": "description",
-          "type": "string",
-          "instruction": "<one paragraph describing what this file does>"
-        },
-        {
-          "key": "role_in_system",
-          "type": "string",
-          "instruction": "<how this file fits into the broader system>"
-        },
-        {
-          "key": "functions",
-          "type": "symbol_list",
-          "instruction": "<what it does>"
-        },
-        {
-          "key": "classes",
-          "type": "symbol_list",
-          "instruction": "<what it does>"
-        },
-        {
-          "key": "exports",
-          "type": "string_list",
-          "instruction": "<symbol this module deliberately exposes, including intentional re-exports>"
-        }
-      ],
-      "per_language": {}
-    },
-    "dependency": {
-      "fields": [
-        {
-          "key": "dependencies_analysis.internal",
-          "type": "string_list",
-          "instruction": "<relative import paths that are project files>"
-        },
-        {
-          "key": "dependencies_analysis.external",
-          "type": "string_list",
-          "instruction": "<package names from node_modules / pip / pub / maven>"
-        },
-        {
-          "key": "dependencies_analysis.dependency_refs",
-          "type": "string_list",
-          "instruction": "<normalized dependency names used by this file>"
-        },
-        {
-          "key": "dependencies_analysis.catalog_updates",
-          "type": "catalog_list",
-          "instruction": "<stable project-level purpose for this dependency>"
-        },
-        {
-          "key": "dependencies_analysis.usage_notes",
-          "type": "usage_note_list",
-          "instruction": "<file-specific note only>"
-        },
-        {
-          "key": "dependencies_analysis.warnings",
-          "type": "string_list",
-          "instruction": "<any dependency concern, e.g. unused import, potential cycle>"
-        }
-      ],
-      "per_language": {}
-    },
-    "documentation": {
-      "fields": [
-        {
-          "key": "description",
-          "type": "string",
-          "instruction": "<clear, detailed paragraph describing what this file does and why it exists>"
-        },
-        {
-          "key": "role_in_system",
-          "type": "string",
-          "instruction": "<how this file connects to and supports the rest of the codebase>"
-        },
-        {
-          "key": "key_concepts",
-          "type": "string_list",
-          "instruction": "<important concept or pattern used in this file>"
-        },
-        {
-          "key": "usage_example",
-          "type": "string",
-          "instruction": "<one-line example of how another file would import or use this file, or empty string>"
-        }
-      ],
-      "per_language": {}
-    }
-  }
-}
-```
-
-A version-1 language override uses `per_language.<tag>.fields` with the same field objects. Its list fully replaces the parent agent's `fields` list; it is not merged. For example: `"per_language": {"python": {"fields": [{"key": "description", "type": "string", "instruction": "Explain this Python module."}]}}`.
-
-| Editable | Fixed / non-overridable |
-| --- | --- |
-| Registered field order; optional-field inclusion; bounded instruction text | System prompts; fixed rules; required fields; key/type vocabulary; object-template identity placeholders (name/type/import); deterministic parser/graph facts; provider/model/key; scanning and control flow; retries/recovery/cache policy; public output vocabulary |
-
-Sequence: resolve source precedence -> schema-version inference -> deterministic schema/type/bound/render validation -> read-only scan and plan -> paid cap and exact review batching -> SAFE continues / RISKY warns / TOO_RISKY blocks unless explicitly overridden -> generation -> strict cleaning and profile filtering -> cache-digest stamping -> recovery/final output. A customized single-only structure selected in triple mode instead runs one paid security review plus one paid routing call and prints a config-ready triple proposal without generating documentation. Dry-run stops after planning and reports pending paid calls without contacting a provider.
-
-<!-- END CODEDOC PROMPT SCHEMA -->
-
-## Environment Variables
-
-Secrets should live in environment variables or a local `.env` file that is ignored by Git. Use [.env.example](.env.example) as the template.
-
-Supported variables:
+Credentials and ordinary scalar overrides may come from operating-system
+environment variables. CodeDoc does not read `.env` files.
 
 | Variable | Purpose |
 | --- | --- |
-| `OPENAI_API_KEY` | OpenAI API key. |
-| `ANTHROPIC_API_KEY` | Anthropic API key. |
-| `GEMINI_API_KEY` | Google Gemini API key. |
-| `GOOGLE_API_KEY` | Google API key alias for Gemini. |
-| `LLM_API_KEY` | Generic fallback API key. |
+| `OPENAI_API_KEY` | OpenAI credential. |
+| `ANTHROPIC_API_KEY` | Anthropic credential. |
+| `GEMINI_API_KEY` / `GOOGLE_API_KEY` | Gemini credential. |
+| `LLM_API_KEY` | Generic fallback credential. |
 | `LLM_PROVIDER` | `auto`, `openai`, `anthropic`, or `gemini`. |
-| `MODEL_NAME` | Model name to use. |
-| `API_BASE_URL` | OpenAI-compatible base URL for custom or gateway endpoints. |
-| `OUTPUT_DIR` | Output directory. |
+| `MODEL_NAME` | Provider model name. |
+| `API_BASE_URL` | OpenAI-compatible endpoint base URL. |
+| `OUTPUT_DIR` | Output directory or exact output file. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
-| `CODEDOC_SAFE_MODE` | Deprecated — crash recovery is always on. |
-| `CODEDOC_MAX_PARALLEL_FILES` | Maximum files processed at once. |
-| `CODEDOC_FILE_RETRY_ATTEMPTS` | Sequential retry attempts for a failed file. |
-| `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive failure threshold before stopping. |
-| `LOG_LEVEL` | `INFO`, `DEBUG`, etc. |
-| `CODEDOC_IGNORE_PATHS` | Semicolon-separated ignore paths. |
-| `CODEDOC_MAX_CONTENT_CHARS` | Maximum characters of file content sent to the LLM. Equivalent to `max_content_chars` in config. |
-| `CODEDOC_DRY_RUN` | Boolean planning-only mode. |
-| `CODEDOC_MAX_FILES` | Non-negative paid-file cap; `0` is unlimited. |
-| `CODEDOC_FORCE_FILES` | Semicolon-separated forced project paths. |
-| `CODEDOC_ALLOW_PARTIAL` | Boolean partial-output exit-code override. |
-| `CODEDOC_PROMPT_PROFILE_FILE` | Explicit prompt-profile JSON path. |
-| `CODEDOC_PROMPT_PROFILE_AUTO_DETECT` | Strict boolean controlling root profile auto-detection. |
-| `CODEDOC_PROMPT_CUSTOMIZATION_ALLOW_RISKY` | Strict boolean allowing only a well-formed `TOO_RISKY` semantic verdict to proceed. |
+| `CODEDOC_MAX_PARALLEL_FILES` | File concurrency. |
+| `CODEDOC_MAX_CONTENT_CHARS` | Per-file prompt content ceiling. |
+| `CODEDOC_DRY_RUN` | Planning-only mode. |
+| `CODEDOC_MAX_FILES` | Paid-file cap (`0` means unlimited). |
+| `CODEDOC_FORCE_FILES` | Semicolon-separated project-relative paths. |
+| `CODEDOC_ALLOW_PARTIAL` | Allow a completed partial run to exit zero. |
 
-Example `.env` for OpenAI:
+Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
+`claude-haiku-4-5-20251001`, and Gemini `gemini-2.5-flash`. Select explicitly with
+`--provider` and `--model`, or use `auto` with a recognized model prefix.
 
-```text
-OPENAI_API_KEY=sk-your-openai-key
-MODEL_NAME=gpt-4o-mini
-CODEDOC_OUTPUT_FORMAT=json
-```
+## Inline instructions
 
-Example `.env` for Anthropic:
+The only runtime instruction source is `prompt_profiles` inside the exact
+`codedoc.config.json` (or an in-memory Python override). Both schema versions are
+readable:
 
-```text
-ANTHROPIC_API_KEY=sk-ant-your-anthropic-key
-LLM_PROVIDER=anthropic
-MODEL_NAME=claude-haiku-4-5-20251001
-CODEDOC_OUTPUT_FORMAT=json
-```
+- schema v1 uses `fields`;
+- schema v2 uses `requested_shape` and is the generated/recommended form.
 
-Example `.env` for Gemini:
-
-```text
-GEMINI_API_KEY=your-gemini-api-key
-LLM_PROVIDER=gemini
-MODEL_NAME=gemini-2.5-flash
-CODEDOC_OUTPUT_FORMAT=json
-```
-
-## Ignore Rules
-
-Use `skip_dirs` for directory names that should be skipped anywhere in the tree.
-
-Use `ignore_paths` for strict project-relative paths. A leading slash means "from the project root", so `/myenv` ignores only the root `myenv` directory.
-
-CLI example:
-
-```bash
-codedoc run --entry main.py --ignore /myenv --ignore services/generated
-```
-
-Environment variable example:
-
-Windows PowerShell:
-
-```powershell
-$env:CODEDOC_IGNORE_PATHS="/myenv;services/generated"
-```
-
-macOS/Linux:
-
-```bash
-export CODEDOC_IGNORE_PATHS="/myenv;services/generated"
-```
-
-## Output and Cache
-
-`codedoc` writes all output to the configured output directory. The project root is never written to.
-
-Default output:
-
-```text
-codedoc/codedoc.json
-```
-
-JSON only:
-
-```bash
-codedoc run --format json
-```
-
-```text
-codedoc/codedoc.json
-```
-
-Markdown only:
-
-```bash
-codedoc run --format md
-```
-
-```text
-codedoc/codedoc.md
-```
-
-Custom output file name and location:
-
-```bash
-codedoc run --entry src/main.py --output project_docs/analysis.json
-codedoc run --entry src/main.py --output project_docs/analysis.md
-```
-
-When a file path is passed to `--output`, the format is inferred from the extension — no need to also pass `--format`. Passing an unsupported extension (anything other than `.json` or `.md`) stops the run with a clear error. `--format both` requires a directory, not a named file.
-
-### Metadata and Resume
-
-Every generated file embeds a small metadata block that stores the entry point and schema version. This is how CodeDoc resumes documentation runs without asking for `--entry` a second time.
-
-In JSON files the block is the first key in the document:
+Every present mode uses a required `common` envelope and an optional
+`per_language` complete replacement:
 
 ```json
 {
-  "_codedoc": {
-    "entry_file": "src/main.py",
-    "schema_version": "1.4"
-  },
-  ...
-}
-```
-
-In Markdown files it is an HTML comment at the very top. It also embeds `file_hashes` so that subsequent Markdown-only runs can perform incremental hash checks without requiring a sibling JSON file:
-
-```text
-<!-- codedoc-ai: {"entry_file": "src/main.py", "schema_version": "1.4", "file_hashes": {"src/main.py": "abc123...", ...}} -->
-```
-
-If this metadata is missing or corrupted, `codedoc` raises a clear error rather than silently failing. To recover, re-run with `--entry` to generate a fresh document.
-
-If a JSON output file is missing but an identically-named Markdown file is present (e.g. `codedoc/claude.md` when `codedoc/claude.json` is expected), `codedoc` reads the entry point from the Markdown metadata and resumes from there.
-
-### Incremental Cache Behaviour
-
-Incremental state lives inside the output file itself — there is no separate cache database. On each run, `codedoc` reads the existing output file, extracts per-file hashes and documentation records, and compares them against current file content. Only files whose content has changed are sent to the LLM.
-
-The CLI logs the selected output format and the exact output file path during execution for better visibility.
-
-The public `codedoc.json` and `codedoc.md` are structured, human- and AI-readable output files. They include:
-
-- Project overview (entry file, file count, languages).
-- File tree representation.
-- Folder-based grouping with summaries.
-- Internal dependency graph between project files.
-- Project-level dependency catalog with deduplicated dependency purpose.
-- Flattened file summaries (no nested duplication).
-- Imports, exports, functions, classes.
-- Internal, external, SDK/standard-library, and reverse dependencies (`imported_by`).
-
-Third-party packages and language standard-library / SDK modules are separated: each file's `links` carry `external_dependencies` (third-party) and `sdk_dependencies` (e.g. Python stdlib, Dart `dart:*`, Node built-ins). The `SDK / Standard Library` Markdown section is rendered only when non-empty, and `internal_dependencies` / `imported_by` are derived **only** from resolved project-graph edges — unresolved agent text can never become an internal link. Missing `sdk_dependencies` loads as an empty list for older outputs.
-
-Dependency links are projected deterministically rather than from model type labels. For Python, the projection is fully parser-authoritative: `external_dependencies` and `sdk_dependencies` come from parser-extracted imports classified against the standard library, and model output can never add, remove, or reclassify a Python link. Generic-parser languages also derive public external/SDK links from graph-filtered unresolved parser imports, so `single` and `triple` modes produce identical links for identical source. React/Node languages still use model-reported external dependencies for bare npm packages because the JS/TS parser intentionally omits those package names; model `catalog_updates` / `usage_notes` may only attach purpose text to a dependency that already exists.
-
-They exclude internal processing data such as raw LLM responses and per-file history.
-
-### Dependency Catalog
-
-`codedoc-ai` keeps dependency details useful without repeating the same explanation in every file. The AI may suggest internal `catalog_updates` while processing individual files. The public output consumes those updates and emits one merged `dependency_catalog`.
-
-Example public JSON:
-
-```json
-{
-  "dependency_catalog": [
-    {
-      "name": "pydantic",
-      "type": "external",
-      "used_for": "Defines validated schema models for API data.",
-      "files": ["schemas/userschema.py", "schemas/projectschema.py"],
-      "file_count": 2
+  "prompt_profiles": {
+    "schema_version": 2,
+    "single": {
+      "common": {
+        "requested_shape": {
+          "description": "Explain what this file does.",
+          "role_in_system": "Explain its architectural role."
+        }
+      },
+      "per_language": {}
     }
-  ],
-  "files": [
-    {
-      "path": "schemas/userschema.py",
-      "links": {
-        "external_dependencies": ["pydantic"],
-        "sdk_dependencies": ["typing"]
-      }
-    }
-  ]
+  }
 }
 ```
 
-The catalog is grouped by `(type, canonical_name)`, so the same package seen across files merges into one entry, while `external` and `sdk` entries stay distinct. An `internal` catalog hint from the model is kept only when it exactly matches a resolved internal path for that file; otherwise it is reclassified as a third-party / SDK dependency.
+The old flat mode layout is rejected with migration guidance. `per_extension` is
+reserved for a future additive design and is rejected in 0.11.3. Its documented
+future precedence is `per_extension > per_language > common`, with full-block
+replacement rather than field merging.
 
-The file still says what it uses. The shared explanation lives once in the catalog. This keeps JSON smaller, Markdown cleaner, and later agent analysis less noisy.
+`analysis_mode: single` uses `single.common`. Triple mode uses explicit structure,
+dependency, and documentation blocks when provided. If triple documentation is
+missing because the profile is single-only, compatible single fields are
+projected deterministically to documentation; structure and dependency use
+built-in defaults. If no compatible customization exists, documentation also uses
+built-in defaults. No paid routing/conversion call is made.
 
-### JSON and Markdown Conversion
+Active custom instructions pass deterministic schema validation and mandatory
+provider-backed semantic review before persistent mutation. `SAFE` continues,
+`RISKY` continues with warnings, and `TOO_RISKY` always stops. There is no bypass.
+Fixed system roles, factuality/safety rules, parser facts, cleaners, provider
+selection, scanning, retry, cache, ownership, and artifact serialization are not
+customizable.
 
-The LLM is asked for structured JSON-like analysis. Final output formatting is handled by Python code:
-
-```text
-AI/cache records
-  -> public project view
-  -> codedoc.json or codedoc.md
-```
-
-That means `--format md` does not require a separate Markdown-generating AI call. Markdown is rendered from the same project view as JSON. The library also provides internal helpers to convert public JSON to Markdown and parse generated Markdown back into the public JSON shape.
-
-## Incremental Processing
-
-On each run, `codedoc` follows this process:
-
-1. Load config and environment.
-2. Resolve the entry point — from `--entry` if given, otherwise from metadata in the existing output file or legacy auto-detection.
-3. Scan supported files while respecting `skip_dirs` and `ignore_paths`.
-4. Build a dependency graph from parsed imports.
-5. Compute the reachable set from the entry point, then select the documented set: under `documentation_scope: "entry"` (default) only reachable files; under `all` every scanned file. Reachability is still recorded for each file regardless of scope.
-6. Normalize forced paths and add valid forced files before dependency propagation.
-7. Compute one immutable plan covering changed, unchanged, reused, resumed, and paid-agent files.
-8. In `--dry-run`, return that plan and approximate lower-bound usage without writing or creating a provider.
-9. In a real run, enforce ownership and `max_files` before creating directories, writers, logs, or providers.
-10. Materialize identical-content and checkpoint reuse exactly as planned.
-11. Send only paid-agent files to the LLM, retry failures, and write final output.
-12. Report actual call attempts and approximate input/output token totals.
-
-This means repeated runs should only send new or changed code to the LLM. Unchanged code and exact duplicate content are reused.
-
-## Crash Recovery and Safe Mode
-
-`codedoc` is built so that interrupting a run — Ctrl-C, a crash, or a dropped
-network connection — never forces you to repeat work that already completed.
-
-### Default: dedicated crash-recovery file
-
-Every run stages in-progress work in a **dedicated crash-recovery file** in the
-output directory, written **before the first AI call** and updated atomically
-after each completed file. Crucially, your last stable completed output is
-**never overwritten while a run is in progress** — it is written once, only on
-clean completion. You do not need to enable anything; `--safe-mode` is deprecated.
-
-- The recovery file is `crash_recovery_<stem>.json`, derived from the final
-  output stem (`codedoc/crash_recovery_codedoc.json` by default,
-  `docs/crash_recovery_report.json` for `--output docs/report.json`). It is
-  written immediately with a `_crash_safety` banner before any LLM request.
-- After every completed file the recovery file is updated (`.tmp` rename —
-  atomic). Your stable `codedoc.json` / Markdown is not opened or touched yet.
-- If a run is interrupted or fails, the **last stable output stays intact** and
-  the recovery file stays on disk marked `_crash_safety`. Re-run the same command
-  — files already recovered are verified by content hash and skipped; only the
-  remaining files are sent to the LLM.
-- On clean completion the stable output is written **first**, and only then is
-  the recovery file deleted. If a file was edited between the interruption and
-  the re-run, its hash no longer matches and it is re-documented, so you never
-  restore stale docs.
-
-The recovery file is written atomically (to a temporary sibling, then renamed) so
-a crash mid-write can never corrupt it, and writes are thread-safe under parallel
-processing.
-
-**Files array ordering.** The `files` array in the recovery file follows the
-topological (dependency-first) processing order, not completion order or
-alphabetical order, so it is structured consistently with the final clean output.
-
-**Reserved names.** `crash_recovery_*` filenames are reserved for codedoc; an
-`--output` whose own filename begins with that prefix is rejected. If a foreign
-or unrelated file already occupies a recovery name, it is preserved untouched and
-codedoc uses the next `crash_recovery_<stem>(2).json`, `(3).json`, … instead.
-
-**MD-only and named-MD runs.** The recovery file is derived from the Markdown
-stem (`codedoc/crash_recovery_codedoc.json` for `--format md`,
-`docs/crash_recovery_report.json` for `--output docs/report.md`) and is removed
-after the clean Markdown write. An older interrupted Markdown run that left a
-`codedoc.json` / `report.json` sibling is detected, used as a resume source, and
-migrated into the new layout automatically — no manual cleanup needed.
-
-**`--safe-mode` (deprecated).** This flag is kept for backwards compatibility
-and now has no effect — crash recovery is always on. Passing it prints a
-deprecation notice. It will be removed in a future release.
-
-### Adaptive rate-limit parallelism
-
-When a provider signals 429 / rate-limit / quota-exceeded, codedoc automatically
-steps down file-level concurrency instead of hammering the API:
-
-```
-[OpenAI] Rate limit detected - your configured max_parallel_files (5) has been
-reduced to 2. Retrying 4 remaining file(s) at lower concurrency.
-```
-
-The default step-down ladder for `max_parallel_files = 5` is `[5, 2, 1]`.
-Customize it in config:
-
-```json
-{
-  "rate_limit_adaptive": true,
-  "parallel_ladder": [5, 2, 1],
-  "respect_retry_after": true,
-  "retry_after_cap_s": 30
-}
-```
-
-Provider-specific rate-limit signals are recognised for OpenAI (`429`, `rate limit`,
-`rate_limit`, `too many requests`, `tokens per min`, `tpm`, `quota`), Anthropic
-(`529`, `overloaded`, `rate_limit`, `429`), and Gemini (`resource_exhausted`,
-`quota`, `429`, `503`). Non-rate-limit errors never trigger a step-down.
-
-codedoc sleeps between parallel step-down rungs using provider-aware
-backoff. You can tune this in config:
-
-```json
-{
-  "rate_limit_backoff_s": null,
-  "rate_limit_backoff_scale": null,
-  "rate_limit_signals_add": ["capacity exceeded", "throttled"],
-  "rate_limit_signals_remove": ["503"]
-}
-```
-
-Set `rate_limit_backoff_s` to `0` to disable computed inter-rung backoff.
-`Retry-After` hints are still honored when `respect_retry_after` is true.
-
-### Unrecoverable-error fast stop
-
-Not every provider error can recover by retrying. codedoc inspects the text
-already present in the raised exception chain — no extra network call, no
-preflight — and stops a doomed run early instead of retrying every file and
-sleeping through the backoff schedule. Classification is deliberately
-conservative: when in doubt an error stays retryable, and bare numeric HTTP codes
-(`401`/`402`/`403`/`404`/`413`) never trigger a stop on their own.
-
-- **Terminal stop (exit `2`).** A confirmed billing/credit exhaustion, invalid
-  credentials, unknown model, or forbidden/permission error stops on its first
-  occurrence — the same setup/credentials exit code as `ConfigError`.
-- **Input-too-large.** A request/context-too-large error is recorded as a failed
-  file *without* any retry (re-sending the identical oversized prompt cannot
-  succeed); the rest of the run proceeds.
-- **Bounded rate-limit stop (exit `1`).** A persistent ambiguous rate limit /
-  quota exhaustion that carries no billing phrase (for example Gemini
-  `RESOURCE_EXHAUSTED`) is still treated as a rate limit, but the total retrying
-  is now bounded by progress: after one full step-down ladder traversal plus one
-  lowest-concurrency pass in which no file succeeds, the run stops. This is a
-  transient "retry later" condition, so it exits `1`, not `2`.
-
-A bare `quota` / `resource_exhausted` / `429`, generic `5xx`, timeouts, and
-JSON-parse failures are **not** treated as terminal — they remain ordinary
-retryable or rate-limited errors. Every stop preserves the stable output intact
-and the dedicated crash-recovery file; re-running the same command resumes and
-re-documents only the unfinished files.
-
-### Lossless Markdown regeneration
-
-Markdown output remains human-readable, but codedoc now embeds a hidden
-base64-encoded public JSON view in a `<!-- codedoc-ai-view-base64 ... -->`
-comment. This lets later Markdown-to-JSON conversion and incremental re-runs
-recover dependency catalogs, per-file dependency metadata, links, and hashes
-without another LLM call. Legacy Markdown without the embedded view still uses
-the best-effort visible Markdown parser.
-
-### Issue log (`error.log`)
-
-When any issue is recorded during a run, codedoc writes `error.log` inside the
-**output directory** (e.g. `codedoc/error.log`), not in the project root.  The
-absolute path is printed at the end of the run:
-
-```
-1 issue(s) recorded (all recovered). See /path/to/codedoc/error.log for details.
-```
-
-Recovered rate-limit step-downs are recorded as warnings in `error.log` but
-**do not** appear as errors in the final `codedoc.json` or Markdown output.
-Only hard file failures are surfaced there.
-
-### Ownership guard
-
-`codedoc` checks that any existing file at the target path was produced by
-codedoc (a `_codedoc` metadata block in JSON, or a `<!-- codedoc-ai: -->` comment
-in Markdown). If the file is foreign, malformed, or empty, the run stops with a
-clear `ConfigError`. Choose a different `--output` directory or remove the
-conflicting file to proceed.
-
-**Preflight.** The ownership check now runs *before* any filesystem
-changes, directory creation, scanning, or LLM calls. A foreign target that would
-block the final write is caught immediately — no tokens are spent and no output
-directory is created.
-
-## Planning, Cost Guardrails, and CI
-
-Use `codedoc run --dry-run --max-files 25` to inspect a run safely. Dry-run
-uses the same routing plan as real execution. It may read source, existing
-outputs, live backups, and legacy checkpoints, but it does not create an output
-directory, write `error.log`, initialize `SafeWriter`, create a provider, or
-call an API. It works without an API key.
-
-Token figures use a simple character heuristic. Dry-run input totals are
-explicitly lower bounds because the documentation prompt includes earlier
-agent responses that do not exist during planning. No monetary estimate is
-provided.
-
-`--max-files N` counts only files that would actually make LLM calls after
-unchanged skipping, identical-content reuse, and eligible checkpoint reuse. A
-real run exceeding the cap exits `2` before persistent mutation or provider
-creation. Dry-run still exits `0` and reports that the equivalent real run
-would fail.
-
-Force selected files with repeatable options:
+Use the registry-backed reference for exact fields and types:
 
 ```bash
-codedoc run --force-files src/a.py --force-files src/b.py
+codedoc --describe-prompt-schema --format json
+codedoc --describe-prompt-schema --format md
 ```
 
-Explicitly forced files bypass unchanged, identical-content, and checkpoint
-reuse. They are added before normal dependency propagation; propagated
-dependents retain normal reuse behavior.
+`--format both` is intentionally invalid for this utility.
 
-CLI exit codes:
+## Output, incremental reuse, and ownership
+
+JSON mode reads only its exact JSON target. Markdown mode reads only its exact
+Markdown target, including the lossless embedded project view. Both mode reads
+only its exact two targets and blocks before provider contact if schema, entry,
+path set, hashes, or cache identity disagree.
+
+An unrelated sibling is never used. For example, selecting `docs/report.json`
+does not inspect `docs/report.md`. When no selected output supplies an entry,
+ordinary source entry auto-detection runs.
+
+CodeDoc refuses to overwrite foreign, empty, or malformed final targets. Custom
+output names remain supported when supplied explicitly:
+
+```bash
+codedoc run --output docs/report.json
+codedoc run --output docs/report.md
+```
+
+`--format both` requires a directory because it writes two files.
+
+## Crash recovery
+
+Every real run uses exactly `<output_dir>/crash_recovery.json`. The file is
+created only after ownership/path checks, deterministic validation, read-only
+planning, paid caps, and any mandatory semantic review have succeeded. It is
+updated atomically after each completed file.
+
+The recovery file includes a versioned identity covering project root, exact
+selected targets, entry, documentation scope, analysis mode/revision, and sorted
+per-language profile digests. A compatible in-progress file is resumed. A
+foreign, malformed, completed, unsupported, or identity-mismatched file blocks
+without mutation. To start fresh, delete `crash_recovery.json` in the output
+directory; to resume, restore the prior run configuration.
+
+On success, final output is atomically replaced first and recovery is removed
+second. Interruptions, provider failures, and final-output failures preserve the
+stable prior output and the recovery file. Dry-run may inspect the exact recovery
+path but never creates, changes, or deletes it.
+
+## Planning and diagnostics
+
+`--dry-run` performs scanning and planning without persistent mutation, provider
+creation, or API calls. `--max-files N` counts only files that would make
+documentation calls. `--force-files PATH` bypasses reuse for a selected file.
+
+Issues are bounded in memory, printed to the terminal, and included in permitted
+final/recovery metadata. CodeDoc does not write `error.log`.
+
+Exit codes:
 
 | Code | Meaning |
 | --- | --- |
-| `0` | Success, dry-run success, or explicitly allowed partial output. |
-| `1` | File-processing failure, output/write failure, bounded rate-limit / quota stop, or unexpected fatal error. |
-| `2` | Invalid input/config/path, ownership conflict, cap exceeded, provider initialization failure, or terminal provider stop (billing/credit, credentials, unknown model, forbidden). |
+| `0` | Success, dry-run success, or explicitly allowed completed partial output. |
+| `1` | Processing/output failure or bounded rate-limit stop. |
+| `2` | Invalid input/config/path, ownership/recovery conflict, cap failure, or terminal provider failure. |
 | `130` | Keyboard interrupt. |
 
-`--allow-partial` changes only completed runs with file-level failures. Setup,
-ownership, cap, provider initialization, write, and unexpected fatal errors
-remain nonzero.
-
-A packaged manual-only GitHub Actions example is installed at
-`codedoc/templates/github-actions-codedoc.yml`. It performs a dry-run before
-the paid run, applies the same cap to both, uploads documentation as an
-artifact, uses `contents: read`, and never commits or pushes. Selected source
-is sent to an external provider and API usage may cost money.
-
 ## Python API
-
-The CLI is not required. You can run the same workflow from Python with `run_pipeline(...)`.
-
-For the current working directory, pass only the config dict:
 
 ```python
 from codedoc import run_pipeline
 
 stats = run_pipeline({
     "entry_file": "src/main.py",
-    "llm_provider": "auto",
-    "model_name": "gpt-4o-mini",
-    "parallel_agents": True,
-    "max_parallel_files": 5,
-    "file_retry_attempts": 1,
-    "output_dir": "codedoc",
     "output_format": "json",
-    "ignore_paths": ["/myenv", "services/generated"],
-})
-
-print(stats)
-```
-
-You can also pass a project root when you want to document another directory:
-
-```python
-from codedoc import run_pipeline
-
-run_pipeline(r"D:\projects\my_app", {"output_format": "both"})
-```
-
-These forms are equivalent:
-
-```python
-run_pipeline()
-run_pipeline(".")
-run_pipeline({})
-```
-
-Equivalent examples:
-
-```python
-from codedoc import run_pipeline
-
-# Same idea as: codedoc run --format md
-run_pipeline({"output_format": "md"})
-
-# Same idea as: codedoc run D:\projects\my_app --format both
-run_pipeline(r"D:\projects\my_app", {"output_format": "both"})
-
-# Same idea as: codedoc run --max-parallel-files 3 --ignore /myenv
-run_pipeline({
     "max_parallel_files": 3,
-    "ignore_paths": ["/myenv"],
 })
+
+stats = run_pipeline("/path/to/project", {"output_format": "both"})
 ```
 
-CLI flags map directly to config keys:
-
-| CLI option | Python config key |
-| --- | --- |
-| `PATH` | Optional first `run_pipeline(project_root, ...)` argument |
-| `--entry` | `entry_file` |
-| `--documentation-scope` | `documentation_scope` |
-| `--analysis-mode` | `analysis_mode` |
-| `--manage-output-gitignore` / `--no-manage-output-gitignore` | `manage_output_gitignore` |
-| `--provider` | `llm_provider` |
-| `--model` | `model_name` |
-| `--output` | `output_dir` |
-| `--format` | `output_format` |
-| `--ignore` | `ignore_paths` |
-| `--dry-run` | `dry_run: True` |
-| `--max-files` | `max_files` |
-| `--force-files` | `force_files` |
-| `--allow-partial` | `allow_partial: True` |
-| `--no-parallel` | `parallel_agents: False` |
-| `--max-parallel-files` | `max_parallel_files` |
-| `--verbose` | `log_level: "DEBUG"` |
+In-memory overrides are supported but do not create another persistent config
+source. Removed settings such as external prompt paths, risky-review bypass,
+safe mode, and managed output ignore files raise targeted configuration errors.
 
 ## Troubleshooting
 
-If API mode fails with an API key error:
-
-- Set `OPENAI_API_KEY` for OpenAI models.
-- Set `ANTHROPIC_API_KEY` for Claude models. Make sure model names start with `claude`.
-- Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` for Gemini models. Make sure model names start with `gemini`, or pass `--provider gemini`.
-
-If many files fail quickly:
-
-- Check `error.log` in the output directory (e.g. `codedoc/error.log`); `codedoc` records the file and failure context.
-- Verify API credentials and model name.
-- Check provider rate limits and network connectivity.
-- Lower `max_parallel_files`.
-- Increase `file_retry_attempts` if failures are temporary.
-
-If files are missing from output:
-
-- Check `entry_file` or `--entry`; under the default `documentation_scope: "entry"` only files reachable from the entry are documented. Pass `--documentation-scope all` to document every scanned source file.
-- Check `skip_dirs` and `ignore_paths`.
-- Check `supported_extensions`.
-- Check `max_file_size_kb`.
+- Missing credential: set the matching provider environment variable.
+- Unexpected paid work: run the identical command with `--dry-run` and inspect
+  the exact output selection and analysis mode.
+- Recovery conflict: follow the error’s expected/found field, then restore the
+  prior configuration or delete the exact `crash_recovery.json` to start fresh.
+- Missing files: check entry selection, `documentation_scope`, `skip_dirs`,
+  `ignore_paths`, `extension_language_map`, and `max_file_size_kb`.
+- Rate limits: lower `max_parallel_files`; adaptive stepping is enabled by default.
 
 ## License
 
-This project is released under the MIT License. See [LICENSE](https://github.com/atharvm416/codedoc-ai/blob/main/LICENSE).
+See [LICENSE](LICENSE).

@@ -97,7 +97,7 @@ def test_sequential_abort_without_retry(tmp_path, exc):
     orch = _RaisingOrch(exc)
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     with pytest.raises(UnrecoverableProviderError) as excinfo:
         ex._process_files_sequentially(
@@ -137,7 +137,7 @@ def test_sequential_input_permanent_marks_failed_without_retry_and_continues(tmp
     orch = _Orch()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
     new_results: dict = {}
 
     outcome = ex._process_files_sequentially(
@@ -177,7 +177,7 @@ def test_sequential_transient_error_still_retries_and_succeeds(tmp_path):
     orch = _FlakyOrch()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     ex._process_files_sequentially(
         _descriptors(tmp_path, 1),
@@ -209,7 +209,7 @@ def test_parallel_abort_without_retry(tmp_path, exc):
     orch = _RaisingOrch(exc)
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
     recorder = SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {})
 
     with pytest.raises(UnrecoverableProviderError) as excinfo:
@@ -244,7 +244,7 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
     orch = _SlowAfterFirst(TERMINAL_BILLING)
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
     recorder = SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {})
 
     with pytest.raises(UnrecoverableProviderError):
@@ -281,7 +281,7 @@ def test_parallel_input_permanent_is_recorded_without_sequential_retry(tmp_path)
     orch = _Orch()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
     recorder = SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {})
 
     succeeded, rate_limited, retryable = ex._process_descriptor_batch(
@@ -350,12 +350,8 @@ def test_pipeline_records_and_flushes_abort_and_preserves_backup(tmp_path, monke
     assert excinfo.value.category == "terminal"
 
     out_dir = tmp_path / "docs"
-    # The pipeline recorded + flushed the abort to error.log before re-raising.
-    error_log = out_dir / "error.log"
-    assert error_log.exists()
-    log_text = error_log.read_text(encoding="utf-8")
-    assert "UnrecoverableProviderError" in log_text
-    assert "provider abort" in log_text
+    # Diagnostics are terminal/in-memory only; no persistent issue log is written.
+    assert not (out_dir / "error.log").exists()
 
     # The final output write was never reached, so the dedicated recovery file is
     # left intact and resumable (still the in-progress crash-safety file, not
@@ -363,7 +359,7 @@ def test_pipeline_records_and_flushes_abort_and_preserves_backup(tmp_path, monke
     # output (docs/codedoc.json) was never created.
     assert wrote["called"] is False
     assert not (out_dir / "codedoc.json").exists()
-    backup = out_dir / "crash_recovery_codedoc.json"
+    backup = out_dir / "crash_recovery.json"
     assert backup.exists()
     data = json.loads(backup.read_text(encoding="utf-8"))
     assert "_crash_safety" in data or data.get("_codedoc", {}).get("status") == "in_progress"

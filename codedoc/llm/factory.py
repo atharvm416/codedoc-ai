@@ -104,8 +104,8 @@ def _make_api(
         raise ConfigError(
             "API mode requires an API key. "
             "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY "
-            "(or GOOGLE_API_KEY) in your .env file, or pass LLM_API_KEY "
-            "as a generic fallback."
+            "(or GOOGLE_API_KEY) as an environment variable, or pass "
+            "LLM_API_KEY as a generic fallback."
         )
 
     model_lower = model.lower()

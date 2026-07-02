@@ -35,13 +35,10 @@ from codedoc.core import discovery, execution, resume
 # ---------------------------------------------------------------------------
 
 RESUME_REEXPORTS = [
-    "_resolve_live_backup_path",
     "_load_existing_file_docs",
     "_load_existing_file_docs_from_md",
     "_public_record_to_doc",
     "_build_documentation_records",
-    "_cleanup_stale_build_file",
-    "_remove_legacy_db",
 ]
 
 DISCOVERY_REEXPORTS = [

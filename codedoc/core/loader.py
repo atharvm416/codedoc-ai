@@ -9,12 +9,6 @@ from pathlib import Path
 from pathlib import PureWindowsPath
 from typing import Any
 
-try:
-    from dotenv import load_dotenv
-except ImportError:
-    def load_dotenv(path):
-        return False
-
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
 from codedoc.utils.logger import get_logger
@@ -33,8 +27,6 @@ DEFAULTS: dict[str, Any] = {
     "output_format": "json",
     "output_json_filename": "codedoc.json",
     "output_md_filename": "codedoc.md",
-    "manage_output_gitignore": False,
-    "output_gitignore_filename": ".gitignore",
     # supported_extensions: read-only after load_config() — always derived from
     # the resolved extension_language_map.  The value listed here is the legacy
     # default set and acts as the detection baseline: if a caller passes a
@@ -44,7 +36,6 @@ DEFAULTS: dict[str, Any] = {
         ".py", ".ts", ".tsx", ".js", ".jsx", ".dart",
         ".java", ".cs", ".html",
     ],
-    "safe_mode": False,
     "parallel_agents": True,
     "max_parallel_files": 5,
     "file_retry_attempts": 1,
@@ -180,23 +171,52 @@ DEFAULTS: dict[str, Any] = {
     # Mode-based JSON prompt profiles
     # -----------------------------------------------------------------------
     # Inline profile object (single and/or triple sections) customizing the
-    # requested JSON shape block. ``None`` means no inline profile.
+    # requested JSON shape block. ``None`` means no inline profile.  This is the
+    # only prompt-customization source in 0.11.3; external profile files,
+    # auto-detection, and the disable flag were removed.
     "prompt_profiles": None,
-    # Path to an external profile JSON file (relative to the project root, or an
-    # absolute path). Never merged with ``prompt_profiles``.
-    "prompt_profile_file": None,
-    # When True (default), auto-detect ``codedoc-prompt-profiles.json`` at the
-    # project root if no inline/explicit profile is given.
-    "prompt_profile_auto_detect": True,
-    # Internal disable flag set by ``--no-prompt-profile``; highest precedence.
-    "prompt_profile_disabled": False,
-    # Explicit user override that lets a TOO_RISKY standards/safety verdict
-    # proceed at the user's own risk. Never relaxes deterministic validation or
-    # the strict cleaners.
-    "prompt_customization_allow_risky": False,
 }
 
-_CONFIG_FILENAMES = ["codedoc.config.json", "config.json"]
+# CodeDoc automatically reads exactly one configuration file at the project
+# root.  There is no candidate list, no ``config.json`` fallback, and no
+# ``--config FILE`` runtime selector.
+_CONFIG_FILENAME = "codedoc.config.json"
+
+# Runtime keys removed in 0.11.3.  Detected in the exact config file and in
+# in-memory overrides *before* the loader filters unknown/default keys, so a
+# stale config that still sets one fails loudly instead of looking active while
+# CodeDoc silently ignores it.  Each value explains the 0.11.3 behavior.
+_REMOVED_CONFIG_KEYS: dict[str, str] = {
+    "safe_mode": (
+        "crash recovery is always active in 0.11.3; there is no safe_mode "
+        "setting and no replacement is required."
+    ),
+    "manage_output_gitignore": (
+        "CodeDoc no longer manages an output .gitignore; manage your "
+        "version-control policy yourself."
+    ),
+    "output_gitignore_filename": (
+        "CodeDoc no longer manages an output .gitignore; manage your "
+        "version-control policy yourself."
+    ),
+    "prompt_profile_file": (
+        "external prompt-profile files were removed; move the profile inline "
+        "under 'prompt_profiles' in codedoc.config.json."
+    ),
+    "prompt_profile_auto_detect": (
+        "prompt-profile auto-detection was removed; the only profile source is "
+        "the inline 'prompt_profiles' value in codedoc.config.json."
+    ),
+    "prompt_profile_disabled": (
+        "the prompt-profile disable flag was removed; omit 'prompt_profiles' "
+        "(or set it to null) to run with developer defaults."
+    ),
+    "prompt_customization_allow_risky": (
+        "the risky-customization override was removed; a TOO_RISKY semantic "
+        "review always blocks and cannot be bypassed."
+    ),
+}
+
 _ENV_KEY_MAP = {
     "LLM_PROVIDER": "llm_provider",
     "MODEL_NAME": "model_name",
@@ -209,7 +229,6 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_PARALLEL_FILES": "max_parallel_files",
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
-    "CODEDOC_SAFE_MODE": "safe_mode",
     "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
     "CODEDOC_DRY_RUN": "dry_run",
     "CODEDOC_MAX_FILES": "max_files",
@@ -217,9 +236,6 @@ _ENV_KEY_MAP = {
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
     "CODEDOC_ANALYSIS_MODE": "analysis_mode",
     "CODEDOC_TRUNCATION_HEAD_RATIO": "truncation_head_ratio",
-    "CODEDOC_PROMPT_PROFILE_FILE": "prompt_profile_file",
-    "CODEDOC_PROMPT_PROFILE_AUTO_DETECT": "prompt_profile_auto_detect",
-    "CODEDOC_PROMPT_CUSTOMIZATION_ALLOW_RISKY": "prompt_customization_allow_risky",
 }
 
 # Allowed values for the selectable per-file analysis mode.
@@ -234,41 +250,38 @@ _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
 # ---------------------------------------------------------------------------
 
 def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Load and merge config from JSON, .env, environment, and defaults."""
+    """Load and merge config from the exact config file, environment, and defaults.
+
+    CodeDoc automatically reads exactly one persistent configuration file,
+    ``<root>/codedoc.config.json``.  No other filename is probed, no ``.env`` is
+    loaded, and there is no ``--config FILE`` selector.  Programmatic callers may
+    still pass in-memory *overrides*; that does not create a second persistent
+    source.
+    """
     config: dict[str, Any] = dict(DEFAULTS)
 
-    env_file = root / ".env"
-    if env_file.exists():
-        load_dotenv(env_file)
-        logger.debug("Loaded .env from %s", env_file)
-
-    json_loaded = False
-    for filename in _CONFIG_FILENAMES:
-        candidate = root / filename
-        if candidate.exists():
-            try:
-                # Parse through the shared strict loader so a duplicate
-                # object key anywhere in the file (including nested inside
-                # ``prompt_profiles``) is rejected instead of silently
-                # last-key-wins.
-                data = loads_no_duplicate_keys(candidate.read_text(encoding="utf-8"))
-                if not isinstance(data, dict):
-                    raise ConfigError(
-                        f"'{filename}' must be a JSON object, got {type(data).__name__}"
-                    )
-                config.update({k: v for k, v in data.items() if k in DEFAULTS})
-                logger.info("Config loaded from %s", candidate)
-                json_loaded = True
-                break
-            except DuplicateJSONKeyError as exc:
+    candidate = root / _CONFIG_FILENAME
+    if candidate.exists():
+        try:
+            # Parse through the shared strict loader so a duplicate object key
+            # anywhere in the file (including nested inside ``prompt_profiles``)
+            # is rejected instead of silently last-key-wins.
+            data = loads_no_duplicate_keys(candidate.read_text(encoding="utf-8"))
+            if not isinstance(data, dict):
                 raise ConfigError(
-                    f"Invalid JSON in '{filename}': duplicate key {exc.key!r}."
-                ) from exc
-            except json.JSONDecodeError as exc:
-                raise ConfigError(f"Invalid JSON in '{filename}': {exc}") from exc
-
-    if not json_loaded:
-        logger.info("No codedoc.config.json or config.json found in %s; using defaults.", root)
+                    f"'{_CONFIG_FILENAME}' must be a JSON object, got {type(data).__name__}"
+                )
+            _reject_removed_keys(data, source=_CONFIG_FILENAME)
+            config.update({k: v for k, v in data.items() if k in DEFAULTS})
+            logger.info("Config loaded from %s", candidate)
+        except DuplicateJSONKeyError as exc:
+            raise ConfigError(
+                f"Invalid JSON in '{_CONFIG_FILENAME}': duplicate key {exc.key!r}."
+            ) from exc
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Invalid JSON in '{_CONFIG_FILENAME}': {exc}") from exc
+    else:
+        logger.info("No %s found in %s; using defaults.", _CONFIG_FILENAME, root)
 
     for env_key, config_key in _ENV_KEY_MAP.items():
         val = os.environ.get(env_key)
@@ -280,6 +293,7 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
             logger.debug("Config override from env: %s", env_key)
 
     if overrides:
+        _reject_removed_keys(overrides, source="config_overrides")
         config.update({k: v for k, v in overrides.items() if k in DEFAULTS})
 
     # Resolve <key> / <key>_add / <key>_remove overrides for configurable
@@ -293,6 +307,33 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
 
     _validate(config)
     return config
+
+
+# ---------------------------------------------------------------------------
+# Removed-key detection
+# ---------------------------------------------------------------------------
+
+def _reject_removed_keys(data: dict[str, Any], *, source: str) -> None:
+    """Raise :class:`ConfigError` when *data* sets any key removed in 0.11.3.
+
+    Detects the removed keys *before* the loader filters unknown/default keys so a
+    stale config or override that still sets one fails loudly with the replacement
+    behavior, instead of looking active while CodeDoc silently ignores it.  Names
+    every offending key so a config carrying several is fixed in one pass.
+    """
+    if not isinstance(data, dict):
+        return
+    offending = [key for key in _REMOVED_CONFIG_KEYS if key in data]
+    if not offending:
+        return
+    details = "\n".join(
+        f"  - '{key}': {_REMOVED_CONFIG_KEYS[key]}" for key in offending
+    )
+    plural = "keys" if len(offending) > 1 else "key"
+    raise ConfigError(
+        f"{source} sets {len(offending)} removed configuration {plural}:\n{details}\n"
+        "Remove the listed key(s) to continue."
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -478,20 +519,19 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
             "ending in '.json' or '.md' (e.g. 'docs/report.json')."
         )
 
-    # ``crash_recovery_*`` filenames are reserved for codedoc's dedicated
-    # crash-recovery file and must never be a user output target — that is the
-    # exact file codedoc keeps separate from the stable output.  Check only
-    # the user-supplied filename's own stem (covering both ``.json`` and ``.md``
-    # forms, and the ``(<n>)``-suffixed forms whose stem still begins with the
-    # prefix).  The same constant guards the recovery-path writer so the two
-    # cannot drift.  Imported locally to avoid an import cycle with resume.py.
-    from codedoc.core.resume import CRASH_RECOVERY_PREFIX
+    # ``crash_recovery.json`` is the single fixed name codedoc keeps for its
+    # dedicated crash-recovery file and must never be a user output target.  Check
+    # the user-supplied filename exactly (case-insensitively, matching the
+    # collision guard applied to the resolved paths).  The same constant guards the
+    # recovery-path writer so the two cannot drift.  Imported locally to avoid an
+    # import cycle with resume.py.
+    from codedoc.core.resume import RECOVERY_FILENAME
 
-    if p.stem.startswith(CRASH_RECOVERY_PREFIX):
+    if p.name.casefold() == RECOVERY_FILENAME.casefold():
         raise ConfigError(
-            f"'{p.name}' uses the reserved '{CRASH_RECOVERY_PREFIX}' prefix, which "
-            "codedoc keeps for its crash-recovery file and cannot be used as an "
-            "output target.\n"
+            f"'{p.name}' is the reserved crash-recovery filename, which codedoc "
+            "keeps separate from the stable output and cannot be used as an output "
+            "target.\n"
             "Choose a different output name — e.g. 'docs/report.json' or a "
             "directory like 'docs_output'."
         )
@@ -612,12 +652,6 @@ def _validate(config: dict[str, Any]) -> None:
     config["follow_symlinks"] = _coerce_strict_bool(
         config.get("follow_symlinks", False), "follow_symlinks"
     )
-    config["manage_output_gitignore"] = _coerce_strict_bool(
-        config.get("manage_output_gitignore", False), "manage_output_gitignore"
-    )
-    _validate_portable_filename(
-        config.get("output_gitignore_filename"), "output_gitignore_filename"
-    )
 
     if (
         config["llm_mode"] == "api"
@@ -627,15 +661,8 @@ def _validate(config: dict[str, Any]) -> None:
         logger.warning(
             "llm_mode is 'api' but no API key was found. Set LLM_API_KEY, "
             "OPENAI_API_KEY, ANTHROPIC_API_KEY, GEMINI_API_KEY, or GOOGLE_API_KEY "
-            "in your environment or .env file."
+            "as an environment variable."
         )
-
-    # Coerce safe_mode to bool (env vars arrive as strings).
-    raw_safe = config.get("safe_mode", False)
-    if isinstance(raw_safe, str):
-        config["safe_mode"] = raw_safe.strip().lower() in ("true", "1", "yes")
-    else:
-        config["safe_mode"] = bool(raw_safe)
 
     if not isinstance(config.get("supported_extensions"), list):
         raise ConfigError("supported_extensions must be a list of file extensions.")
@@ -825,29 +852,13 @@ def _validate(config: dict[str, Any]) -> None:
         )
     config["truncation_head_ratio"] = ratio_val
 
-    # Prompt-profile keys.  Structural profile validation happens later in
-    # prompt_profiles.resolve_profile_source; here we only enforce the config-level
-    # value types and strict booleans so an unrecognized value is a hard error.
+    # Inline prompt-customization profile.  Structural profile validation happens
+    # later in prompt_profiles.resolve_profile_source; here we only enforce that
+    # the config-level value is an object or null.  ``prompt_profiles`` is the only
+    # profile source in 0.11.3.
     inline_profiles = config.get("prompt_profiles")
     if inline_profiles is not None and not isinstance(inline_profiles, dict):
         raise ConfigError("prompt_profiles must be an inline JSON object or null.")
-    profile_file = config.get("prompt_profile_file")
-    if profile_file is not None and not (
-        isinstance(profile_file, str) and not isinstance(profile_file, bool)
-    ):
-        raise ConfigError("prompt_profile_file must be a path string or null.")
-    if isinstance(profile_file, str) and not profile_file.strip():
-        raise ConfigError("prompt_profile_file must be a non-empty path string or null.")
-    config["prompt_profile_auto_detect"] = _coerce_strict_bool(
-        config.get("prompt_profile_auto_detect", True), "prompt_profile_auto_detect"
-    )
-    config["prompt_customization_allow_risky"] = _coerce_strict_bool(
-        config.get("prompt_customization_allow_risky", False),
-        "prompt_customization_allow_risky",
-    )
-    config["prompt_profile_disabled"] = _coerce_strict_bool(
-        config.get("prompt_profile_disabled", False), "prompt_profile_disabled"
-    )
 
 
 _WINDOWS_RESERVED_NAMES = {

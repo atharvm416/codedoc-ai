@@ -18,10 +18,42 @@ from codedoc.core.record_meta import CACHE_IDENTITY_KEYS, normalized_identity_va
 LANGS = frozenset({"python", "java"})
 
 
+def _to_envelope(raw):
+    """Wrap a legacy flat profile dict into the 0.11.3 ``common`` envelope."""
+    if not isinstance(raw, dict):
+        return raw
+    out = {k: v for k, v in raw.items() if k in ("schema_version", "$comment")}
+    if isinstance(raw.get("single"), dict) and "common" not in raw["single"]:
+        sec = raw["single"]
+        common = {k: sec[k] for k in ("fields", "requested_shape") if k in sec}
+        new_sec = {"common": common}
+        if "per_language" in sec:
+            new_sec["per_language"] = sec["per_language"]
+        out["single"] = new_sec
+    elif "single" in raw:
+        out["single"] = raw["single"]
+    if isinstance(raw.get("triple"), dict) and "common" not in raw["triple"]:
+        sec = raw["triple"]
+        agents = ("structure", "dependency", "documentation")
+        common, per_lang = {}, {}
+        for agent in agents:
+            block = sec.get(agent, {})
+            common[agent] = {k: block[k] for k in ("fields", "requested_shape") if k in block}
+            for lang, ov in (block.get("per_language") or {}).items():
+                per_lang.setdefault(lang, {})[agent] = ov
+        new_sec = {"common": common}
+        if per_lang:
+            new_sec["per_language"] = per_lang
+        out["triple"] = new_sec
+    elif "triple" in raw:
+        out["triple"] = raw["triple"]
+    return out
+
+
 def _resolved(raw, mode="single"):
     return ResolvedProfile(
         mode,
-        validate_profile(raw, active_mode=mode, known_languages=LANGS,
+        validate_profile(_to_envelope(raw), active_mode=mode, known_languages=LANGS,
                          source="inline", source_path=None),
     )
 

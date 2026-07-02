@@ -22,7 +22,6 @@ from pathlib import Path
 
 from codedoc.core.graph import DependencyGraph, resolve_import
 from codedoc.core.project_view import read_codedoc_meta
-from codedoc.core.resume import _resolve_live_backup_path
 from codedoc.core.scanner import detect_entry_file
 from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import ConfigError, ErrorReporter, ParseError
@@ -32,7 +31,17 @@ logger = get_logger(__name__)
 
 
 def _resolve_entry_and_docs(root: Path, config: dict) -> None:
-    """Auto-discover the entry point from a previously generated CodeDoc file."""
+    """Auto-discover the entry point from the exact selected CodeDoc output only.
+
+    Inspects only the exact selected final target(s) for the current format — the
+    exact JSON target (json/both) first, then the exact Markdown target (md/both) —
+    and reads entry metadata from the first that exists and yields an entry.  No
+    sibling, recovery, or opposite-format file is probed: a format switch never
+    consults the other format's document for entry metadata (consistent with the
+    Workstream G incremental-reuse rule).  If no selected target supplies an entry,
+    ``entry_file`` is left unset so ``_select_files`` runs ordinary
+    ``detect_entry_file()`` auto-detection.
+    """
     if config.get("entry_file"):
         return
 
@@ -40,62 +49,37 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
     p = Path(raw_output)
 
     if p.suffix.lower() in (".json", ".md"):
-        candidate = (root / p) if not p.is_absolute() else p
-        candidates: list[Path] = [candidate]
+        # A fully-qualified file output path is itself the single exact target.
+        candidates: list[Path] = [(root / p) if not p.is_absolute() else p]
     else:
         out_dir = (root / p) if not p.is_absolute() else p
         json_filename = config.get("output_json_filename", "codedoc.json")
         md_filename = config.get("output_md_filename", "codedoc.md")
         output_format = config.get("output_format", "json")
-
-        json_cand = out_dir / json_filename
-        # Also probe the live backup sibling for MD-only format.
-        live_backup_cand = _resolve_live_backup_path(out_dir, output_format, json_filename, md_filename)
-        md_cand = out_dir / md_filename
-        candidates = [json_cand]
-        if live_backup_cand.resolve() != json_cand.resolve():
-            candidates.append(live_backup_cand)
+        candidates = []
+        if output_format in ("json", "both"):
+            candidates.append(out_dir / json_filename)
         if output_format in ("md", "both"):
-            candidates.append(md_cand)
+            candidates.append(out_dir / md_filename)
 
     for candidate in candidates:
-        if candidate.exists():
-            try:
-                meta = read_codedoc_meta(candidate)
-            except ConfigError:
-                continue
-            entry = meta.get("entry_file")
-            if entry:
-                logger.info(
-                    "Resuming: entry '%s' read from '%s'", entry, candidate.name
-                )
-                config["entry_file"] = entry
+        if not candidate.exists():
+            continue
+        try:
+            meta = read_codedoc_meta(candidate)
+        except ConfigError:
+            continue
+        entry = meta.get("entry_file")
+        if entry:
+            logger.info("Resuming: entry '%s' read from '%s'", entry, candidate.name)
+            config["entry_file"] = entry
             return
 
-        if candidate.suffix.lower() == ".json":
-            md_sibling = candidate.with_suffix(".md")
-            if md_sibling.exists():
-                try:
-                    meta = read_codedoc_meta(md_sibling)
-                    entry = meta.get("entry_file")
-                    if entry:
-                        logger.info(
-                            "Cross-format resume: entry '%s' read from '%s'",
-                            entry,
-                            md_sibling.name,
-                        )
-                        config["entry_file"] = entry
-                    return
-                except ConfigError:
-                    pass
-
-    # No existing output was found and no --entry was provided.
-    # Leave config["entry_file"] unset so _select_files() can call
+    # No exact selected output supplied an entry and no --entry was provided.
+    # Leave config["entry_file"] unset so _select_files() calls
     # detect_entry_file() with the configured auto-entry candidates.
-    # If auto-detection also finds nothing, the existing "process all
-    # supported files" behaviour from detect_entry_file() applies.
     logger.info(
-        "No existing CodeDoc output found and no --entry provided. "
+        "No entry found in the exact selected output and no --entry provided. "
         "Auto-detection via detect_entry_file() will be attempted."
     )
 

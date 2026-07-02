@@ -3,10 +3,10 @@ codedoc CLI entry point.
 
 Behaviour notes
 ---------------
-- ``--safe-mode`` is deprecated (kept for backwards compatibility; prints a
-  no-op warning at runtime).
-- The error / issue log path is printed whenever any issue is recorded, not
-  only when ``failed > 0``.
+- Removed compatibility flags such as ``--safe-mode`` are rejected with
+  migration guidance; crash recovery is always active.
+- Issues are reported from bounded in-memory diagnostics; no issue-log path is
+  persisted or printed.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
 - On interrupt, the dedicated crash-recovery file path attached by the pipeline
@@ -20,10 +20,10 @@ First run:
     codedoc run --entry src/main.py              # document from entry; save to codedoc/
     codedoc run --entry src/main.py --output docs/report.json
 
-Subsequent runs (entry auto-read from previous docs when available):
+Subsequent runs (entry read from the exact selected output when available):
     codedoc run                                  # resumes from codedoc/ folder
     codedoc run --output codedoc/codedoc.json    # explicit path to previous output
-    codedoc run --format md                      # convert existing JSON to Markdown
+    codedoc run --format md                      # reuse/update exact codedoc.md
 """
 
 from __future__ import annotations
@@ -32,6 +32,11 @@ import argparse
 import json
 import sys
 from pathlib import Path
+
+# Sentinel distinguishing ``--init-config`` (flag present, no NAME → active
+# codedoc.config.json) from ``--init-config NAME`` (a help template) and from the
+# flag being absent (``default=None``).
+_INIT_CONFIG_ACTIVE = object()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,10 +52,10 @@ examples:
   codedoc run --entry src/main.py --output docs/api.json   save as a named JSON file
   codedoc run --entry src/main.py --format md              write only codedoc.md
 
-  # --- Subsequent runs: entry read from existing docs ---
-  codedoc run                                              resume from codedoc/ (auto-detected)
+  # --- Subsequent runs: entry read from exact selected docs ---
+  codedoc run                                              resume from codedoc/codedoc.json
   codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON to Markdown
+  codedoc run --format md                                  reuse/update exact codedoc.md
   codedoc run --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
@@ -85,20 +90,6 @@ examples:
             "Documentation coverage: entry follows files reachable from the entry; "
             "all includes every scanned source file (default: entry)."
         ),
-    )
-    ignore_group = parser.add_mutually_exclusive_group()
-    ignore_group.add_argument(
-        "--manage-output-gitignore",
-        dest="manage_output_gitignore",
-        action="store_true",
-        default=None,
-        help="Manage a codedoc-owned block in the output directory .gitignore.",
-    )
-    ignore_group.add_argument(
-        "--no-manage-output-gitignore",
-        dest="manage_output_gitignore",
-        action="store_false",
-        help="Disable managed output .gitignore updates.",
     )
     parser.add_argument(
         "--provider",
@@ -178,15 +169,6 @@ examples:
             "Example: --remove-skip-dir codedoc  (allows scanning the package source)"
         ),
     )
-    # [DEPRECATED] Live JSON backup is always on.  The flag is
-    # still accepted for backwards compatibility but hidden from --help;
-    # the pipeline prints one compatibility warning when enabled.
-    parser.add_argument(
-        "--safe-mode",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -250,33 +232,6 @@ examples:
             "(structure + dependency + documentation)."
         ),
     )
-    profile_group = parser.add_mutually_exclusive_group()
-    profile_group.add_argument(
-        "--prompt-profile",
-        metavar="FILE",
-        default=None,
-        help="Use an explicit mode-based JSON prompt profile.",
-    )
-    profile_group.add_argument(
-        "--no-prompt-profile",
-        action="store_true",
-        default=False,
-        help="Disable inline, explicit, and auto-detected prompt profiles.",
-    )
-    risk_group = parser.add_mutually_exclusive_group()
-    risk_group.add_argument(
-        "--allow-risky-prompt-customization",
-        dest="allow_risky_prompt_customization",
-        action="store_true",
-        default=None,
-        help="Proceed after a well-formed TOO_RISKY semantic review verdict.",
-    )
-    risk_group.add_argument(
-        "--no-allow-risky-prompt-customization",
-        dest="allow_risky_prompt_customization",
-        action="store_false",
-        help="Block a TOO_RISKY semantic review verdict (default).",
-    )
     utility_group = parser.add_mutually_exclusive_group()
     utility_group.add_argument(
         "--describe-prompt-schema",
@@ -284,20 +239,33 @@ examples:
         help="Print the supported prompt-profile schema as JSON or Markdown and exit.",
     )
     utility_group.add_argument(
-        "--export-prompt-profile",
+        "--init-config",
         nargs="?",
-        const="-",
+        const=_INIT_CONFIG_ACTIVE,
         default=None,
-        metavar="PATH",
+        metavar="NAME",
         help=(
-            "Export an editable default: stdout is a config-ready version-2 "
-            "wrapper; PATH is a legacy version-1 external profile."
+            "Write a complete editable codedoc.config.json with all public "
+            "defaults and single/triple instructions. With NAME, write a "
+            "non-active help template you must rename/copy to codedoc.config.json."
+        ),
+    )
+    utility_group.add_argument(
+        "--init-instructions",
+        nargs="?",
+        choices=["single", "triple", "both"],
+        const="both",
+        default=None,
+        metavar="MODE",
+        help=(
+            "Write or replace only the inline prompt_profiles in "
+            "codedoc.config.json (single, triple, or both; default both)."
         ),
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="With --export-prompt-profile, back up and replace a regular file.",
+        help="With --init-config / --init-instructions, replace an existing file.",
     )
     parser.add_argument(
         "--max-parallel-files",
@@ -335,22 +303,13 @@ examples:
     return parser
 
 
-def _print_ignore_status(stats: dict, dry_run: bool) -> None:
-    if not stats.get("output_gitignore_enabled", False):
-        return
-    if stats.get("output_gitignore_warning"):
-        print(f"  Managed ignore warning: {stats['output_gitignore_warning']}")
-    elif stats.get("output_gitignore_updated"):
-        print(f"  Managed ignore updated: {stats.get('output_gitignore_path', '')}")
-    elif dry_run:
-        print("  Managed ignore         : enabled (dry run; no change)")
-    else:
-        print("  Managed ignore         : enabled; no eligible artifact change")
-
-
 def _has_resolved_prompt_profile(stats: dict) -> bool:
-    """Whether a real profile source won resolution for this run."""
-    return stats.get("prompt_profile_source") in {"inline", "explicit", "auto"}
+    """Whether an inline profile source won resolution for this run.
+
+    ``inline`` is the only resolved custom source in 0.11.3; ``absent`` means
+    developer defaults and prints no profile section.
+    """
+    return stats.get("prompt_profile_source") == "inline"
 
 
 def _print_prompt_profile_dry_run(stats: dict) -> None:
@@ -374,7 +333,6 @@ def _print_prompt_profile_run(stats: dict) -> None:
         return
     documentation = stats.get("documentation_calls_attempted", 0)
     review = stats.get("prompt_customization_security_review_calls_attempted", 0)
-    routing = stats.get("prompt_profile_conversion_calls_attempted", 0)
     print("\n  Prompt profile:")
     print(f"    Source                : {stats.get('prompt_profile_source')}")
     print(f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}")
@@ -386,8 +344,7 @@ def _print_prompt_profile_run(stats: dict) -> None:
         f"{stats.get('prompt_customization_security_review_calls_completed', 0)} completed)"
     )
     print(f"    Documentation calls   : {documentation} attempted")
-    print(f"    Routing calls         : {routing} attempted")
-    print(f"    Total attempted calls : {documentation + review + routing}")
+    print(f"    Total attempted calls : {documentation + review}")
 
 
 def _print_dry_run_summary(stats: dict) -> None:
@@ -442,7 +399,6 @@ def _print_dry_run_summary(stats: dict) -> None:
         f"({estimate_qualifier} — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
-    _print_ignore_status(stats, dry_run=True)
     _print_prompt_profile_dry_run(stats)
 
     if stats.get("max_files_exceeded"):
@@ -502,7 +458,6 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
-    _print_ignore_status(stats, dry_run=False)
 
     # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
@@ -529,79 +484,18 @@ def _print_run_summary(stats: dict) -> None:
         sleep_note = f", {total_sleep:.1f}s total backoff" if total_sleep > 0 else ""
         print(
             f"\n  Rate limits: {event_count} step-down event(s) "
-            f"[{', '.join(providers)}]{sleep_note}. "
-            "Details in error.log."
+            f"[{', '.join(providers)}]{sleep_note}."
         )
 
-    # Always print issue log path when any issue was recorded.
+    # Note how many issues were recorded (details were printed during the run;
+    # hard-error summaries are embedded in the final output).
     issues = stats.get("issues_recorded", 0)
-    error_log = stats.get("error_log")
-    if issues and error_log:
+    if issues:
         failed = stats.get("failed", 0)
         if failed > 0:
-            print(f"\n  {failed} file(s) failed. See {error_log} for details.")
+            print(f"\n  {failed} file(s) failed; {issues} issue(s) recorded.")
         else:
-            print(f"\n  {issues} issue(s) recorded (all recovered). See {error_log} for details.")
-    elif issues and stats.get("issue_log_warning"):
-        print(f"\n  Issue log warning: {stats['issue_log_warning']}")
-
-
-def _print_conversion_summary(stats: dict) -> None:
-    """Print the dedicated single-to-triple conversion result.
-
-    Branches before the generic dry-run/run summaries; never requires the ordinary
-    ``checked``/``failed``/``output_*`` completion fields.
-    """
-    status = stats.get("prompt_profile_conversion")
-    if status == "pending":
-        review = stats.get("prompt_customization_security_review_calls_planned", 0)
-        routing = stats.get("prompt_profile_conversion_calls_planned", 0)
-        print(
-            "\ncodedoc single-to-triple conversion (dry run) — no provider was contacted."
-        )
-        print(f"  Analysis mode               : {stats.get('analysis_mode', 'triple')}")
-        print("  Conversion status           : pending (customized single -> triple)")
-        print(f"  Planned source review calls : {review}")
-        print(f"  Planned routing calls       : {routing}")
-        print(f"  Total paid proposal calls   : {review + routing}")
-        print(
-            "  Documentation calls are deferred until you paste the proposal and rerun."
-        )
-        print(
-            "  The confirmed triple structures will be reviewed again before generation."
-        )
-        return
-
-    # generated-awaiting-confirmation
-    print(
-        "\ncodedoc single-to-triple conversion proposal — no documentation was "
-        "generated and no files were written."
-    )
-    factors = stats.get("prompt_profile_conversion_factors", [])
-    if factors:
-        print("  Division rationale:")
-        for factor in factors:
-            print(f"    - {factor}")
-    print(
-        "  Source review calls : "
-        f"{stats.get('prompt_customization_security_review_calls_attempted', 0)} attempted "
-        f"({stats.get('prompt_customization_security_review_calls_completed', 0)} completed)"
-    )
-    print(
-        "  Routing calls       : "
-        f"{stats.get('prompt_profile_conversion_calls_attempted', 0)} attempted "
-        f"({stats.get('prompt_profile_conversion_calls_completed', 0)} completed)"
-    )
-    print(f"  Documentation calls : {stats.get('documentation_calls_attempted', 0)}")
-    print(
-        "\nReplace ONLY the 'prompt_profiles' value in codedoc.config.json with the "
-        "block below (keep all other settings), then rerun:\n"
-    )
-    print(stats.get("prompt_profile_conversion_fragment", ""))
-    print(
-        "\nThe confirmed triple structures will be reviewed again before any "
-        "documentation call."
-    )
+            print(f"\n  {issues} issue(s) recorded (all recovered).")
 
 
 def run_cli(argv: list[str] | None = None) -> int:
@@ -632,13 +526,23 @@ def run_cli(argv: list[str] | None = None) -> int:
             raise
         return int(exc.code or 2)
 
-    if args.describe_prompt_schema or args.export_prompt_profile is not None:
+    init_config_selected = args.init_config is not None
+    utility_selected = (
+        args.describe_prompt_schema
+        or init_config_selected
+        or args.init_instructions is not None
+    )
+    if utility_selected:
+        # Utility actions operate on the current working directory as the project
+        # root and are mutually exclusive with a documentation run and its
+        # options.  The argparse group already makes the utilities mutually
+        # exclusive with each other; here we reject any documentation-run option
+        # (including the run positional passed as NAME).
         unrelated = any(
             (
                 args.root != ".",
                 args.entry is not None,
                 args.documentation_scope is not None,
-                args.manage_output_gitignore is not None,
                 args.provider is not None,
                 args.model is not None,
                 args.output is not None,
@@ -646,7 +550,6 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.skip_dirs is not None,
                 bool(args.add_skip_dirs),
                 bool(args.remove_skip_dirs),
-                args.safe_mode,
                 args.dry_run,
                 args.max_files is not None,
                 bool(args.force_files),
@@ -655,34 +558,32 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.max_parallel_files is not None,
                 args.truncation_head_ratio is not None,
                 args.verbose,
-                args.prompt_profile is not None,
-                args.no_prompt_profile,
-                args.allow_risky_prompt_customization is not None,
             )
         )
-        if unrelated or (args.export_prompt_profile is not None and args.format is not None):
+        if unrelated:
             print(
-                "Error: prompt schema describe/export utilities cannot be combined "
-                "with a documentation run or unrelated run options.",
+                "Error: utility actions (--describe-prompt-schema, --init-config, "
+                "--init-instructions) cannot be combined with a documentation run "
+                "or unrelated run options.",
+                file=sys.stderr,
+            )
+            return 2
+        # --force is meaningful only for the initialization utilities.
+        if args.force and args.describe_prompt_schema:
+            print(
+                "Error: --force is valid only with --init-config or "
+                "--init-instructions.",
                 file=sys.stderr,
             )
             return 2
         try:
-            from codedoc.core.block_manager import (
-                create_text_exclusive,
-                replace_text_with_backup,
-            )
-            from codedoc.core.prompt_profiles import (
-                export_default_profile_config,
-                export_default_profile_dict,
-                render_prompt_schema_reference,
-                schema_reference_data,
-            )
-
-            mode = args.analysis_mode
             if args.describe_prompt_schema:
-                if args.force:
-                    parser.error("--force is valid only with --export-prompt-profile")
+                from codedoc.core.prompt_profiles import (
+                    render_prompt_schema_reference,
+                    schema_reference_data,
+                )
+
+                mode = args.analysis_mode
                 # The describe utility has a single stdout representation per
                 # format; 'both' has no meaning here.
                 if args.format == "both":
@@ -697,28 +598,16 @@ def run_cli(argv: list[str] | None = None) -> int:
                 else:
                     print(json.dumps(schema_reference_data(mode), indent=2, ensure_ascii=False))
                 return 0
-            target = args.export_prompt_profile
-            if target in (None, "-"):
-                # Stdout export is the version-2 config-ready wrapper —
-                # paste its 'prompt_profiles' value straight into
-                # codedoc.config.json.  Path export (below) keeps the version-1
-                # external-profile format usable with --prompt-profile PATH.
-                if args.force:
-                    parser.error("--force is not valid for stdout export")
-                stdout_data = json.dumps(
-                    export_default_profile_config(mode), indent=2, ensure_ascii=False
-                ) + "\n"
-                print(stdout_data, end="")
-                return 0
-            data = json.dumps(
-                export_default_profile_dict(mode), indent=2, ensure_ascii=False
-            ) + "\n"
-            path = Path(target)
-            if args.force:
-                replace_text_with_backup(path, data)
+
+            from codedoc.core.config_template import init_config, init_instructions
+
+            cwd = Path.cwd()
+            if init_config_selected:
+                name = None if args.init_config is _INIT_CONFIG_ACTIVE else args.init_config
+                result = init_config(cwd, name, args.force)
             else:
-                create_text_exclusive(path, data)
-            print(f"Exported prompt profile: {path}")
+                result = init_instructions(cwd, args.init_instructions, args.force)
+            print(result.message)
             return 0
         except SystemExit as exc:
             return int(exc.code or 2)
@@ -727,7 +616,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 2
 
     if args.force:
-        print("Error: --force requires --export-prompt-profile", file=sys.stderr)
+        print(
+            "Error: --force requires --init-config or --init-instructions.",
+            file=sys.stderr,
+        )
         return 2
 
     root = Path(args.root).resolve()
@@ -740,8 +632,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["entry_file"] = args.entry
     if args.documentation_scope is not None:
         overrides["documentation_scope"] = args.documentation_scope
-    if args.manage_output_gitignore is not None:
-        overrides["manage_output_gitignore"] = args.manage_output_gitignore
     if args.provider:
         overrides["llm_provider"] = args.provider
     if args.model:
@@ -758,20 +648,10 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["skip_dirs_add"] = args.add_skip_dirs
     if args.remove_skip_dirs:
         overrides["skip_dirs_remove"] = args.remove_skip_dirs
-    if args.safe_mode:
-        overrides["safe_mode"] = True
     if args.no_parallel:
         overrides["parallel_agents"] = False
     if args.analysis_mode is not None:
         overrides["analysis_mode"] = args.analysis_mode
-    if args.prompt_profile is not None:
-        overrides["prompt_profile_file"] = args.prompt_profile
-    if args.no_prompt_profile:
-        overrides["prompt_profile_disabled"] = True
-    if args.allow_risky_prompt_customization is not None:
-        overrides["prompt_customization_allow_risky"] = (
-            args.allow_risky_prompt_customization
-        )
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.truncation_head_ratio is not None:
@@ -790,15 +670,6 @@ def run_cli(argv: list[str] | None = None) -> int:
     try:
         from codedoc.pipeline import run_pipeline
         stats = run_pipeline(root, config_overrides=overrides)
-
-        # A single-to-triple conversion is a distinct terminal result —
-        # branch before the generic dry-run/run summaries.
-        if stats.get("prompt_profile_conversion") in (
-            "pending",
-            "generated-awaiting-confirmation",
-        ):
-            _print_conversion_summary(stats)
-            return 0
 
         if stats.get("dry_run"):
             _print_dry_run_summary(stats)
@@ -860,11 +731,10 @@ def run_cli(argv: list[str] | None = None) -> int:
             UnrecoverableProviderError,
         )
         if isinstance(exc, UnrecoverableProviderError):
-            # A doomed-run safe stop — not an unexpected crash.  The
-            # pipeline already recorded and flushed it to error.log; here we only
-            # present it.  Completed files are in the live JSON backup and
-            # re-running resumes.  A *terminal* abort (billing/credentials/model/
-            # access) is a setup/credentials class problem → exit 2 (consistent
+            # A doomed-run safe stop — not an unexpected crash.  Completed files
+            # are in the crash-recovery file and re-running resumes.  A *terminal*
+            # abort (billing/credentials/model/access) is a setup/credentials
+            # class problem → exit 2 (consistent
             # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
             # stop is a transient "retry later" condition, not a credentials
             # fault → exit 1 so automation does not read it as "fix credentials".
@@ -881,25 +751,20 @@ def run_cli(argv: list[str] | None = None) -> int:
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
-            # ownership conflicts, the max_files cap, and prompt-customization /
-            # conversion fail-closed errors.
-            # A fail-closed conversion/review carries bounded numeric
-            # attempt statistics (never profile text) before the ordinary setup
-            # error, so the paid cost of the aborted proposal is visible
+            # ownership conflicts, the max_files cap, and the prompt-customization
+            # fail-closed / TOO_RISKY review errors.  A fail-closed review carries
+            # bounded numeric attempt statistics (never profile text) before the
+            # ordinary setup error, so the paid cost of the aborted review is
+            # visible.
             err_stats = getattr(exc, "stats", None)
             if isinstance(err_stats, dict) and (
-                "prompt_profile_conversion_calls_attempted" in err_stats
-                or "prompt_customization_security_review_calls_attempted" in err_stats
+                "prompt_customization_security_review_calls_attempted" in err_stats
             ):
                 print(
                     "  Paid calls before stop: review "
                     f"{err_stats.get('prompt_customization_security_review_calls_attempted', 0)} "
                     f"attempted/"
                     f"{err_stats.get('prompt_customization_security_review_calls_completed', 0)} "
-                    "completed, routing "
-                    f"{err_stats.get('prompt_profile_conversion_calls_attempted', 0)} "
-                    f"attempted/"
-                    f"{err_stats.get('prompt_profile_conversion_calls_completed', 0)} "
                     "completed, documentation 0.",
                     file=sys.stderr,
                 )

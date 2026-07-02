@@ -5,9 +5,9 @@ Internal decomposition
 This module is now a thin lifecycle coordinator.  The heavy lifting has been
 moved into cohesive, single-responsibility modules:
 
-- :mod:`codedoc.core.resume` — live-backup path resolution, existing-record
-  loading, public→internal record reconstruction, final documentation-record
-  construction, and stale/legacy cleanup.
+- :mod:`codedoc.core.resume` — exact selected-output loading, exact
+  crash-recovery inspection, public→internal record reconstruction, and final
+  documentation-record construction.
 - :mod:`codedoc.core.discovery` — entry recovery, dependency-graph
   construction, entry-reachability selection, and graph-edge serialization.
 - :mod:`codedoc.core.execution` — rate-limit/retry classification, the
@@ -43,9 +43,7 @@ from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
-from codedoc.agents.prompt_profile_routing_agent import PromptProfileRoutingAgent
 from codedoc.bootstrap import ensure_codedoc_installed
-from codedoc.core.checkpoint import Checkpoint
 from codedoc.core.discovery import (
     _build_graph,
     _graph_edges,
@@ -58,8 +56,6 @@ from codedoc.core.execution import (
     execute_agent_files,
 )
 from codedoc.core.loader import load_config
-from codedoc.core.block_manager import BlockError
-from codedoc.core.ignore_manager import generated_ignore_entries, update_output_gitignore
 from codedoc.core.output import (
     inspect_output_ownership,
     preflight_output_accessibility,
@@ -72,29 +68,22 @@ from codedoc.core.planning import (
     normalize_force_files,
 )
 from codedoc.core.prompt_profiles import (
-    PROFILE_ACTION_CONVERSION_REQUIRED,
     ProfileResolution,
     ResolvedProfile,
     ReviewBatch,
-    build_conversion_proposal_fragment,
-    build_conversion_review_batches,
     build_resolved_profile,
     build_review_batches,
-    build_routing_request,
     classify_profile_action,
     resolve_profile_source,
-    routing_conversion_id,
 )
 from codedoc.core.queue import ProcessingQueue
+from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import (
+    RECOVERY_FILENAME,
     _build_documentation_records,
-    _cleanup_legacy_recovery,
-    _cleanup_stale_build_file,
     _load_existing_file_docs,
-    _remove_legacy_db,
-    _resolve_legacy_backup_path,
-    _resolve_live_backup_path,
-    select_active_recovery_path,
+    build_recovery_identity,
+    load_recovery_records_if_compatible,
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
@@ -176,12 +165,12 @@ def run_pipeline(
 
     analysis_mode = config.get("analysis_mode", "single")
     known_languages = frozenset(config["extension_language_map"].values())
-    # Resolve and classify the prompt profile BEFORE
-    # entry resolution, artifact/ownership inspection, existing-output reads,
-    # source scanning, graph building, and planning.  Both calls are read-only and
-    # provider-free.  A customized single-only structure selected in triple mode is
-    # routed into the conversion-proposal workflow here so it can never silently
-    # resolve to inactive built-in triple defaults.
+    # Resolve and classify the prompt profile BEFORE entry resolution,
+    # artifact/ownership inspection, existing-output reads, source scanning, graph
+    # building, and planning.  Both calls are read-only and provider-free.  A
+    # customized single-only structure selected in triple mode is executable — its
+    # documentation is resolved by deterministic projection, never a paid routing
+    # conversion.
     profile_resolution = resolve_profile_source(
         config,
         root,
@@ -189,35 +178,21 @@ def run_pipeline(
         active_mode=analysis_mode,
     )
     profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
-    if profile_action.action == PROFILE_ACTION_CONVERSION_REQUIRED:
-        return _run_single_to_triple_conversion(
-            config=config,
-            profile_resolution=profile_resolution,
-            profile_action=profile_action,
-            analysis_mode=analysis_mode,
-            dry_run=dry_run,
-        )
 
     _resolve_entry_and_docs(root, config)
     resolved_profile = build_resolved_profile(profile_action, analysis_mode)
     no_work_profile_stats = {
         "prompt_profile_source": profile_resolution.source,
-        "prompt_profile_file": (
-            str(profile_resolution.source_path)
-            if profile_resolution.source_path is not None
-            else None
-        ),
         "prompt_profile_active": False,
         "prompt_profile_affected_files": 0,
         "prompt_customization_security_review": "not-required",
         "prompt_customization_security_review_calls_planned": 0,
         "prompt_customization_security_review_calls_completed": 0,
+        "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
-        "prompt_customization_allow_risky": bool(
-            config.get("prompt_customization_allow_risky", False)
-        ),
-        **_conversion_stats_defaults(),
+        "documentation_calls_planned": 0,
+        "documentation_calls_attempted": 0,
     }
 
     output_format = config.get("output_format", "json")
@@ -227,98 +202,45 @@ def run_pipeline(
         logger.info("Dry run: planning only — no writes, no provider, no LLM calls.")
 
     output_dir = root / config["output_dir"]
-    ignore_target: Path | None = None
-    if config.get("manage_output_gitignore", False):
-        ignore_target = output_dir / config["output_gitignore_filename"]
-        resolved_output = output_dir.resolve()
-        resolved_ignore = ignore_target.resolve()
-        try:
-            resolved_ignore.relative_to(resolved_output)
-        except ValueError as exc:
-            raise ConfigError("output_gitignore_filename must resolve inside output_dir") from exc
-        if ignore_target.is_symlink():
-            raise ConfigError(f"Managed ignore target '{ignore_target}' is a symbolic link")
-        if ignore_target.exists() and ignore_target.is_dir():
-            raise ConfigError(f"Managed ignore target '{ignore_target}' is a directory")
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
-    # Crash-recovery data is staged in its own dedicated file, never the
-    # stable output.  Derive the base recovery path, then deterministically
-    # select the active candidate (absent → fresh; valid in-progress → resume;
-    # invalid/foreign/completed → advance to the next ``(<n>)`` suffix).  The
-    # walk is read-only.  The legacy path is the older live-backup location,
-    # read only as an in-progress overlay during resume/migration.
-    base_recovery_path = _resolve_live_backup_path(
-        output_dir, output_format, json_filename, md_filename
-    )
-    live_backup_path, _recovery_resume = select_active_recovery_path(base_recovery_path)
-    legacy_recovery_path = _resolve_legacy_backup_path(
-        output_dir, output_format, json_filename, md_filename
-    )
-    # Stable output targets and the active recovery file must never be removed by
-    # the legacy-migration cleanup (which only prunes a distinct, migrated,
-    # in-progress legacy sibling — e.g. the old md JSON sibling).
-    _recovery_keep_paths: set[Path] = {live_backup_path}
-    if output_format in ("json", "both"):
-        _recovery_keep_paths.add(output_dir / json_filename)
-    if output_format in ("md", "both"):
-        _recovery_keep_paths.add(output_dir / md_filename)
+    # Exact selected final output targets for this run's format.
+    json_target = output_dir / json_filename if output_format in ("json", "both") else None
+    md_target = output_dir / md_filename if output_format in ("md", "both") else None
+    # The single fixed crash-recovery file, staged separately from the stable
+    # output for every format.  There is no candidate walk, numbered suffix, or
+    # legacy sibling: absent means a fresh recovery state; an owned in-progress
+    # file is reused only when its versioned identity matches this run.
+    recovery_path = output_dir / RECOVERY_FILENAME
 
-    # Reject generated-artifact path collisions before any scan or mutation.
-    # The dedicated recovery file is always its own ``live_backup`` artifact,
-    # distinct from the final JSON (``json``), Markdown (``markdown``), and the
-    # diagnostic log (``error_log``), for every format.  The *selected* recovery
-    # candidate is the artifact validated here, so a configuration that points a
-    # final output or the log at the recovery file is rejected rather than hidden
-    # behind a suffix increment.
-    artifact_paths: dict[str, Path | None] = {"error_log": output_dir / "error.log"}
-    if output_format in ("json", "both"):
-        artifact_paths["json"] = output_dir / json_filename
-    if output_format in ("md", "both"):
-        artifact_paths["markdown"] = output_dir / md_filename
-    artifact_paths["live_backup"] = live_backup_path
-    if ignore_target is not None:
-        artifact_paths["output_gitignore"] = ignore_target
+    # Reject generated-artifact path collisions before any scan or mutation.  The
+    # recovery file is its own ``live_backup`` artifact, always distinct from the
+    # exact JSON and Markdown targets.
+    artifact_paths: dict[str, Path | None] = {
+        "json": json_target,
+        "markdown": md_target,
+        "live_backup": recovery_path,
+    }
     validate_distinct_artifact_paths(artifact_paths)
 
-    # Read-only ownership inspection.  A real run fails fast before any
-    # filesystem side effect, scanning, or LLM call when a final output target
+    # Read-only ownership inspection of the exact final targets.  A real run fails
+    # fast before any filesystem side effect, scanning, or LLM call when a target
     # is foreign-owned; a dry run records the conflicts and reports them.  The
-    # recovery file is NOT inspected here: a foreign file at a recovery name is
-    # preserved and skipped by the candidate walk, not treated as a run-blocking
-    # final-output conflict.
+    # recovery file is not inspected here.
     ownership_conflicts = inspect_output_ownership(
         output_dir, output_format, json_filename, md_filename
     )
     if ownership_conflicts and not dry_run:
         raise ConfigError(ownership_conflicts[0]["message"])
 
-    # --safe-mode is deprecated; print at most one notice when it was
-    # explicitly enabled, then continue normally.
-    if config.get("safe_mode", False):
-        print(
-            "WARNING: --safe-mode is now the default behaviour in 0.8.0 and this "
-            "flag has no additional effect.  It is kept for backwards compatibility "
-            "and will be removed in a future release.",
-            flush=True,
-        )
-        logger.info("--safe-mode flag noted; live backup is always on in 0.8.0.")
+    # In-memory issue reporter; nothing is persisted to disk.
+    error_reporter = ErrorReporter()
 
-    # error.log lives in the output directory, not the project root.
-    # Construction is in-memory only; nothing is written until flush(), which
-    # dry-run never calls.
-    error_reporter = ErrorReporter(output_dir / "error.log")
-
-    existing_docs = _load_existing_file_docs(
-        output_dir,
-        json_filename,
-        md_filename,
-        live_backup_path,
-        read_only=True,
-        output_format=output_format,
-        legacy_recovery_path=legacy_recovery_path,
-    )
+    # Stable final-output records from the exact selected target(s) only.  The
+    # both-mode cross-document identity check runs inside this helper.  Compatible
+    # recovery records are overlaid after selection/profile resolution (below).
+    existing_docs = _load_existing_file_docs(json_target, md_target, output_format)
 
     # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
     # resolved by load_config with _add/_remove applied), then unconditionally
@@ -379,11 +301,9 @@ def run_pipeline(
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
                 "output_files": [],
-                **_initial_ignore_stats(config, ignore_target),
                 **no_work_profile_stats,
             }
         output_dir.mkdir(parents=True, exist_ok=True)
-        _remove_legacy_db(output_dir)
         return {
             "checked": 0,
             "failed": 0,
@@ -395,7 +315,6 @@ def run_pipeline(
             ),
             "output_dir": str(output_dir),
             "live_backup_path": None,
-            "error_log": None,
             "issues_recorded": 0,
             "rate_limit_warnings": [],
             "documentation_scope": config.get("documentation_scope", "entry"),
@@ -403,7 +322,6 @@ def run_pipeline(
             "entry_disconnected": 0,
             "disconnected_paid_files": 0,
             "disconnected_planned_calls": 0,
-            **_initial_ignore_stats(config, ignore_target),
             **no_work_profile_stats,
         }
 
@@ -424,21 +342,44 @@ def run_pipeline(
     # ConfigError for paths outside the root).
     forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
-    # Migration eligibility: legacy Checkpoint entries may be used only when no
-    # existing records were recovered — read-only equivalent of the
-    # ``SafeWriter.size == 0`` check.  The recovery file is a separate
-    # path, so eligibility is keyed on the merged reuse set (stable baseline +
-    # legacy overlay + active recovery), i.e. exactly what seeds the writer.
-    checkpoint_results: dict[str, dict] = {}
-    if not existing_docs:
-        cp = Checkpoint(output_dir, entry_file=entry_rel)
-        checkpoint_results = cp.load()
-        if checkpoint_results:
-            logger.info(
-                "Migration: loaded %d entry(s) from legacy .codedoc_progress.json "
-                "— they will be migrated into the live backup on first flush.",
-                len(checkpoint_results),
-            )
+    # Build the versioned recovery identity from the now-known project root,
+    # selected targets, entry, scope, analysis mode/revision, and sorted
+    # per-language profile digests for the selected file set.
+    selected_languages = sorted(
+        {file_map[rel].get("language", "generic") for rel in documented_rels}
+    )
+    recovery_identity = build_recovery_identity(
+        project_root=root,
+        json_target=json_target,
+        md_target=md_target,
+        entry_file=entry_rel,
+        documentation_scope=config.get("documentation_scope", "entry"),
+        analysis_mode=analysis_mode,
+        analysis_revision=ANALYSIS_REVISION,
+        profile_digests_by_language={
+            lang: resolved_profile.file_digest(lang) for lang in selected_languages
+        },
+    )
+    # Inspect the single exact recovery file, read-only.  A real run blocks on an
+    # incompatible / foreign / malformed / completed recovery file; a dry run
+    # never mutates it and treats an incompatible file as non-resumable rather
+    # than blocking planning.
+    recovery_records: dict[str, dict] = {}
+    try:
+        recovery_records = load_recovery_records_if_compatible(
+            recovery_path, recovery_identity
+        )
+    except ConfigError:
+        if not dry_run:
+            raise
+    if recovery_records:
+        logger.info(
+            "Resuming: overlaying %d compatible record(s) from '%s'.",
+            len(recovery_records),
+            recovery_path.name,
+        )
+    # Overlay compatible recovery records onto the stable baseline before planning.
+    existing_docs = {**existing_docs, **recovery_records}
 
     # One shared plan drives both dry-run and real execution.
     plan, materials = build_pipeline_plan(
@@ -447,7 +388,6 @@ def run_pipeline(
         selected_rels=documented_rels,
         entry_rel=entry_rel,
         existing_docs=existing_docs,
-        checkpoint_records=checkpoint_results,
         forced_paths=forced_paths,
         config=config,
         resolved_profile=resolved_profile,
@@ -469,6 +409,7 @@ def run_pipeline(
             resolved_profile,
             profile_resolution,
             review_batches,
+            recovery_resumed=len(recovery_records),
         )
 
     scope_stats = _build_scope_stats(
@@ -490,14 +431,12 @@ def run_pipeline(
     review_stats = _base_profile_stats(
         resolved_profile, profile_resolution, plan, file_map, review_batches
     )
-    review_stats["prompt_customization_allow_risky"] = bool(
-        config.get("prompt_customization_allow_risky", False)
-    )
     if review_batches:
-        # This is a probabilistic semantic standards/safety gate. TOO_RISKY
-        # blocks by default and only the explicit user override may bypass that
-        # well-formed verdict. Deterministic validation and strict cleaners are
-        # the non-overridable structural boundary.
+        # This is a mandatory, non-overridable, probabilistic semantic
+        # standards/safety gate. A well-formed TOO_RISKY verdict always blocks;
+        # deterministic validation and strict cleaners are the additional
+        # non-overridable structural boundary.  It is probabilistic and must not
+        # be marketed as a complete security guarantee.
         review_provider, review_model = describe_provider_selection(config)
         print(
             "Prompt customization standards/safety review will make "
@@ -544,34 +483,21 @@ def run_pipeline(
                 print(f"  - {warning}")
             print("Review the flagged items; re-run with a corrected profile to clear them.")
         else:
+            # TOO_RISKY always stops before any documentation call or mutation.
+            # There is no override.
             shown = _reviewed_shape_text(review_batches, analysis_mode)
-            if config.get("prompt_customization_allow_risky", False):
-                review_stats["prompt_customization_security_review"] = (
-                    "too-risky-overridden"
-                )
-                print(
-                    "Prompt customization standards/safety review: TOO RISKY — "
-                    "proceeding ONLY because --allow-risky-prompt-customization is set."
-                )
-                for reason in outcome.reasons:
-                    print(f"  - {reason}")
-                print(f"Customization applied (effective requested-shape JSON for {analysis_mode}):\n{shown}")
-            else:
-                review_stats["prompt_customization_security_review"] = (
-                    "too-risky-blocked"
-                )
-                raise PromptCustomizationValidationError(
-                    "Prompt customization standards/safety review: TOO RISKY — "
-                    "blocked and not applied.\n"
-                    + "\n".join(f"- {reason}" for reason in outcome.reasons)
-                    + f"\nCustomization under review (effective requested-shape JSON for {analysis_mode}):\n"
-                    + shown
-                    + "\nTo override the semantic review and proceed at your own risk, "
-                    "re-run with --allow-risky-prompt-customization (or set "
-                    "prompt_customization_allow_risky: true). Deterministic "
-                    "validation and the strict cleaners cannot be overridden.",
-                    stats=review_stats,
-                )
+            review_stats["prompt_customization_security_review"] = "too-risky-blocked"
+            raise PromptCustomizationValidationError(
+                "Prompt customization standards/safety review: TOO RISKY — "
+                "blocked and not applied.\n"
+                + "\n".join(f"- {reason}" for reason in outcome.reasons)
+                + f"\nCustomization under review (effective requested-shape JSON for {analysis_mode}):\n"
+                + shown
+                + "\nRevise the flagged instructions and re-run. Deterministic "
+                "validation, the strict cleaners, and this semantic review cannot "
+                "be overridden.",
+                stats=review_stats,
+            )
 
     # ------------------------------------------------------------------
     # Mutation boundary — everything below may write to the filesystem.
@@ -584,25 +510,26 @@ def run_pipeline(
     # cannot be written, so a persistent permission/space failure is caught
     # before paid work instead of after it.
     preflight_output_accessibility(output_dir)
-    _remove_legacy_db(output_dir)
-    _cleanup_stale_build_file(output_dir, json_filename)
 
-    # Always-on crash-recovery writer.  Targets the dedicated
-    # recovery file for every format; the stable output is untouched until
-    # finalization.
-    recorder = SafeWriter(live_backup_path, output_format, entry_rel, file_map)
+    # Always-on crash-recovery writer.  Targets the single fixed recovery file for
+    # every format; the stable output is untouched until finalization.  The
+    # versioned run identity is emitted inside every flush so a partially written
+    # recovery file already carries it.
+    recorder = SafeWriter(
+        recovery_path, output_format, entry_rel, file_map, recovery_identity
+    )
     recorder.set_queue_order(ordered_selected)
 
     # Seed the writer with the same merged reuse set planning consumed (stable
-    # baseline + legacy in-progress overlay + active recovery overlay) so every
-    # partial flush of the recovery file is a self-contained resumable snapshot.
+    # baseline + compatible recovery overlay) so every partial flush of the
+    # recovery file is a self-contained resumable snapshot.
     recorder.load(preloaded=existing_docs)
 
     skipped = len(plan.unchanged_rels)
     if skipped > 0:
         logger.info("Incremental mode: skipping %d unchanged file(s)", skipped)
 
-    # Materialize reuse/resume records exactly as the plan routed them.
+    # Materialize reuse records exactly as the plan routed them.
     new_results: dict[str, dict] = {}
     for rel_path in plan.identical_reuse_rels:
         source_doc = materials.identical_reuse_docs[rel_path]
@@ -613,11 +540,7 @@ def run_pipeline(
             source_doc.get("path", "unknown"),
         )
     reused = len(plan.identical_reuse_rels)
-
-    for rel_path in plan.checkpoint_reuse_rels:
-        new_results[rel_path] = materials.checkpoint_reuse_docs[rel_path]
-        logger.info("Migrating from checkpoint: %s", rel_path)
-    resumed = len(plan.checkpoint_reuse_rels)
+    resumed = len(recovery_records)
 
     agent_rels = set(plan.agent_rels)
     rate_limit_warnings: list[dict] = []
@@ -634,7 +557,6 @@ def run_pipeline(
             **scope_stats,
             "output_dir": str(output_dir),
             "rate_limit_warnings": rate_limit_warnings,
-            **_initial_ignore_stats(config, ignore_target),
             **no_work_profile_stats,
             **review_stats,
         }
@@ -658,14 +580,8 @@ def run_pipeline(
             unresolved_imports_by_path=unresolved_imports_by_path,
         )
         stats["output_files"] = [str(path) for path in output_files if path]
-        error_reporter.flush()
-        _cleanup_stale_error_log(stats, error_reporter)
         recorder.delete()
-        _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
-        _finalize_output_gitignore(
-            stats, config, output_dir, ignore_target, output_files, error_reporter
-        )
-        _set_issue_stats(stats, error_reporter, live_backup_path)
+        _set_issue_stats(stats, error_reporter, recovery_path)
         _set_usage_stats(stats, usage, plan, config)
         return stats
 
@@ -686,21 +602,12 @@ def run_pipeline(
         logger.info("LLM provider: %s", llm.provider_name)
     except Exception as exc:
         error_reporter.record(exc, context="LLM provider init")
-        error_reporter.flush()
-        # The exception propagates to the CLI which never sees stats, so print
-        # the error.log path here so the user can always find diagnostics.
-        if error_reporter.has_issues() and error_reporter.has_persisted_log():
-            print(
-                f"\n  1 issue recorded. See {error_reporter.log_path.resolve()} for details.",
-                file=sys.stderr,
-                flush=True,
-            )
         raise
     except KeyboardInterrupt as exc:
         # An interrupt during provider init still happens after the
         # recovery file was initialized; name it for the CLI (see below).
-        if live_backup_path.exists():
-            exc.recovery_path = str(live_backup_path)
+        if recovery_path.exists():
+            exc.recovery_path = str(recovery_path)
         raise
 
     orchestrator = Orchestrator(
@@ -721,7 +628,6 @@ def run_pipeline(
         "entry_excluded": entry_excluded,
         **scope_stats,
         "rate_limit_warnings": rate_limit_warnings,
-        **_initial_ignore_stats(config, ignore_target),
         **review_stats,
     }
 
@@ -766,40 +672,24 @@ def run_pipeline(
     except UnrecoverableProviderError as exc:
         # A confirmed unrecoverable provider abort (terminal
         # billing/credentials/model/access, or a bounded zero-progress rate
-        # limit).  Record + flush it to error.log here — where the ErrorReporter
-        # lives — so the abort is logged exactly like other issues even though it
-        # leaves the pipeline by exception.  Then re-raise for the CLI to present.
+        # limit).  Record it in memory, then re-raise for the CLI to present.
         # Deliberately do NOT call write_project_outputs(...) or recorder.delete()
-        # on this path: the live JSON backup must stay intact and resumable.
+        # on this path: the recovery file must stay intact and resumable.
         error_reporter.record(exc, context="provider abort")
-        error_reporter.flush()
         raise
     except LiveBackupWriteError as exc:
-        # The dedicated recovery file could not be
-        # persisted, so crash-safety no longer holds and execution stopped
-        # scheduling paid work.  The last valid recovery file is preserved by the
-        # atomic writer.  Record the failure (target path + classified cause +
-        # traceback) to error.log on a best-effort basis, then print the recovery
-        # and error-log paths so the user can act.  A log-write failure must never
-        # replace or hide this primary persistence error.
+        # The dedicated recovery file could not be persisted, so crash-safety no
+        # longer holds and execution stopped scheduling paid work.  The last valid
+        # recovery file is preserved by the atomic writer.  Record the failure in
+        # memory and print the recovery path so the user can act.
         error_reporter.record(exc, context="live backup write")
-        log_note = ""
-        try:
-            error_reporter.flush()
-        except Exception as flush_exc:  # noqa: BLE001 — secondary, must not mask primary
-            log_note = f" (issue log could not be written: {flush_exc})"
         recovery_note = (
-            f"\n  Completed work is preserved in: {live_backup_path}"
-            if live_backup_path.exists()
-            else ""
-        )
-        error_log_note = (
-            f"\n  Diagnostics: {error_reporter.log_path.resolve()}"
-            if error_reporter.has_persisted_log()
+            f"\n  Completed work is preserved in: {recovery_path}"
+            if recovery_path.exists()
             else ""
         )
         print(
-            f"\nError: {exc}{recovery_note}{error_log_note}{log_note}",
+            f"\nError: {exc}{recovery_note}",
             file=sys.stderr,
             flush=True,
         )
@@ -811,8 +701,8 @@ def run_pipeline(
         # so the CLI can name it in the interrupt message, then re-raise the same
         # exception unchanged.  No suffix walk, candidate creation, or filesystem
         # mutation happens here.
-        if live_backup_path.exists():
-            exc.recovery_path = str(live_backup_path)
+        if recovery_path.exists():
+            exc.recovery_path = str(recovery_path)
         raise
 
     stats["output_dir"] = str(output_dir)
@@ -836,23 +726,11 @@ def run_pipeline(
         unresolved_imports_by_path=unresolved_imports_by_path,
     )
     stats["output_files"] = [str(path) for path in output_files if path]
-    error_reporter.flush()
-    # A clean, issue-free run clears a stale CodeDoc-owned error.log left
-    # by a prior failed run so a historical failure no longer looks current.  A
-    # foreign log is left byte-identical; a removal failure is an auxiliary
-    # warning surfaced in stats, never a failure of valid documentation output.
-    _cleanup_stale_error_log(stats, error_reporter)
     # Clean completion: the stable output is written above; only now delete the
     # dedicated recovery file (all formats).  A deletion OSError raises
     # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
-    # Complete the migration of a legacy in-progress sibling (md mode):
-    # its records are already in the stable output, so remove the leftover.
-    _cleanup_legacy_recovery(legacy_recovery_path, _recovery_keep_paths)
-    _finalize_output_gitignore(
-        stats, config, output_dir, ignore_target, output_files, error_reporter
-    )
-    _set_issue_stats(stats, error_reporter, live_backup_path)
+    _set_issue_stats(stats, error_reporter, recovery_path)
     _set_usage_stats(stats, usage, plan, config)
 
     logger.info(
@@ -864,315 +742,22 @@ def run_pipeline(
     )
 
     if error_reporter.has_issues():
-        logger.info(
-            "%d issue(s) recorded. See %s for details.",
-            error_reporter.issue_count(),
-            error_reporter.log_path,
-        )
+        logger.info("%d issue(s) recorded.", error_reporter.issue_count())
 
     return stats
-
-
-# ---------------------------------------------------------------------------
-# Single-to-triple conversion proposal
-# ---------------------------------------------------------------------------
-
-def _conversion_stats_defaults() -> dict:
-    """Stable conversion/attempt stat keys, zeroed (present on every return path)."""
-    return {
-        "documentation_calls_planned": 0,
-        "documentation_calls_attempted": 0,
-        "prompt_profile_conversion": "not-required",
-        "prompt_profile_conversion_calls_planned": 0,
-        "prompt_profile_conversion_calls_attempted": 0,
-        "prompt_profile_conversion_calls_completed": 0,
-        "prompt_customization_security_review_calls_attempted": 0,
-    }
-
-
-def _conversion_base_stats(
-    profile_resolution: ProfileResolution,
-    config: dict,
-    analysis_mode: str,
-    review_planned: int,
-) -> dict:
-    """Shared stat skeleton for every conversion return/raise path."""
-    return {
-        "analysis_mode": analysis_mode,
-        "prompt_profile_source": profile_resolution.source,
-        "prompt_profile_file": (
-            str(profile_resolution.source_path)
-            if profile_resolution.source_path is not None
-            else None
-        ),
-        "prompt_profile_active": True,
-        "prompt_profile_affected_files": 0,
-        "prompt_customization_allow_risky": bool(
-            config.get("prompt_customization_allow_risky", False)
-        ),
-        "prompt_customization_security_review": (
-            "pending" if review_planned else "not-required"
-        ),
-        "prompt_customization_security_review_calls_planned": review_planned,
-        "prompt_customization_security_review_calls_completed": 0,
-        "prompt_customization_security_review_calls_attempted": 0,
-        "prompt_customization_security_warnings": 0,
-        "prompt_customization_security_blocking_reasons": 0,
-        "documentation_calls_planned": 0,
-        "documentation_calls_attempted": 0,
-        "prompt_profile_conversion": "pending",
-        "prompt_profile_conversion_calls_planned": 1,
-        "prompt_profile_conversion_calls_attempted": 0,
-        "prompt_profile_conversion_calls_completed": 0,
-        "estimated_input_tokens": 0,
-        "estimated_output_tokens": 0,
-        "successful_calls": 0,
-        "failed_calls": 0,
-        "attempted_calls": 0,
-    }
-
-
-def _inline_profile_comment(config: dict) -> object | None:
-    """Return a bounded inline ``$comment`` to preserve in the proposal, if any."""
-    inline = config.get("prompt_profiles")
-    if isinstance(inline, dict):
-        comment = inline.get("$comment")
-        if comment is not None:
-            return comment
-    return None
-
-
-def _run_single_to_triple_conversion(
-    *,
-    config: dict,
-    profile_resolution: ProfileResolution,
-    profile_action,
-    analysis_mode: str,
-    dry_run: bool,
-) -> dict:
-    """Run the bounded single-to-triple conversion proposal and stop.
-
-    Performs only its disclosed review/routing calls; never scans source, mutates
-    the filesystem, initializes recovery, or makes a documentation call.  Returns
-    a distinct conversion status; raises a setup-class error (with attached
-    statistics) on any fail-closed condition.
-    """
-    single_profile = profile_action.single_profile
-    review_batches = build_conversion_review_batches(single_profile)
-    review_planned = len(review_batches)
-    conversion_id = routing_conversion_id(single_profile)
-
-    base = _conversion_base_stats(profile_resolution, config, analysis_mode, review_planned)
-
-    # Complete the bounded deterministic conversion preflight for both dry and
-    # real runs.  This keeps a dry-run projection from claiming a proposal is
-    # viable when the corresponding real request would be rejected locally.
-    try:
-        build_routing_request(single_profile, conversion_id)
-    except PromptCustomizationValidationError as exc:
-        raise PromptCustomizationValidationError(str(exc), stats=dict(base)) from exc
-
-    if dry_run:
-        # No provider contact: project the paid plan only.
-        base["prompt_profile_conversion"] = "pending"
-        return {
-            "dry_run": True,
-            "analysis_mode": analysis_mode,
-            "prompt_profile_conversion_id": conversion_id,
-            "total_paid_proposal_calls": review_planned + 1,
-            **base,
-        }
-
-    review_provider, review_model = describe_provider_selection(config)
-    print(
-        f"Single-to-triple profile conversion will make {review_planned} paid "
-        "security-review call(s) plus 1 paid routing call using "
-        f"provider={review_provider}, model={review_model}. It will print a "
-        "proposal and stop without generating documentation.",
-        flush=True,
-    )
-
-    usage = UsageAccumulator()
-    llm = create_provider(config)
-
-    # --- Source security review (the customized single structure) ---
-    review_status = "not-required"
-    reasons: tuple[str, ...] = ()
-    warnings: tuple[str, ...] = ()
-    if review_batches:
-        reviewer = PromptCustomizationValidationAgent(llm, usage=usage)
-        try:
-            outcome = reviewer.review(review_batches)
-        except PromptCustomizationValidationError as exc:
-            stats = dict(base)
-            stats["prompt_customization_security_review"] = "failed-closed"
-            stats["prompt_customization_security_review_calls_attempted"] = (
-                usage.attempted_calls
-            )
-            stats.update(usage.snapshot())
-            raise PromptCustomizationValidationError(str(exc), stats=stats) from exc
-        reasons = outcome.reasons
-        warnings = outcome.warnings
-        base["prompt_customization_security_review_calls_completed"] = outcome.calls_completed
-        base["prompt_customization_security_review_calls_attempted"] = outcome.calls_completed
-        base.update(usage.snapshot())
-        base["prompt_customization_security_warnings"] = len(warnings)
-        base["prompt_customization_security_blocking_reasons"] = len(reasons)
-        if outcome.verdict == "SAFE":
-            review_status = "safe"
-            print("Conversion source review: SAFE — continuing to routing.", flush=True)
-        elif outcome.verdict == "RISKY":
-            review_status = "risky"
-            print("Conversion source review: RISKY — proceeding with warnings:", flush=True)
-            for warning in warnings:
-                print(f"  - {warning}", flush=True)
-        else:  # TOO_RISKY
-            if config.get("prompt_customization_allow_risky", False):
-                review_status = "too-risky-overridden"
-                print(
-                    "Conversion source review: TOO RISKY — proceeding ONLY because "
-                    "--allow-risky-prompt-customization is set.",
-                    flush=True,
-                )
-                for reason in reasons:
-                    print(f"  - {reason}", flush=True)
-            else:
-                stats = dict(base)
-                stats["prompt_customization_security_review"] = "too-risky-blocked"
-                raise PromptCustomizationValidationError(
-                    "Conversion source review: TOO RISKY — blocked and not converted.\n"
-                    + "\n".join(f"- {reason}" for reason in reasons)
-                    + "\nTo override the semantic review and proceed at your own risk, "
-                    "re-run with --allow-risky-prompt-customization (or set "
-                    "prompt_customization_allow_risky: true). Deterministic "
-                    "validation and the strict cleaners cannot be overridden.",
-                    stats=stats,
-                )
-        base["prompt_customization_security_review"] = review_status
-
-    # --- Paid routing call ---
-    routing_agent = PromptProfileRoutingAgent(llm, usage=usage)
-    review_attempted = base["prompt_customization_security_review_calls_attempted"]
-    try:
-        routing_outcome = routing_agent.route(single_profile, conversion_id)
-    except PromptCustomizationValidationError as exc:
-        stats = dict(base)
-        stats.update(usage.snapshot())
-        stats["prompt_profile_conversion_calls_attempted"] = max(
-            0, usage.attempted_calls - review_attempted
-        )
-        raise PromptCustomizationValidationError(str(exc), stats=stats) from exc
-
-    # --- Success: build the canonical config-ready proposal fragment ---
-    fragment = build_conversion_proposal_fragment(
-        single_profile,
-        routing_outcome.triple,
-        comment=_inline_profile_comment(config),
-    )
-    import json as _json
-
-    stats = dict(base)
-    stats["prompt_profile_conversion"] = "generated-awaiting-confirmation"
-    stats["prompt_profile_conversion_calls_attempted"] = routing_outcome.calls_attempted
-    stats["prompt_profile_conversion_calls_completed"] = routing_outcome.calls_completed
-    stats["prompt_profile_conversion_id"] = conversion_id
-    stats["prompt_profile_conversion_factors"] = list(routing_outcome.factors)
-    stats["prompt_profile_conversion_fragment"] = _json.dumps(
-        fragment, indent=2, ensure_ascii=False
-    )
-    stats.update(usage.snapshot())
-    # Documentation never ran; the three paid categories reconcile to the total.
-    stats["documentation_calls_attempted"] = max(
-        0,
-        stats["attempted_calls"]
-        - stats["prompt_customization_security_review_calls_attempted"]
-        - stats["prompt_profile_conversion_calls_attempted"],
-    )
-    return stats
-
-
-def _cleanup_stale_error_log(stats: dict, error_reporter: ErrorReporter) -> None:
-    """Remove a stale CodeDoc-owned error log on a clean run; record any warning.
-
-    Only acts when the current run recorded no issues (``flush`` already wrote
-    the log otherwise).  A removal failure is surfaced as ``stats['stale_log_warning']``
-    and logged, but never raised.
-    """
-    warning = error_reporter.clear_stale_owned_log()
-    if warning:
-        stats["stale_log_warning"] = warning
-        logger.warning(warning)
 
 
 def _set_issue_stats(
     stats: dict,
     error_reporter: ErrorReporter,
-    live_backup_path: Path,
+    recovery_path: Path | None,
 ) -> None:
-    """Populate error/issue stats keys on *stats* in-place."""
-    if error_reporter.has_issues():
-        stats["issues_recorded"] = error_reporter.issue_count()
-        if error_reporter.has_persisted_log():
-            stats["error_log"] = str(error_reporter.log_path.resolve())
-        else:
-            stats["error_log"] = None
-            stats["issue_log_warning"] = (
-                f"{error_reporter.issue_count()} issue(s) were recorded, but "
-                f"'{error_reporter.log_path.name}' could not be written because "
-                "a foreign file already exists at that path."
-            )
-    else:
-        stats["error_log"] = None
-        stats["issues_recorded"] = 0
-    if live_backup_path is not None:
-        stats["live_backup_path"] = str(live_backup_path.resolve())
+    """Populate in-memory issue/recovery stats keys on *stats* in-place."""
+    stats["issues_recorded"] = error_reporter.issue_count()
+    if recovery_path is not None and recovery_path.exists():
+        stats["live_backup_path"] = str(recovery_path.resolve())
     else:
         stats["live_backup_path"] = None
-
-
-def _initial_ignore_stats(config: dict, ignore_target: Path | None) -> dict:
-    enabled = bool(config.get("manage_output_gitignore", False))
-    return {
-        "output_gitignore_enabled": enabled,
-        "output_gitignore_updated": False,
-        "output_gitignore_path": str(ignore_target.resolve()) if enabled and ignore_target else None,
-        "output_gitignore_warning": None,
-    }
-
-
-def _finalize_output_gitignore(
-    stats: dict,
-    config: dict,
-    output_dir: Path,
-    ignore_target: Path | None,
-    output_files: tuple[Path | None, Path | None],
-    error_reporter: ErrorReporter,
-) -> None:
-    """Best-effort auxiliary ignore update after required finalization."""
-    if ignore_target is None or not config.get("manage_output_gitignore", False):
-        return
-    artifacts = [path.name for path in output_files if path is not None and path.exists()]
-    if error_reporter.log_path.exists():
-        artifacts.append(error_reporter.log_path.name)
-    if not artifacts:
-        return
-    try:
-        entries = generated_ignore_entries(artifacts)
-        update_output_gitignore(
-            output_dir, config["output_gitignore_filename"], entries
-        )
-        stats["output_gitignore_updated"] = True
-    except (BlockError, OSError) as exc:
-        warning = f"Documentation succeeded, but managed ignore update failed: {exc}"
-        stats["output_gitignore_warning"] = warning
-        logger.warning(warning)
-        error_reporter.record(exc, context="managed output .gitignore", level="warning")
-        try:
-            error_reporter.flush()
-        except OSError as flush_exc:
-            warning = f"{warning}; auxiliary warning log could not be persisted: {flush_exc}"
-            stats["output_gitignore_warning"] = warning
-            logger.warning(warning)
 
 
 def _set_usage_stats(
@@ -1192,15 +777,14 @@ def _set_usage_stats(
     stats["initial_calls_per_file"] = per_file
     stats["planned_calls"] = len(plan.agent_rels) * per_file
     stats["planned_files"] = len(plan.agent_rels)
-    # Documentation-call category accounting.  Every provider attempt is
-    # exactly one of three categories (documentation, customization review,
-    # routing).  Review and routing track their own attempts; documentation is the
-    # remainder so the three categories reconcile to ``attempted_calls`` exactly.
+    # Documentation-call category accounting.  Every provider attempt is exactly
+    # one of two categories (documentation or mandatory customization review).
+    # Review tracks its own attempts; documentation is the remainder so the two
+    # categories reconcile to ``attempted_calls`` exactly.
     stats["documentation_calls_planned"] = stats["planned_calls"]
     review_attempted = stats.get("prompt_customization_security_review_calls_attempted", 0)
-    routing_attempted = stats.get("prompt_profile_conversion_calls_attempted", 0)
     stats["documentation_calls_attempted"] = max(
-        0, stats.get("attempted_calls", 0) - review_attempted - routing_attempted
+        0, stats.get("attempted_calls", 0) - review_attempted
     )
     # Files the plan routed to the LLM that were neither completed nor failed
     # (e.g. a run aborted early by the consecutive-failure health check).
@@ -1221,6 +805,7 @@ def _build_dry_run_stats(
     resolved_profile: ResolvedProfile | None = None,
     profile_resolution: ProfileResolution | None = None,
     review_batches: list[ReviewBatch] | None = None,
+    recovery_resumed: int = 0,
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -1230,11 +815,6 @@ def _build_dry_run_stats(
         set(plan.documented_rels),
         plan.agent_rels,
         plan.entry_rel,
-    )
-    ignore_target = (
-        output_dir / config["output_gitignore_filename"]
-        if config.get("manage_output_gitignore", False)
-        else None
     )
     analysis_mode = config.get("analysis_mode", "single")
     per_file = initial_calls_per_file(analysis_mode)
@@ -1252,9 +832,6 @@ def _build_dry_run_stats(
     if review_batches:
         profile_stats["prompt_customization_security_review"] = "pending"
     if profile_stats:
-        profile_stats["prompt_customization_allow_risky"] = bool(
-            config.get("prompt_customization_allow_risky", False)
-        )
         # Dry-run projects the documentation plan without attempting any call.
         profile_stats["documentation_calls_planned"] = len(plan.agent_rels) * per_file
     return {
@@ -1269,7 +846,7 @@ def _build_dry_run_stats(
         "would_call_llm_for": len(plan.agent_rels),
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
-        "would_resume": len(plan.checkpoint_reuse_rels),
+        "would_resume": recovery_resumed,
         "forced": len(plan.forced_rels),
         "estimated_calls": len(plan.agent_rels) * per_file,
         "estimated_input_tokens": _estimate_planned_input_tokens(
@@ -1281,7 +858,6 @@ def _build_dry_run_stats(
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
-        **_initial_ignore_stats(config, ignore_target),
         **profile_stats,
     }
 
@@ -1301,9 +877,6 @@ def _base_profile_stats(
     affected = len(affected_rels)
     return {
         "prompt_profile_source": resolution.source,
-        "prompt_profile_file": (
-            str(resolution.source_path) if resolution.source_path is not None else None
-        ),
         "prompt_profile_active": affected > 0,
         "prompt_profile_affected_files": affected,
         "prompt_customization_security_review": (
@@ -1311,10 +884,11 @@ def _base_profile_stats(
         ),
         "prompt_customization_security_review_calls_planned": len(batches),
         "prompt_customization_security_review_calls_completed": 0,
+        "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
-        "prompt_customization_allow_risky": False,
-        **_conversion_stats_defaults(),
+        "documentation_calls_planned": 0,
+        "documentation_calls_attempted": 0,
     }
 
 

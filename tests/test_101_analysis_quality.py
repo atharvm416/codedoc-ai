@@ -228,7 +228,7 @@ def test_v1_record_is_invalidated_once_under_v2(tmp_path):
             }
         }
         plan, _ = build_pipeline_plan(
-            file_map, graph, {"main.py"}, "main.py", existing, {}, [],
+            file_map, graph, {"main.py"}, "main.py", existing, [],
             {"propagate_changes": False, "max_files": 0, "analysis_mode": "single"},
         )
         return plan

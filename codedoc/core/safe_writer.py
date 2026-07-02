@@ -5,7 +5,7 @@ This writer is the **default** crash-safety mechanism for every run —
 no longer opt-in via ``--safe-mode``.
 
 Crash-recovery data is kept in its own dedicated file named
-``crash_recovery_<stem>.json`` (or a ``(<n>)``-suffixed sibling), **never** the
+``crash_recovery.json``, **never** the
 stable output.  The recovery file is created before AI work begins and updated
 after each completed file.  The stable completed output (the final JSON for
 ``json``/``both`` or the Markdown for ``md``/``both``) is written only once, on
@@ -16,7 +16,7 @@ mutated while a run is in progress.  After the stable output is written,
 Format behaviour
 ----------------
 All formats
-    The recovery file is a distinct ``crash_recovery_<stem>.json`` in the output
+    The recovery file is the exact ``crash_recovery.json`` in the output
     directory.  On clean completion the stable output is written first and the
     recovery file is then deleted by ``SafeWriter.delete()``.  On interrupt or
     failure the stable output is left intact and the recovery file is preserved
@@ -82,8 +82,8 @@ class SafeWriter:
 
     Typical pipeline usage::
 
-        backup_path = _resolve_live_backup_path(output_dir, fmt, json_fn, md_fn)
-        sw = SafeWriter(backup_path, output_format, entry_rel, file_map)
+        recovery_path = output_dir / RECOVERY_FILENAME
+        sw = SafeWriter(recovery_path, output_format, entry_rel, file_map, identity)
         sw.set_queue_order(ordered_selected_paths)
         sw.load()              # pre-populate from any existing records + ownership check
         sw.initialize_empty()  # flush empty in-progress banner before AI starts
@@ -106,11 +106,16 @@ class SafeWriter:
         output_format: str,
         entry_file: str | None,
         file_map: dict[str, dict],
+        recovery_identity: dict | None = None,
     ) -> None:
         self._path: Path = backup_path
         self._output_format: str = output_format
         self._entry_file: str | None = entry_file
         self._file_map: dict[str, dict] = file_map
+        # Versioned run identity emitted inside the ``_codedoc`` block on every
+        # flush, so a partially written recovery file already carries the identity
+        # used to decide whether a later identical run may resume from it.
+        self._recovery_identity: dict | None = recovery_identity
         self._lock: threading.Lock = threading.Lock()
         self._clean_records: dict[str, dict] = {}
         # rel_paths actually written via record() during THIS run, as opposed to
@@ -144,21 +149,21 @@ class SafeWriter:
         ----------
         preloaded:
             The merged reuse record set computed by the canonical resume
-            boundary (``_load_existing_file_docs``: stable completed output +
-            legacy in-progress overlay + active recovery overlay).  Seeding the
-            writer with this set means every partial flush of the dedicated
-            recovery file is a self-contained snapshot, so an interrupted run
-            resumes correctly even if a later source is removed.  This replaces
-            the older behaviour where the live backup *was* the stable output
-            and ``load()`` re-read it directly.
+            boundary (stable completed output overlaid with any compatible
+            exact ``crash_recovery.json`` records). Seeding the writer with this
+            set means every partial flush of the dedicated recovery file is a
+            self-contained snapshot, so an interrupted run resumes correctly
+            even if the prior stable output later changes or disappears. This
+            replaces the older behaviour where the live backup *was* the stable
+            output and ``load()`` re-read it directly.
 
         Ownership guard
         ---------------
         If a file exists at the target recovery path but is not a codedoc output
         (unreadable / malformed JSON or no ``_codedoc`` metadata block) a
         :class:`ConfigError` is raised before any LLM work begins.  In normal
-        operation the active recovery path was already validated by the
-        candidate walk, so this guard is defensive.
+        operation the active recovery path was already validated by the exact
+        recovery-reader preflight, so this guard is defensive.
 
         A valid in-progress recovery file (``_codedoc.status = "in_progress"``)
         is fully accepted — this is the normal resume path.
@@ -317,7 +322,7 @@ class SafeWriter:
     def delete(self) -> None:
         """Remove the dedicated crash-recovery file after a clean completion.
 
-        The recovery file is a distinct ``crash_recovery_<stem>.json``
+        The recovery file is the exact ``crash_recovery.json``
         for **every** output format, never the stable output.  Clean completion
         writes the stable output first (via ``write_project_outputs``) and only
         then calls this to remove the recovery file.  Deletion is therefore a
@@ -409,16 +414,19 @@ class SafeWriter:
             )
 
         now = datetime.now(timezone.utc).isoformat()
+        codedoc_block: dict = {
+            "entry_file": self._entry_file,
+            "schema_version": SCHEMA_VERSION,
+            "created_at": self._created_at,
+            "updated_at": now,
+            "status": _STATUS_IN_PROGRESS,
+            "live_backup": True,
+        }
+        if self._recovery_identity is not None:
+            codedoc_block["recovery_identity"] = self._recovery_identity
         payload: dict = {
             "_crash_safety": _CRASH_SAFETY_BANNER,
-            "_codedoc": {
-                "entry_file": self._entry_file,
-                "schema_version": SCHEMA_VERSION,
-                "created_at": self._created_at,
-                "updated_at": now,
-                "status": _STATUS_IN_PROGRESS,
-                "live_backup": True,
-            },
+            "_codedoc": codedoc_block,
             "files": files_list,
         }
 

@@ -126,7 +126,7 @@ def _oversized_plan(tmp_path, stored_mcr, *, max_chars=1000, head_ratio=0.70):
         "max_content_chars": max_chars, "truncation_head_ratio": head_ratio,
     }
     plan, _ = build_pipeline_plan(
-        file_map, graph, {"main.py"}, "main.py", {"main.py": record}, {}, [], config,
+        file_map, graph, {"main.py"}, "main.py", {"main.py": record}, [], config,
     )
     return plan
 
@@ -182,7 +182,7 @@ def _small_plan(tmp_path, *, max_chars, head_ratio=0.70):
         "max_content_chars": max_chars, "truncation_head_ratio": head_ratio,
     }
     plan, _ = build_pipeline_plan(
-        file_map, graph, {"main.py"}, "main.py", {"main.py": record}, {}, [], config,
+        file_map, graph, {"main.py"}, "main.py", {"main.py": record}, [], config,
     )
     return plan
 

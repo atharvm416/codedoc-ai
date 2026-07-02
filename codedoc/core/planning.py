@@ -1,11 +1,10 @@
 """Shared pipeline planning for codedoc.
 
 The planning helper computes every routing decision — selection, forcing,
-propagation, unchanged skipping, identical-content reuse, legacy checkpoint
-reuse, and the paid-file cap — into one immutable :class:`PipelinePlan` that
-both ``--dry-run`` and real execution consume.  It may read source contents
-and hashes, but it never writes, never creates a provider, and never
-initializes ``SafeWriter``.
+propagation, unchanged skipping, identical-content reuse, and the paid-file cap
+— into one immutable :class:`PipelinePlan` that both ``--dry-run`` and real
+execution consume.  It may read source contents and hashes, but it never writes,
+never creates a provider, and never initializes ``SafeWriter``.
 
 Format detection and ownership inspection live in ``codedoc.core.output``;
 this module only consumes their results.
@@ -73,7 +72,6 @@ class PipelinePlan:
     process_rels: frozenset[str]
     unchanged_rels: frozenset[str]
     identical_reuse_rels: frozenset[str]
-    checkpoint_reuse_rels: frozenset[str]
     agent_rels: frozenset[str]
     entry_rel: str | None
     max_files: int
@@ -102,8 +100,6 @@ class PlanMaterials:
     content_hashes: dict[str, str] = field(default_factory=dict)
     # rel_path -> existing doc record reused via identical content.
     identical_reuse_docs: dict[str, dict] = field(default_factory=dict)
-    # rel_path -> legacy checkpoint result (hash key already stripped).
-    checkpoint_reuse_docs: dict[str, dict] = field(default_factory=dict)
 
 
 def normalize_force_files(
@@ -143,7 +139,6 @@ def build_pipeline_plan(
     selected_rels: set[str],
     entry_rel: str | None,
     existing_docs: dict[str, dict],
-    checkpoint_records: dict[str, dict],
     forced_paths: list[str],
     config: dict,
     resolved_profile: ResolvedProfile | None = None,
@@ -161,11 +156,8 @@ def build_pipeline_plan(
     entry_rel:
         The resolved entry path, or ``None``.
     existing_docs:
-        Per-file records loaded read-only from existing output files.
-    checkpoint_records:
-        Eligible legacy ``.codedoc_progress.json`` records.  Must be empty
-        when the live backup already contains records (``SafeWriter.size == 0``
-        equivalence is the caller's responsibility).
+        Per-file records loaded read-only from the exact selected output
+        target(s), overlaid with any compatible ``crash_recovery.json`` records.
     forced_paths:
         Normalized project-relative forced paths (see
         :func:`normalize_force_files`).
@@ -268,7 +260,6 @@ def build_pipeline_plan(
 
     materials = PlanMaterials()
     identical_reuse: set[str] = set()
-    checkpoint_reuse: set[str] = set()
     agent_rels: set[str] = set()
 
     for rel_path in graph.topological_order():
@@ -279,9 +270,8 @@ def build_pipeline_plan(
         materials.content_hashes[rel_path] = content_hash
 
         if rel_path in effective_forced:
-            # Forcing bypasses identical-content reuse and checkpoint reuse
-            # for the explicitly forced file.  Propagated dependents keep
-            # normal reuse behaviour below.
+            # Forcing bypasses identical-content reuse for the explicitly forced
+            # file.  Propagated dependents keep normal reuse behaviour below.
             agent_rels.add(rel_path)
             continue
 
@@ -304,40 +294,6 @@ def build_pipeline_plan(
             materials.identical_reuse_docs[rel_path] = candidate
             continue
 
-        # Legacy checkpoint reuse: eligible only when the checkpoint hash matches
-        # and the checkpoint carries a matching cache identity.  A checkpoint
-        # without the analysis revision/mode is reprocessed once.
-        if rel_path in checkpoint_records:
-            checkpoint_entry = checkpoint_records[rel_path]
-            stored_hash = checkpoint_entry.get("_checkpoint_hash", "")
-            checkpoint_candidate = {**checkpoint_entry, "hash": stored_hash}
-            if not stored_hash:
-                logger.info(
-                    "Checkpoint entry for '%s' has no hash — reprocessing.", rel_path
-                )
-                agent_rels.add(rel_path)
-            elif not _record_is_reusable(
-                checkpoint_candidate, content_hash, _expected_identity_for(rel_path)
-            ):
-                if content_hash == stored_hash:
-                    logger.info(
-                        "Checkpoint entry for '%s' predates the current analysis "
-                        "revision/mode — reprocessing.",
-                        rel_path,
-                    )
-                else:
-                    logger.info(
-                        "File '%s' was modified after it was checkpointed — reprocessing.",
-                        rel_path,
-                    )
-                agent_rels.add(rel_path)
-            else:
-                checkpoint_reuse.add(rel_path)
-                materials.checkpoint_reuse_docs[rel_path] = {
-                    k: v for k, v in checkpoint_entry.items() if k != "_checkpoint_hash"
-                }
-            continue
-
         agent_rels.add(rel_path)
 
     max_files = int(config.get("max_files", 0) or 0)
@@ -351,7 +307,6 @@ def build_pipeline_plan(
         process_rels=frozenset(process_rels),
         unchanged_rels=frozenset(unchanged_rels),
         identical_reuse_rels=frozenset(identical_reuse),
-        checkpoint_reuse_rels=frozenset(checkpoint_reuse),
         agent_rels=frozenset(agent_rels),
         entry_rel=entry_rel,
         max_files=max_files,
