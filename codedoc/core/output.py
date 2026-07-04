@@ -281,7 +281,7 @@ def _foreign_file_message(path: Path) -> str:
         "output file.\n"
         "codedoc will not overwrite it to protect your data.\n\n"
         "To resolve this, choose one of:\n"
-        f"  • Use a different output directory:   codedoc run --output my_docs/\n"
+        f"  • Use a different output directory:   codedoc --output my_docs/\n"
         f"  • Delete or rename the conflicting file:  {path}"
     )
 
@@ -371,7 +371,7 @@ def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Pat
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / PROJECT_MARKDOWN
     lines = [
-        "# codedoc run summary\n\n",
+        "# codedoc summary\n\n",
         f"- Files checked: {stats.get('checked', 0)}\n",
         f"- Files failed: {stats.get('failed', 0)}\n",
         f"- Files skipped: {stats.get('skipped', 0)}\n",

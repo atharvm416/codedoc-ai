@@ -1,6 +1,6 @@
 # CodeDoc run lifecycle
 
-This document describes the implemented 0.11.3 phase ordering for a real run.
+This document describes the phase ordering CodeDoc uses for a real run.
 The deterministic scanner, parser, graph, and output cleaners remain authoritative;
 LLM output is bounded enrichment.
 

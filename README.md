@@ -5,8 +5,6 @@ repositories. It scans source locally, builds a deterministic dependency graph,
 sends only files that need analysis to a configured LLM, and writes JSON,
 Markdown, or both.
 
-Current release: `0.11.3`.
-
 ## Highlights
 
 - Explicit or auto-detected entry files, with `entry` or `all` documentation scope.
@@ -30,25 +28,30 @@ Set a provider credential in the process environment, then run CodeDoc:
 
 ```bash
 export OPENAI_API_KEY="your-key"
-codedoc run --entry src/main.py
+codedoc --entry src/main.py
 ```
 
 PowerShell:
 
 ```powershell
 $env:OPENAI_API_KEY="your-key"
-codedoc run --entry src/main.py
+codedoc --entry src/main.py
 ```
 
 The default output is `codedoc/codedoc.json`. Common alternatives:
 
 ```bash
-codedoc run --format md
-codedoc run --format both
-codedoc run --output docs/report.json
-codedoc run --documentation-scope all
-codedoc run --dry-run --max-files 25
+codedoc --format md
+codedoc --format both
+codedoc --output docs/report.json
+codedoc --documentation-scope all
+codedoc --dry-run --max-files 25
 ```
+
+The optional leading verbs `run` and `execute` are accepted aliases; examples
+use the shorter canonical spelling. An entry is optional: CodeDoc can recover it
+from the selected output, auto-detect a configured candidate, or document all
+scanned files when no candidate exists.
 
 On later runs, use the same output selection. CodeDoc reads only the exact
 selected target(s), reuses unchanged owned records, and reprocesses changed files.
@@ -84,28 +87,10 @@ This writes `codedoc.config.json` in the current directory. It includes every
 public setting, `api_key: null`, and editable schema-v2 single/triple instruction
 defaults. Credentials are never copied into the file.
 
-Generate an inactive help template under another portable filename:
-
-```bash
-codedoc --init-config team-example
-```
-
-This writes `team-example.json`; runtime does not discover it. Rename or copy it
-to `codedoc.config.json` to activate it. Existing targets are refused unless
-`--force` is supplied. Forced replacement is atomic and creates no backup.
-
-To add or replace only inline instructions while preserving all other semantic
-settings:
-
-```bash
-codedoc --init-instructions
-codedoc --init-instructions single
-codedoc --init-instructions triple --force
-```
-
-The default mode is `both`. A non-null existing `prompt_profiles` value requires
-`--force`; no provider, scan, output, or recovery work occurs during either
-initialization utility.
+Existing targets are refused unless `--force` is supplied. Forced regeneration
+validates the existing file and atomically replaces only `prompt_profiles`; every
+other top-level setting and value is preserved, and no backup is created. CodeDoc
+reads subsequent edits from this exact active file.
 
 Useful defaults include:
 
@@ -128,6 +113,37 @@ Useful defaults include:
 Run `codedoc --init-config` rather than copying a partial example when you need
 the complete current key set.
 
+## Command-line options
+
+| Flag | Purpose |
+| --- | --- |
+| `--entry FILE` | Select an entry file; otherwise recover or auto-detect one. |
+| `--documentation-scope {entry,all}` | Document entry-reachable files or all scanned files. |
+| `--provider NAME` | Select `auto`, `openai`, `anthropic`, or `gemini`. |
+| `--model MODEL` | Override the provider model. |
+| `--output PATH` | Select an output directory or exact `.json`/`.md` file. |
+| `--format {json,md,both}` | Select output format. |
+| `--ignore PATH` | Add a project-relative ignored path; repeatable. |
+| `--skip-dirs DIRS` | Replace default skipped directory names with a comma-separated list. |
+| `--add-skip-dir DIR` | Add a skipped directory name; repeatable. |
+| `--remove-skip-dir DIR` | Remove a default skipped directory name; repeatable. |
+| `--dry-run` | Plan without writes or provider calls. |
+| `--max-files N` | Cap files allowed to make documentation calls (`0` is unlimited). |
+| `--force-files FILE` | Reprocess a selected path even when unchanged; repeatable. |
+| `--allow-partial` | Exit zero after a completed run with file failures. |
+| `--no-parallel` | Disable within-file parallel agents in triple mode. |
+| `--analysis-mode {single,triple}` | Select one combined call or the three-agent path. |
+| `--init-config` | Create the complete active config and exit. |
+| `--force` | With `--init-config`, refresh only editable profiles. |
+| `--max-parallel-files N` | Set concurrent file processing (default `5`). |
+| `--truncation-head-ratio FLOAT` | Set the head/tail source truncation split. |
+| `--verbose`, `-v` | Enable debug logging. |
+| `--version` | Print the installed version and exit. |
+
+Ignore rules are resolved from `--ignore`/`ignore_paths` and the
+`--skip-dirs`/`--add-skip-dir`/`--remove-skip-dir` family. Paths are
+project-relative; skip-directory values are directory names.
+
 ## Providers and environment variables
 
 Credentials and ordinary scalar overrides may come from operating-system
@@ -144,12 +160,18 @@ environment variables. CodeDoc does not read `.env` files.
 | `API_BASE_URL` | OpenAI-compatible endpoint base URL. |
 | `OUTPUT_DIR` | Output directory or exact output file. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
+| `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |
+| `CODEDOC_IGNORE_PATHS` | Semicolon-separated project-relative paths to ignore. |
 | `CODEDOC_MAX_PARALLEL_FILES` | File concurrency. |
+| `CODEDOC_FILE_RETRY_ATTEMPTS` | Per-file retry attempts. |
+| `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive-failure abort threshold. |
 | `CODEDOC_MAX_CONTENT_CHARS` | Per-file prompt content ceiling. |
 | `CODEDOC_DRY_RUN` | Planning-only mode. |
 | `CODEDOC_MAX_FILES` | Paid-file cap (`0` means unlimited). |
 | `CODEDOC_FORCE_FILES` | Semicolon-separated project-relative paths. |
 | `CODEDOC_ALLOW_PARTIAL` | Allow a completed partial run to exit zero. |
+| `CODEDOC_ANALYSIS_MODE` | `single` or `triple`. |
+| `CODEDOC_TRUNCATION_HEAD_RATIO` | Head fraction for source truncation. |
 
 Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
 `claude-haiku-4-5-20251001`, and Gemini `gemini-2.5-flash`. Select explicitly with
@@ -185,32 +207,28 @@ Every present mode uses a required `common` envelope and an optional
 ```
 
 The old flat mode layout is rejected with migration guidance. `per_extension` is
-reserved for a future additive design and is rejected in 0.11.3. Its documented
+reserved for a future additive design and is currently rejected. Its documented
 future precedence is `per_extension > per_language > common`, with full-block
 replacement rather than field merging.
 
-`analysis_mode: single` uses `single.common`. Triple mode uses explicit structure,
-dependency, and documentation blocks when provided. If triple documentation is
-missing because the profile is single-only, compatible single fields are
-projected deterministically to documentation; structure and dependency use
-built-in defaults. If no compatible customization exists, documentation also uses
-built-in defaults. No paid routing/conversion call is made.
+`analysis_mode: single` exposes one combined editable instruction JSON at
+`single.common`. Triple mode exposes three independently editable instruction
+JSON blocks at `triple.common.structure`, `.dependency`, and `.documentation`.
+Supported field order, optional fields, and bounded instruction text are editable;
+fixed system, safety, factuality, scanning, retry, cache, and serialization rules
+are not. `per_language` remains a complete-block replacement.
 
-Active custom instructions pass deterministic schema validation and mandatory
-provider-backed semantic review before persistent mutation. `SAFE` continues,
-`RISKY` continues with warnings, and `TOO_RISKY` always stops. There is no bypass.
+An effective non-default instruction is reviewed only when it will reach a planned
+LLM documentation call. `SAFE` continues, `RISKY` requires explicit per-run
+confirmation, and `TOO_RISKY` always stops. Initialization, unedited defaults,
+dry runs, cache-only work, and deterministic JSON↔Markdown conversion make no
+security-review call. There is no stored bypass.
 Fixed system roles, factuality/safety rules, parser facts, cleaners, provider
 selection, scanning, retry, cache, ownership, and artifact serialization are not
 customizable.
 
-Use the registry-backed reference for exact fields and types:
-
-```bash
-codedoc --describe-prompt-schema --format json
-codedoc --describe-prompt-schema --format md
-```
-
-`--format both` is intentionally invalid for this utility.
+Use `codedoc --init-config` as the registry-backed reference for exact fields,
+types, and complete defaults.
 
 ## Output, incremental reuse, and ownership
 
@@ -227,8 +245,8 @@ CodeDoc refuses to overwrite foreign, empty, or malformed final targets. Custom
 output names remain supported when supplied explicitly:
 
 ```bash
-codedoc run --output docs/report.json
-codedoc run --output docs/report.md
+codedoc --output docs/report.json
+codedoc --output docs/report.md
 ```
 
 `--format both` requires a directory because it writes two files.
@@ -285,7 +303,7 @@ stats = run_pipeline("/path/to/project", {"output_format": "both"})
 ```
 
 In-memory overrides are supported but do not create another persistent config
-source. Removed settings such as external prompt paths, risky-review bypass,
+source. Unsupported settings such as external prompt paths, risky-review bypass,
 safe mode, and managed output ignore files raise targeted configuration errors.
 
 ## Troubleshooting

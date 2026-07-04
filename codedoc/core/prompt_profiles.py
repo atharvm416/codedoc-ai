@@ -660,7 +660,7 @@ def _collect_block_syntaxes(raw: dict) -> set[str]:
 
 
 def _precheck_mode_sections(raw: dict) -> None:
-    """Require a ``common`` scope and reject the flat 0.11.0/0.11.1 layout.
+    """Require a ``common`` scope and reject the unsupported flat layout.
 
     Runs before schema-version inference so a former flat profile receives an
     actionable migration message instead of a generic "cannot determine version".
@@ -681,7 +681,7 @@ def _precheck_mode_sections(raw: dict) -> None:
             raise _err(
                 f"{mode}: the {keys} block must move under a 'common' scope, e.g. "
                 f'{{"{mode}": {{"common": {{...}}, "per_language": {{}}}}}}. The flat '
-                "0.11.0/0.11.1 layout is no longer accepted."
+                "flat mode layout is not accepted."
             )
         raise _err(
             f"{mode} must contain a 'common' scope, e.g. "
@@ -692,13 +692,13 @@ def _precheck_mode_sections(raw: dict) -> None:
 def _reject_section_keys(section: dict, where: str) -> None:
     """A mode section may contain only ``common`` and an optional ``per_language``.
 
-    ``per_extension`` is reserved for a future release and is rejected as
-    unsupported in 0.11.3 rather than silently ignored.
+    ``per_extension`` is reserved for a future additive design and is rejected
+    rather than silently ignored.
     """
     if "per_extension" in section:
         raise _err(
-            f"{where}: 'per_extension' is reserved for a future release and is not "
-            "accepted in 0.11.3; use 'common' and an optional 'per_language' only."
+            f"{where}: 'per_extension' is reserved for a future additive design "
+            "and is not accepted; use 'common' and an optional 'per_language' only."
         )
     extra = set(section) - {"common", "per_language"}
     if extra:
@@ -1245,8 +1245,7 @@ def validate_profile(
     A ``single``-only profile selected in triple mode remains valid: Workstream D
     resolves it by deterministic projection of the compatible ``single.common``
     fields onto documentation, so there is no "triple mode requires a triple
-    section" rejection here (external sources — the only case that historically
-    kept it — were removed in 0.11.3).
+    section" rejection here; external profile sources are not supported.
     """
     if not isinstance(raw, dict):
         raise _err("the profile must be a JSON object.")
@@ -1299,7 +1298,7 @@ def resolve_profile_source(
 ) -> ProfileResolution:
     """Resolve and validate the inline prompt profile, or report an absent source.
 
-    0.11.3 has exactly two profile source states:
+    There are exactly two profile source states:
 
     - ``inline``: a non-null ``prompt_profiles`` value from the exact config file
       or an in-memory override;
@@ -2040,166 +2039,6 @@ def clean_review_verdict(
 # Schema reference + export
 # ---------------------------------------------------------------------------
 
-def schema_reference_data(mode: str | None = None) -> dict:
-    """Machine-readable schema reference for ``--describe-prompt-schema``.
-
-    Documents both the legacy version-1 ``fields`` format and the version-2 literal
-    ``requested_shape`` format from the same registry.
-    """
-    modes = [mode] if mode else ["single", "triple"]
-    out: dict = {
-        "schema_version": PROMPT_PROFILE_SCHEMA_VERSION,
-        "supported_schema_versions": [
-            LEGACY_PROMPT_PROFILE_SCHEMA_VERSION,
-            CURRENT_PROMPT_PROFILE_SCHEMA_VERSION,
-        ],
-        "version_2_inline_only": True,
-        "modes": {},
-    }
-    for current_mode in modes:
-        agents_data = {}
-        for agent in VALID_AGENTS_BY_MODE[current_mode]:
-            fields = []
-            for fld in iter_fields(current_mode, agent):
-                fields.append(
-                    {
-                        "key": fld.path,
-                        "type": fld.type,
-                        "required": fld.required,
-                        "explanation": fld.explanation,
-                        "default_instruction": fld.instruction,
-                    }
-                )
-            agents_data[agent] = {
-                "requested_shape": render_default_shape_block(current_mode, agent),
-                "requested_shape_v2": _default_requested_shape(current_mode, agent),
-                "fields": fields,
-            }
-        out["modes"][current_mode] = agents_data
-    return out
-
-
-def render_prompt_schema_reference(mode: str | None = None) -> str:
-    """Render the registry-backed human-readable schema reference as Markdown."""
-    modes = [mode] if mode else ["single", "triple"]
-    lines = ["<!-- BEGIN CODEDOC PROMPT SCHEMA -->"]
-    lines.extend(
-        [
-            "CodeDoc accepts two equivalent prompt-profile formats from this one "
-            "registry. The **version-2** literal `requested_shape` form (keys and "
-            "containers resemble the output you want; string values are instruction "
-            "text) is the recommended form. The legacy **version-1** `fields` form "
-            "remains valid. Both are accepted only inline in `codedoc.config.json` "
-            "(the `prompt_profiles` value) or via the Python API — there are no "
-            "external profile files. Every mode section uses the `common` "
-            "instruction envelope. The `name`/`type`/`import` members in object "
-            "templates are fixed structural placeholders — only "
-            "`description`/`used_for` and scalar instructions are editable.",
-            "",
-        ]
-    )
-    for current_mode in modes:
-        for agent in VALID_AGENTS_BY_MODE[current_mode]:
-            lines.extend(
-                [
-                    f"### `{current_mode}/{agent}` requested shape",
-                    "",
-                    "Version-2 `requested_shape` (literal):",
-                    "",
-                    "```json",
-                    render_default_shape_block(current_mode, agent).split("\n", 1)[1],
-                    "```",
-                    "",
-                    "| Key path | Type | Status | Producer | Meaning | Default instruction | Cleaner |",
-                    "| --- | --- | --- | --- | --- | --- | --- |",
-                ]
-            )
-            for fld in iter_fields(current_mode, agent):
-                values = (
-                    fld.path,
-                    fld.type,
-                    "required" if fld.required else "optional",
-                    agent,
-                    fld.explanation,
-                    fld.instruction,
-                    "Strict type cleaning; unknown keys and invalid/empty values are removed.",
-                )
-                escaped = [value.replace("|", "\\|").replace("\n", " ") for value in values]
-                lines.append("| " + " | ".join(escaped) + " |")
-            lines.append("")
-    if mode is None:
-        v2_config_example = json.dumps(
-            {"prompt_profiles": default_prompt_profiles()}, indent=2, ensure_ascii=False
-        )
-        v2_single_example = json.dumps(
-            {"prompt_profiles": default_prompt_profiles("single")},
-            indent=2,
-            ensure_ascii=False,
-        )
-        v1_single_example = json.dumps(
-            {"prompt_profiles": default_prompt_profiles("single", schema_version=1)},
-            indent=2,
-            ensure_ascii=False,
-        )
-        lines.extend(
-            [
-                "### Complete profile examples",
-                "",
-                "Every mode section uses the `common` instruction envelope: put the "
-                "mode's instructions under `common` and (optionally) narrower "
-                "`per_language` overrides. Generate this file with `codedoc "
-                "--init-config` (full config) or `codedoc --init-instructions` "
-                "(prompt_profiles only). It is developer-standard-equivalent (inert "
-                "until you edit it).",
-                "",
-                "Version-2 `requested_shape` (both modes, `common` envelope):",
-                "",
-                "```json",
-                v2_config_example,
-                "```",
-                "",
-                "Version-2 `single` only:",
-                "",
-                "```json",
-                v2_single_example,
-                "```",
-                "",
-                "A `per_language` override uses `per_language.<tag>` with the same "
-                "payload as that mode's `common` (for triple, all three agent keys); "
-                "the override fully replaces the broader scope (it is not merged).",
-                "",
-                "Version-1 `fields` uses the same `common` envelope. Inline `single`:",
-                "",
-                "```json",
-                v1_single_example,
-                "```",
-                "",
-                "The future `per_extension` scope is reserved (precedence "
-                "`per_extension > per_language > common`) but is rejected as "
-                "unsupported in 0.11.3.",
-                "",
-                "| Editable | Fixed / non-overridable |",
-                "| --- | --- |",
-                "| Registered field order; optional-field inclusion; bounded instruction text | System prompts; fixed rules; required fields; key/type vocabulary; object-template identity placeholders (name/type/import); deterministic parser/graph facts; provider/model/key; scanning and control flow; retries/recovery/cache policy; public output vocabulary |",
-                "",
-                "Sequence: read the inline profile -> schema-version inference -> "
-                "deterministic schema/type/bound/render validation -> read-only scan "
-                "and plan -> paid cap and exact review batching -> SAFE continues / "
-                "RISKY warns / TOO_RISKY blocks -> generation -> strict cleaning and "
-                "profile filtering -> cache-digest stamping -> recovery/final output. "
-                "A customized single-only structure selected in triple mode resolves "
-                "its documentation block deterministically (missing triple "
-                "documentation -> projected compatible `single.common` fields -> "
-                "built-in defaults); no paid routing conversion is ever made. Dry-run "
-                "stops after planning and reports pending paid calls without "
-                "contacting a provider.",
-                "",
-            ]
-        )
-    lines.append("<!-- END CODEDOC PROMPT SCHEMA -->")
-    return "\n".join(lines)
-
-
 def _leaf_requested_value(fld: ShapeField, instruction: str) -> object:
     """Render one normalized spec back to its literal version-2 value."""
     if fld.type == "string":
@@ -2276,8 +2115,8 @@ def default_prompt_profiles(
     """Return the canonical ``prompt_profiles`` value under the ``common`` envelope.
 
     This is the single source of the generated/recommended prompt-profile shape
-    used by ``--init-config``, ``--init-instructions``, and
-    ``--describe-prompt-schema``.  Each present mode section carries an explicit
+    used by runtime resolution and ``--init-config``. Each present mode section
+    carries an explicit
     ``common`` scope and an empty ``per_language`` map; no ``per_extension`` key is
     emitted (that scope is reserved for a future release).  The result is
     developer-standard-equivalent, so an unedited generated profile is inert (no

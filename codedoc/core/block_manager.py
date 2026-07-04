@@ -1,4 +1,4 @@
-"""Atomic text writing for codedoc completed output and the live backup.
+"""Atomic text writing for completed output and crash recovery.
 
 ``atomic_write_text`` is the single canonical helper for replacing a file's
 contents without ever truncating the existing target in place.  It writes to a
@@ -17,7 +17,7 @@ Contract
 - ``OSError`` propagates with its original cause available.
 
 This is the only atomic-write implementation in the codebase; both the
-completed-output writers and the live-backup writer delegate to it.
+completed-output and crash-recovery writers delegate to it.
 """
 
 from __future__ import annotations
@@ -106,7 +106,7 @@ def create_text_exclusive(path: Path, text: str) -> None:
     Uses ``O_CREAT | O_EXCL`` so creation is atomic and race-safe: if anything
     already exists at *path* — a regular file, a directory, or a symlink — the
     operation raises :class:`BlockError` rather than overwriting it.  Used by the
-    config generators (``--init-config`` / ``--init-instructions``) for the
+    config generator (``--init-config``) for the
     no-``--force`` no-overwrite creation path.
     """
     path = Path(path)
@@ -131,8 +131,8 @@ def create_text_exclusive(path: Path, text: str) -> None:
 def replace_text_atomic_no_backup(path: Path, text: str) -> None:
     """Atomically replace a regular-file *path* with *text*, keeping no backup.
 
-    The ``--force`` path for the config generators (``--init-config`` /
-    ``--init-instructions``).  The resolved 0.11.3 product contract permits only
+    The ``--force`` path for the config generator (``--init-config``). The
+    product contract permits only
     one active config/support file, so ``--force`` is the user's explicit
     permission to discard the old bytes — no timestamped ``.bak-`` sibling is
     written.

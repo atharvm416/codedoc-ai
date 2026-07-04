@@ -154,7 +154,7 @@ class SafeWriter:
             set means every partial flush of the dedicated recovery file is a
             self-contained snapshot, so an interrupted run resumes correctly
             even if the prior stable output later changes or disappears. This
-            replaces the older behaviour where the live backup *was* the stable
+            replaces the older behaviour where recovery state *was* the stable
             output and ``load()`` re-read it directly.
 
         Ownership guard
@@ -188,7 +188,7 @@ class SafeWriter:
                 "codedoc output file.\n"
                 "codedoc will not overwrite it to protect your data.\n\n"
                 "To resolve this, choose one of:\n"
-                f"  • Use a different output directory:   codedoc run --output my_docs/\n"
+                f"  • Use a different output directory:   codedoc --output my_docs/\n"
                 f"  • Delete or rename the conflicting file:  {self._path}"
             )
 
@@ -223,7 +223,7 @@ class SafeWriter:
     def initialize_empty(self) -> None:
         """Flush the empty in-progress banner to disk before AI work starts.
 
-        This ensures the live backup exists even if the process is killed
+        This ensures crash_recovery.json exists even if the process is killed
         before the first file finishes.  When records were pre-loaded from a
         previous run the flush includes those records (not truly empty), which
         is the correct behaviour — the banner is the important part.

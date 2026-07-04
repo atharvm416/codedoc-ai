@@ -8,7 +8,8 @@ Security fixes are handled for the latest released version of `codedoc-ai`.
 
 Please do not open a public issue for secrets exposure, prompt injection risks, arbitrary file access, or other security-sensitive reports.
 
-Until a dedicated security contact is published, report vulnerabilities privately to the repository owner through GitHub.
+Use GitHub's private vulnerability reporting form:
+https://github.com/atharvm416/codedoc-ai/security/advisories/new
 
 When reporting, include:
 

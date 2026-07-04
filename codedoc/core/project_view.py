@@ -805,7 +805,7 @@ def __getattr__(name: str) -> Any:
 
     Markdown serialization/parsing moved to :mod:`codedoc.core.markdown_view`
     during internal decomposition.  Repository tests and documented integrations still import those
-    names from this module, so they are forwarded here for one release.  The
+    names from this module, so they are forwarded here for compatibility. The
     import is function-local so ``markdown_view`` (which imports a few pure
     assembly helpers from this module at load time) does not create a cycle.
     No runtime warning is emitted.

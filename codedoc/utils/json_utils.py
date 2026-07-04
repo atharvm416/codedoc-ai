@@ -18,7 +18,11 @@ from __future__ import annotations
 import json
 from typing import Any
 
-__all__ = ["DuplicateJSONKeyError", "loads_no_duplicate_keys"]
+__all__ = [
+    "DuplicateJSONKeyError",
+    "NonFiniteJSONNumberError",
+    "loads_no_duplicate_keys",
+]
 
 
 class DuplicateJSONKeyError(ValueError):
@@ -33,6 +37,14 @@ class DuplicateJSONKeyError(ValueError):
     def __init__(self, key: str) -> None:
         self.key = key
         super().__init__(f"duplicate JSON key {key!r}")
+
+
+class NonFiniteJSONNumberError(ValueError):
+    """Raised when JSON contains NaN or an Infinity token."""
+
+    def __init__(self, token: str) -> None:
+        self.token = token
+        super().__init__(f"non-finite JSON number {token!r}")
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -56,4 +68,12 @@ def loads_no_duplicate_keys(text: str) -> Any:
     Raises :class:`DuplicateJSONKeyError` (a :class:`ValueError`) on a repeated
     key and :class:`json.JSONDecodeError` on malformed JSON.
     """
-    return json.loads(text, object_pairs_hook=_reject_duplicate_pairs)
+
+    def reject_constant(token: str) -> None:
+        raise NonFiniteJSONNumberError(token)
+
+    return json.loads(
+        text,
+        object_pairs_hook=_reject_duplicate_pairs,
+        parse_constant=reject_constant,
+    )

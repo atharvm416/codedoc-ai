@@ -384,7 +384,7 @@ class TestConfigurableContentTruncation:
     def test_max_content_chars_invalid_type_raises(self):
         from codedoc.utils.errors import ConfigError
         from codedoc.core.loader import load_config
-        with pytest.raises(ConfigError, match="positive integer"):
+        with pytest.raises(ConfigError, match="integer"):
             load_config(Path("."), {"max_content_chars": "not-a-number"})
 
     def test_content_not_truncated_when_below_limit(self):

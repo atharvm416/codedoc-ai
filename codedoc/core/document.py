@@ -9,7 +9,7 @@ document and, if so, returns its normalized contents.
 Acceptance (encoded explicitly):
 
 - completed JSON with valid ``_codedoc`` metadata and schema ``1.3`` or ``1.4``;
-- in-progress / live-backup JSON (crash banner, ``status=in_progress``, or
+- in-progress crash-recovery JSON (crash banner, ``status=in_progress``, or
   ``live_backup``) with schema ``1.4`` or a missing schema;
 - stale-build migration JSON with valid ``_codedoc`` ownership and schema
   ``1.3`` / ``1.4`` / missing — only when ``legacy_role="stale_build"``;
@@ -194,7 +194,7 @@ def _validate_json_schema(
     legacy_role: str | None,
 ) -> None:
     if schema is None:
-        # Missing schema is acceptable only for in-progress/live-backup data or
+        # Missing schema is acceptable only for in-progress recovery data or
         # an explicit stale-build migration — never for general completed output.
         if in_progress or legacy_role == "stale_build":
             return

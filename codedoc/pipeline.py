@@ -20,15 +20,15 @@ moved into cohesive, single-responsibility modules:
 1. configuration and read-only ownership inspection;
 2. scan, graph, selection, and planning;
 3. paid-file-cap decision;
-4. filesystem mutation and live-backup initialization;
+4. filesystem mutation and crash-recovery initialization;
 5. provider creation;
 6. execution;
 7. final output, logs, cleanup, and statistics.
 
 Compatibility note
 --------------------------
-Private helpers that moved to the modules above are re-exported here for one
-release because repository tests and documented integrations import them as
+Private helpers that moved to the modules above are re-exported here because
+repository tests and documented integrations import them as
 ``codedoc.pipeline._name``.  These re-exports are deprecated; import from the
 defining module instead.  No runtime warning is emitted.
 """
@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Callable
 
 from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
@@ -104,7 +105,7 @@ from codedoc.utils.logger import get_logger, set_level
 # Compatibility re-exports (deprecated; import from the defining module)
 # ---------------------------------------------------------------------------
 # These private helpers moved to resume/discovery/execution.  They are
-# re-exported here for one release because repository tests and documented
+# re-exported here for compatibility because repository tests and documented
 # integrations still import them as ``codedoc.pipeline._name``.  Several are
 # already imported above for use by ``run_pipeline``; the names below cover the
 # remaining helpers that only external/test callers reference.
@@ -139,6 +140,8 @@ logger = get_logger(__name__)
 def run_pipeline(
     project_root: str | Path | dict | None = ".",
     config_overrides: dict | None = None,
+    *,
+    confirm_risky: Callable[[tuple[str, ...]], bool] | None = None,
 ) -> dict:
     """Run the full documentation pipeline on a project."""
     if isinstance(project_root, dict) and config_overrides is None:
@@ -477,11 +480,28 @@ def run_pipeline(
             review_stats["prompt_customization_security_review"] = "safe"
             print("Prompt customization standards/safety review: SAFE — continuing.")
         elif outcome.verdict == "RISKY":
-            review_stats["prompt_customization_security_review"] = "risky"
-            print("Prompt customization standards/safety review: RISKY — proceeding with warnings:")
+            print("Prompt customization standards/safety review: RISKY — confirmation required:")
             for warning in outcome.warnings:
                 print(f"  - {warning}")
-            print("Review the flagged items; re-run with a corrected profile to clear them.")
+            confirmed = False
+            if confirm_risky is not None:
+                try:
+                    confirmed = confirm_risky(tuple(outcome.warnings)) is True
+                except Exception:
+                    confirmed = False
+            if not confirmed:
+                review_stats["prompt_customization_security_review"] = (
+                    "risky-confirmation-blocked"
+                )
+                raise PromptCustomizationValidationError(
+                    "Prompt customization standards/safety review: RISKY — "
+                    "explicit confirmation was not provided. No documentation "
+                    "call or persistent mutation was performed. Revise the "
+                    "flagged instructions or confirm this run interactively.",
+                    stats=review_stats,
+                )
+            review_stats["prompt_customization_security_review"] = "risky-confirmed"
+            print("Medium-risk customization confirmed for this run — continuing.")
         else:
             # TOO_RISKY always stops before any documentation call or mutation.
             # There is no override.
@@ -591,8 +611,8 @@ def run_pipeline(
         if rel_path in agent_rels:
             queue.add(file_map[rel_path])
 
-    # Create LLM provider AFTER the live backup is initialised.
-    # initialize_empty() must be called before provider creation so the backup
+    # Create the LLM provider after crash recovery is initialized.
+    # initialize_empty() must be called before provider creation so recovery
     # exists even if provider init fails.
     recorder.initialize_empty()
 
@@ -682,7 +702,7 @@ def run_pipeline(
         # longer holds and execution stopped scheduling paid work.  The last valid
         # recovery file is preserved by the atomic writer.  Record the failure in
         # memory and print the recovery path so the user can act.
-        error_reporter.record(exc, context="live backup write")
+        error_reporter.record(exc, context="crash-recovery write")
         recovery_note = (
             f"\n  Completed work is preserved in: {recovery_path}"
             if recovery_path.exists()

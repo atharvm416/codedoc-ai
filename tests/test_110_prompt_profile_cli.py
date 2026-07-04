@@ -9,7 +9,7 @@ import json
 import pytest
 
 import codedoc.pipeline as pipe
-from codedoc.cli.cli import run_cli
+from codedoc.cli.cli import build_parser, run_cli
 from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
 
 INLINE = {"schema_version": 1, "single": {"common": {"fields": [
@@ -171,45 +171,13 @@ def test_first_activation_invalidates_then_reuses(monkeypatch, project):
 
 
 # ---------------------------------------------------------------------------
-# Describe / export utilities (Test #21)
+# Removed overlapping utilities
 # ---------------------------------------------------------------------------
 
-def test_describe_schema_json_is_project_free(capsys):
-    assert run_cli(["--describe-prompt-schema", "--analysis-mode", "single"]) == 0
-    data = json.loads(capsys.readouterr().out)
-    assert set(data["modes"]) == {"single"}
-
-
-def test_describe_schema_markdown(capsys):
-    assert run_cli(["--describe-prompt-schema", "--format", "md"]) == 0
-    out = capsys.readouterr().out
-    assert "BEGIN CODEDOC PROMPT SCHEMA" in out
-
-
-def test_describe_is_deterministic(capsys):
-    run_cli(["--describe-prompt-schema"])
-    first = capsys.readouterr().out
-    run_cli(["--describe-prompt-schema"])
-    assert capsys.readouterr().out == first
-
-
-def test_describe_schema_shows_common_envelope(capsys):
-    assert run_cli(["--describe-prompt-schema", "--format", "md"]) == 0
-    out = capsys.readouterr().out
-    assert '"common"' in out
-    assert "--export-prompt-profile" not in out
-    assert "codedoc-prompt-profiles.json" not in out
-
-
-def test_describe_rejects_format_both(capsys):
-    assert run_cli(["--describe-prompt-schema", "--format", "both"]) == 2
-    err = capsys.readouterr().err
-    assert "both" in err.lower()
-
-
-def test_utilities_are_mutually_exclusive_with_run_options():
-    # describe + a documentation run option -> usage error
-    assert run_cli(["--describe-prompt-schema", "--entry", "main.py"]) == 2
+@pytest.mark.parametrize("flag", ["--describe-prompt-schema", "--init-instructions"])
+def test_removed_config_utilities_are_rejected(flag):
+    assert flag not in build_parser().format_help()
+    assert run_cli([flag]) == 2
 
 
 def test_force_without_init_utility_is_rejected():

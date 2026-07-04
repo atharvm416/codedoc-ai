@@ -17,7 +17,7 @@ configuration dictionary nor recomputes configuration policy.
 
 Error classification logic lives in :mod:`codedoc.core.error_classifier`.
 Compat re-exports below preserve all ``codedoc.core.execution._name`` imports
-for one release.
+for compatibility.
 """
 
 from __future__ import annotations
@@ -141,7 +141,7 @@ class ExecutionOptions:
 class ExecutionContext:
     """All collaborators required to execute the agent-file queue.
 
-    The pipeline constructs this after provider creation and live-backup
+    The pipeline constructs this after provider creation and crash-recovery
     initialization, so execution never touches configuration loading,
     provider creation, or output writing.
     """
@@ -165,7 +165,7 @@ def _process_and_record(
     orchestrator: Orchestrator,
     recorder: SafeWriter,
 ) -> dict:
-    """Process one file and record it in the live backup from the worker thread.
+    """Process one file and record it in crash recovery from the worker thread.
 
     Recording happens here — inside the worker — so a Ctrl-C or crash that
     interrupts the main ``as_completed`` collection loop never discards a
@@ -432,7 +432,7 @@ def _process_descriptor_batch(
     -------
     succeeded : dict[str, dict]
         rel_path → result for files that completed without error.  These have
-        already been recorded in the live backup by the worker thread.
+        already been recorded in crash recovery by the worker thread.
     retry_rate_limited : list[tuple[dict, Exception]]
         (descriptor, causing_exception) pairs for files that hit a rate-limit
         signal.  The exception is preserved so the caller can parse
@@ -628,7 +628,7 @@ def _process_files_sequentially(
         except UnrecoverableProviderError:
             # A terminal billing/credentials/model/access abort raised by
             # the per-file retry routing must propagate out of execution so the
-            # pipeline records it and stops while the live backup stays resumable.
+            # pipeline records it and stops while crash recovery stays resumable.
             # Mirrors the LiveBackupWriteError re-raise; must precede the
             # recoverable AgentError/OutputError and generic handlers below
             # (UnrecoverableProviderError is an LLMError, not one of those).

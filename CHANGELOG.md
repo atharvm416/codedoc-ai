@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.11.4 - 2026-07-04
+
+### Fail-closed configuration and public-surface hardening
+
+- Unknown, malformed, non-finite, or incorrectly typed configuration now fails
+  before scanning, provider creation, mutation, or paid documentation work.
+- Configuration authoring is consolidated to `codedoc --init-config [--force]`.
+  The schema-description, instruction-only, and named-template forms are removed;
+  forced regeneration validates the active file and replaces only
+  `prompt_profiles`, preserving every unrelated top-level value.
+- Generated profiles expose one editable combined block for single mode and
+  independently editable structure, dependency, and documentation blocks for
+  triple mode. Security review runs only for effective non-default instructions
+  headed to planned LLM calls; medium risk now requires explicit per-run
+  confirmation, while high risk remains non-overridable.
+- Documentation and help consistently teach the shorter `codedoc …` spelling;
+  the accepted `run` and `execute` aliases remain supported. README now covers the
+  complete CLI and environment-variable surfaces, and release-tethered prose was
+  removed from runtime code and public guides.
+- Recovery messages name `crash_recovery.json`, entry-selection help reflects
+  auto-detection/all-files behavior, and the bundled Actions template uses the
+  canonical command form.
+- Documentation output shape, prompt bytes, document schema, and cache/recovery
+  identity are unchanged outside the explicit validation, initialization, and
+  medium-risk confirmation behavior above.
+- This is the first official-PyPI release in the 0.11 line. Users upgrading from
+  0.10.x should review the 0.11.0–0.11.3 entries below for cumulative breaking
+  changes.
+
 ## 0.11.3 - 2026-07-02
 
 ### Config-only instructions and exact file lifecycle

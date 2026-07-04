@@ -44,7 +44,7 @@ class UnrecoverableProviderError(LLMError):
     *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
-    *safe*: the live JSON backup is left intact and resumable; no stop path
+    *safe*: crash_recovery.json is left intact and resumable; no stop path
     deletes the backup or overwrites it with a "complete" final output.
 
     Parameters
@@ -109,7 +109,7 @@ class PromptCustomizationValidationError(ConfigError):
     Subclasses :class:`ConfigError` so the CLI maps it to exit code 2 (a
     setup-class problem the user must correct) without special-casing.  It is
     raised before any source file is processed and before any crash-recovery,
-    live-backup, or output artifact is written, so the run leaves nothing behind.
+    crash-recovery, or output artifact is written, so the run leaves nothing behind.
     """
 
     def __init__(self, message: str, *, stats: dict | None = None) -> None:
@@ -140,7 +140,7 @@ class LiveBackupWriteError(OutputError):
     """Raised when the live crash-safety backup cannot be persisted.
 
     This is a fatal output failure, not a recoverable agent or rate-limit
-    failure: once the live backup cannot be written, codedoc's crash-recovery
+    failure: once crash_recovery.json cannot be written, codedoc's recovery
     guarantee no longer holds, so execution must stop scheduling new work rather
     than continue under a false guarantee.  Carries the target path only — never
     source, prompt, or credential data — and retains the original SDK/OS

@@ -92,7 +92,7 @@ def test_cli_flag_absent_does_not_add_override(monkeypatch):
 
     captured = {}
 
-    def fake_run_pipeline(root, config_overrides=None):
+    def fake_run_pipeline(root, config_overrides=None, **_kwargs):
         captured["config"] = config_overrides
         return {"checked": 0, "failed": 0, "reused": 0,
                 "output_dir": "d", "output_files": []}
@@ -107,7 +107,7 @@ def test_cli_flag_sets_override(monkeypatch):
 
     captured = {}
 
-    def fake_run_pipeline(root, config_overrides=None):
+    def fake_run_pipeline(root, config_overrides=None, **_kwargs):
         captured["config"] = config_overrides
         return {"checked": 0, "failed": 0, "reused": 0,
                 "output_dir": "d", "output_files": []}

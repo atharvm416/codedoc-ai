@@ -1,17 +1,14 @@
-"""Canonical full-config generator and config-only instruction initializer.
+"""Canonical full-config generator.
 
-This module owns the two safe, provider-free config utilities:
+This module owns the safe, provider-free config utility:
 
-- ``--init-config [NAME]`` writes a complete editable ``codedoc.config.json``
-  (or a help-template file under a custom NAME) containing every public default
-  plus editable single/triple prompt instructions;
-- ``--init-instructions [single|triple|both]`` writes or replaces only the
-  inline ``prompt_profiles`` value inside the exact ``codedoc.config.json``.
+- ``--init-config`` writes a complete editable ``codedoc.config.json`` containing
+  every public default plus editable single/triple prompt instructions.
 
-Both utilities generate their defaults from the canonical registries
+The utility generates its defaults from the canonical registries
 (:data:`codedoc.core.loader.DEFAULTS` and
 :func:`codedoc.core.prompt_profiles.default_prompt_profiles`) so there is never a
-second hand-maintained template.  Neither utility scans source, detects an entry,
+second hand-maintained template. It never scans source, detects an entry,
 contacts a provider, runs an output preflight, initializes recovery, or mutates a
 final-output target.
 
@@ -36,14 +33,18 @@ from codedoc.core.block_manager import (
     create_text_exclusive,
     replace_text_atomic_no_backup,
 )
-from codedoc.core.loader import DEFAULTS, _CONFIG_FILENAME, _validate_portable_filename
+from codedoc.core.loader import DEFAULTS, _CONFIG_FILENAME, validate_config_data
 from codedoc.core.prompt_profiles import default_prompt_profiles
 from codedoc.utils.errors import ConfigError
-from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
+from codedoc.utils.json_utils import (
+    DuplicateJSONKeyError,
+    NonFiniteJSONNumberError,
+    loads_no_duplicate_keys,
+)
 
 # Keys never emitted into generated config.  ``supported_extensions`` is derived
 # (read-only after load) from ``extension_language_map`` and is deliberately
-# omitted (settled decision 5).  The remaining names were removed in 0.11.3 and
+# omitted (settled design). The remaining names are unsupported and
 # are already absent from ``DEFAULTS``; they are listed here as a belt-and-braces
 # guard and as the drift-test anchor so re-adding one to ``DEFAULTS`` cannot leak
 # it into generated JSON without also failing the classification test.
@@ -89,10 +90,16 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("parallel_ladder", "Explicit parallelism step-down ladder, or null."),
     ("respect_retry_after", "Honor a provider Retry-After hint."),
     ("retry_after_cap_s", "Upper bound (seconds) on an honored Retry-After."),
-    ("skip_dirs", "Directory names skipped while scanning (replaces the default list)."),
+    (
+        "skip_dirs",
+        "Directory names skipped while scanning (replaces the default list).",
+    ),
     ("skip_dirs_add", "Directory names to add to the skip list."),
     ("skip_dirs_remove", "Directory names to remove from the skip list."),
-    ("extension_language_map", "Extension -> language map (source of truth for scanning)."),
+    (
+        "extension_language_map",
+        "Extension -> language map (source of truth for scanning).",
+    ),
     ("extension_language_map_add", "Extension -> language entries to add."),
     ("extension_language_map_remove", "Extensions to remove from the map."),
     ("auto_entry_candidates", "Filenames tried during entry auto-detection."),
@@ -112,8 +119,14 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("force_files", "Project-relative paths to reprocess even when unchanged."),
     ("allow_partial", "Exit 0 even when some files failed (completed runs only)."),
     ("analysis_mode", "'single' (one combined call) or 'triple' (three agents)."),
-    ("truncation_head_ratio", "Head fraction (0<r<1) of the head+tail truncation split."),
-    ("prompt_profiles", "Inline single/triple instructions under the 'common' envelope."),
+    (
+        "truncation_head_ratio",
+        "Head fraction (0<r<1) of the head+tail truncation split.",
+    ),
+    (
+        "prompt_profiles",
+        "Inline single/triple instructions under the 'common' envelope.",
+    ),
 )
 
 _CREDENTIAL_NOTE = (
@@ -122,12 +135,10 @@ _CREDENTIAL_NOTE = (
     "GEMINI_API_KEY, GOOGLE_API_KEY, or the generic LLM_API_KEY)."
 )
 
-_VALID_INSTRUCTION_MODES = ("single", "triple", "both")
-
 
 @dataclass(frozen=True)
 class InitResult:
-    """Outcome of an ``--init-config`` / ``--init-instructions`` invocation."""
+    """Outcome of an ``--init-config`` invocation."""
 
     path: Path
     message: str
@@ -136,6 +147,7 @@ class InitResult:
 # ---------------------------------------------------------------------------
 # Full-config generation (Workstream A)
 # ---------------------------------------------------------------------------
+
 
 def build_default_config() -> dict:
     """Return the complete, editable default config dict.
@@ -162,82 +174,34 @@ def render_default_config_json() -> str:
     return json.dumps(build_default_config(), indent=2, ensure_ascii=False) + "\n"
 
 
-def init_config(project_root: Path | str, name: str | None, force: bool) -> InitResult:
-    """Write a full default ``codedoc.config.json`` (or a custom-name template).
-
-    With ``name=None`` the target is ``<project_root>/codedoc.config.json`` (the
-    active config).  With a portable ``name`` the target is that file — a
-    non-active *help template* that must be renamed/copied to
-    ``codedoc.config.json`` to take effect.  Never scans source, detects an entry,
-    contacts a provider, or mutates any output/recovery file.
-    """
-    root = Path(project_root)
-    if name is None:
-        target = root / _CONFIG_FILENAME
-        is_template = False
-    else:
-        filename = _normalize_config_filename(name)
-        target = root / filename
-        is_template = filename.lower() != _CONFIG_FILENAME.lower()
-
-    rerun = "codedoc --init-config" + (f" {name}" if name is not None else "")
-    _write_generated_file(target, render_default_config_json(), force, rerun)
-
-    if is_template:
-        message = (
-            f"Template created: {target}\n"
-            "CodeDoc reads only codedoc.config.json; rename or copy this file to "
-            "codedoc.config.json to activate it.\n" + _CREDENTIAL_NOTE
-        )
-    else:
-        message = (
-            f"Created {target} with every public default and editable single/triple "
-            "prompt instructions. Edit it, then run codedoc.\n" + _CREDENTIAL_NOTE
-        )
-    return InitResult(path=target, message=message)
-
-
-# ---------------------------------------------------------------------------
-# Config-only instruction initialization (Workstream B)
-# ---------------------------------------------------------------------------
-
-def init_instructions(
-    project_root: Path | str, mode: str | None, force: bool
-) -> InitResult:
-    """Create/insert/replace only the inline ``prompt_profiles`` in the config.
-
-    Operates only on ``<project_root>/codedoc.config.json`` (no filename option).
-    *mode* is ``single``, ``triple``, or ``both`` (default ``both``).  Preserves
-    every other semantic setting; makes no provider/review/documentation call and
-    creates no output/recovery file.
-    """
-    resolved_mode = mode or "both"
-    if resolved_mode not in _VALID_INSTRUCTION_MODES:
-        raise ConfigError(
-            "instruction mode must be 'single', 'triple', or 'both'; got "
-            f"{resolved_mode!r}."
-        )
-    section = None if resolved_mode == "both" else resolved_mode
-    profiles = default_prompt_profiles(section)
-
+def init_config(project_root: Path | str, force: bool = False) -> InitResult:
+    """Create the active config, or refresh only its profiles with ``force``."""
     root = Path(project_root)
     target = root / _CONFIG_FILENAME
-
     if not target.exists():
-        text = json.dumps({"prompt_profiles": profiles}, indent=2, ensure_ascii=False) + "\n"
-        create_text_exclusive(target, text)
+        create_text_exclusive(target, render_default_config_json())
         return InitResult(
             path=target,
             message=(
-                f"Created {target} with {resolved_mode} prompt instructions.\n"
+                f"Created {target} with every public default and editable "
+                "single/triple prompt instructions. Edit it, then run codedoc.\n"
                 + _CREDENTIAL_NOTE
             ),
+        )
+
+    if not force:
+        raise ConfigError(
+            f"'{target.name}' already exists. Re-run with --force to refresh only "
+            "its prompt_profiles value (all other settings are preserved):\n"
+            "  codedoc --init-config --force"
         )
 
     if target.is_symlink():
         raise ConfigError(f"refusing to modify symlink '{target}'.")
     if target.is_dir():
         raise ConfigError(f"'{target}' is a directory, not a config file.")
+    if not target.is_file():
+        raise ConfigError(f"'{target}' is not a regular config file.")
 
     original_bytes = target.read_bytes()
     try:
@@ -250,79 +214,27 @@ def init_instructions(
         raise ConfigError(
             f"'{target.name}' is not valid JSON: duplicate key {exc.key!r}."
         ) from exc
+    except NonFiniteJSONNumberError as exc:
+        raise ConfigError(f"'{target.name}' is not valid JSON: {exc}.") from exc
     except json.JSONDecodeError as exc:
         raise ConfigError(f"'{target.name}' is not valid JSON: {exc}.") from exc
     if not isinstance(data, dict):
         raise ConfigError(f"'{target.name}' must be a JSON object.")
 
-    existing = data.get("prompt_profiles")
-    replacing = existing is not None
-    if replacing and not force:
-        raise ConfigError(
-            f"'{target.name}' already defines a non-null 'prompt_profiles'. Re-run "
-            "with --force to replace only that value (all other settings are "
-            "preserved; JSON formatting may be canonicalized):\n"
-            f"  codedoc --init-instructions {resolved_mode} --force"
-        )
-
-    data["prompt_profiles"] = profiles
+    # Validate the complete existing object before preserving it. This catches
+    # unknown/removed keys and malformed values before any replacement occurs.
+    validate_config_data(data, source=target.name)
+    data["prompt_profiles"] = default_prompt_profiles()
     new_text = json.dumps(data, indent=2, ensure_ascii=False) + "\n"
     # End-to-end concurrent-change guard against the bytes we parsed.
     if target.read_bytes() != original_bytes:
         raise ConfigError(f"'{target.name}' changed during update; aborting.")
     replace_text_atomic_no_backup(target, new_text)
 
-    if replacing:
-        message = (
-            f"Replaced prompt_profiles in {target} with {resolved_mode} instructions "
-            "(all other settings preserved; JSON formatting canonicalized)."
-        )
-    else:
-        message = (
-            f"Added {resolved_mode} prompt instructions to {target} "
-            "(all other settings preserved)."
-        )
-    return InitResult(path=target, message=message)
-
-
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-def _normalize_config_filename(name: str) -> str:
-    """Normalize + validate a custom ``--init-config NAME`` into a portable file.
-
-    Appends ``.json`` (case-insensitively) when missing — never twice — then
-    validates the final basename through the shared portable-filename validator so
-    paths, drives, traversal, reserved device names, and control characters are
-    rejected.
-    """
-    if not isinstance(name, str) or not name.strip():
-        raise ConfigError("--init-config NAME must be a non-empty portable filename.")
-    if name.lower().endswith(".json.json"):
-        raise ConfigError(
-            "--init-config NAME must not repeat the .json extension."
-        )
-    candidate = name if name.lower().endswith(".json") else name + ".json"
-    _validate_portable_filename(candidate, "--init-config NAME")
-    return candidate
-
-
-def _write_generated_file(target: Path, text: str, force: bool, rerun: str) -> None:
-    """Create *target* with *text*, refusing an existing file unless *force*.
-
-    Without ``--force`` an existing target is refused with the exact rerun command
-    (no persistent backup is ever written — ``--force`` is the user's explicit
-    permission to discard the old bytes).  A failed atomic replacement leaves the
-    original byte-identical.
-    """
-    if force:
-        replace_text_atomic_no_backup(target, text)
-        return
-    if target.exists():
-        raise ConfigError(
-            f"'{target.name}' already exists. Re-run with --force to replace its "
-            f"contents (the current bytes are discarded, no backup is kept):\n"
-            f"  {rerun} --force"
-        )
-    create_text_exclusive(target, text)
+    return InitResult(
+        path=target,
+        message=(
+            f"Refreshed prompt_profiles in {target}; all other settings were "
+            "preserved (JSON formatting was canonicalized)."
+        ),
+    )

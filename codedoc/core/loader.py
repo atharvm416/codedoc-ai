@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 from pathlib import Path
@@ -10,7 +11,11 @@ from pathlib import PureWindowsPath
 from typing import Any
 
 from codedoc.utils.errors import ConfigError
-from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
+from codedoc.utils.json_utils import (
+    DuplicateJSONKeyError,
+    NonFiniteJSONNumberError,
+    loads_no_duplicate_keys,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -33,8 +38,15 @@ DEFAULTS: dict[str, Any] = {
     # *different* list, _apply_config_overrides() treats it as a filter on the
     # extension_language_map (backward-compat bridge for older configs).
     "supported_extensions": [
-        ".py", ".ts", ".tsx", ".js", ".jsx", ".dart",
-        ".java", ".cs", ".html",
+        ".py",
+        ".ts",
+        ".tsx",
+        ".js",
+        ".jsx",
+        ".dart",
+        ".java",
+        ".cs",
+        ".html",
     ],
     "parallel_agents": True,
     "max_parallel_files": 5,
@@ -56,9 +68,26 @@ DEFAULTS: dict[str, Any] = {
     # skip_dirs — single source of truth (was split across loader + scanner)
     # -----------------------------------------------------------------------
     "skip_dirs": [
-        "__pycache__", ".git", ".hg", ".svn", ".venv", "venv", "env", "myenv",
-        ".env", "node_modules", "site-packages", "dist-packages", "dist", "build",
-        ".next", ".nuxt", "target", "codedoc", ".mypy_cache", ".pytest_cache",
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".venv",
+        "venv",
+        "env",
+        "myenv",
+        ".env",
+        "node_modules",
+        "site-packages",
+        "dist-packages",
+        "dist",
+        "build",
+        ".next",
+        ".nuxt",
+        "target",
+        "codedoc",
+        ".mypy_cache",
+        ".pytest_cache",
         ".ruff_cache",
     ],
     # Extend skip_dirs without replacing the full list.
@@ -72,25 +101,25 @@ DEFAULTS: dict[str, Any] = {
     # supported — no need to edit both this and supported_extensions.
     # -----------------------------------------------------------------------
     "extension_language_map": {
-        ".py":   "python",
-        ".ts":   "typescript",
-        ".tsx":  "tsx",
-        ".js":   "javascript",
-        ".jsx":  "jsx",
+        ".py": "python",
+        ".ts": "typescript",
+        ".tsx": "tsx",
+        ".js": "javascript",
+        ".jsx": "jsx",
         ".dart": "dart",
         ".java": "java",
-        ".cs":   "csharp",
+        ".cs": "csharp",
         ".html": "html",
-        ".htm":  "html",
-        ".kt":   "kotlin",
-        ".swift":"swift",
-        ".go":   "go",
-        ".rb":   "ruby",
-        ".rs":   "rust",
-        ".cpp":  "cpp",
-        ".c":    "c",
-        ".h":    "c",
-        ".hpp":  "cpp",
+        ".htm": "html",
+        ".kt": "kotlin",
+        ".swift": "swift",
+        ".go": "go",
+        ".rb": "ruby",
+        ".rs": "rust",
+        ".cpp": "cpp",
+        ".c": "c",
+        ".h": "c",
+        ".hpp": "cpp",
     },
     # Add new extension → language entries (merged with extension_language_map).
     "extension_language_map_add": {},
@@ -118,8 +147,8 @@ DEFAULTS: dict[str, Any] = {
     # -----------------------------------------------------------------------
     "provider_prefixes": {
         "anthropic": ["claude"],
-        "gemini":    ["gemini"],
-        "openai":    ["gpt-", "o1", "o3", "text-"],
+        "gemini": ["gemini"],
+        "openai": ["gpt-", "o1", "o3", "text-"],
     },
     # Add prefixes per provider: {"anthropic": ["claude2"], "custom": ["mymodel-"]}.
     "provider_prefixes_add": {},
@@ -172,7 +201,7 @@ DEFAULTS: dict[str, Any] = {
     # -----------------------------------------------------------------------
     # Inline profile object (single and/or triple sections) customizing the
     # requested JSON shape block. ``None`` means no inline profile.  This is the
-    # only prompt-customization source in 0.11.3; external profile files,
+    # only prompt-customization source; external profile files,
     # auto-detection, and the disable flag were removed.
     "prompt_profiles": None,
 }
@@ -182,13 +211,13 @@ DEFAULTS: dict[str, Any] = {
 # ``--config FILE`` runtime selector.
 _CONFIG_FILENAME = "codedoc.config.json"
 
-# Runtime keys removed in 0.11.3.  Detected in the exact config file and in
+# Unsupported runtime keys. Detected in the exact config file and in
 # in-memory overrides *before* the loader filters unknown/default keys, so a
 # stale config that still sets one fails loudly instead of looking active while
-# CodeDoc silently ignores it.  Each value explains the 0.11.3 behavior.
+# CodeDoc silently ignores it. Each value explains the current behavior.
 _REMOVED_CONFIG_KEYS: dict[str, str] = {
     "safe_mode": (
-        "crash recovery is always active in 0.11.3; there is no safe_mode "
+        "crash recovery is always active; there is no safe_mode "
         "setting and no replacement is required."
     ),
     "manage_output_gitignore": (
@@ -249,6 +278,7 @@ _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
 # Public entry point
 # ---------------------------------------------------------------------------
 
+
 def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
     """Load and merge config from the exact config file, environment, and defaults.
 
@@ -272,12 +302,15 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
                     f"'{_CONFIG_FILENAME}' must be a JSON object, got {type(data).__name__}"
                 )
             _reject_removed_keys(data, source=_CONFIG_FILENAME)
-            config.update({k: v for k, v in data.items() if k in DEFAULTS})
+            _reject_unknown_keys(data, source=_CONFIG_FILENAME)
+            config.update(data)
             logger.info("Config loaded from %s", candidate)
         except DuplicateJSONKeyError as exc:
             raise ConfigError(
                 f"Invalid JSON in '{_CONFIG_FILENAME}': duplicate key {exc.key!r}."
             ) from exc
+        except NonFiniteJSONNumberError as exc:
+            raise ConfigError(f"Invalid JSON in '{_CONFIG_FILENAME}': {exc}.") from exc
         except json.JSONDecodeError as exc:
             raise ConfigError(f"Invalid JSON in '{_CONFIG_FILENAME}': {exc}") from exc
     else:
@@ -294,7 +327,13 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
 
     if overrides:
         _reject_removed_keys(overrides, source="config_overrides")
-        config.update({k: v for k, v in overrides.items() if k in DEFAULTS})
+        _reject_unknown_keys(overrides, source="config_overrides")
+        config.update(overrides)
+
+    # Validate values before merge helpers iterate or coerce them. This ensures
+    # malformed collections and scalar paths produce ConfigError rather than a
+    # raw TypeError/AttributeError.
+    _validate_pre_resolution(config)
 
     # Resolve <key> / <key>_add / <key>_remove overrides for configurable
     # default keys.  Must run after all sources are merged so the final
@@ -309,12 +348,27 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     return config
 
 
+def validate_config_data(data: dict[str, Any], *, source: str = "configuration") -> None:
+    """Validate one config object without reading environment variables or files."""
+    if not isinstance(data, dict):
+        raise ConfigError(f"{source} must be a JSON object.")
+    _reject_removed_keys(data, source=source)
+    _reject_unknown_keys(data, source=source)
+    config = dict(DEFAULTS)
+    config.update(data)
+    _validate_pre_resolution(config)
+    _apply_config_overrides(config)
+    _resolve_output_spec(config, data)
+    _validate(config, warn_missing_api_key=False)
+
+
 # ---------------------------------------------------------------------------
 # Removed-key detection
 # ---------------------------------------------------------------------------
 
+
 def _reject_removed_keys(data: dict[str, Any], *, source: str) -> None:
-    """Raise :class:`ConfigError` when *data* sets any key removed in 0.11.3.
+    """Raise :class:`ConfigError` when *data* sets an unsupported key.
 
     Detects the removed keys *before* the loader filters unknown/default keys so a
     stale config or override that still sets one fails loudly with the replacement
@@ -336,9 +390,23 @@ def _reject_removed_keys(data: dict[str, Any], *, source: str) -> None:
     )
 
 
+def _reject_unknown_keys(data: dict[str, Any], *, source: str) -> None:
+    """Reject all unknown top-level configuration keys deterministically."""
+    unknown = sorted(str(key) for key in data if key not in DEFAULTS)
+    if not unknown:
+        return
+    details = "\n".join(f"  - {key}" for key in unknown)
+    plural = "keys" if len(unknown) != 1 else "key"
+    raise ConfigError(
+        f"{source} contains {len(unknown)} unknown configuration {plural}:\n"
+        f"{details}\nCorrect or remove the listed key(s)."
+    )
+
+
 # ---------------------------------------------------------------------------
 # Override-resolution helpers
 # ---------------------------------------------------------------------------
+
 
 def _resolve_list_override(
     key: str,
@@ -409,8 +477,7 @@ def _resolve_nested_list_dict_override(
     3. ``<key>_remove`` — a ``dict[str, list[str]]``; removes prefixes per provider.
     """
     base: dict[str, list[str]] = {
-        k: list(v)
-        for k, v in raw_config.get(key, defaults.get(key, {})).items()
+        k: list(v) for k, v in raw_config.get(key, defaults.get(key, {})).items()
     }
 
     add = raw_config.get(f"{key}_add") or {}
@@ -418,7 +485,7 @@ def _resolve_nested_list_dict_override(
         for provider, prefixes in add.items():
             existing = base.setdefault(provider, [])
             seen = set(existing)
-            for prefix in (prefixes or []):
+            for prefix in prefixes or []:
                 if prefix not in seen:
                     existing.append(prefix)
                     seen.add(prefix)
@@ -431,6 +498,128 @@ def _resolve_nested_list_dict_override(
                 base[provider] = [p for p in base[provider] if p not in remove_set]
 
     return base
+
+
+def _non_empty_string(value: Any) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _validate_string_list(config: dict[str, Any], key: str) -> None:
+    value = config.get(key)
+    if not isinstance(value, list) or not all(
+        _non_empty_string(item) for item in value
+    ):
+        raise ConfigError(f"{key} must be a list of non-empty strings.")
+
+
+def _validate_extension(value: Any, key: str) -> None:
+    if not _non_empty_string(value) or not value.startswith(".") or len(value) < 2:
+        raise ConfigError(f"{key} entries must be extensions such as '.py'.")
+
+
+def _reject_non_finite(value: Any, key: str = "configuration") -> None:
+    """Reject NaN and infinities in in-memory configuration recursively."""
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ConfigError(f"{key} contains a non-finite number.")
+    if isinstance(value, dict):
+        for child_key, child in value.items():
+            _reject_non_finite(child, f"{key}.{child_key}")
+    elif isinstance(value, (list, tuple)):
+        for index, child in enumerate(value):
+            _reject_non_finite(child, f"{key}[{index}]")
+
+
+def _validate_pre_resolution(config: dict[str, Any]) -> None:
+    """Validate shapes that merge/path resolution assumes are well formed."""
+    _reject_non_finite(config)
+
+    required_strings = (
+        "llm_mode",
+        "llm_provider",
+        "model_name",
+        "documentation_scope",
+        "output_dir",
+        "output_format",
+        "output_json_filename",
+        "output_md_filename",
+        "log_level",
+        "analysis_mode",
+    )
+    for key in required_strings:
+        value = config.get(key)
+        if not isinstance(value, str) or (key != "model_name" and not value.strip()):
+            raise ConfigError(
+                f"{key} must be a string{'' if key == 'model_name' else ' and must not be empty'}."
+            )
+    for key in ("entry_file", "api_base_url", "api_key"):
+        value = config.get(key)
+        if value is not None and not _non_empty_string(value):
+            raise ConfigError(f"{key} must be a non-empty string or null.")
+
+    json_name = _validate_portable_filename(
+        config["output_json_filename"], "output_json_filename"
+    )
+    md_name = _validate_portable_filename(
+        config["output_md_filename"], "output_md_filename"
+    )
+    if not json_name.lower().endswith(".json"):
+        raise ConfigError("output_json_filename must end in '.json'.")
+    if not md_name.lower().endswith(".md"):
+        raise ConfigError("output_md_filename must end in '.md'.")
+
+    for key in (
+        "skip_dirs",
+        "skip_dirs_add",
+        "skip_dirs_remove",
+        "ignore_paths",
+        "auto_entry_candidates",
+        "auto_entry_candidates_add",
+        "auto_entry_candidates_remove",
+        "rate_limit_signals_add",
+        "rate_limit_signals_remove",
+        "force_files",
+    ):
+        _validate_string_list(config, key)
+
+    for key in ("supported_extensions", "extension_language_map_remove"):
+        value = config.get(key)
+        if not isinstance(value, list):
+            raise ConfigError(f"{key} must be a list of file extensions.")
+        for item in value:
+            _validate_extension(item, key)
+
+    for key in ("extension_language_map", "extension_language_map_add"):
+        value = config.get(key)
+        if not isinstance(value, dict):
+            raise ConfigError(f"{key} must map file extensions to language tags.")
+        for extension, language in value.items():
+            _validate_extension(extension, key)
+            if not _non_empty_string(language):
+                raise ConfigError(f"{key} language tags must be non-empty strings.")
+
+    for key in (
+        "provider_prefixes",
+        "provider_prefixes_add",
+        "provider_prefixes_remove",
+    ):
+        value = config.get(key)
+        if not isinstance(value, dict):
+            raise ConfigError(f"{key} must map providers to lists of model prefixes.")
+        for provider, prefixes in value.items():
+            if (
+                not _non_empty_string(provider)
+                or not isinstance(prefixes, list)
+                or not all(_non_empty_string(prefix) for prefix in prefixes)
+            ):
+                raise ConfigError(
+                    f"{key} must map non-empty provider names to lists of non-empty strings."
+                )
+
+    ladder = config.get("parallel_ladder")
+    if ladder is not None and not isinstance(ladder, list):
+        raise ConfigError(
+            "parallel_ladder must be null or a list of positive integers."
+        )
 
 
 def _apply_config_overrides(config: dict[str, Any]) -> None:
@@ -483,6 +672,7 @@ def _apply_config_overrides(config: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Output path resolution
 # ---------------------------------------------------------------------------
+
 
 def _resolve_output_spec(config: dict, overrides: dict) -> None:
     """
@@ -582,13 +772,6 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
 # Validation
 # ---------------------------------------------------------------------------
 
-def _coerce_bool(value: Any) -> bool:
-    """Normalize a config value (possibly an env-var string) to a boolean."""
-    if isinstance(value, str):
-        return value.strip().lower() in ("true", "1", "yes")
-    return bool(value)
-
-
 _TRUE_STRINGS = ("true", "1", "yes")
 _FALSE_STRINGS = ("false", "0", "no")
 
@@ -608,18 +791,22 @@ def _coerce_strict_bool(value: Any, key: str) -> bool:
             return True
         if normalized in _FALSE_STRINGS:
             return False
-        raise ConfigError(
-            f"{key} must be a boolean (true/false); got {value!r}."
-        )
-    if isinstance(value, int):
-        # Non-string ints are already handled by the bool branch above for
-        # True/False; a bare 0/1 here is acceptable, anything else is not.
-        if value in (0, 1):
-            return bool(value)
+        raise ConfigError(f"{key} must be a boolean (true/false); got {value!r}.")
     raise ConfigError(f"{key} must be a boolean (true/false); got {value!r}.")
 
 
-def _validate(config: dict[str, Any]) -> None:
+def _coerce_strict_int(value: Any, key: str) -> int:
+    """Accept integers and integer strings while rejecting bools/floats."""
+    if isinstance(value, bool):
+        raise ConfigError(f"{key} must be an integer.")
+    if isinstance(value, int):
+        return value
+    if isinstance(value, str) and re.fullmatch(r"[+-]?\d+", value.strip()):
+        return int(value.strip())
+    raise ConfigError(f"{key} must be an integer.")
+
+
+def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> None:
     """Raise ConfigError for invalid values."""
     if config.get("llm_mode", "api") != "api":
         raise ConfigError(
@@ -643,18 +830,27 @@ def _validate(config: dict[str, Any]) -> None:
             "'triple' (the three-agent path)."
         )
 
-    # Normalize booleans early — dry_run gates the API-key warning below.
-    config["dry_run"] = _coerce_bool(config.get("dry_run", False))
-    config["allow_partial"] = _coerce_bool(config.get("allow_partial", False))
+    config["log_level"] = config["log_level"].upper()
+    if config["log_level"] not in ("DEBUG", "INFO", "WARNING", "ERROR"):
+        raise ConfigError("log_level must be DEBUG, INFO, WARNING, or ERROR.")
 
-    # follow_symlinks is a safety control — coerce strictly so an
-    # unrecognized string is a hard error rather than a silent False.
-    config["follow_symlinks"] = _coerce_strict_bool(
-        config.get("follow_symlinks", False), "follow_symlinks"
-    )
+    # Normalize every public boolean consistently. Integers are rejected even
+    # though bool is an int subclass in Python; documented environment strings
+    # remain accepted.
+    for key in (
+        "parallel_agents",
+        "follow_symlinks",
+        "propagate_changes",
+        "rate_limit_adaptive",
+        "respect_retry_after",
+        "dry_run",
+        "allow_partial",
+    ):
+        config[key] = _coerce_strict_bool(config[key], key)
 
     if (
-        config["llm_mode"] == "api"
+        warn_missing_api_key
+        and config["llm_mode"] == "api"
         and not config["dry_run"]
         and not (config.get("api_key") or _has_provider_api_key())
     ):
@@ -690,8 +886,10 @@ def _validate(config: dict[str, Any]) -> None:
     _rls = config.get("rate_limit_backoff_s")
     if _rls is not None:
         try:
+            if isinstance(_rls, bool):
+                raise ValueError
             _v = float(_rls)
-            if _v < 0:
+            if not math.isfinite(_v) or _v < 0:
                 raise ValueError
             config["rate_limit_backoff_s"] = _v
         except (TypeError, ValueError) as exc:
@@ -702,8 +900,10 @@ def _validate(config: dict[str, Any]) -> None:
     _rls = config.get("rate_limit_backoff_scale")
     if _rls is not None:
         try:
+            if isinstance(_rls, bool):
+                raise ValueError
             _v = float(_rls)
-            if _v <= 0:
+            if not math.isfinite(_v) or _v <= 0:
                 raise ValueError
             config["rate_limit_backoff_scale"] = _v
         except (TypeError, ValueError) as exc:
@@ -718,27 +918,23 @@ def _validate(config: dict[str, Any]) -> None:
         raise ConfigError("rate_limit_signals_remove must be a list of strings.")
 
     if config.get("output_format") not in ("json", "md", "both"):
-        raise ConfigError(
-            "output_format must be one of: 'json', 'md', or 'both'."
-        )
+        raise ConfigError("output_format must be one of: 'json', 'md', or 'both'.")
 
-    if isinstance(config.get("max_file_size_kb"), bool):
-        raise ConfigError("max_file_size_kb must be a positive integer (at least 1).")
-    try:
-        config["max_file_size_kb"] = int(config["max_file_size_kb"])
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("max_file_size_kb must be an integer.") from exc
+    config["max_file_size_kb"] = _coerce_strict_int(
+        config["max_file_size_kb"], "max_file_size_kb"
+    )
     if config["max_file_size_kb"] < 1:
         raise ConfigError(
             "max_file_size_kb must be at least 1; a non-positive value would "
             "silently skip every file."
         )
 
-    for key in ("max_parallel_files", "file_retry_attempts", "max_consecutive_failures"):
-        try:
-            config[key] = int(config[key])
-        except (TypeError, ValueError) as exc:
-            raise ConfigError(f"{key} must be an integer.") from exc
+    for key in (
+        "max_parallel_files",
+        "file_retry_attempts",
+        "max_consecutive_failures",
+    ):
+        config[key] = _coerce_strict_int(config[key], key)
 
     if config["max_parallel_files"] < 1:
         raise ConfigError("max_parallel_files must be at least 1.")
@@ -753,11 +949,10 @@ def _validate(config: dict[str, Any]) -> None:
     ladder = config.get("parallel_ladder")
     if ladder is not None:
         if not isinstance(ladder, list) or not all(
-            isinstance(x, int) and x > 0 for x in ladder
+            isinstance(x, int) and not isinstance(x, bool) and x > 0 for x in ladder
         ):
             raise ConfigError(
-                "parallel_ladder must be a list of positive integers, "
-                "e.g. [5, 2, 1]."
+                "parallel_ladder must be a list of positive integers, e.g. [5, 2, 1]."
             )
         if ladder != sorted(ladder, reverse=True):
             raise ConfigError(
@@ -786,40 +981,20 @@ def _validate(config: dict[str, Any]) -> None:
 
     # Coerce retry_after_cap_s to int.  Zero is valid and intentionally
     # disables the backoff cap; negative values are invalid.  Booleans rejected.
-    if isinstance(config.get("retry_after_cap_s"), bool):
-        raise ConfigError("retry_after_cap_s must be an integer of 0 or greater.")
-    try:
-        config["retry_after_cap_s"] = int(config.get("retry_after_cap_s", 30))
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("retry_after_cap_s must be an integer.") from exc
+    config["retry_after_cap_s"] = _coerce_strict_int(
+        config.get("retry_after_cap_s", 30), "retry_after_cap_s"
+    )
     if config["retry_after_cap_s"] < 0:
         raise ConfigError("retry_after_cap_s must be 0 or greater.")
 
-    try:
-        config["max_content_chars"] = int(config["max_content_chars"])
-    except (TypeError, ValueError) as exc:
-        raise ConfigError("max_content_chars must be a positive integer.") from exc
+    config["max_content_chars"] = _coerce_strict_int(
+        config["max_content_chars"], "max_content_chars"
+    )
     if config["max_content_chars"] < 1000:
         raise ConfigError("max_content_chars must be at least 1000.")
 
     # max_files — integer >= 0; 0 means unlimited; booleans rejected.
-    raw_max_files = config.get("max_files", 0)
-    if isinstance(raw_max_files, bool):
-        raise ConfigError("max_files must be an integer greater than or equal to 0.")
-    if isinstance(raw_max_files, int):
-        parsed_max_files = raw_max_files
-    elif isinstance(raw_max_files, str):
-        try:
-            parsed_max_files = int(raw_max_files.strip())
-        except ValueError:
-            raise ConfigError(
-                "max_files must be an integer greater than or equal to 0."
-            )
-    else:
-        raise ConfigError(
-            "max_files must be an integer greater than or equal to 0."
-        )
-    config["max_files"] = parsed_max_files
+    config["max_files"] = _coerce_strict_int(config.get("max_files", 0), "max_files")
     if config["max_files"] < 0:
         raise ConfigError("max_files must be an integer greater than or equal to 0.")
 
@@ -845,24 +1020,28 @@ def _validate(config: dict[str, Any]) -> None:
             "truncation_head_ratio must be a number strictly between 0.0 and 1.0 "
             f"(exclusive); got {raw_ratio!r}."
         ) from exc
-    if not (0.0 < ratio_val < 1.0):
+    if not math.isfinite(ratio_val) or not (0.0 < ratio_val < 1.0):
         raise ConfigError(
             "truncation_head_ratio must be strictly between 0.0 and 1.0 "
             f"(exclusive); got {ratio_val!r}."
         )
     config["truncation_head_ratio"] = ratio_val
 
-    # Inline prompt-customization profile.  Structural profile validation happens
+    # Inline prompt-customization profile. Structural profile validation happens
     # later in prompt_profiles.resolve_profile_source; here we only enforce that
     # the config-level value is an object or null.  ``prompt_profiles`` is the only
-    # profile source in 0.11.3.
+    # profile source.
     inline_profiles = config.get("prompt_profiles")
     if inline_profiles is not None and not isinstance(inline_profiles, dict):
         raise ConfigError("prompt_profiles must be an inline JSON object or null.")
 
 
 _WINDOWS_RESERVED_NAMES = {
-    "CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+    "CON",
+    "PRN",
+    "AUX",
+    "NUL",
+    *(f"COM{i}" for i in range(1, 10)),
     *(f"LPT{i}" for i in range(1, 10)),
 }
 

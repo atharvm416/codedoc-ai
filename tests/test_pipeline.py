@@ -587,7 +587,7 @@ def test_cli_run_alias_passes_current_directory_and_overrides(monkeypatch):
 
     captured = {}
 
-    def fake_run_pipeline(root, config_overrides=None):
+    def fake_run_pipeline(root, config_overrides=None, **_kwargs):
         captured["root"] = root
         captured["config"] = config_overrides
         return {
@@ -1377,8 +1377,7 @@ def test_A6_walker_state_independent_when_interleaved(tmp_path):
 
 
 def test_version_identity_consistent(capsys):
-    """Release identity: pyproject, codedoc.__version__, CLI --version, and the
-    README 'Current release' all agree."""
+    """Release identity: pyproject, codedoc.__version__, and CLI agree."""
     import re
     import pathlib
     import pytest
@@ -1390,11 +1389,6 @@ def test_version_identity_consistent(capsys):
     match = re.search(r'(?m)^version\s*=\s*"([^"]+)"', pyproject)
     assert match, "version not found in pyproject.toml"
     assert match.group(1) == codedoc.__version__
-
-    readme = (repo_root / "README.md").read_text(encoding="utf-8")
-    readme_match = re.search(r'Current release:\s*`([^`]+)`', readme)
-    assert readme_match, "'Current release' not found in README.md"
-    assert readme_match.group(1) == codedoc.__version__
 
     from codedoc.cli.cli import main
     with pytest.raises(SystemExit):

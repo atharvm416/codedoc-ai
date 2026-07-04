@@ -5,7 +5,7 @@ Both expose an OpenAI-compatible /v1/chat/completions endpoint,
 so we use the openai SDK pointed at localhost.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-DORMANT — not exposed in the current release.
+DORMANT — not exposed by the public runtime.
 
 This module is intentionally excluded from the factory and CLI.
 The code is kept here as a reserved implementation that can be

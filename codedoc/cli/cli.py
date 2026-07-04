@@ -17,26 +17,20 @@ Behaviour notes
   reported in the run summary.
 
 First run:
-    codedoc run --entry src/main.py              # document from entry; save to codedoc/
-    codedoc run --entry src/main.py --output docs/report.json
+    codedoc --entry src/main.py              # document from entry; save to codedoc/
+    codedoc --entry src/main.py --output docs/report.json
 
 Subsequent runs (entry read from the exact selected output when available):
-    codedoc run                                  # resumes from codedoc/ folder
-    codedoc run --output codedoc/codedoc.json    # explicit path to previous output
-    codedoc run --format md                      # reuse/update exact codedoc.md
+    codedoc                                  # resumes from codedoc/ folder
+    codedoc --output codedoc/codedoc.json    # explicit path to previous output
+    codedoc --format md                      # reuse/update exact codedoc.md
 """
 
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
-
-# Sentinel distinguishing ``--init-config`` (flag present, no NAME → active
-# codedoc.config.json) from ``--init-config NAME`` (a help template) and from the
-# flag being absent (``default=None``).
-_INIT_CONFIG_ACTIVE = object()
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,21 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 examples:
   # --- First run ---
-  codedoc run --entry src/main.py                          document from entry; save to codedoc/
-  codedoc run --entry src/main.py --output ./docs          save to custom directory
-  codedoc run --entry src/main.py --output docs/api.json   save as a named JSON file
-  codedoc run --entry src/main.py --format md              write only codedoc.md
+  codedoc --entry src/main.py                          document from entry; save to codedoc/
+  codedoc --entry src/main.py --output ./docs          save to custom directory
+  codedoc --entry src/main.py --output docs/api.json   save as a named JSON file
+  codedoc --entry src/main.py --format md              write only codedoc.md
 
   # --- Subsequent runs: entry read from exact selected docs ---
-  codedoc run                                              resume from codedoc/codedoc.json
-  codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  reuse/update exact codedoc.md
-  codedoc run --format both                                generate JSON + Markdown
+  codedoc                                              resume from codedoc/codedoc.json
+  codedoc --output codedoc/codedoc.json                resume from explicit file path
+  codedoc --format md                                  reuse/update exact codedoc.md
+  codedoc --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
-  codedoc run --provider gemini --entry src/main.py
-  codedoc run --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
-  codedoc run --ignore /myenv --entry src/main.py          ignore a project-root path
+  codedoc --provider gemini --entry src/main.py
+  codedoc --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
+  codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
         """,
     )
 
@@ -77,9 +71,9 @@ examples:
         metavar="FILE",
         default=None,
         help=(
-            "Entry file relative to project root (e.g. src/main.py). "
-            "Required for the first run. On subsequent runs the entry point is "
-            "read automatically from the previously generated documentation file."
+            "Optional entry file relative to the project root. An exact selected "
+            "output may supply it; otherwise configured candidates are auto-detected. "
+            "If none is found, all scanned files are documented."
         ),
     )
     parser.add_argument(
@@ -232,40 +226,18 @@ examples:
             "(structure + dependency + documentation)."
         ),
     )
-    utility_group = parser.add_mutually_exclusive_group()
-    utility_group.add_argument(
-        "--describe-prompt-schema",
-        action="store_true",
-        help="Print the supported prompt-profile schema as JSON or Markdown and exit.",
-    )
-    utility_group.add_argument(
+    parser.add_argument(
         "--init-config",
-        nargs="?",
-        const=_INIT_CONFIG_ACTIVE,
-        default=None,
-        metavar="NAME",
+        action="store_true",
         help=(
             "Write a complete editable codedoc.config.json with all public "
-            "defaults and single/triple instructions. With NAME, write a "
-            "non-active help template you must rename/copy to codedoc.config.json."
-        ),
-    )
-    utility_group.add_argument(
-        "--init-instructions",
-        nargs="?",
-        choices=["single", "triple", "both"],
-        const="both",
-        default=None,
-        metavar="MODE",
-        help=(
-            "Write or replace only the inline prompt_profiles in "
-            "codedoc.config.json (single, triple, or both; default both)."
+            "defaults and editable single/triple instructions, then exit."
         ),
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="With --init-config / --init-instructions, replace an existing file.",
+        help="With --init-config, refresh only prompt_profiles in an existing config.",
     )
     parser.add_argument(
         "--max-parallel-files",
@@ -288,12 +260,14 @@ examples:
         ),
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         default=False,
         help="Enable debug logging",
     )
     from codedoc import __version__
+
     parser.add_argument(
         "--version",
         action="version",
@@ -306,7 +280,7 @@ examples:
 def _has_resolved_prompt_profile(stats: dict) -> bool:
     """Whether an inline profile source won resolution for this run.
 
-    ``inline`` is the only resolved custom source in 0.11.3; ``absent`` means
+    ``inline`` is the only resolved custom source; ``absent`` means
     developer defaults and prints no profile section.
     """
     return stats.get("prompt_profile_source") == "inline"
@@ -320,8 +294,12 @@ def _print_prompt_profile_dry_run(stats: dict) -> None:
     review = stats.get("prompt_customization_security_review_calls_planned", 0)
     print("\n  Prompt profile:")
     print(f"    Source                : {stats.get('prompt_profile_source')}")
-    print(f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}")
-    print(f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}")
+    print(
+        f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}"
+    )
+    print(
+        f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}"
+    )
     print(f"    Documentation calls   : {documentation} planned")
     print(f"    Security-review calls : {review} planned")
     print(f"    Total paid calls      : {documentation + review} planned")
@@ -335,8 +313,12 @@ def _print_prompt_profile_run(stats: dict) -> None:
     review = stats.get("prompt_customization_security_review_calls_attempted", 0)
     print("\n  Prompt profile:")
     print(f"    Source                : {stats.get('prompt_profile_source')}")
-    print(f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}")
-    print(f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}")
+    print(
+        f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}"
+    )
+    print(
+        f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}"
+    )
     print(
         "    Security review       : "
         f"{stats.get('prompt_customization_security_review', 'not-required')} "
@@ -355,10 +337,7 @@ def _print_dry_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
     print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
-    print(
-        "  Initial calls per file : "
-        f"{stats.get('initial_calls_per_file', 1)}"
-    )
+    print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -431,10 +410,7 @@ def _print_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
     print(f"  Analysis mode    : {stats.get('analysis_mode', 'single')}")
-    print(
-        "  Initial calls/file: "
-        f"{stats.get('initial_calls_per_file', 1)}"
-    )
+    print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -498,6 +474,17 @@ def _print_run_summary(stats: dict) -> None:
             print(f"\n  {issues} issue(s) recorded (all recovered).")
 
 
+def _confirm_risky_prompt_customization(_warnings: tuple[str, ...]) -> bool:
+    """Ask for explicit medium-risk consent only on an interactive terminal."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("Proceed with this medium-risk customization? [y/N] ")
+    except (EOFError, OSError):
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
+
+
 def run_cli(argv: list[str] | None = None) -> int:
     """Run the CLI and return the process exit code.
 
@@ -526,18 +513,9 @@ def run_cli(argv: list[str] | None = None) -> int:
             raise
         return int(exc.code or 2)
 
-    init_config_selected = args.init_config is not None
-    utility_selected = (
-        args.describe_prompt_schema
-        or init_config_selected
-        or args.init_instructions is not None
-    )
-    if utility_selected:
-        # Utility actions operate on the current working directory as the project
-        # root and are mutually exclusive with a documentation run and its
-        # options.  The argparse group already makes the utilities mutually
-        # exclusive with each other; here we reject any documentation-run option
-        # (including the run positional passed as NAME).
+    if args.init_config:
+        # Initialization operates on the current working directory and accepts
+        # no documentation-run option or positional project path.
         unrelated = any(
             (
                 args.root != ".",
@@ -546,6 +524,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.provider is not None,
                 args.model is not None,
                 args.output is not None,
+                args.format is not None,
                 bool(args.ignore),
                 args.skip_dirs is not None,
                 bool(args.add_skip_dirs),
@@ -555,6 +534,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 bool(args.force_files),
                 args.allow_partial,
                 args.no_parallel,
+                args.analysis_mode is not None,
                 args.max_parallel_files is not None,
                 args.truncation_head_ratio is not None,
                 args.verbose,
@@ -562,51 +542,15 @@ def run_cli(argv: list[str] | None = None) -> int:
         )
         if unrelated:
             print(
-                "Error: utility actions (--describe-prompt-schema, --init-config, "
-                "--init-instructions) cannot be combined with a documentation run "
-                "or unrelated run options.",
-                file=sys.stderr,
-            )
-            return 2
-        # --force is meaningful only for the initialization utilities.
-        if args.force and args.describe_prompt_schema:
-            print(
-                "Error: --force is valid only with --init-config or "
-                "--init-instructions.",
+                "Error: --init-config can be combined only with --force; project "
+                "paths and documentation-run options are not accepted.",
                 file=sys.stderr,
             )
             return 2
         try:
-            if args.describe_prompt_schema:
-                from codedoc.core.prompt_profiles import (
-                    render_prompt_schema_reference,
-                    schema_reference_data,
-                )
+            from codedoc.core.config_template import init_config
 
-                mode = args.analysis_mode
-                # The describe utility has a single stdout representation per
-                # format; 'both' has no meaning here.
-                if args.format == "both":
-                    print(
-                        "Error: --describe-prompt-schema accepts --format json or "
-                        "--format md, not 'both'.",
-                        file=sys.stderr,
-                    )
-                    return 2
-                if args.format == "md":
-                    print(render_prompt_schema_reference(mode))
-                else:
-                    print(json.dumps(schema_reference_data(mode), indent=2, ensure_ascii=False))
-                return 0
-
-            from codedoc.core.config_template import init_config, init_instructions
-
-            cwd = Path.cwd()
-            if init_config_selected:
-                name = None if args.init_config is _INIT_CONFIG_ACTIVE else args.init_config
-                result = init_config(cwd, name, args.force)
-            else:
-                result = init_instructions(cwd, args.init_instructions, args.force)
+            result = init_config(Path.cwd(), args.force)
             print(result.message)
             return 0
         except SystemExit as exc:
@@ -617,7 +561,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     if args.force:
         print(
-            "Error: --force requires --init-config or --init-instructions.",
+            "Error: --force requires --init-config.",
             file=sys.stderr,
         )
         return 2
@@ -669,7 +613,12 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     try:
         from codedoc.pipeline import run_pipeline
-        stats = run_pipeline(root, config_overrides=overrides)
+
+        stats = run_pipeline(
+            root,
+            config_overrides=overrides,
+            confirm_risky=_confirm_risky_prompt_customization,
+        )
 
         if stats.get("dry_run"):
             _print_dry_run_summary(stats)
@@ -730,6 +679,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             OutputError,
             UnrecoverableProviderError,
         )
+
         if isinstance(exc, UnrecoverableProviderError):
             # A doomed-run safe stop — not an unexpected crash.  Completed files
             # are in the crash-recovery file and re-running resumes.  A *terminal*
@@ -740,13 +690,14 @@ def run_cli(argv: list[str] | None = None) -> int:
             # fault → exit 1 so automation does not read it as "fix credentials".
             print(f"Error: {exc}", file=sys.stderr)
             print(
-                "\nCompleted files are saved in the live JSON backup in your "
-                "output directory. Re-run the same command to resume — only the "
+                "\nCompleted files are saved in crash_recovery.json in your output "
+                "directory. Re-run the same command to resume — only the "
                 "unfinished files will be re-documented.",
                 file=sys.stderr,
             )
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
@@ -771,6 +722,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 2
         if isinstance(exc, OutputError):
@@ -802,11 +754,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 1
         print(f"Fatal error: {exc}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 

@@ -390,4 +390,4 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     assert "Fatal error:" not in err
     # Resume hint is always printed.
     assert "re-run" in err.lower()
-    assert "live json backup" in err.lower()
+    assert "crash_recovery.json" in err

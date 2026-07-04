@@ -1,7 +1,7 @@
 """Private per-file record metadata registry.
 
 CodeDoc file records may carry a small set of *private* keys that are
-persisted through JSON, Markdown (embedded view), live backups, and resume
+persisted through JSON, Markdown (embedded view), crash recovery, and resume
 reconstruction, but are never rendered into the visible Markdown prose.
 
 Only keys explicitly listed in :data:`PRIVATE_RECORD_KEYS` are preserved.
