@@ -53,7 +53,7 @@ def test_json_is_the_default_combined_output(tmp_path):
     assert json_path == output_dir / "codedoc.json"
     assert md_path is None
     output = json_path.read_text(encoding="utf-8")
-    assert '"schema_version": "1.4"' in output
+    assert '"schema_version"' not in output
     assert '"path": "main.py"' in output
     assert '"author"' not in output
     assert '"result"' not in output

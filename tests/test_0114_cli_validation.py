@@ -37,7 +37,7 @@ def test_initializer_fixed_target_refusal_and_merge_safe_force(tmp_path, monkeyp
     assert run_cli(["--init-config", "--force"]) == 0
     refreshed = json.loads(path.read_text(encoding="utf-8"))
     assert refreshed["output_format"] == "md"
-    assert refreshed["prompt_profiles"]["schema_version"] == 2
+    assert "schema_version" not in refreshed["prompt_profiles"]
 
 
 def test_removed_utilities_are_absent_from_help():

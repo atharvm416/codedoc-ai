@@ -84,8 +84,8 @@ codedoc --init-config
 ```
 
 This writes `codedoc.config.json` in the current directory. It includes every
-public setting, `api_key: null`, and editable schema-v2 single/triple instruction
-defaults. Credentials are never copied into the file.
+public setting, `api_key: null`, and editable versionless single/triple instruction
+defaults (`requested_shape` syntax). Credentials are never copied into the file.
 
 Existing targets are refused unless `--force` is supplied. Forced regeneration
 validates the existing file and atomically replaces only `prompt_profiles`; every
@@ -180,7 +180,8 @@ Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
 ## Inline instructions
 
 The only runtime instruction source is `prompt_profiles` inside the exact
-`codedoc.config.json` (or an in-memory Python override). Both schema versions are
+`codedoc.config.json` (or an in-memory Python override). Generated profiles are
+versionless and use `requested_shape`. Existing explicit schema versions remain
 readable:
 
 - schema v1 uses `fields`;
@@ -192,7 +193,6 @@ Every present mode uses a required `common` envelope and an optional
 ```json
 {
   "prompt_profiles": {
-    "schema_version": 2,
     "single": {
       "common": {
         "requested_shape": {
@@ -234,7 +234,7 @@ types, and complete defaults.
 
 JSON mode reads only its exact JSON target. Markdown mode reads only its exact
 Markdown target, including the lossless embedded project view. Both mode reads
-only its exact two targets and blocks before provider contact if schema, entry,
+only its exact two targets and blocks before provider contact if entry,
 path set, hashes, or cache identity disagree.
 
 An unrelated sibling is never used. For example, selecting `docs/report.json`

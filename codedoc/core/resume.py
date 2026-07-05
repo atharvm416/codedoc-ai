@@ -80,7 +80,12 @@ def _load_existing_file_docs(
     # both — JSON authoritative; cross-check consistency when both exist.
     json_records = _load_json_records(json_target)
     md_records = _load_md_records(md_target)
-    if json_records and md_records:
+    if (
+        json_target is not None
+        and md_target is not None
+        and json_target.exists()
+        and md_target.exists()
+    ):
         _assert_cross_document_consistency(json_target, md_target)
         return json_records
     return json_records or md_records
@@ -113,7 +118,7 @@ def _load_md_records(md_target: Path | None) -> dict[str, dict]:
 def _assert_cross_document_consistency(json_target: Path, md_target: Path) -> None:
     """Raise :class:`ConfigError` if the two both-mode targets disagree.
 
-    Compares one canonical identity: top-level ``schema_version``, the entry file,
+    Compares one canonical identity: the entry file,
     the exact sorted set of documented file paths, and — for every path — its
     content ``hash`` plus every normalized :data:`CACHE_IDENTITY_KEYS` value (all
     of which round-trip losslessly through the Markdown embedded view).  Names the
@@ -122,7 +127,6 @@ def _assert_cross_document_consistency(json_target: Path, md_target: Path) -> No
     mutation.
     """
     jdoc = read_codedoc_document(json_target)
-    jmeta = jdoc.metadata or {}
     jrecords = records_by_path(jdoc)
     mrecords = _load_existing_file_docs_from_md(md_target)
     try:
@@ -138,8 +142,6 @@ def _assert_cross_document_consistency(json_target: Path, md_target: Path) -> No
             "the incremental state is unambiguous."
         )
 
-    if jmeta.get("schema_version") != mmeta.get("schema_version"):
-        _conflict("schema_version", jmeta.get("schema_version"), mmeta.get("schema_version"))
     if jdoc.entry_file != mmeta.get("entry_file"):
         _conflict("the entry file", jdoc.entry_file, mmeta.get("entry_file"))
     jpaths, mpaths = sorted(jrecords), sorted(mrecords)

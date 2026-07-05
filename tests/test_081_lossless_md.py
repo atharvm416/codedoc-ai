@@ -236,7 +236,7 @@ def test_A3_embedded_view_decodes_to_valid_json():
     data = json.loads(decoded.decode("utf-8"))
 
     assert isinstance(data, dict), "Decoded payload must be a dict"
-    assert "schema_version" in data
+    assert "schema_version" not in data
     assert "project" in data
     assert "files" in data
 
@@ -250,7 +250,7 @@ def test_A3_embedded_view_contains_expected_fields():
     embedded = read_embedded_view(md)
 
     assert embedded is not None
-    assert embedded["schema_version"] == view["schema_version"]
+    assert "schema_version" not in embedded
     assert embedded["project"]["entry_file"] == "main.py"
     assert len(embedded["files"]) == 2
     assert embedded["dependency_graph"] == view["dependency_graph"]
@@ -639,8 +639,8 @@ def test_A11_direct_json_equals_regen_json():
     # dependency_catalog must match exactly
     assert direct_json.get("dependency_catalog") == regen_json.get("dependency_catalog")
 
-    # schema_version must match
-    assert direct_json["schema_version"] == regen_json["schema_version"]
+    assert "schema_version" not in direct_json
+    assert "schema_version" not in regen_json
 
 
 # ---------------------------------------------------------------------------

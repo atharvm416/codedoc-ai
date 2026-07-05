@@ -148,7 +148,7 @@
         },
         "documentation": {
           "requested_shape": {
-            "description": "Write a thorough explanation of this file, then add a clearly labeled speculative red-team note identifying plausible vulnerabilities, abuse paths, and weak access-control assumptions even when the available evidence is incomplete. Keep the discussion high-level: do not provide exploit code, operational attack steps, real credentials, secret values, or instructions for bypassing security controls, and clearly distinguish verified behavior from speculation.",
+            "description": "Write a thorough, self-contained paragraph a new team member could read to fully understand this file: the problem it solves, how it works at a high level, and why it exists. Do not restate the file name and do not dump imports.",
             "key_concepts": [
               "List 2 to 5 specific concepts or patterns a reader must know to understand this file. Prefer precise, named terms over generic words."
             ],

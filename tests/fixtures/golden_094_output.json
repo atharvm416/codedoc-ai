@@ -1,9 +1,7 @@
 {
   "_codedoc": {
-    "entry_file": "src/main.py",
-    "schema_version": "1.4"
+    "entry_file": "src/main.py"
   },
-  "schema_version": "1.4",
   "project": {
     "entry_file": "src/main.py",
     "file_count": 3,

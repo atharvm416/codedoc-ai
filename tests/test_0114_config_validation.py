@@ -89,4 +89,4 @@ def test_nested_collection_members_are_validated(tmp_path, key, value):
 
 def test_generated_config_round_trips(tmp_path):
     init_config(tmp_path)
-    assert load_config(tmp_path)["prompt_profiles"]["schema_version"] == 2
+    assert "schema_version" not in load_config(tmp_path)["prompt_profiles"]

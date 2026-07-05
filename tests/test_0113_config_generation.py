@@ -24,7 +24,7 @@ def test_public_default_registry_is_complete_and_generated_config_round_trips(tm
     assert "supported_extensions" not in generated
     assert not (set(generated) & GENERATOR_EXCLUDED_KEYS)
     profiles = generated["prompt_profiles"]
-    assert profiles["schema_version"] == 2
+    assert "schema_version" not in profiles
     assert set(profiles["single"]) == {"common", "per_language"}
     assert set(profiles["triple"]) == {"common", "per_language"}
     assert "per_extension" not in json.dumps(profiles)

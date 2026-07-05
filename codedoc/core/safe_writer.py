@@ -60,7 +60,7 @@ from codedoc.core.io_diagnostics import (
     classify_os_error,
     describe_cause,
 )
-from codedoc.core.project_view import SCHEMA_VERSION, clean_file_record
+from codedoc.core.project_view import clean_file_record
 from codedoc.utils.errors import LiveBackupWriteError, OutputError
 from codedoc.utils.logger import get_logger
 
@@ -416,7 +416,6 @@ class SafeWriter:
         now = datetime.now(timezone.utc).isoformat()
         codedoc_block: dict = {
             "entry_file": self._entry_file,
-            "schema_version": SCHEMA_VERSION,
             "created_at": self._created_at,
             "updated_at": now,
             "status": _STATUS_IN_PROGRESS,

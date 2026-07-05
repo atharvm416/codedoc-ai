@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.11.5 - 2026-07-04
+
+### Versionless user-facing data
+
+- Newly generated prompt-profile configuration, final JSON and Markdown
+  documentation, embedded Markdown project views, and crash-recovery files no
+  longer expose `schema_version`.
+- Existing supported versioned prompt profiles and documents remain readable;
+  current versionless documents use the CodeDoc ownership envelope plus strict
+  structural validation.
+- Provider-requested shapes and cleaned responses remain versionless, while
+  project identity, incremental reuse, recovery matching, and lossless
+  JSON/Markdown conversion retain their deterministic non-version checks.
+
 ## 0.11.4 - 2026-07-04
 
 ### Fail-closed configuration and public-surface hardening

@@ -154,7 +154,7 @@ def build_default_config() -> dict:
 
     Emits every :data:`PUBLIC_CONFIG_KEYS` entry in order with its resolved
     default value.  ``api_key`` is emitted as ``null``; ``prompt_profiles`` is the
-    full ``common``-envelope schema-v2 object for both single and triple modes.
+    full versionless ``common``-envelope current object for both modes.
     The result round-trips through ``load_config`` and is developer-standard
     equivalent (inert until edited).
     """

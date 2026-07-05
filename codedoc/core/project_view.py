@@ -35,6 +35,19 @@ logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.4"
 
+
+def without_schema_version(value: Any) -> Any:
+    """Return a deep copy with every public ``schema_version`` key removed."""
+    if isinstance(value, dict):
+        return {
+            key: without_schema_version(item)
+            for key, item in value.items()
+            if key != "schema_version"
+        }
+    if isinstance(value, list):
+        return [without_schema_version(item) for item in value]
+    return value
+
 # Placeholder import/package names that LLMs emit in usage examples.
 # These are never meaningful to end-users and must be stripped before output.
 # Uses \b word boundaries so 'example_package' does NOT match inside a longer
@@ -101,7 +114,6 @@ def build_project_view(
     dependency_catalog = _dependency_catalog(files)
 
     view = {
-        "schema_version": SCHEMA_VERSION,
         "project": {
             "entry_file": entry_file,
             "file_count": len(files),
@@ -130,15 +142,14 @@ def build_project_view(
 
 def json_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as formatted JSON."""
-    payload = dict(view)
+    payload = without_schema_version(view)
     if error_summary and error_summary != "No errors.":
         payload["errors"] = error_summary
     # Embed _codedoc metadata block first so it's easy to find
-    project = view.get("project", {})
+    project = payload.get("project", {})
     meta_block = {
         "_codedoc": {
             "entry_file": project.get("entry_file"),
-            "schema_version": view.get("schema_version", SCHEMA_VERSION),
         }
     }
     # Determinism: completed output carries no run-varying timestamp.
@@ -157,7 +168,7 @@ def read_codedoc_meta(file_path: Path) -> dict:
     """
     Read CodeDoc metadata from a previously generated .json or .md output file.
 
-    Returns a dict containing at least ``schema_version``.  ``entry_file`` may
+    Returns the document's ownership metadata. ``entry_file`` may
     be ``None`` — callers must handle that case (a valid CodeDoc file can have
     a null entry when auto-detection was used or when no entry was specified on
     the first run).

@@ -28,11 +28,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from codedoc.core.project_view import (
-    SCHEMA_VERSION,
     _folder_view,
     _prune_empty,
     _tree,
     json_from_view,
+    without_schema_version,
 )
 from codedoc.utils.logger import get_logger
 
@@ -205,7 +205,6 @@ def markdown_to_view(markdown: str) -> dict:
     entry_file = project.get("entry_file")
 
     view = {
-        "schema_version": SCHEMA_VERSION,
         "project": {
             "entry_file": None if entry_file in (None, "not specified") else entry_file,
             "file_count": project.get("file_count", len(files)),
@@ -291,13 +290,22 @@ def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
         return EmbeddedViewResult(state="invalid", view=None)
 
     # Structural validation: require the three fields that make the view useful.
-    required = {"schema_version", "project", "files"}
+    required = {"project", "run"}
     missing = required - data.keys()
     if missing:
         logger.warning(
             "codedoc-ai-view-base64 is missing required fields %s; "
             "falling back to visible Markdown parser.",
             sorted(missing),
+        )
+        return EmbeddedViewResult(state="invalid", view=None)
+
+    if not isinstance(data.get("project"), dict) or not isinstance(data.get("run"), dict) or (
+        "files" in data and not isinstance(data["files"], list)
+    ):
+        logger.warning(
+            "codedoc-ai-view-base64 has malformed project/files fields; "
+            "falling back to visible Markdown parser."
         )
         return EmbeddedViewResult(state="invalid", view=None)
 
@@ -325,7 +333,8 @@ def _public_view_for_embedding(view: dict) -> dict:
     ``generated_at`` field (for run determinism).
     """
     excluded = {"_crash_safety", "_codedoc", "generated_at"}
-    return {k: v for k, v in view.items() if k not in excluded}
+    public = {k: v for k, v in view.items() if k not in excluded}
+    return without_schema_version(public)
 
 
 def _build_full_view_comment(view: dict) -> str:
@@ -365,7 +374,6 @@ def _build_meta_comment(view: dict, project: dict) -> str:
     }
     meta = {
         "entry_file": project.get("entry_file"),
-        "schema_version": view.get("schema_version", SCHEMA_VERSION),
         "file_hashes": file_hashes,
     }
     return f"<!-- codedoc-ai: {json.dumps(meta, ensure_ascii=False)} -->\n"

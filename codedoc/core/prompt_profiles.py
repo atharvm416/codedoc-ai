@@ -2110,7 +2110,7 @@ def _default_common_block(mode: str, agent: str, schema_version: int) -> dict:
 def default_prompt_profiles(
     mode: str | None = None,
     *,
-    schema_version: int = CURRENT_PROMPT_PROFILE_SCHEMA_VERSION,
+    schema_version: int | None = None,
 ) -> dict:
     """Return the canonical ``prompt_profiles`` value under the ``common`` envelope.
 
@@ -2121,20 +2121,26 @@ def default_prompt_profiles(
     emitted (that scope is reserved for a future release).  The result is
     developer-standard-equivalent, so an unedited generated profile is inert (no
     semantic review, no cache invalidation) when reloaded through
-    :func:`validate_profile`.  ``schema_version`` selects the version-2
-    ``requested_shape`` form (default) or the version-1 ``fields`` form; both use
-    the same ``common`` envelope.
+    :func:`validate_profile`. The generated default omits ``schema_version`` and
+    uses current ``requested_shape`` syntax. Passing a version explicitly is a
+    compatibility/testing facility that selects legacy syntax without emitting
+    a public version marker.
     """
-    profiles: dict = {"schema_version": schema_version}
+    selected_version = (
+        CURRENT_PROMPT_PROFILE_SCHEMA_VERSION
+        if schema_version is None
+        else schema_version
+    )
+    profiles: dict = {}
     if mode in (None, "single"):
         profiles["single"] = {
-            "common": _default_common_block("single", "combined", schema_version),
+            "common": _default_common_block("single", "combined", selected_version),
             "per_language": {},
         }
     if mode in (None, "triple"):
         profiles["triple"] = {
             "common": {
-                agent: _default_common_block("triple", agent, schema_version)
+                agent: _default_common_block("triple", agent, selected_version)
                 for agent in VALID_AGENTS_BY_MODE["triple"]
             },
             "per_language": {},
