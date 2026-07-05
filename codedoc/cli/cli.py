@@ -23,7 +23,7 @@ First run:
 Subsequent runs (entry read from the exact selected output when available):
     codedoc                                  # resumes from codedoc/ folder
     codedoc --output codedoc/codedoc.json    # explicit path to previous output
-    codedoc --format md                      # reuse/update exact codedoc.md
+    codedoc --format md                      # reuse MD, or convert exact JSON sibling
 """
 
 from __future__ import annotations
@@ -49,7 +49,7 @@ examples:
   # --- Subsequent runs: entry read from exact selected docs ---
   codedoc                                              resume from codedoc/codedoc.json
   codedoc --output codedoc/codedoc.json                resume from explicit file path
-  codedoc --format md                                  reuse/update exact codedoc.md
+  codedoc --format md                                  reuse MD, or convert exact JSON sibling
   codedoc --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---

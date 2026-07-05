@@ -755,10 +755,16 @@ def _resolve_output_spec(config: dict, overrides: dict) -> None:
     config["output_dir"] = parent_str
     config["output_format"] = inferred_format
 
+    # A named single-format target has one deterministic read-only conversion
+    # sibling: the same stem with the opposite supported extension.  Only the
+    # selected format is written; resolving the sibling name here prevents a
+    # later ``report.json`` run from probing an unrelated default ``codedoc.md``.
     if inferred_format == "json":
         config["output_json_filename"] = p.name
+        config["output_md_filename"] = p.with_suffix(".md").name
     else:
         config["output_md_filename"] = p.name
+        config["output_json_filename"] = p.with_suffix(".json").name
 
     logger.info(
         "Output path resolved: dir='%s'  file='%s'  format='%s'",

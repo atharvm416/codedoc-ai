@@ -9,7 +9,8 @@ Markdown, or both.
 
 - Explicit or auto-detected entry files, with `entry` or `all` documentation scope.
 - One combined provider call per file by default; optional triple-agent analysis.
-- Exact-output incremental reuse based on source hashes and analysis identity.
+- Incremental reuse across JSON and Markdown based on source hashes and analysis
+  identity.
 - One fixed crash-recovery file that preserves completed work after interruption.
 - Config-only, validated instruction customization with mandatory semantic review.
 - OpenAI, Anthropic, Gemini, and OpenAI-compatible endpoint support.
@@ -53,8 +54,10 @@ use the shorter canonical spelling. An entry is optional: CodeDoc can recover it
 from the selected output, auto-detect a configured candidate, or document all
 scanned files when no candidate exists.
 
-On later runs, use the same output selection. CodeDoc reads only the exact
-selected target(s), reuses unchanged owned records, and reprocesses changed files.
+On later runs, CodeDoc reuses unchanged owned records and reprocesses changed
+files. If you switch between JSON and Markdown and the requested target does not
+yet exist, the exact opposite-format sibling is validated and used as the
+conversion source; unchanged files require no provider call.
 
 ## File contract
 
@@ -67,9 +70,10 @@ CodeDoc automatically manages a deliberately small set of persistent files:
 | Final output | Exact selected `.json`, `.md`, or both | Stable CodeDoc-owned result. |
 
 There is no alternate-config search, external prompt-profile search, prompt
-directory, `.env` loading, checkpoint/build/database migration, sibling-output
-discovery, persistent issue log, or managed `.gitignore` behavior. Stray legacy
-files are not opened, migrated, renamed, or deleted.
+directory, `.env` loading, checkpoint/build/database migration, directory-wide
+output discovery, persistent issue log, or managed `.gitignore` behavior. The
+only fallback is the deterministic same-name JSON/Markdown counterpart described
+below; stray legacy files are not opened, migrated, renamed, or deleted.
 
 Temporary atomic-write siblings and writability probes are short-lived
 implementation details. They use unique names in the target directory and are
@@ -232,14 +236,23 @@ types, and complete defaults.
 
 ## Output, incremental reuse, and ownership
 
-JSON mode reads only its exact JSON target. Markdown mode reads only its exact
-Markdown target, including the lossless embedded project view. Both mode reads
-only its exact two targets and blocks before provider contact if entry,
-path set, hashes, or cache identity disagree.
+In a single-format run, an existing requested target is authoritative. If it is
+missing, CodeDoc may strictly validate and reuse only its exact opposite-format
+sibling: `codedoc.json` pairs with `codedoc.md`, and a named
+`docs/report.json` pairs only with `docs/report.md`. Unchanged compatible records
+are converted without provider calls; changed, forced, missing, or
+cache-incompatible files are documented normally. The sibling is read-only and
+only the requested format is written.
 
-An unrelated sibling is never used. For example, selecting `docs/report.json`
-does not inspect `docs/report.md`. When no selected output supplies an entry,
-ordinary source entry auto-detection runs.
+A present fallback that is foreign or malformed blocks before provider contact
+instead of silently starting a paid fresh run. No directory walk, modification-
+time choice, unrelated default filename, or legacy candidate is used. Entry
+recovery remains tied to the selected output; when it is absent, ordinary source
+entry auto-detection runs.
+
+Both mode reads its exact two targets and blocks before provider contact if
+entry, path set, hashes, or cache identity disagree. When only one valid target
+exists, it supplies the records used to create both outputs.
 
 CodeDoc refuses to overwrite foreign, empty, or malformed final targets. Custom
 output names remain supported when supplied explicitly:

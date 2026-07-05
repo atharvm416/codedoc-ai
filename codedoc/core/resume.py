@@ -3,7 +3,8 @@
 This module owns:
 
 - loading stable per-file documentation from the exact selected prior JSON /
-  Markdown output (no sibling, opposite-format, or directory probing);
+  Markdown output, with one strict opposite-format sibling fallback only when
+  the selected target is absent (no directory or legacy-candidate probing);
 - the both-mode cross-document identity consistency check;
 - the exact single-recovery-file reader and its versioned run identity;
 - reconstructing the internal documentation shape from a public JSON record;
@@ -52,7 +53,7 @@ _RECOVERY_IDENTITY_VERSION = 1
 
 
 # ---------------------------------------------------------------------------
-# Existing-docs loader (exact selected targets only)
+# Existing-docs loader (selected target, then exact format sibling)
 # ---------------------------------------------------------------------------
 
 def _load_existing_file_docs(
@@ -60,22 +61,35 @@ def _load_existing_file_docs(
     md_target: Path | None,
     output_format: str,
 ) -> dict[str, dict]:
-    """Load stable final-output records from the exact selected target(s) only.
+    """Load stable records from the selected target or its exact format sibling.
 
-    - ``json``: load only the exact JSON target.
-    - ``md``: load only the exact Markdown target (via the lossless embedded view).
+    - ``json``: load JSON when it exists; otherwise strictly validate and load
+      the exact Markdown sibling.
+    - ``md``: load Markdown when it exists; otherwise strictly validate and load
+      the exact JSON sibling.
     - ``both``: load both when present; run the canonical cross-document identity
       comparison and raise :class:`ConfigError` on any mismatch before returning.
       JSON is authoritative when both are valid; when only one exists it is used.
 
-    No sibling, opposite-format file, recovery file, or directory is probed.  This
-    helper returns only stable final-output records; recovery reuse is handled by
+    An existing selected target is always authoritative in single-format mode,
+    so its sibling is not inspected.  Fallback probes no directory, recovery
+    file, or alternate name.  Unlike optional exact-target reuse, a present
+    fallback sibling is strict: foreign or malformed data raises before paid
+    work. Recovery reuse is handled separately by
     :func:`load_recovery_records_if_compatible`.
     """
     if output_format == "json":
-        return _load_json_records(json_target)
+        if json_target is not None and json_target.exists():
+            return _load_json_records(json_target)
+        if md_target is not None and md_target.exists():
+            return _load_strict_fallback_records(md_target, "Markdown")
+        return {}
     if output_format == "md":
-        return _load_md_records(md_target)
+        if md_target is not None and md_target.exists():
+            return _load_md_records(md_target)
+        if json_target is not None and json_target.exists():
+            return _load_strict_fallback_records(json_target, "JSON")
+        return {}
 
     # both — JSON authoritative; cross-check consistency when both exist.
     json_records = _load_json_records(json_target)
@@ -89,6 +103,19 @@ def _load_existing_file_docs(
         _assert_cross_document_consistency(json_target, md_target)
         return json_records
     return json_records or md_records
+
+
+def _load_strict_fallback_records(path: Path, label: str) -> dict[str, dict]:
+    """Return records from an owned opposite-format fallback or fail closed."""
+    try:
+        return records_by_path(read_codedoc_document(path))
+    except (ConfigError, FileNotFoundError) as exc:
+        raise ConfigError(
+            f"The requested output target does not exist, but its {label} "
+            f"conversion sibling '{path.name}' is not a readable CodeDoc "
+            f"document: {exc}. Rename or remove that sibling, or choose a "
+            "different output path, before rerunning. No provider was contacted."
+        ) from exc
 
 
 def _load_json_records(json_target: Path | None) -> dict[str, dict]:

@@ -5,9 +5,9 @@ Internal decomposition
 This module is now a thin lifecycle coordinator.  The heavy lifting has been
 moved into cohesive, single-responsibility modules:
 
-- :mod:`codedoc.core.resume` — exact selected-output loading, exact
-  crash-recovery inspection, public→internal record reconstruction, and final
-  documentation-record construction.
+- :mod:`codedoc.core.resume` — selected-output and strict cross-format fallback
+  loading, exact crash-recovery inspection, public→internal record
+  reconstruction, and final documentation-record construction.
 - :mod:`codedoc.core.discovery` — entry recovery, dependency-graph
   construction, entry-reachability selection, and graph-edge serialization.
 - :mod:`codedoc.core.execution` — rate-limit/retry classification, the
@@ -208,9 +208,14 @@ def run_pipeline(
 
     json_filename = config.get("output_json_filename", "codedoc.json")
     md_filename = config.get("output_md_filename", "codedoc.md")
-    # Exact selected final output targets for this run's format.
-    json_target = output_dir / json_filename if output_format in ("json", "both") else None
-    md_target = output_dir / md_filename if output_format in ("md", "both") else None
+    # Read candidates always include the deterministic JSON/Markdown pair.  Write
+    # targets remain limited to the selected format.  This distinction lets a
+    # missing selected target reuse its validated opposite-format sibling without
+    # broadening ownership checks, recovery identity, or the final write set.
+    json_candidate = output_dir / json_filename
+    md_candidate = output_dir / md_filename
+    json_target = json_candidate if output_format in ("json", "both") else None
+    md_target = md_candidate if output_format in ("md", "both") else None
     # The single fixed crash-recovery file, staged separately from the stable
     # output for every format.  There is no candidate walk, numbered suffix, or
     # legacy sibling: absent means a fresh recovery state; an owned in-progress
@@ -240,10 +245,14 @@ def run_pipeline(
     # In-memory issue reporter; nothing is persisted to disk.
     error_reporter = ErrorReporter()
 
-    # Stable final-output records from the exact selected target(s) only.  The
-    # both-mode cross-document identity check runs inside this helper.  Compatible
-    # recovery records are overlaid after selection/profile resolution (below).
-    existing_docs = _load_existing_file_docs(json_target, md_target, output_format)
+    # Stable records come from an existing selected target, or from its strict,
+    # deterministic opposite-format sibling only when the selected target is
+    # absent.  The both-mode cross-document identity check runs inside this
+    # helper. Compatible recovery records are overlaid after selection/profile
+    # resolution (below).
+    existing_docs = _load_existing_file_docs(
+        json_candidate, md_candidate, output_format
+    )
 
     # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
     # resolved by load_config with _add/_remove applied), then unconditionally

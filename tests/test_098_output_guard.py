@@ -65,12 +65,14 @@ def test_ordinary_md_run_not_rejected(tmp_path):
     cfg = load_config(tmp_path, {"output_dir": "report.md"})
     assert cfg["output_format"] == "md"
     assert cfg["output_md_filename"] == "report.md"
+    assert cfg["output_json_filename"] == "report.json"
 
 
 def test_non_reserved_named_output_not_rejected(tmp_path):
     cfg = load_config(tmp_path, {"output_dir": "docs/report.json"})
     assert cfg["output_format"] == "json"
     assert cfg["output_json_filename"] == "report.json"
+    assert cfg["output_md_filename"] == "report.md"
 
 
 def test_default_run_not_rejected(tmp_path):

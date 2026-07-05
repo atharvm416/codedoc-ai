@@ -156,8 +156,9 @@ def build_pipeline_plan(
     entry_rel:
         The resolved entry path, or ``None``.
     existing_docs:
-        Per-file records loaded read-only from the exact selected output
-        target(s), overlaid with any compatible ``crash_recovery.json`` records.
+        Per-file records loaded read-only from the selected output target(s), or
+        the exact validated opposite-format sibling when a single-format target
+        is missing, overlaid with compatible ``crash_recovery.json`` records.
     forced_paths:
         Normalized project-relative forced paths (see
         :func:`normalize_force_files`).

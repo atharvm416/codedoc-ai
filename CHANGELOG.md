@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.11.6 - 2026-07-05
+
+### Safe cross-format incremental reuse
+
+- A single-format run now reuses the exact opposite-format CodeDoc sibling when
+  the requested target does not yet exist. Switching from Markdown to JSON, or
+  JSON to Markdown, converts unchanged records without repeating provider calls;
+  only changed or cache-incompatible files are documented again.
+- An existing requested target remains authoritative. Fallback probes only the
+  expected sibling in the selected output directory and validates ownership and
+  structure before reuse; foreign or malformed fallbacks stop before paid work.
+- Named outputs use the same stem (`report.json` / `report.md`), while directory
+  outputs use their configured JSON/Markdown filename pair. No directory walk,
+  unrelated default filename, or modification-time selection is performed.
+- Compatible partial recovery state overlays the stable sibling, and
+  `crash_recovery.json` is removed only after the requested output commits
+  successfully. Both-format conflict checks, versionless output, legacy readers,
+  and ordinary cache-identity rules remain unchanged.
+
 ## 0.11.5 - 2026-07-04
 
 ### Versionless user-facing data

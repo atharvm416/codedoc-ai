@@ -1006,7 +1006,7 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
     assert not (output_dir / "codedoc.json").exists()
 
 
-def test_cross_format_sibling_is_not_used_for_resume(tmp_path, monkeypatch):
+def test_cross_format_sibling_is_used_for_zero_call_conversion(tmp_path, monkeypatch):
     import json
     """--output docs/claude.json after a previous --format md run that wrote
     docs/claude.md must read the entry from claude.md and resume without error."""
@@ -1081,12 +1081,12 @@ def test_cross_format_sibling_is_not_used_for_resume(tmp_path, monkeypatch):
         },
     )
 
-    assert stats["checked"] == 1
-    assert calls["count"] == 1
+    assert stats["checked"] == 0
+    assert calls["count"] == 0
     assert (docs_dir / "claude.json").exists()
     json_content = (docs_dir / "claude.json").read_text(encoding="utf-8")
-    assert "Fresh exact-target analysis." in json_content
-    assert "Entry module." not in json_content
+    assert "Entry module." in json_content
+    assert "Fresh exact-target analysis." not in json_content
 
 
 def test_select_files_raises_when_entry_not_in_file_map(tmp_path, monkeypatch):

@@ -353,34 +353,31 @@ def test_5b_has_record_returns_true_after_worker_records(tmp_path):
 # Test 6 — Ownership guard for named-MD JSON sibling
 # ---------------------------------------------------------------------------
 
-def test_6_foreign_json_sibling_does_not_block_md_run(tmp_path, monkeypatch):
-    """Test 6 (0.9.8): a foreign report.json no longer blocks an md run.
-
-    Pre-0.9.8 the live backup for ``--output docs/report.md`` *was*
-    ``report.json``, so a foreign file there blocked the run.  The recovery file
-    is now the exact ``crash_recovery.json`` and the stable output is
-    ``report.md``; an unrelated ``report.json`` is neither, so it is left
-    byte-identical and the run proceeds.
-    """
+def test_6_foreign_json_conversion_sibling_blocks_md_run(tmp_path, monkeypatch):
+    """A present same-stem fallback must be owned before it can be reused."""
     (tmp_path / "docs").mkdir()
     foreign = tmp_path / "docs" / "report.json"
     foreign_bytes = json.dumps({"not": "codedoc"}).encode("utf-8")
     foreign.write_bytes(foreign_bytes)
     (tmp_path / "main.py").write_text("x=1\n")
 
-    _patch_provider(monkeypatch, _make_fake_provider())
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _cfg: pytest.fail("provider must not be created"),
+    )
 
     from codedoc.pipeline import run_pipeline
-    run_pipeline(tmp_path, {
-        "entry_file": "main.py",
-        "output_dir": "docs/report.md",
-        "parallel_agents": False,
-        "propagate_changes": False,
-    })
+    from codedoc.utils.errors import ConfigError
 
-    # The md stable output was produced; the foreign sibling was untouched and
-    # the dedicated recovery file was cleaned up on success.
-    assert (tmp_path / "docs" / "report.md").exists()
+    with pytest.raises(ConfigError, match="conversion sibling"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "output_dir": "docs/report.md",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+    assert not (tmp_path / "docs" / "report.md").exists()
     assert foreign.read_bytes() == foreign_bytes
     assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 

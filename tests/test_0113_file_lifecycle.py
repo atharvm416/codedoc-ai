@@ -43,19 +43,12 @@ def test_fixed_recovery_name_and_identity_mismatch_blocks(tmp_path):
     assert path.exists()
 
 
-def test_exact_target_loader_ignores_opposite_format_sibling(tmp_path, monkeypatch):
+def test_missing_target_rejects_foreign_opposite_format_sibling(tmp_path):
     json_target = tmp_path / "codedoc.json"
     md_sibling = tmp_path / "codedoc.md"
     md_sibling.write_text("foreign sibling", encoding="utf-8")
-    original_exists = Path.exists
-
-    def guarded_exists(path):
-        if path == md_sibling:
-            raise AssertionError("opposite-format sibling was probed")
-        return original_exists(path)
-
-    monkeypatch.setattr(Path, "exists", guarded_exists)
-    assert _load_existing_file_docs(json_target, None, "json") == {}
+    with pytest.raises(ConfigError, match="conversion sibling"):
+        _load_existing_file_docs(json_target, md_sibling, "json")
 
 
 def test_completed_run_uses_only_fixed_recovery_filename(tmp_path, monkeypatch):
@@ -122,4 +115,3 @@ def test_both_mode_cross_document_entry_conflict_blocks(tmp_path, monkeypatch):
 
     with pytest.raises(ConfigError, match="entry file"):
         _load_existing_file_docs(json_target, md_target, "both")
-

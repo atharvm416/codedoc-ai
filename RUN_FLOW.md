@@ -10,12 +10,14 @@ CodeDoc automatically reads or writes only:
 
 1. `<project_root>/codedoc.config.json` for optional configuration and inline instructions;
 2. `<output_dir>/crash_recovery.json` while a run is in progress;
-3. the exact selected CodeDoc-owned JSON and/or Markdown final target.
+3. the exact selected CodeDoc-owned JSON and/or Markdown final target, plus its
+   deterministic opposite-format counterpart only when the selected target is
+   missing.
 
-There is no alternate-config, `.env`, external-profile, sibling-output,
+There is no alternate-config, `.env`, external-profile, directory-wide output,
 checkpoint, build, database, legacy-recovery, issue-log, or `.gitignore`
-discovery. Explicit source entry/output paths and ordinary source scanning are not
-support-file discovery.
+discovery. The counterpart uses the configured filename pair, or the same stem
+for a named output; no directory walk or unrelated sibling is permitted.
 
 ## Ordered phases
 
@@ -25,9 +27,11 @@ support-file discovery.
    filename.
 
 2. **Read-only output preflight.** Validate distinct artifact paths and ownership
-   of every existing selected target. Load incremental records only from exact
-   selected targets. In both mode, compare schema, entry, exact path set, hashes,
-   and normalized cache identity; any mismatch blocks before mutation/provider use.
+   of every existing selected target. Load incremental records from the selected
+   target, or strictly validate its exact opposite-format counterpart when the
+   selected target is missing. A foreign or malformed fallback blocks before
+   provider use. In both mode, compare schema, entry, exact path set, hashes, and
+   normalized cache identity; any mismatch blocks before mutation/provider use.
 
 3. **Instruction resolution.** Resolve `prompt_profiles` as inline or absent,
    validate schema v1/v2 under the required `common` envelope, choose single or
@@ -41,9 +45,10 @@ support-file discovery.
 
 5. **Exact recovery inspection.** Inspect only
    `<output_dir>/crash_recovery.json`. Missing means fresh state. A compatible
-   owned in-progress document overlays exact stable records. Foreign, malformed,
-   completed, unsupported, or identity-mismatched recovery blocks with guidance
-   to restore the prior configuration or delete the exact recovery file.
+   owned in-progress document overlays selected-target or cross-format fallback
+   records. Foreign, malformed, completed, unsupported, or identity-mismatched
+   recovery blocks with guidance to restore the prior configuration or delete the
+   exact recovery file.
 
 6. **Final read-only gates.** Build the final plan from stable plus compatible
    recovery records, enforce `max_files`, and perform mandatory semantic review
@@ -92,5 +97,6 @@ overlaid; it does not replace per-file reuse checks.
 - Stable output is never mutated during analysis.
 - Recovery is initialized only after all read-only gates and semantic review.
 - Recovery is preserved on interruption, provider failure, and final-output failure.
-- No unrelated sibling or legacy file is opened or deleted.
+- No unrelated sibling or legacy file is opened or deleted; an exact validated
+  opposite-format counterpart is read-only.
 - Dry-run performs no persistent mutation and contacts no provider.
