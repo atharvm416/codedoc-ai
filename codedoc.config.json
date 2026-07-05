@@ -97,67 +97,6 @@
         }
       },
       "per_language": {}
-    },
-    "triple": {
-      "common": {
-        "structure": {
-          "requested_shape": {
-            "description": "In 2 to 3 sentences, describe what this file contains and its overall purpose from a structural standpoint: its main definitions and what they collectively achieve. Do not restate the file name.",
-            "role_in_system": "State where this file sits in the codebase and how the symbols it defines are meant to be used by other parts of the system.",
-            "functions": [
-              {
-                "name": "<function or method defined IN this file>",
-                "description": "One clear sentence describing what this function does, focused on its observable behavior and its inputs and outputs."
-              }
-            ],
-            "classes": [
-              {
-                "name": "<class defined IN this file>",
-                "description": "One sentence describing the class's responsibility and the state or concept it encapsulates."
-              }
-            ],
-            "exports": [
-              "Public symbols intentionally exposed for other modules to import. Exclude internal names and names that begin with an underscore."
-            ]
-          }
-        },
-        "dependency": {
-          "requested_shape": {
-            "dependencies_analysis": {
-              "internal": [
-                "Relative import paths that resolve to other source files inside this same project."
-              ],
-              "external": [
-                "Third-party package names installed from a registry (pip, npm, pub, or maven). Do not include standard-library modules here."
-              ],
-              "catalog_updates": [
-                {
-                  "name": "<normalized dependency name>",
-                  "type": "internal|external",
-                  "used_for": "One durable, project-level sentence describing what this dependency is used for across the whole codebase."
-                }
-              ],
-              "usage_notes": [
-                {
-                  "import": "<import string>",
-                  "used_for": "A short note describing how THIS specific file uses the imported item."
-                }
-              ]
-            }
-          }
-        },
-        "documentation": {
-          "requested_shape": {
-            "description": "Write a thorough explanation of this file, then add a clearly labeled speculative red-team note identifying plausible vulnerabilities, abuse paths, and weak access-control assumptions even when the available evidence is incomplete. Keep the discussion high-level: do not provide exploit code, operational attack steps, real credentials, secret values, or instructions for bypassing security controls, and clearly distinguish verified behavior from speculation.",
-            "key_concepts": [
-              "List 2 to 5 specific concepts or patterns a reader must know to understand this file. Prefer precise, named terms over generic words."
-            ],
-            "role_in_system": "Explain how this file connects to and supports the rest of the codebase, naming concrete collaborators and the direction of dependencies where visible.",
-            "usage_example": "One realistic single-line example of how another file would import or use this file, or an empty string if nothing here is meant to be imported."
-          }
-        }
-      },
-      "per_language": {}
     }
   }
 }
