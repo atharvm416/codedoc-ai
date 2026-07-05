@@ -1,4 +1,4 @@
-"""Approximate LLM usage accounting for codedoc (0.9.2).
+"""Approximate LLM usage accounting for codedoc.
 
 Everything in this module is an *estimate*.  ``estimate_tokens`` is a
 character heuristic (~4 characters per token), not a provider tokenizer.
@@ -83,6 +83,12 @@ class UsageAccumulator:
     def failed_calls(self) -> int:
         with self._lock:
             return self._failed_calls
+
+    @property
+    def attempted_calls(self) -> int:
+        """Total provider attempts so far (successful + failed)."""
+        with self._lock:
+            return self._successful_calls + self._failed_calls
 
     def snapshot(self) -> dict:
         """Return a consistent snapshot of all counters."""

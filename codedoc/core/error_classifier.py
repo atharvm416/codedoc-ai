@@ -1,7 +1,7 @@
 """Provider-error classification helpers.
 
-0.10.2 — extracted from ``codedoc.core.execution`` as part of a structural
-decomposition (same pattern as the 0.9.4 pipeline decomposition).  This module
+Extracted from ``codedoc.core.execution`` as part of a structural decomposition.
+This module
 owns all signal-constant tuples, exception-chain walking, and the fixed failure
 precedence classifier.  It has no dependency on execution state, the orchestrator,
 or file-processing logic.
@@ -11,7 +11,7 @@ Import note
 ``_is_rate_limit_error`` is included here (not kept in execution.py) because
 ``_classify_failure`` depends on it and keeping both in the same module avoids
 a circular import.  ``execution.py`` imports this entire module and re-exports
-every symbol for one release as a backward-compat shim.
+every symbol as a backward-compatibility shim.
 """
 
 from __future__ import annotations
@@ -46,7 +46,7 @@ _RATE_LIMIT_SIGNALS = (
 )
 
 # ---------------------------------------------------------------------------
-# Terminal-billing / credential / access / model signals (0.9.7)
+# Terminal-billing / credential / access / model signals
 # ---------------------------------------------------------------------------
 
 _TERMINAL_BILLING_SIGNALS = (
@@ -159,7 +159,7 @@ def _is_rate_limit_error(
     exc:
         The exception to classify.
     profile:
-        0.8.1 — when supplied, only ``profile.signals`` are used for detection,
+        When supplied, only ``profile.signals`` are used for detection,
         giving provider-specific accuracy.  When ``None`` (backward-compat),
         the module-level ``_RATE_LIMIT_SIGNALS`` tuple is used so that existing
         callers without a profile continue to work unchanged.
@@ -232,7 +232,7 @@ def _classify_failure(
     exc: BaseException,
     profile: "RateLimitProfile | None",
 ) -> str:
-    """Apply the fixed 0.9.7 failure precedence to *exc* and return a verdict.
+    """Apply the fixed failure precedence to *exc* and return a verdict.
 
     Returns one of ``"terminal_billing"``, ``"rate_limit"``, ``"global"``,
     ``"input"``, or ``"transient"``.  Precedence:
@@ -284,7 +284,7 @@ def _build_terminal_abort(
             cause = "forbidden or permission-denied access"
     reason = (
         f"Provider error that cannot recover by retrying ({cause}). "
-        "Completed files were saved to the live JSON backup in the output "
+        "Completed files were saved to crash_recovery.json in the output "
         "directory; re-running the same command resumes the unfinished files."
     )
     err = UnrecoverableProviderError(provider_name, reason, category="terminal")
@@ -301,7 +301,7 @@ def _build_rate_limit_exhausted_abort(
         "Provider is persistently rate-limited or out of quota: no file made "
         "progress after stepping down to the lowest concurrency, so retrying was "
         "stopped to avoid sleeping through the backoff schedule for nothing. "
-        "Partial results were saved to the live JSON backup in the output "
+        "Partial results were saved to crash_recovery.json in the output "
         "directory; re-running the same command resumes the unfinished files."
     )
     return UnrecoverableProviderError(
@@ -318,7 +318,7 @@ def _raise_rate_limit_exhausted(
     warn_msg = (
         f"[{provider_name}] Persistent rate limit / quota: no file made progress "
         "at the lowest concurrency. Stopping the run; completed files are saved "
-        "in the live JSON backup — re-run the same command to resume."
+        "in crash_recovery.json — re-run the same command to resume."
     )
     print(warn_msg, flush=True)
     logger.warning(warn_msg)

@@ -1,4 +1,4 @@
-"""Pure, deterministic non-project dependency classification (0.9.3).
+"""Pure, deterministic non-project dependency classification.
 
 This module is the single source of truth for deciding whether a
 *non-project* import names a third-party package (``external``) or a
@@ -46,7 +46,7 @@ class DependencyName:
 
 # Python 3.9 ``sys.stdlib_module_names``.  Used as the fallback when the
 # running interpreter does not expose ``sys.stdlib_module_names`` (added in
-# 3.10).  ``requires-python >= 3.9`` makes this fallback reachable.
+# 3.10).  ``requires-python >= 3.10`` makes this fallback reachable.
 _PYTHON_39_STDLIB: frozenset[str] = frozenset({
     "__future__", "_abc", "_aix_support", "_ast", "_asyncio", "_bisect",
     "_blake2", "_bootlocale", "_bootsubprocess", "_bz2", "_codecs",

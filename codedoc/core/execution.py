@@ -1,7 +1,7 @@
 """Agent-file execution: rate-limit handling, retries, and parallelism.
 
-0.9.4 — extracted from ``codedoc.pipeline`` as part of the internal
-decomposition.  This module owns:
+Extracted from ``codedoc.pipeline`` as part of the internal module decomposition.
+This module owns:
 
 - the adaptive-parallelism step-down ladder;
 - sequential and parallel descriptor processing with per-file retries and
@@ -15,9 +15,9 @@ constructed :class:`ExecutionContext`.  The provider-specific
 configuration and passed in; this module never receives the full
 configuration dictionary nor recomputes configuration policy.
 
-0.10.2 — error classification logic moved to :mod:`codedoc.core.error_classifier`.
+Error classification logic lives in :mod:`codedoc.core.error_classifier`.
 Compat re-exports below preserve all ``codedoc.core.execution._name`` imports
-for one release.
+for compatibility.
 """
 
 from __future__ import annotations
@@ -55,7 +55,7 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 # ---------------------------------------------------------------------------
-# Compat re-exports (0.10.2 — deprecated; import from error_classifier instead)
+# Compat re-exports (deprecated; import from error_classifier instead)
 # ---------------------------------------------------------------------------
 from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-export)
     _ACCESS_SIGNALS,
@@ -79,7 +79,7 @@ from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-expo
 @dataclass(frozen=True)
 class _SequentialOutcome:
     """Minimal progress signal threaded back from a sequential pass so the
-    Workstream C zero-progress bound can be evaluated without parsing logs.
+    The zero-progress bound can be evaluated without parsing logs.
 
     ``succeeded_any``
         True if at least one file was recorded successfully during the pass.
@@ -97,7 +97,7 @@ class _SequentialOutcome:
 
 def _is_zero_progress_pass(outcome: _SequentialOutcome) -> bool:
     """True when a lowest-concurrency sequential pass made no progress and every
-    failure it saw was rate-limit-classified — the Workstream C stop condition."""
+    failure it saw was rate-limit-classified — the zero-progress stop condition."""
     return (
         not outcome.succeeded_any
         and outcome.failures > 0
@@ -121,7 +121,7 @@ def _build_default_ladder(max_p: int) -> list[int]:
 
 
 # ---------------------------------------------------------------------------
-# Execution boundary (0.9.4)
+# Execution boundary
 # ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
@@ -141,7 +141,7 @@ class ExecutionOptions:
 class ExecutionContext:
     """All collaborators required to execute the agent-file queue.
 
-    The pipeline constructs this after provider creation and live-backup
+    The pipeline constructs this after provider creation and crash-recovery
     initialization, so execution never touches configuration loading,
     provider creation, or output writing.
     """
@@ -157,7 +157,7 @@ class ExecutionContext:
 
 
 # ---------------------------------------------------------------------------
-# Worker wrapper (Work Item 2)
+# Worker wrapper
 # ---------------------------------------------------------------------------
 
 def _process_and_record(
@@ -165,7 +165,7 @@ def _process_and_record(
     orchestrator: Orchestrator,
     recorder: SafeWriter,
 ) -> dict:
-    """Process one file and record it in the live backup from the worker thread.
+    """Process one file and record it in crash recovery from the worker thread.
 
     Recording happens here — inside the worker — so a Ctrl-C or crash that
     interrupts the main ``as_completed`` collection loop never discards a
@@ -186,14 +186,13 @@ def _process_and_record(
 
 
 # ---------------------------------------------------------------------------
-# Parallel / sequential file processing (Work Items 2 & 3)
+# Parallel / sequential file processing
 # ---------------------------------------------------------------------------
 
 def execute_agent_files(context: ExecutionContext) -> None:
     """Process the agent-file queue, applying retries and the rate-limit ladder.
 
-    Replaces the pre-0.9.4 ``_process_agent_files`` with a context-driven
-    facade; behavior is unchanged.
+    A context-driven facade over the per-file processing loop.
     """
     queue = context.queue
     orchestrator = context.orchestrator
@@ -219,7 +218,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
 
     if max_workers <= 1 or len(descriptors) <= 1:
         # This single sequential pass IS the lowest-concurrency pass, so the
-        # Workstream C zero-progress bound applies directly to it.
+        # The zero-progress bound applies directly to it.
         outcome = _process_files_sequentially(
             descriptors,
             orchestrator,
@@ -319,11 +318,11 @@ def execute_agent_files(context: ExecutionContext) -> None:
         # --- Step down to next ladder rung ---
         next_level = ladder[level_index + 1] if level_index + 1 < len(ladder) else 1
 
-        # 0.8.1: unpack descriptors and exceptions from the rate-limited list.
+        # Unpack descriptors and exceptions from the rate-limited list.
         remaining_descs = [d for d, _e in retry_rate_limited]
         exceptions = [e for _d, e in retry_rate_limited]
 
-        # 0.8.1: compute inter-rung sleep duration.
+        # Compute inter-rung sleep duration.
         retry_afters = [
             ra for ra in (_parse_retry_after(e) for e in exceptions)
             if ra is not None
@@ -340,7 +339,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
         else:
             sleep_s = 0.0
 
-        # 0.8.1: derive error sample and limit type from the first exception.
+        # Derive error sample and limit type from the first exception.
         error_sample = str(exceptions[0])[:200] if exceptions else ""
         limit_type = _detect_limit_type(error_sample) if error_sample else None
 
@@ -372,7 +371,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
         logger.warning(warn_msg)
         error_reporter.record(RuntimeError(warn_msg), context="rate limit step-down", level="warning")
 
-        # 0.8.1: apply inter-rung backoff sleep before the next ladder level.
+        # Apply inter-rung backoff sleep before the next ladder level.
         if sleep_s > 0:
             logger.info(
                 "Rate-limit backoff: sleeping %.1fs before level %d (rung %d, event %d)",
@@ -393,7 +392,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 print(still_limited_msg, flush=True)
                 logger.warning(still_limited_msg)
             # The ladder has been fully traversed; this sequential fall-through is
-            # the single lowest-concurrency pass.  Apply the Workstream C
+            # the single lowest-concurrency pass.  Apply the
             # zero-progress bound to it.  The inter-rung sleep above already
             # happened; if this pass makes no progress we stop without sleeping
             # again.
@@ -433,7 +432,7 @@ def _process_descriptor_batch(
     -------
     succeeded : dict[str, dict]
         rel_path → result for files that completed without error.  These have
-        already been recorded in the live backup by the worker thread.
+        already been recorded in crash recovery by the worker thread.
     retry_rate_limited : list[tuple[dict, Exception]]
         (descriptor, causing_exception) pairs for files that hit a rate-limit
         signal.  The exception is preserved so the caller can parse
@@ -489,7 +488,7 @@ def _process_descriptor_batch(
                 break
             except Exception as exc:
                 completed += 1
-                # 0.9.7: evaluate terminal-billing and global-permanent BEFORE the
+                # Evaluate terminal-billing and global-permanent BEFORE the
                 # rate-limit branch and the consecutive-failure health check.  A
                 # confirmed unrecoverable provider fault is handled exactly like
                 # the fatal LiveBackupWriteError path: cancel work not yet started,
@@ -508,7 +507,7 @@ def _process_descriptor_batch(
                     # that is only *preloaded* from a prior output (stale) must be
                     # retried, never restored from old documentation (A4).
                     if not recorder.recorded_this_run(rel_path):
-                        # 0.8.1: preserve the causing exception alongside the
+                        # Preserve the causing exception alongside the
                         # descriptor so the caller can parse Retry-After hints.
                         retry_rate_limited.append((descriptor, exc))
                         _log_file_progress("RATE-LIMIT", rel_path, completed, total, str(exc))
@@ -560,7 +559,7 @@ def _process_descriptor_batch(
     # Propagate the fatal persistence failure as the original error.
     if fatal_error is not None:
         raise fatal_error
-    # 0.9.7: propagate a confirmed unrecoverable provider abort so it leaves
+    # Propagate a confirmed unrecoverable provider abort so it leaves
     # execution and the pipeline records + re-raises it.  Raised only after the
     # executor shut down, so no further descriptors run.
     if abort_error is not None:
@@ -585,10 +584,9 @@ def _process_files_sequentially(
 ) -> _SequentialOutcome:
     """Process *descriptors* one at a time with per-file retries.
 
-    0.9.7 — returns a :class:`_SequentialOutcome` so that, when this is the
+    Returns a :class:`_SequentialOutcome` so that, when this is the
     lowest-concurrency pass, ``execute_agent_files`` can apply the zero-progress
-    rate-limit bound (Workstream C).  Existing callers ignore the return value;
-    behavior is otherwise unchanged.
+    rate-limit bound.  Existing callers may ignore the return value.
     """
     consecutive_failures = 0
     total = len(descriptors)
@@ -628,9 +626,9 @@ def _process_files_sequentially(
             # precede the recoverable OutputError handler below.)
             raise
         except UnrecoverableProviderError:
-            # 0.9.7: a terminal billing/credentials/model/access abort raised by
+            # A terminal billing/credentials/model/access abort raised by
             # the per-file retry routing must propagate out of execution so the
-            # pipeline records it and stops while the live backup stays resumable.
+            # pipeline records it and stops while crash recovery stays resumable.
             # Mirrors the LiveBackupWriteError re-raise; must precede the
             # recoverable AgentError/OutputError and generic handlers below
             # (UnrecoverableProviderError is an LLMError, not one of those).
@@ -687,7 +685,7 @@ def _process_one_file_with_retries(
             return _process_one_file(descriptor, orchestrator)
         except Exception as exc:
             last_error = exc
-            # 0.9.7: apply the fixed failure precedence before consuming the next
+            # Apply the fixed failure precedence before consuming the next
             # attempt.  Abort cases raise immediately (no remaining attempts);
             # an input-too-large error re-raises immediately so it is recorded as
             # a normal failed file without a guaranteed-to-fail retry; transient

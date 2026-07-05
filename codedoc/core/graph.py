@@ -17,6 +17,10 @@ class DependencyGraph:
         self._edges: dict[str, set[str]] = defaultdict(set)
         self._reverse: dict[str, set[str]] = defaultdict(set)
         self._nodes: set[str] = set()
+        # topological_order() is called several times per
+        # run; emit the cycle warning at most once per graph instance (i.e. per
+        # pipeline run) so a real cycle is not reported repeatedly.
+        self._cycle_warning_emitted = False
 
     def add_file(self, rel_path: str) -> None:
         self._nodes.add(_to_posix(rel_path))
@@ -86,12 +90,15 @@ class DependencyGraph:
                     queue.append(dependent)
 
         remaining = sorted(n for n in self._nodes if n not in order)
-        if remaining:
+        if remaining and not self._cycle_warning_emitted:
+            # Count at WARNING once per run; full path list at DEBUG once per run.
+            self._cycle_warning_emitted = True
             logger.warning(
-                "Dependency cycle detected involving %d file(s). Processing them anyway: %s",
+                "Dependency cycle detected involving %d file(s). Processing them anyway. "
+                "Run with --verbose to list the files involved.",
                 len(remaining),
-                remaining,
             )
+            logger.debug("Dependency cycle members (%d): %s", len(remaining), remaining)
         return order + remaining
 
     def summary(self) -> str:

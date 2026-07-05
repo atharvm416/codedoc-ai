@@ -547,7 +547,7 @@ def test_C16_cli_remove_skip_dir_wired_to_overrides(tmp_path, monkeypatch, capsy
     # Capture the resolved skip_dirs by intercepting run_pipeline
     captured = {}
 
-    def fake_run(root, config_overrides=None):
+    def fake_run(root, config_overrides=None, **_kwargs):
         from codedoc.core.loader import load_config
         cfg = load_config(root, config_overrides)
         captured["skip_dirs"] = cfg["skip_dirs"]

@@ -201,7 +201,7 @@ def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeyp
     recorder = _CountingFailRecorder()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_files_sequentially(
@@ -228,7 +228,7 @@ def test_parallel_persistence_failure_is_fatal_without_retry(tmp_path, monkeypat
     recorder = _CountingFailRecorder()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_descriptor_batch(
@@ -266,7 +266,7 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
     recorder = _CountingFailRecorder()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
-    reporter = ErrorReporter(tmp_path / "error.log")
+    reporter = ErrorReporter()
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_descriptor_batch(

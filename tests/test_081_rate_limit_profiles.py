@@ -324,10 +324,8 @@ def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatc
     queue = ProcessingQueue()
     queue.add(descriptor)
     stats = {"checked": 0, "failed": 0}
-    error_reporter_path = tmp_path / "error.log"
-
     from codedoc.utils.errors import ErrorReporter
-    error_reporter = ErrorReporter(error_reporter_path)
+    error_reporter = ErrorReporter()
 
     backup = tmp_path / "codedoc.json"
     sw = SafeWriter(backup, "json", "main.py", {"main.py": descriptor})

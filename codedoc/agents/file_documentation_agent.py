@@ -1,4 +1,4 @@
-"""Combined per-file documentation agent (0.10.0 — default ``single`` mode).
+"""Combined per-file documentation agent (default ``single`` mode).
 
 This is the default one-call analysis path.  A single provider call produces the
 same flat record the legacy three-agent path produced, by asking the model for
@@ -8,7 +8,7 @@ extension, parser imports) are merged by the :class:`~codedoc.agents.orchestrato
 and can never be replaced by model output.
 
 The opt-in ``triple`` mode still runs ``StructureAgent`` / ``DependencyAgent`` /
-``DocumentationAgent``; 0.10.1 makes them share this module's strict cleaners via
+``DocumentationAgent``; both share this module's strict cleaners via
 :mod:`codedoc.agents.response_cleaning`.
 
 Factuality boundary: the current parser contract supplies deterministic imports
@@ -17,7 +17,7 @@ but no deterministic function/class inventory, so ``functions``, ``classes``,
 bounded *model enrichment*, not verified AST facts.  They are cleaned and
 capped, never presented as parser-verified.
 
-0.10.1: the response-cleaning primitives, bounds, and ``clean_combined_response``
+The response-cleaning primitives, bounds, and ``clean_combined_response``
 moved to :mod:`codedoc.agents.response_cleaning` so single and triple modes share
 one strict contract.  They are re-exported here for backward compatibility.
 """
@@ -25,6 +25,11 @@ one strict contract.  They are re-exported here for backward compatibility.
 from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
+from codedoc.core.prompt_profiles import (
+    ResolvedShapeBlock,
+    default_shape_block,
+    filter_cleaned_response_for_profile,
+)
 
 # Re-export the shared bounds + cleaners so existing imports of
 # ``file_documentation_agent.MAX_*`` / ``clean_combined_response`` keep working.
@@ -70,32 +75,7 @@ Imports found by static parser: {imports}
 Code:
 {content}
 
-Return EXACTLY this JSON shape:
-{{
-  "description": "<clear paragraph describing what this file does and why it exists>",
-  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-  "functions": [
-    {{"name": "<function or method defined IN this file>", "description": "<what it does>"}}
-  ],
-  "classes": [
-    {{"name": "<class defined IN this file>", "description": "<what it does>"}}
-  ],
-  "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"],
-  "dependencies_analysis": {{
-    "internal": ["<relative import paths that are project files>"],
-    "external": ["<package names from node_modules / pip / pub / maven>"],
-    "dependency_refs": ["<normalized dependency names used by this file>"],
-    "catalog_updates": [
-      {{"name": "<normalized dependency name>", "type": "internal|external", "used_for": "<stable project-level purpose>"}}
-    ],
-    "usage_notes": [
-      {{"import": "<import string>", "used_for": "<file-specific note only>"}}
-    ],
-    "warnings": ["<any dependency concern, e.g. unused import, potential cycle>"]
-  }},
-  "key_concepts": ["<important concept or pattern used in this file>"],
-  "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
-}}
+{shape_block}
 
 Rules:
 - Use only information from the provided code and parser imports
@@ -125,19 +105,32 @@ Rules:
 
 
 def build_prompt(
-    file_path: str, content: str, imports: list[str], language: str
+    file_path: str,
+    content: str,
+    imports: list[str],
+    language: str,
+    requested_shape: ResolvedShapeBlock | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, prompt)`` exactly as sent to the provider.
 
     *content* must already be truncated by the caller.  Used by ``run()`` and by
     dry-run usage estimation so estimates match real prompts.  In ``single`` mode
     the dry-run estimate is exact because the prompt embeds only known inputs.
+
+    *requested_shape* supplies the requested-shape block.  When ``None`` the
+    developer-standard block is used, reproducing the frozen prompt byte for byte.
     """
+    shape_block = (
+        requested_shape.text
+        if requested_shape is not None
+        else default_shape_block("single", "combined")
+    )
     prompt = _PROMPT_TEMPLATE.format(
         language=language,
         file_path=file_path,
         imports=imports,
         content=content,
+        shape_block=shape_block,
     )
     return _SYSTEM, prompt
 
@@ -147,13 +140,24 @@ class FileDocumentationAgent(BaseAgent):
 
     agent_name = "FileDocumentationAgent"
 
-    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: ResolvedShapeBlock | None = None,
+    ) -> dict:
         system, prompt = build_prompt(
-            file_path, self._truncate(content, file_path), imports, language
+            file_path, self._truncate(content, file_path), imports, language,
+            requested_shape,
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
         cleaned = clean_combined_response(result, file_path)
+        cleaned = filter_cleaned_response_for_profile(
+            cleaned, requested_shape, mode="single", agent="combined"
+        )
         logger.debug(
             "FileDocumentationAgent: %s → %d functions, %d classes",
             file_path,

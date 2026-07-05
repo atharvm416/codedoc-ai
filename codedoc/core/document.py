@@ -1,4 +1,4 @@
-"""Centralized read-only parser for CodeDoc JSON / Markdown documents (0.9.3).
+"""Centralized read-only parser for CodeDoc JSON / Markdown documents.
 
 This module owns CodeDoc document parsing and structural ownership validation.
 It is strictly read-only: it never writes, migrates, renames, or deletes.
@@ -9,7 +9,7 @@ document and, if so, returns its normalized contents.
 Acceptance (encoded explicitly):
 
 - completed JSON with valid ``_codedoc`` metadata and schema ``1.3`` or ``1.4``;
-- in-progress / live-backup JSON (crash banner, ``status=in_progress``, or
+- in-progress crash-recovery JSON (crash banner, ``status=in_progress``, or
   ``live_backup``) with schema ``1.4`` or a missing schema;
 - stale-build migration JSON with valid ``_codedoc`` ownership and schema
   ``1.3`` / ``1.4`` / missing — only when ``legacy_role="stale_build"``;
@@ -17,8 +17,9 @@ Acceptance (encoded explicitly):
 - current Markdown with a valid embedded lossless view;
 - legacy Markdown without an embedded view (visible parser).
 
-A missing schema is **not** treated as generally-valid completed output.
-Unknown newer schemas, malformed versions, and unsupported extensions fail
+Versionless completed documents must satisfy stricter current ownership and
+canonical project/run shape checks. Unknown newer schemas, malformed versions,
+and unsupported extensions fail
 closed (``ConfigError``).  Missing files raise ``FileNotFoundError`` — callers
 decide whether "missing" is acceptable.
 """
@@ -38,9 +39,8 @@ from codedoc.core.markdown_view import (
 from codedoc.core.project_view import SCHEMA_VERSION
 from codedoc.utils.errors import ConfigError
 
-# Schema versions this release reads.  Parsed as integer components, never
-# floats.  SCHEMA_VERSION (today "1.4") is imported so this stays in sync with
-# the single production owner of the current version.
+# Accepted schema versions, parsed as integer components rather than floats.
+# Importing SCHEMA_VERSION keeps this synchronized with its production owner.
 _CURRENT_SCHEMA_COMPONENTS = tuple(int(part) for part in SCHEMA_VERSION.split("."))
 _ACCEPTED_SCHEMAS: frozenset[tuple[int, ...]] = frozenset({
     (1, 3),
@@ -161,6 +161,8 @@ def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocu
     _validate_json_schema(path, schema, in_progress=in_progress, legacy_role=legacy_role)
 
     files = _extract_files(path, data.get("files"))
+    if schema is None and not in_progress and legacy_role != "stale_build":
+        _validate_versionless_completed_view(path, data, meta, files)
     file_hashes = {
         f["path"]: f.get("hash", "")
         for f in files
@@ -195,14 +197,9 @@ def _validate_json_schema(
     legacy_role: str | None,
 ) -> None:
     if schema is None:
-        # Missing schema is acceptable only for in-progress/live-backup data or
-        # an explicit stale-build migration — never for general completed output.
-        if in_progress or legacy_role == "stale_build":
-            return
-        raise ConfigError(
-            f"'{path}' is missing a schema version and is not a valid completed "
-            "CodeDoc output. Re-run to generate a fresh document."
-        )
+        # Recovery/stale-build envelopes are accepted directly. Completed
+        # current documents receive strict structural validation in the caller.
+        return
 
     components = _parse_schema_components(schema)
     if components is None:
@@ -293,6 +290,16 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
 
     schema = lw_schema if lw_schema is not None else emb_schema
     _validate_markdown_schema(path, schema)
+    if schema is None:
+        if lightweight_meta is None or emb_view is None:
+            raise ConfigError(
+                f"'{path}' is missing the complete versionless CodeDoc ownership "
+                "envelope (metadata comment plus embedded project view)."
+            )
+        embedded_files = _extract_files(path, emb_view.get("files"))
+        _validate_versionless_completed_view(
+            path, emb_view, lightweight_meta, embedded_files
+        )
 
     # Prefer the valid embedded view; fall back to the visible parser only when
     # the embedded block is absent.
@@ -320,7 +327,6 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
         if lightweight_meta is not None
         else {
             "entry_file": emb_entry,
-            "schema_version": emb_schema,
             "file_hashes": dict(file_hashes),
         }
     )
@@ -340,10 +346,7 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
 
 def _validate_markdown_schema(path: Path, schema) -> None:
     if schema is None:
-        raise ConfigError(
-            f"'{path}' is missing a schema version and is not a valid "
-            "CodeDoc Markdown document."
-        )
+        return
     components = _parse_schema_components(schema)
     if components is None:
         raise ConfigError(f"'{path}' has a malformed schema version '{schema}'.")
@@ -420,6 +423,59 @@ def _extract_files(path: Path, files_obj) -> list[dict]:
             seen.add(rec_path)
         out.append(copy.deepcopy(record))
     return out
+
+
+def _validate_versionless_completed_view(
+    path: Path,
+    data: dict,
+    metadata: dict,
+    files: list[dict],
+) -> None:
+    """Require the canonical ownership and shape envelope for current output."""
+    project = data.get("project")
+    run = data.get("run")
+    if not isinstance(project, dict) or not isinstance(run, dict):
+        raise ConfigError(
+            f"'{path}' is not a valid versionless CodeDoc output: canonical "
+            "'project' and 'run' objects are required."
+        )
+
+    required_project = {"entry_file", "file_count", "languages", "folders"}
+    required_run = {
+        "files_checked",
+        "files_failed",
+        "files_skipped",
+        "files_reused",
+        "files_documented",
+    }
+    if not required_project.issubset(project) or not required_run.issubset(run):
+        raise ConfigError(
+            f"'{path}' is not a valid versionless CodeDoc output: the canonical "
+            "project/run fields are incomplete."
+        )
+
+    entry = project.get("entry_file")
+    file_count = project.get("file_count")
+    if entry is not None and not isinstance(entry, str):
+        raise ConfigError(f"'{path}' has a malformed project entry file.")
+    if isinstance(file_count, bool) or not isinstance(file_count, int) or file_count < 0:
+        raise ConfigError(f"'{path}' has a malformed project file count.")
+    for field in ("languages", "folders"):
+        value = project.get(field)
+        if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+            raise ConfigError(f"'{path}' has a malformed project {field} list.")
+    for field in required_run:
+        value = run.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(f"'{path}' has a malformed run field '{field}'.")
+
+    if "entry_file" not in metadata or metadata.get("entry_file") != entry:
+        raise ConfigError(
+            f"'{path}' has contradictory versionless ownership metadata and "
+            "project entry file."
+        )
+    if file_count != len(files) or run.get("files_documented") != len(files):
+        raise ConfigError(f"'{path}' has contradictory versionless file counts.")
 
 
 def records_by_path(document: CodedocDocument) -> dict[str, dict]:

@@ -39,25 +39,22 @@ Run these before opening a pull request:
 
 ```bash
 python -m pytest
-python -m ruff check codedoc
-python -m ruff check tests/test_095_*.py tests/test_093_dependency_view.py tests/test_graph.py tests/test_agents.py tests/test_080_features.py tests/test_097_*.py
+python -m ruff check .
 python -m build
 python -m twine check dist/*
 ```
 
 Continuous integration (`.github/workflows/ci.yml`) runs the full test suite on
-Python 3.10–3.12, Ruff over production and the release-touched tests, and a
+Python 3.10–3.12, Ruff over the complete repository, and a
 packaging job that builds the sdist and wheel, runs `twine check`, installs the
 wheel into a clean environment, and smoke-tests `import codedoc`,
-`codedoc --version`, and `codedoc --help`. The older test files still have known
-Ruff findings, so the lint gate is intentionally scoped until those are cleaned
-in a dedicated behavior-free change. CI never publishes, makes paid provider
-calls, or requires provider secrets.
+`codedoc --version`, and `codedoc --help`. CI never publishes, makes paid
+provider calls, or requires provider secrets.
 
 ## Run lifecycle
 
 The verified phase ordering of a run — read-only preflight, scan/plan, the
-mutation boundary, live-backup initialization before provider creation,
+mutation boundary, crash-recovery initialization before provider creation,
 execution, atomic finalization, diagnostics, and cleanup — is documented in
 [`RUN_FLOW.md`](RUN_FLOW.md).
 
@@ -75,7 +72,7 @@ File size is a review *signal*, not a hard gate. Production modules should
 normally stay cohesive and under roughly 700 lines; a module that grows well
 past that is usually doing too many jobs and is a good candidate for
 extraction into single-responsibility modules (as the pipeline and the
-project-view serializer were split in 0.9.4).
+project-view serializer were split into separate modules).
 
 There is no CI line-count rule, and you should never split code merely to hit
 a number. Generated files, large data tables, parsers, and tightly coupled

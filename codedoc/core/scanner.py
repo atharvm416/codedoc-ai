@@ -1,22 +1,7 @@
-"""
-Directory scanner.
+"""Scan a project and detect file languages without using an LLM.
 
-Walks a project root, finds all supported files, and detects the
-language of each file deterministically from its extension.
-No LLM is involved here.
-
-0.8.1 changes
--------------
-- ``SKIP_DIRS`` and ``EXTENSION_LANGUAGE_MAP`` are no longer hardcoded here.
-  The scanner receives ``skip_dirs`` and ``extension_language_map`` from the
-  caller (resolved by :func:`codedoc.core.loader.load_config`), making both
-  fully configurable via ``codedoc.config.json`` or CLI flags.
-- ``scan_files`` now accepts ``extension_language_map`` as its primary
-  extension/language source.  The legacy ``supported_extensions`` keyword
-  argument is kept for backward compatibility with direct callers.
-- ``detect_entry_file`` accepts a ``candidates`` list so the auto-entry file
-  search is driven by ``DEFAULTS["auto_entry_candidates"]`` rather than a
-  hardcoded list.
+Callers provide skip rules, extension mappings, and entry candidates. The
+``supported_extensions`` keyword remains compatible with direct callers.
 """
 
 from __future__ import annotations
@@ -71,7 +56,7 @@ def scan_files(
     skip_dirs: list[str] | None = None,
     ignore_paths: list[str] | None = None,
     *,
-    # Safety control (0.9.6).  Keyword-only so existing positional callers stay
+    # Safety control.  Keyword-only so existing positional callers stay
     # compatible.  When False (the default) every symlinked directory and file
     # is skipped, which prevents both symlink cycles and escapes outside the
     # project root.  When True, links are followed only when their resolved

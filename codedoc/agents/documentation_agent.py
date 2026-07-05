@@ -12,6 +12,11 @@ from __future__ import annotations
 
 from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import clean_documentation_response
+from codedoc.core.prompt_profiles import (
+    ResolvedShapeBlock,
+    default_shape_block,
+    filter_cleaned_response_for_profile,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -34,13 +39,7 @@ Dependency analysis:
 Code:
 {content}
 
-Return EXACTLY this JSON shape:
-{{
-  "description": "<clear, detailed paragraph describing what this file does and why it exists>",
-  "role_in_system": "<how this file connects to and supports the rest of the codebase>",
-  "key_concepts": ["<important concept or pattern used in this file>"],
-  "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
-}}
+{shape_block}
 
 Rules:
 - Base the documentation only on the provided code and analyses
@@ -65,6 +64,7 @@ def build_prompt(
     language: str,
     structure: dict,
     dependencies: dict,
+    requested_shape: ResolvedShapeBlock | None = None,
 ) -> tuple[str, str]:
     """Return ``(system, prompt)`` exactly as sent to the provider.
 
@@ -74,12 +74,18 @@ def build_prompt(
     """
     import json as _json
 
+    shape_block = (
+        requested_shape.text
+        if requested_shape is not None
+        else default_shape_block("triple", "documentation")
+    )
     prompt = _PROMPT_TEMPLATE.format(
         language=language,
         file_path=file_path,
         structure=_json.dumps(structure, indent=2) if structure else "{}",
         dependencies=_json.dumps(dependencies, indent=2) if dependencies else "{}",
         content=content,
+        shape_block=shape_block,
     )
     return _SYSTEM, prompt
 
@@ -87,10 +93,19 @@ def build_prompt(
 class DocumentationAgent(BaseAgent):
     agent_name = "DocumentationAgent"
 
-    def run(self, file_path: str, content: str, imports: list[str], language: str) -> dict:
+    def run(
+        self,
+        file_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        requested_shape: ResolvedShapeBlock | None = None,
+    ) -> dict:
         # This agent also receives pre-computed structure/dependency results
         # passed via content slot as structured context — see orchestrator
-        return self._run_with_context(file_path, content, imports, language, {}, {})
+        return self._run_with_context(
+            file_path, content, imports, language, {}, {}, requested_shape
+        )
 
     def run_with_context(
         self,
@@ -100,9 +115,11 @@ class DocumentationAgent(BaseAgent):
         language: str,
         structure: dict,
         dependencies: dict,
+        requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
         return self._run_with_context(
-            file_path, content, imports, language, structure, dependencies
+            file_path, content, imports, language, structure, dependencies,
+            requested_shape,
         )
 
     def _safe_run_with_context(
@@ -113,6 +130,7 @@ class DocumentationAgent(BaseAgent):
         language: str,
         structure: dict,
         dependencies: dict,
+        requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
         """Run with upstream agent context and return the standard fallback."""
         try:
@@ -123,6 +141,7 @@ class DocumentationAgent(BaseAgent):
                 language,
                 structure,
                 dependencies,
+                requested_shape,
             )
         except Exception as exc:
             logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
@@ -136,6 +155,7 @@ class DocumentationAgent(BaseAgent):
         language: str,
         structure: dict,
         dependencies: dict,
+        requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
         system, prompt = build_prompt(
             file_path,
@@ -143,10 +163,14 @@ class DocumentationAgent(BaseAgent):
             language,
             structure,
             dependencies,
+            requested_shape,
         )
         raw = self._call_llm(prompt, system=system)
         result = self._parse_json(raw, file_path)
         cleaned = clean_documentation_response(result, file_path)
+        cleaned = filter_cleaned_response_for_profile(
+            cleaned, requested_shape, mode="triple", agent="documentation"
+        )
 
         logger.debug("DocumentationAgent: completed %s", file_path)
         return cleaned

@@ -331,7 +331,7 @@ def test_file_retry_repeats_the_resolved_modes_full_call_set(
     assert provider.calls == expected_calls
 
 
-@pytest.mark.parametrize("source", ["same_path", "identical", "checkpoint"])
+@pytest.mark.parametrize("source", ["same_path", "identical"])
 @pytest.mark.parametrize(
     ("identity_change", "identity_value"),
     [
@@ -369,16 +369,10 @@ def test_every_reuse_source_requires_complete_matching_identity(
         **identity,
     }
     existing_docs = {}
-    checkpoints = {}
     if source == "same_path":
         existing_docs["main.py"] = record
-    elif source == "identical":
+    else:  # identical
         existing_docs["cached.py"] = record
-    else:
-        checkpoints["main.py"] = {
-            **record,
-            "_checkpoint_hash": content_hash,
-        }
 
     graph = DependencyGraph()
     graph.add_file("main.py")
@@ -395,7 +389,6 @@ def test_every_reuse_source_requires_complete_matching_identity(
         selected_rels={"main.py"},
         entry_rel="main.py",
         existing_docs=existing_docs,
-        checkpoint_records=checkpoints,
         forced_paths=[],
         config={
             "analysis_mode": "single",
@@ -407,72 +400,36 @@ def test_every_reuse_source_requires_complete_matching_identity(
     identity_matches = identity_change is None
     if identity_matches and source == "same_path":
         assert plan.unchanged_rels == frozenset({"main.py"})
-    elif identity_matches and source == "identical":
+    elif identity_matches:  # identical
         assert plan.identical_reuse_rels == frozenset({"main.py"})
-    elif identity_matches:
-        assert plan.checkpoint_reuse_rels == frozenset({"main.py"})
     else:
         assert plan.agent_rels == frozenset({"main.py"})
-
-
-def test_checkpoint_reuse_routes_through_central_predicate(tmp_path, monkeypatch):
-    import codedoc.core.planning as planning
-    from codedoc.core.db import compute_file_hash
-    from codedoc.core.graph import DependencyGraph
-
-    target = tmp_path / "main.py"
-    target.write_text("x = 1\n", encoding="utf-8")
-    content_hash = compute_file_hash(target)
-    calls = []
-    original = planning._record_is_reusable
-
-    def observed(stored, expected_hash, expected_identity):
-        calls.append((stored, expected_hash, expected_identity))
-        return original(stored, expected_hash, expected_identity)
-
-    monkeypatch.setattr(planning, "_record_is_reusable", observed)
-    graph = DependencyGraph()
-    graph.add_file("main.py")
-    plan, _materials = planning.build_pipeline_plan(
-        file_map={
-            "main.py": {
-                "path": target,
-                "rel_path": "main.py",
-                "language": "python",
-                "extension": ".py",
-            }
-        },
-        graph=graph,
-        selected_rels={"main.py"},
-        entry_rel="main.py",
-        existing_docs={},
-        checkpoint_records={
-            "main.py": {
-                "_checkpoint_hash": content_hash,
-                "_analysis_revision": ANALYSIS_REVISION,
-                "_analysis_mode": "single",
-            }
-        },
-        forced_paths=[],
-        config={"analysis_mode": "single", "propagate_changes": False},
-    )
-    assert plan.checkpoint_reuse_rels == frozenset({"main.py"})
-    assert any(
-        isinstance(stored, dict) and stored.get("hash") == content_hash
-        for stored, _, _ in calls
-    )
 
 
 @pytest.mark.parametrize("mode", ["single", "triple"])
 def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, mode):
     from codedoc.core.db import compute_file_hash
+    from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
+    from codedoc.core.resume import RECOVERY_FILENAME, build_recovery_identity
     from codedoc.pipeline import run_pipeline
 
     target = tmp_path / "main.py"
     target.write_text("x = 1\n", encoding="utf-8")
     output = tmp_path / "codedoc"
     output.mkdir()
-    (output / "crash_recovery_codedoc.json").write_text(
+    # A compatible in-progress recovery file uses the single fixed name and carries
+    # a versioned recovery identity that matches this run.
+    identity = build_recovery_identity(
+        project_root=tmp_path,
+        json_target=output / "codedoc.json",
+        md_target=None,
+        entry_file="main.py",
+        documentation_scope="entry",
+        analysis_mode=mode,
+        analysis_revision=ANALYSIS_REVISION,
+        profile_digests_by_language={"python": NO_PROMPT_PROFILE_DIGEST},
+    )
+    (output / RECOVERY_FILENAME).write_text(
         json.dumps(
             {
                 "_crash_safety": "INCOMPLETE RUN - test",
@@ -480,6 +437,7 @@ def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, m
                     "entry_file": "main.py",
                     "schema_version": "1.4",
                     "status": "in_progress",
+                    "recovery_identity": identity,
                 },
                 "schema_version": "1.4",
                 "files": [

@@ -1,5 +1,4 @@
 {
-  "schema_version": "1.4",
   "project": {
     "entry_file": "src/main.py",
     "file_count": 3,

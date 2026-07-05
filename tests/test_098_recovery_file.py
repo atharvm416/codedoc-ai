@@ -2,7 +2,7 @@
 0.9.8 — Gate A: dedicated crash-recovery file.
 
 Verifies that in-progress (crash-recovery) records are staged in a distinct
-``crash_recovery_<stem>.json`` file, that the stable completed output is never
+``crash_recovery.json`` file, that the stable completed output is never
 mutated before clean completion, that the recovery file is deleted only after a
 successful stable write, and that the artifact-path collision check treats the
 recovery file as its own artifact.
@@ -84,14 +84,14 @@ def _write_codedoc_json(path: Path, files: list, status: str | None = None):
 
 
 # ---------------------------------------------------------------------------
-# A run writes records to crash_recovery_codedoc.json, not the stable JSON
+# A run writes records to crash_recovery.json, not the stable JSON
 # ---------------------------------------------------------------------------
 
 def test_json_run_writes_recovery_file_and_never_mutates_stable_json(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text("x = 1\n")
     out = tmp_path / "codedoc"
     stable = out / "codedoc.json"
-    recovery = out / "crash_recovery_codedoc.json"
+    recovery = out / "crash_recovery.json"
 
     # A pre-existing clean stable output (for an unrelated file) must be left
     # byte-identical until the run completes cleanly.
@@ -121,9 +121,9 @@ def test_json_run_writes_recovery_file_and_never_mutates_stable_json(tmp_path, m
     assert not recovery.exists()
 
 
-def test_named_json_output_uses_crash_recovery_report(tmp_path, monkeypatch):
+def test_named_json_output_uses_fixed_recovery_name(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text("x = 1\n")
-    recovery = tmp_path / "docs" / "crash_recovery_report.json"
+    recovery = tmp_path / "docs" / "crash_recovery.json"
     stable = tmp_path / "docs" / "report.json"
 
     seen = {"recovery_midrun": False}
@@ -147,7 +147,7 @@ def test_both_run_preserves_both_stable_artifacts_until_completion(tmp_path, mon
     out = tmp_path / "codedoc"
     stable_json = out / "codedoc.json"
     stable_md = out / "codedoc.md"
-    recovery = out / "crash_recovery_codedoc.json"
+    recovery = out / "crash_recovery.json"
 
     seen = {"json_absent_midrun": None, "md_absent_midrun": None, "recovery_midrun": False}
 
@@ -173,9 +173,9 @@ def test_both_run_preserves_both_stable_artifacts_until_completion(tmp_path, mon
     assert not recovery.exists()
 
 
-def test_md_run_recovery_name_derived_from_md_stem(tmp_path, monkeypatch):
+def test_md_run_md_run_uses_fixed_recovery_name(tmp_path, monkeypatch):
     (tmp_path / "main.py").write_text("x = 1\n")
-    recovery = tmp_path / "docs" / "crash_recovery_report.json"
+    recovery = tmp_path / "docs" / "crash_recovery.json"
     stable_md = tmp_path / "docs" / "report.md"
 
     seen = {"recovery_midrun": False}
@@ -204,7 +204,7 @@ def test_forced_stable_write_failure_preserves_recovery_and_prior_stable(tmp_pat
     (tmp_path / "main.py").write_text("x = 1\n")
     out = tmp_path / "codedoc"
     stable = out / "codedoc.json"
-    recovery = out / "crash_recovery_codedoc.json"
+    recovery = out / "crash_recovery.json"
 
     _write_codedoc_json(stable, [{"path": "old.py", "hash": "OLD", "language": "python"}])
     stable_before = stable.read_bytes()
@@ -230,12 +230,12 @@ def test_forced_recovery_deletion_oserror_raises_outputerror_and_keeps_both(tmp_
     (tmp_path / "main.py").write_text("x = 1\n")
     out = tmp_path / "codedoc"
     stable = out / "codedoc.json"
-    recovery = out / "crash_recovery_codedoc.json"
+    recovery = out / "crash_recovery.json"
 
     real_unlink = Path.unlink
 
     def guarded_unlink(self, *args, **kwargs):
-        if self.name.startswith("crash_recovery_"):
+        if self.name == "crash_recovery.json":
             raise OSError("forced recovery deletion failure")
         return real_unlink(self, *args, **kwargs)
 
@@ -250,7 +250,7 @@ def test_forced_recovery_deletion_oserror_raises_outputerror_and_keeps_both(tmp_
     completed = json.loads(stable.read_text(encoding="utf-8"))
     assert "_crash_safety" not in completed
     assert recovery.exists()
-    assert "crash_recovery_codedoc.json" in str(excinfo.value)
+    assert "crash_recovery.json" in str(excinfo.value)
 
 
 # ---------------------------------------------------------------------------
@@ -298,5 +298,5 @@ def test_validate_distinct_accepts_separate_recovery(tmp_path):
         "error_log": tmp_path / "error.log",
         "json": tmp_path / "codedoc.json",
         "markdown": tmp_path / "codedoc.md",
-        "live_backup": tmp_path / "crash_recovery_codedoc.json",
+        "live_backup": tmp_path / "crash_recovery.json",
     })

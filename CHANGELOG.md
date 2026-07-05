@@ -1,5 +1,200 @@
 # Changelog
 
+## 0.11.6 - 2026-07-05
+
+### Safe cross-format incremental reuse
+
+- A single-format run now reuses the exact opposite-format CodeDoc sibling when
+  the requested target does not yet exist. Switching from Markdown to JSON, or
+  JSON to Markdown, converts unchanged records without repeating provider calls;
+  only changed or cache-incompatible files are documented again.
+- An existing requested target remains authoritative. Fallback probes only the
+  expected sibling in the selected output directory and validates ownership and
+  structure before reuse; foreign or malformed fallbacks stop before paid work.
+- Named outputs use the same stem (`report.json` / `report.md`), while directory
+  outputs use their configured JSON/Markdown filename pair. No directory walk,
+  unrelated default filename, or modification-time selection is performed.
+- Compatible partial recovery state overlays the stable sibling, and
+  `crash_recovery.json` is removed only after the requested output commits
+  successfully. Both-format conflict checks, versionless output, legacy readers,
+  and ordinary cache-identity rules remain unchanged.
+
+## 0.11.5 - 2026-07-04
+
+### Versionless user-facing data
+
+- Newly generated prompt-profile configuration, final JSON and Markdown
+  documentation, embedded Markdown project views, and crash-recovery files no
+  longer expose `schema_version`.
+- Existing supported versioned prompt profiles and documents remain readable;
+  current versionless documents use the CodeDoc ownership envelope plus strict
+  structural validation.
+- Provider-requested shapes and cleaned responses remain versionless, while
+  project identity, incremental reuse, recovery matching, and lossless
+  JSON/Markdown conversion retain their deterministic non-version checks.
+
+## 0.11.4 - 2026-07-04
+
+### Fail-closed configuration and public-surface hardening
+
+- Unknown, malformed, non-finite, or incorrectly typed configuration now fails
+  before scanning, provider creation, mutation, or paid documentation work.
+- Configuration authoring is consolidated to `codedoc --init-config [--force]`.
+  The schema-description, instruction-only, and named-template forms are removed;
+  forced regeneration validates the active file and replaces only
+  `prompt_profiles`, preserving every unrelated top-level value.
+- Generated profiles expose one editable combined block for single mode and
+  independently editable structure, dependency, and documentation blocks for
+  triple mode. Security review runs only for effective non-default instructions
+  headed to planned LLM calls; medium risk now requires explicit per-run
+  confirmation, while high risk remains non-overridable.
+- Documentation and help consistently teach the shorter `codedoc …` spelling;
+  the accepted `run` and `execute` aliases remain supported. README now covers the
+  complete CLI and environment-variable surfaces, and release-tethered prose was
+  removed from runtime code and public guides.
+- Recovery messages name `crash_recovery.json`, entry-selection help reflects
+  auto-detection/all-files behavior, and the bundled Actions template uses the
+  canonical command form.
+- Documentation output shape, prompt bytes, document schema, and cache/recovery
+  identity are unchanged outside the explicit validation, initialization, and
+  medium-risk confirmation behavior above.
+- This is the first official-PyPI release in the 0.11 line. Users upgrading from
+  0.10.x should review the 0.11.0–0.11.3 entries below for cumulative breaking
+  changes.
+
+## 0.11.3 - 2026-07-02
+
+### Config-only instructions and exact file lifecycle
+
+This release consolidates the unpublished 0.11 instruction feature into a small,
+predictable surface. It intentionally favors the clean contract over
+compatibility with the internal 0.11.0/0.11.1 experiments.
+
+- **One config file.** CodeDoc automatically reads exactly
+  `<project_root>/codedoc.config.json`. The `config.json` fallback, `.env` file
+  loading, external prompt-profile files (`codedoc-prompt-profiles.json`),
+  auto-detection, and `--prompt-profile` / `--no-prompt-profile` are removed. OS
+  environment variables remain supported for credentials and scalar overrides.
+  `.env.example` is deleted and the `python-dotenv` dependency is dropped.
+- **`common` instruction envelope.** Every mode section now uses
+  `<mode>: { "common": {...}, "per_language": {...} }` for both schema v1
+  (`fields`) and v2 (`requested_shape`). The flat 0.11.0/0.11.1 layout produces a
+  deterministic migration error. The `per_extension` scope is reserved
+  (precedence `per_extension > per_language > common`) but rejected as unsupported
+  in 0.11.3.
+- **`codedoc --init-config [NAME] [--force]`** writes a complete, editable
+  `codedoc.config.json` with every public default plus single/triple instructions;
+  a `NAME` writes a non-active help template. **`codedoc --init-instructions
+  [single|triple|both] [--force]`** writes/replaces only the inline
+  `prompt_profiles`. Neither keeps a backup; `--force` replaces atomically.
+  `--export-prompt-profile` is removed (covered by the initializers and
+  `--describe-prompt-schema`).
+- **Deterministic documentation fallback.** A customized single-only profile in
+  triple mode resolves its documentation block by projecting the compatible
+  `single.common` fields (`description`, `role_in_system`, `key_concepts`,
+  `usage_example`) — missing triple documentation resolves as explicit → projected
+  single → built-in. The paid single-to-triple routing conversion is removed.
+- **Mandatory, non-overridable security review.** `TOO_RISKY` always blocks;
+  `--allow-risky-prompt-customization` / `prompt_customization_allow_risky` are
+  removed.
+- **Exact output and one recovery file.** Incremental state comes only from the
+  exact selected `codedoc.json` / `codedoc.md` target(s); no sibling, opposite-
+  format, or directory discovery. `both` mode fails with an actionable error when
+  the two documents' identities conflict. Crash recovery is exactly
+  `<output_dir>/crash_recovery.json` with a versioned run identity — no candidate
+  walk or numbered suffixes. An owned in-progress recovery whose identity does not
+  match the current run blocks with a "delete crash_recovery.json to start fresh,
+  or restore the prior configuration" message instead of silently resuming.
+- **Removed auxiliary artifacts.** The persistent `error.log`, the managed output
+  `.gitignore` (`manage_output_gitignore` / `output_gitignore_filename`), and all
+  probing/migration of legacy `.codedoc_progress.json`, `.codedoc_build.json`, and
+  `codedoc_db.json` are removed. Diagnostics are printed and embedded in the final
+  output; issues are kept in memory only. The deprecated `--safe-mode` /
+  `CODEDOC_SAFE_MODE` no-op is removed. A stale config that still sets any removed
+  key now fails with a targeted error naming the key and its replacement behavior.
+- No change to the public document schema (`SCHEMA_VERSION` `1.4`), cache identity
+  (`ANALYSIS_REVISION` `file-doc-v2`, `pp-v1`, `truncate-v1`,
+  `no-prompt-profile-v1`), default prompt bytes, or OpenAI/Anthropic/Gemini parity.
+
+## 0.11.2 - 2026-06-30
+
+### Version-reference decluttering
+
+- Removed historical, changelog-style version tags from source comments and
+  docstrings — leading `# X.Y.Z:` markers, `(Workstream …)` / `(Work Item …)`
+  provenance labels, parenthetical `(0.X.Y …)` module/section tags, and inline
+  "since / before / as of X.Y" references — so the code reads as a description of
+  current behavior. This CHANGELOG remains the single record of version history.
+- Removed "available since `<version>`" framing from `README.md` prose: settings
+  and feature section headers, the run-determinism and one-time-reprocessing
+  notes, and similar dated phrasing, keeping all descriptive content.
+- Documentation/comment-only release. No executable logic, public document schema
+  (`SCHEMA_VERSION` `1.4`), cache identity (`ANALYSIS_REVISION` `file-doc-v2`,
+  `pp-v1`, `truncate-v1`, `no-prompt-profile-v1`), prompt bytes, model ids, or
+  supported Python versions changed. The full test suite, Ruff, `compileall`, and
+  the README/default-block drift guards pass with the same pass/skip counts as
+  0.11.1.
+
+## 0.11.1 - 2026-06-29
+
+### Config-embedded AI output structures
+
+- Added a literal version-2 `requested_shape` prompt-profile format whose JSON
+  keys and containers resemble the desired output, so output customization can
+  live entirely inside `codedoc.config.json` without a second profile file. The
+  legacy version-1 `fields` format, external profile files, auto-detection, and
+  `--prompt-profile` remain fully compatible. `schema_version` is optional and
+  inferred from the block syntax (version 1 from `fields`, version 2 from
+  `requested_shape`); version 2 is accepted only inline. Equivalent version-1 and
+  version-2 profiles render an identical prompt and share the same
+  `_prompt_profile_digest`, so existing caches are reused unchanged.
+- Added a deterministic strict-JSON loader (`codedoc/utils/json_utils.py`) shared
+  by the config loader, external-profile reader, and the security/routing control
+  responses; it rejects duplicate object keys at every nesting depth.
+- Added an opt-in single-to-triple conversion proposal: selecting `triple` mode
+  with only a *customized* `single` structure runs the ordinary paid security
+  review plus one separately disclosed paid routing call (new
+  `PromptProfileRoutingAgent`), prints a config-ready `triple` proposal, and stops
+  without generating documentation. The proposal is bounded, deterministically
+  validated, fail-closed, and never written to config automatically. A
+  developer-standard-equivalent single structure in triple mode resolves to the
+  built-in defaults with no paid call.
+- Added separate documentation/security-review/routing call-attempt accounting
+  that reconciles exactly to the aggregate attempt total, plus dedicated CLI
+  conversion summaries and a config-ready stdout export
+  (`--export-prompt-profile`); `--describe-prompt-schema` now documents both
+  formats and rejects `--format both`. Path export still emits a version-1
+  external profile.
+- Reduced duplicate dependency-cycle warning noise: the cycle count is logged at
+  WARNING at most once per run and the full path list at DEBUG, with no change to
+  topological ordering or cycle handling. The public document `SCHEMA_VERSION`
+  (`1.4`), `ANALYSIS_REVISION` (`file-doc-v2`), output vocabulary, and no-profile
+  prompt/cache behavior are unchanged.
+
+
+## 0.11.0 - 2026-06-28
+
+### Mode-based JSON prompt profiles
+
+- Added one canonical registry for the requested JSON shapes used by `single`
+  and `triple` analysis. Profiles may reorder registered fields, rewrite their
+  bounded instruction strings, omit optional fields, and select per-language
+  overrides without changing system prompts, fixed rules, cleaner types, parser
+  facts, provider configuration, or output paths.
+- Added inline, explicit-file, and root auto-detected profile resolution plus
+  `--prompt-profile`, `--no-prompt-profile`, strict environment booleans, schema
+  description, and safe default-profile export utilities.
+- Active customization that will reach planned documentation calls receives a
+  mandatory, bounded, paid semantic standards/safety review through the configured
+  provider. `SAFE` proceeds, `RISKY` proceeds with warnings, and `TOO_RISKY` blocks
+  unless the explicit risky-customization override is set. Deterministic validation
+  and strict response cleaning are never overridable.
+- Added a shared post-clean filter and `_prompt_profile_digest` private cache
+  identity so omitted fields cannot reappear and only affected files are
+  invalidated. The public schema remains `1.4`; default/no-profile prompts and
+  legacy cache reuse remain compatible.
+
+
 ## 0.10.3 - 2026-06-25
 
 ### Truncation parameters now participate in cache identity

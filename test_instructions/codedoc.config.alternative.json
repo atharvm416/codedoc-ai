@@ -1,0 +1,163 @@
+{
+  "llm_mode": "api",
+  "llm_provider": "auto",
+  "model_name": "",
+  "api_base_url": null,
+  "api_key": null,
+  "entry_file": null,
+  "documentation_scope": "entry",
+  "output_dir": "codedoc",
+  "output_format": "json",
+  "output_json_filename": "codedoc.json",
+  "output_md_filename": "codedoc.md",
+  "parallel_agents": true,
+  "max_parallel_files": 5,
+  "file_retry_attempts": 1,
+  "max_consecutive_failures": 5,
+  "log_level": "INFO",
+  "max_file_size_kb": 500,
+  "follow_symlinks": false,
+  "propagate_changes": true,
+  "rate_limit_adaptive": true,
+  "parallel_ladder": null,
+  "respect_retry_after": true,
+  "retry_after_cap_s": 30,
+  "skip_dirs_add": [],
+  "skip_dirs_remove": [],
+  "extension_language_map_add": {},
+  "extension_language_map_remove": [],
+  "auto_entry_candidates_add": [],
+  "auto_entry_candidates_remove": [],
+  "provider_prefixes_add": {},
+  "provider_prefixes_remove": {},
+  "rate_limit_backoff_s": null,
+  "rate_limit_backoff_scale": null,
+  "rate_limit_signals_add": [],
+  "rate_limit_signals_remove": [],
+  "ignore_paths": [],
+  "max_content_chars": 12000,
+  "dry_run": false,
+  "max_files": 0,
+  "force_files": [],
+  "allow_partial": false,
+  "analysis_mode": "single",
+  "truncation_head_ratio": 0.7,
+  "prompt_profiles": {
+    "$comment": [
+      "ALTERNATIVE instruction set (test_instructions) for validating prompt-profile customization.",
+      "Voice: explain every file to a brand-new engineer. Be concrete, specific, and consistent so any AI reader interprets it the same way.",
+      "Only the guidance text, field order, and selected fields differ from the defaults; the output keys and their types are unchanged.",
+      "To restore the defaults, copy test_instructions/codedoc.config.default.json over codedoc.config.json."
+    ],
+    "single": {
+      "common": {
+        "requested_shape": {
+          "description": "Summarize this file for a developer who has never seen it. In 2 to 4 sentences, state the concrete problem it solves, when or where it runs in the program's lifecycle, and why it exists. Do not restate the file name and do not list imports.",
+          "role_in_system": "Explain how this file fits the wider architecture: which layer or subsystem it belongs to, what calls into it, and what it calls out to. Name concrete collaborators (modules, classes, functions) when they are visible in the code.",
+          "key_concepts": [
+            "List 2 to 5 specific concepts, algorithms, patterns, or domain terms a reader must already understand to follow this file (for example: atomic file write, topological sort, rate-limit backoff). Prefer precise named terms over generic words like logic or helpers."
+          ],
+          "functions": [
+            {
+              "name": "<function or method defined IN this file>",
+              "description": "One precise sentence stating what this function does and its key input, return value, or side effect. Describe observable behavior, not the line-by-line implementation."
+            }
+          ],
+          "classes": [
+            {
+              "name": "<class defined IN this file>",
+              "description": "One sentence naming the single responsibility this class owns and the real-world thing or state it models or manages."
+            }
+          ],
+          "exports": [
+            "Each public name this module is meant to be imported and used by other files; skip private helpers and names that begin with an underscore."
+          ],
+          "dependencies_analysis": {
+            "internal": [
+              "Relative import paths that resolve to other source files inside this same project."
+            ],
+            "external": [
+              "Third-party package names installed from a registry (pip, npm, pub, or maven). Do not include standard-library modules here."
+            ],
+            "catalog_updates": [
+              {
+                "name": "<normalized dependency name>",
+                "type": "internal|external",
+                "used_for": "One durable, project-level sentence describing what this dependency is used for across the whole codebase (reusable knowledge, not a detail specific to this one file)."
+              }
+            ],
+            "usage_notes": [
+              {
+                "import": "<import string>",
+                "used_for": "A short note describing how THIS specific file uses the imported item."
+              }
+            ]
+          },
+          "usage_example": "One realistic single-line example showing how another file would import or call the main thing this file exposes. Use an empty string if nothing here is meant to be imported."
+        }
+      },
+      "per_language": {}
+    },
+    "triple": {
+      "common": {
+        "structure": {
+          "requested_shape": {
+            "description": "In 2 to 3 sentences, describe what this file contains and its overall purpose from a structural standpoint: its main definitions and what they collectively achieve. Do not restate the file name.",
+            "role_in_system": "State where this file sits in the codebase and how the symbols it defines are meant to be used by other parts of the system.",
+            "functions": [
+              {
+                "name": "<function or method defined IN this file>",
+                "description": "One clear sentence describing what this function does, focused on its observable behavior and its inputs and outputs."
+              }
+            ],
+            "classes": [
+              {
+                "name": "<class defined IN this file>",
+                "description": "One sentence describing the class's responsibility and the state or concept it encapsulates."
+              }
+            ],
+            "exports": [
+              "Public symbols intentionally exposed for other modules to import. Exclude internal names and names that begin with an underscore."
+            ]
+          }
+        },
+        "dependency": {
+          "requested_shape": {
+            "dependencies_analysis": {
+              "internal": [
+                "Relative import paths that resolve to other source files inside this same project."
+              ],
+              "external": [
+                "Third-party package names installed from a registry (pip, npm, pub, or maven). Do not include standard-library modules here."
+              ],
+              "catalog_updates": [
+                {
+                  "name": "<normalized dependency name>",
+                  "type": "internal|external",
+                  "used_for": "One durable, project-level sentence describing what this dependency is used for across the whole codebase."
+                }
+              ],
+              "usage_notes": [
+                {
+                  "import": "<import string>",
+                  "used_for": "A short note describing how THIS specific file uses the imported item."
+                }
+              ]
+            }
+          }
+        },
+        "documentation": {
+          "requested_shape": {
+            "description": "Write a thorough, self-contained paragraph a new team member could read to fully understand this file: the problem it solves, how it works at a high level, and why it exists. Do not restate the file name and do not dump imports.",
+            "key_concepts": [
+              "List 2 to 5 specific concepts or patterns a reader must know to understand this file. Prefer precise, named terms over generic words."
+            ],
+            "role_in_system": "Explain how this file connects to and supports the rest of the codebase, naming concrete collaborators and the direction of dependencies where visible.",
+            "usage_example": "One realistic single-line example of how another file would import or use this file, or an empty string if nothing here is meant to be imported."
+          }
+        }
+      },
+      "per_language": {}
+    }
+  }
+}

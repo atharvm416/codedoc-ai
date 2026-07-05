@@ -69,7 +69,6 @@ jobs:
       - name: Dry run (free) — review the plan
         run: |
           args=(
-            run
             "$CODEDOC_PROJECT_ROOT"
             --output "$CODEDOC_OUTPUT_PATH"
             --max-files "$CODEDOC_MAX_FILES"
@@ -80,7 +79,6 @@ jobs:
       - name: Generate documentation (paid LLM calls)
         run: |
           args=(
-            run
             "$CODEDOC_PROJECT_ROOT"
             --output "$CODEDOC_OUTPUT_PATH"
             --max-files "$CODEDOC_MAX_FILES"

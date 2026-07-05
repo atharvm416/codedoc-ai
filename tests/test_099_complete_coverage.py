@@ -317,7 +317,6 @@ def test_pipeline_plan_canonical_documented_field_with_selected_alias(tmp_path):
         selected_rels={"main.py", "helper.py"},
         entry_rel="main.py",
         existing_docs={},
-        checkpoint_records={},
         forced_paths=[],
         config={"propagate_changes": True, "max_files": 0},
     )
@@ -333,13 +332,10 @@ def test_pipeline_plan_canonical_documented_field_with_selected_alias(tmp_path):
 
 
 def test_no_supported_files_real_stats_keep_scope_and_compatibility_keys(tmp_path):
-    stats = run_pipeline(tmp_path, {"manage_output_gitignore": True})
+    stats = run_pipeline(tmp_path, {})
     assert stats["entry_excluded"] == 0
     assert stats["documentation_scope"] == "entry"
     assert stats["entry_reachable"] == 0
     assert stats["entry_disconnected"] == 0
     assert stats["disconnected_paid_files"] == 0
     assert stats["disconnected_planned_calls"] == 0
-    assert stats["output_gitignore_enabled"] is True
-    assert stats["output_gitignore_updated"] is False
-    assert stats["output_gitignore_warning"] is None

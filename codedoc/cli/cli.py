@@ -3,10 +3,10 @@ codedoc CLI entry point.
 
 Behaviour notes
 ---------------
-- ``--safe-mode`` is deprecated (kept for backwards compatibility; prints a
-  no-op warning at runtime).
-- The error / issue log path is printed whenever any issue is recorded, not
-  only when ``failed > 0``.
+- Removed compatibility flags such as ``--safe-mode`` are rejected with
+  migration guidance; crash recovery is always active.
+- Issues are reported from bounded in-memory diagnostics; no issue-log path is
+  persisted or printed.
 - Rate-limit step-down warnings from ``stats["rate_limit_warnings"]`` are
   printed to stdout.
 - On interrupt, the dedicated crash-recovery file path attached by the pipeline
@@ -17,13 +17,13 @@ Behaviour notes
   reported in the run summary.
 
 First run:
-    codedoc run --entry src/main.py              # document from entry; save to codedoc/
-    codedoc run --entry src/main.py --output docs/report.json
+    codedoc --entry src/main.py              # document from entry; save to codedoc/
+    codedoc --entry src/main.py --output docs/report.json
 
-Subsequent runs (entry auto-read from previous docs when available):
-    codedoc run                                  # resumes from codedoc/ folder
-    codedoc run --output codedoc/codedoc.json    # explicit path to previous output
-    codedoc run --format md                      # convert existing JSON to Markdown
+Subsequent runs (entry read from the exact selected output when available):
+    codedoc                                  # resumes from codedoc/ folder
+    codedoc --output codedoc/codedoc.json    # explicit path to previous output
+    codedoc --format md                      # reuse MD, or convert exact JSON sibling
 """
 
 from __future__ import annotations
@@ -41,21 +41,21 @@ def build_parser() -> argparse.ArgumentParser:
         epilog="""
 examples:
   # --- First run ---
-  codedoc run --entry src/main.py                          document from entry; save to codedoc/
-  codedoc run --entry src/main.py --output ./docs          save to custom directory
-  codedoc run --entry src/main.py --output docs/api.json   save as a named JSON file
-  codedoc run --entry src/main.py --format md              write only codedoc.md
+  codedoc --entry src/main.py                          document from entry; save to codedoc/
+  codedoc --entry src/main.py --output ./docs          save to custom directory
+  codedoc --entry src/main.py --output docs/api.json   save as a named JSON file
+  codedoc --entry src/main.py --format md              write only codedoc.md
 
-  # --- Subsequent runs: entry read from existing docs ---
-  codedoc run                                              resume from codedoc/ (auto-detected)
-  codedoc run --output codedoc/codedoc.json                resume from explicit file path
-  codedoc run --format md                                  convert cached JSON to Markdown
-  codedoc run --format both                                generate JSON + Markdown
+  # --- Subsequent runs: entry read from exact selected docs ---
+  codedoc                                              resume from codedoc/codedoc.json
+  codedoc --output codedoc/codedoc.json                resume from explicit file path
+  codedoc --format md                                  reuse MD, or convert exact JSON sibling
+  codedoc --format both                                generate JSON + Markdown
 
   # --- Provider / model overrides ---
-  codedoc run --provider gemini --entry src/main.py
-  codedoc run --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
-  codedoc run --ignore /myenv --entry src/main.py          ignore a project-root path
+  codedoc --provider gemini --entry src/main.py
+  codedoc --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
+  codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
         """,
     )
 
@@ -71,9 +71,9 @@ examples:
         metavar="FILE",
         default=None,
         help=(
-            "Entry file relative to project root (e.g. src/main.py). "
-            "Required for the first run. On subsequent runs the entry point is "
-            "read automatically from the previously generated documentation file."
+            "Optional entry file relative to the project root. An exact selected "
+            "output may supply it; otherwise configured candidates are auto-detected. "
+            "If none is found, all scanned files are documented."
         ),
     )
     parser.add_argument(
@@ -84,20 +84,6 @@ examples:
             "Documentation coverage: entry follows files reachable from the entry; "
             "all includes every scanned source file (default: entry)."
         ),
-    )
-    ignore_group = parser.add_mutually_exclusive_group()
-    ignore_group.add_argument(
-        "--manage-output-gitignore",
-        dest="manage_output_gitignore",
-        action="store_true",
-        default=None,
-        help="Manage a codedoc-owned block in the output directory .gitignore.",
-    )
-    ignore_group.add_argument(
-        "--no-manage-output-gitignore",
-        dest="manage_output_gitignore",
-        action="store_false",
-        help="Disable managed output .gitignore updates.",
     )
     parser.add_argument(
         "--provider",
@@ -177,15 +163,6 @@ examples:
             "Example: --remove-skip-dir codedoc  (allows scanning the package source)"
         ),
     )
-    # [DEPRECATED] Live JSON backup is always on since 0.8.0.  The flag is
-    # still accepted for backwards compatibility but hidden from --help
-    # (0.9.2); the pipeline prints one compatibility warning when enabled.
-    parser.add_argument(
-        "--safe-mode",
-        action="store_true",
-        default=False,
-        help=argparse.SUPPRESS,
-    )
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -250,6 +227,19 @@ examples:
         ),
     )
     parser.add_argument(
+        "--init-config",
+        action="store_true",
+        help=(
+            "Write a complete editable codedoc.config.json with all public "
+            "defaults and editable single/triple instructions, then exit."
+        ),
+    )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="With --init-config, refresh only prompt_profiles in an existing config.",
+    )
+    parser.add_argument(
         "--max-parallel-files",
         type=int,
         default=None,
@@ -270,12 +260,14 @@ examples:
         ),
     )
     parser.add_argument(
-        "--verbose", "-v",
+        "--verbose",
+        "-v",
         action="store_true",
         default=False,
         help="Enable debug logging",
     )
     from codedoc import __version__
+
     parser.add_argument(
         "--version",
         action="version",
@@ -285,17 +277,56 @@ examples:
     return parser
 
 
-def _print_ignore_status(stats: dict, dry_run: bool) -> None:
-    if not stats.get("output_gitignore_enabled", False):
+def _has_resolved_prompt_profile(stats: dict) -> bool:
+    """Whether an inline profile source won resolution for this run.
+
+    ``inline`` is the only resolved custom source; ``absent`` means
+    developer defaults and prints no profile section.
+    """
+    return stats.get("prompt_profile_source") == "inline"
+
+
+def _print_prompt_profile_dry_run(stats: dict) -> None:
+    """Print projected profile/review costs without changing no-profile output."""
+    if not _has_resolved_prompt_profile(stats):
         return
-    if stats.get("output_gitignore_warning"):
-        print(f"  Managed ignore warning: {stats['output_gitignore_warning']}")
-    elif stats.get("output_gitignore_updated"):
-        print(f"  Managed ignore updated: {stats.get('output_gitignore_path', '')}")
-    elif dry_run:
-        print("  Managed ignore         : enabled (dry run; no change)")
-    else:
-        print("  Managed ignore         : enabled; no eligible artifact change")
+    documentation = stats.get("documentation_calls_planned", 0)
+    review = stats.get("prompt_customization_security_review_calls_planned", 0)
+    print("\n  Prompt profile:")
+    print(f"    Source                : {stats.get('prompt_profile_source')}")
+    print(
+        f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}"
+    )
+    print(
+        f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}"
+    )
+    print(f"    Documentation calls   : {documentation} planned")
+    print(f"    Security-review calls : {review} planned")
+    print(f"    Total paid calls      : {documentation + review} planned")
+
+
+def _print_prompt_profile_run(stats: dict) -> None:
+    """Print actual profile/review category costs for an ordinary real run."""
+    if not _has_resolved_prompt_profile(stats):
+        return
+    documentation = stats.get("documentation_calls_attempted", 0)
+    review = stats.get("prompt_customization_security_review_calls_attempted", 0)
+    print("\n  Prompt profile:")
+    print(f"    Source                : {stats.get('prompt_profile_source')}")
+    print(
+        f"    Active                : {'yes' if stats.get('prompt_profile_active') else 'no'}"
+    )
+    print(
+        f"    Affected files        : {stats.get('prompt_profile_affected_files', 0)}"
+    )
+    print(
+        "    Security review       : "
+        f"{stats.get('prompt_customization_security_review', 'not-required')} "
+        f"({review} attempted, "
+        f"{stats.get('prompt_customization_security_review_calls_completed', 0)} completed)"
+    )
+    print(f"    Documentation calls   : {documentation} attempted")
+    print(f"    Total attempted calls : {documentation + review}")
 
 
 def _print_dry_run_summary(stats: dict) -> None:
@@ -306,13 +337,10 @@ def _print_dry_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
     print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
-    print(
-        "  Initial calls per file : "
-        f"{stats.get('initial_calls_per_file', 1)}"
-    )
+    print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
-    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # Derive the excluded count from the clearer reachable/disconnected
     # counts.  Under scope 'entry' the disconnected files are exactly the ones
     # excluded from documentation; scope 'all' documents them so none are
     # excluded.  The compatibility ``entry_excluded`` stat is still returned.
@@ -350,7 +378,7 @@ def _print_dry_run_summary(stats: dict) -> None:
         f"({estimate_qualifier} — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
-    _print_ignore_status(stats, dry_run=True)
+    _print_prompt_profile_dry_run(stats)
 
     if stats.get("max_files_exceeded"):
         print(
@@ -382,13 +410,10 @@ def _print_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
     print(f"  Analysis mode    : {stats.get('analysis_mode', 'single')}")
-    print(
-        "  Initial calls/file: "
-        f"{stats.get('initial_calls_per_file', 1)}"
-    )
+    print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
-    # 0.10.0: derive the excluded count from the clearer reachable/disconnected
+    # Derive the excluded count from the clearer reachable/disconnected
     # counts (see _print_dry_run_summary).  ``entry_excluded`` is still returned
     # in stats for compatibility.
     disconnected = stats.get("entry_disconnected", 0)
@@ -409,9 +434,8 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
-    _print_ignore_status(stats, dry_run=False)
 
-    # 0.9.2: approximate usage accounting — only when LLM work was planned.
+    # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
         print(
             f"  LLM calls        : {stats.get('attempted_calls', 0)} attempted "
@@ -424,8 +448,9 @@ def _print_run_summary(stats: dict) -> None:
             f"~{stats.get('estimated_output_tokens', 0)} out "
             "(character estimate, not a tokenizer)"
         )
+    _print_prompt_profile_run(stats)
 
-    # 0.8.1: compact rate-limit summary — only shown when events occurred.
+    # Compact rate-limit summary — only shown when events occurred.
     # Per-event messages were already printed in real time during the run.
     rate_limit_warnings = stats.get("rate_limit_warnings", [])
     if rate_limit_warnings:
@@ -435,27 +460,35 @@ def _print_run_summary(stats: dict) -> None:
         sleep_note = f", {total_sleep:.1f}s total backoff" if total_sleep > 0 else ""
         print(
             f"\n  Rate limits: {event_count} step-down event(s) "
-            f"[{', '.join(providers)}]{sleep_note}. "
-            "Details in error.log."
+            f"[{', '.join(providers)}]{sleep_note}."
         )
 
-    # Always print issue log path when any issue was recorded (Work Item 4).
+    # Note how many issues were recorded (details were printed during the run;
+    # hard-error summaries are embedded in the final output).
     issues = stats.get("issues_recorded", 0)
-    error_log = stats.get("error_log")
-    if issues and error_log:
+    if issues:
         failed = stats.get("failed", 0)
         if failed > 0:
-            print(f"\n  {failed} file(s) failed. See {error_log} for details.")
+            print(f"\n  {failed} file(s) failed; {issues} issue(s) recorded.")
         else:
-            print(f"\n  {issues} issue(s) recorded (all recovered). See {error_log} for details.")
-    elif issues and stats.get("issue_log_warning"):
-        print(f"\n  Issue log warning: {stats['issue_log_warning']}")
+            print(f"\n  {issues} issue(s) recorded (all recovered).")
+
+
+def _confirm_risky_prompt_customization(_warnings: tuple[str, ...]) -> bool:
+    """Ask for explicit medium-risk consent only on an interactive terminal."""
+    if not sys.stdin.isatty():
+        return False
+    try:
+        answer = input("Proceed with this medium-risk customization? [y/N] ")
+    except (EOFError, OSError):
+        return False
+    return answer.strip().casefold() in {"y", "yes"}
 
 
 def run_cli(argv: list[str] | None = None) -> int:
     """Run the CLI and return the process exit code.
 
-    Exit-code contract (0.9.2):
+    Exit-code contract:
       0   — complete success, dry-run success, or --allow-partial
       1   — file-processing failures, output/write failure, unexpected fatal error
       2   — invalid path/input/config, ownership conflict, cap exceeded,
@@ -480,6 +513,59 @@ def run_cli(argv: list[str] | None = None) -> int:
             raise
         return int(exc.code or 2)
 
+    if args.init_config:
+        # Initialization operates on the current working directory and accepts
+        # no documentation-run option or positional project path.
+        unrelated = any(
+            (
+                args.root != ".",
+                args.entry is not None,
+                args.documentation_scope is not None,
+                args.provider is not None,
+                args.model is not None,
+                args.output is not None,
+                args.format is not None,
+                bool(args.ignore),
+                args.skip_dirs is not None,
+                bool(args.add_skip_dirs),
+                bool(args.remove_skip_dirs),
+                args.dry_run,
+                args.max_files is not None,
+                bool(args.force_files),
+                args.allow_partial,
+                args.no_parallel,
+                args.analysis_mode is not None,
+                args.max_parallel_files is not None,
+                args.truncation_head_ratio is not None,
+                args.verbose,
+            )
+        )
+        if unrelated:
+            print(
+                "Error: --init-config can be combined only with --force; project "
+                "paths and documentation-run options are not accepted.",
+                file=sys.stderr,
+            )
+            return 2
+        try:
+            from codedoc.core.config_template import init_config
+
+            result = init_config(Path.cwd(), args.force)
+            print(result.message)
+            return 0
+        except SystemExit as exc:
+            return int(exc.code or 2)
+        except Exception as exc:
+            print(f"Error: {exc}", file=sys.stderr)
+            return 2
+
+    if args.force:
+        print(
+            "Error: --force requires --init-config.",
+            file=sys.stderr,
+        )
+        return 2
+
     root = Path(args.root).resolve()
     if not root.exists() or not root.is_dir():
         print(f"Error: project root is not a directory: {root}", file=sys.stderr)
@@ -490,8 +576,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["entry_file"] = args.entry
     if args.documentation_scope is not None:
         overrides["documentation_scope"] = args.documentation_scope
-    if args.manage_output_gitignore is not None:
-        overrides["manage_output_gitignore"] = args.manage_output_gitignore
     if args.provider:
         overrides["llm_provider"] = args.provider
     if args.model:
@@ -508,8 +592,6 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["skip_dirs_add"] = args.add_skip_dirs
     if args.remove_skip_dirs:
         overrides["skip_dirs_remove"] = args.remove_skip_dirs
-    if args.safe_mode:
-        overrides["safe_mode"] = True
     if args.no_parallel:
         overrides["parallel_agents"] = False
     if args.analysis_mode is not None:
@@ -531,7 +613,12 @@ def run_cli(argv: list[str] | None = None) -> int:
 
     try:
         from codedoc.pipeline import run_pipeline
-        stats = run_pipeline(root, config_overrides=overrides)
+
+        stats = run_pipeline(
+            root,
+            config_overrides=overrides,
+            confirm_risky=_confirm_risky_prompt_customization,
+        )
 
         if stats.get("dry_run"):
             _print_dry_run_summary(stats)
@@ -565,7 +652,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         print(f"Error: {exc}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as exc:
-        # 0.9.8: the pipeline attaches the exact selected crash-recovery path to
+        # The pipeline attaches the exact selected crash-recovery path to
         # the interrupt as ``recovery_path`` only when that file exists on disk.
         # The stable output is never touched mid-run, so it is always preserved;
         # we just report which file enables resume (or that none was created).
@@ -592,36 +679,54 @@ def run_cli(argv: list[str] | None = None) -> int:
             OutputError,
             UnrecoverableProviderError,
         )
+
         if isinstance(exc, UnrecoverableProviderError):
-            # 0.9.7: a doomed-run safe stop — not an unexpected crash.  The
-            # pipeline already recorded and flushed it to error.log; here we only
-            # present it.  Completed files are in the live JSON backup and
-            # re-running resumes.  A *terminal* abort (billing/credentials/model/
-            # access) is a setup/credentials class problem → exit 2 (consistent
+            # A doomed-run safe stop — not an unexpected crash.  Completed files
+            # are in the crash-recovery file and re-running resumes.  A *terminal*
+            # abort (billing/credentials/model/access) is a setup/credentials
+            # class problem → exit 2 (consistent
             # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
             # stop is a transient "retry later" condition, not a credentials
             # fault → exit 1 so automation does not read it as "fix credentials".
             print(f"Error: {exc}", file=sys.stderr)
             print(
-                "\nCompleted files are saved in the live JSON backup in your "
-                "output directory. Re-run the same command to resume — only the "
+                "\nCompleted files are saved in crash_recovery.json in your output "
+                "directory. Re-run the same command to resume — only the "
                 "unfinished files will be re-documented.",
                 file=sys.stderr,
             )
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
-            # ownership conflicts, and the max_files cap.
+            # ownership conflicts, the max_files cap, and the prompt-customization
+            # fail-closed / TOO_RISKY review errors.  A fail-closed review carries
+            # bounded numeric attempt statistics (never profile text) before the
+            # ordinary setup error, so the paid cost of the aborted review is
+            # visible.
+            err_stats = getattr(exc, "stats", None)
+            if isinstance(err_stats, dict) and (
+                "prompt_customization_security_review_calls_attempted" in err_stats
+            ):
+                print(
+                    "  Paid calls before stop: review "
+                    f"{err_stats.get('prompt_customization_security_review_calls_attempted', 0)} "
+                    f"attempted/"
+                    f"{err_stats.get('prompt_customization_security_review_calls_completed', 0)} "
+                    "completed, documentation 0.",
+                    file=sys.stderr,
+                )
             print(f"Error: {exc}", file=sys.stderr)
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 2
         if isinstance(exc, OutputError):
-            # 0.10.1: the OutputError message already carries the sanitized OS
+            # The OutputError message already carries the sanitized OS
             # cause/category and the affected path.  Add concrete next-step
             # guidance keyed on whether this was a transient lock or a persistent
             # accessibility failure.  CodeDoc never names the locking process
@@ -649,11 +754,13 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
             if args.verbose:
                 import traceback
+
                 traceback.print_exc()
             return 1
         print(f"Fatal error: {exc}", file=sys.stderr)
         if args.verbose:
             import traceback
+
             traceback.print_exc()
         return 1
 

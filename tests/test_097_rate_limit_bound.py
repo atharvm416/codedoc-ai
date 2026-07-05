@@ -86,7 +86,7 @@ def test_persistent_rate_limit_stops_after_bounded_passes(
     # never deleted or overwritten with a "complete" final output.  0.9.8: the
     # stable output (docs/codedoc.json) is never created on this path.
     assert not (tmp_path / "docs" / "codedoc.json").exists()
-    backup = tmp_path / "docs" / "crash_recovery_codedoc.json"
+    backup = tmp_path / "docs" / "crash_recovery.json"
     assert backup.exists()
     data = json.loads(backup.read_text(encoding="utf-8"))
     assert "_crash_safety" in data or data.get("_codedoc", {}).get("status") == "in_progress"
@@ -116,7 +116,7 @@ def test_initial_sequential_persistent_rate_limit_stops(
         )
 
     assert excinfo.value.category == "rate_limit_exhausted"
-    backup = tmp_path / "docs" / "crash_recovery_codedoc.json"
+    backup = tmp_path / "docs" / "crash_recovery.json"
     assert backup.exists()
 
 
@@ -145,7 +145,7 @@ def test_non_adaptive_persistent_rate_limit_stops(
         )
 
     assert excinfo.value.category == "rate_limit_exhausted"
-    assert (tmp_path / "docs" / "crash_recovery_codedoc.json").exists()
+    assert (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
 def test_initial_sequential_uses_custom_rate_limit_signal(

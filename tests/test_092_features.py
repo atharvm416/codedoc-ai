@@ -152,7 +152,6 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
         set(file_map),
         "main.py",
         existing,
-        {},
         ["dep.py"],
         {"propagate_changes": True, "max_files": 0},
     )
@@ -186,7 +185,6 @@ def test_missing_and_unselected_forced_paths_warn_once(tmp_path, caplog):
             {"main.py"},
             "main.py",
             {},
-            {},
             ["missing.py", "other.py"],
             {"propagate_changes": True, "max_files": 0},
         )
@@ -196,7 +194,7 @@ def test_missing_and_unselected_forced_paths_warn_once(tmp_path, caplog):
     assert caplog.text.count("other.py") == 1
 
 
-def test_checkpoint_hash_reuse_and_live_backup_precedence(tmp_path, monkeypatch):
+def test_legacy_checkpoint_is_ignored_and_preserved(tmp_path):
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
@@ -223,20 +221,11 @@ def test_checkpoint_hash_reuse_and_live_backup_precedence(tmp_path, monkeypatch)
         tmp_path,
         {"dry_run": True, "entry_file": "main.py", "propagate_changes": False},
     )
-    assert stats["would_resume"] == 1
-    assert stats["would_call_llm_for"] == 0
-
-    live = {
-        "_codedoc": {"status": "in_progress"},
-        "files": [{"path": "other.py", "hash": "hash"}],
-    }
-    (output / "codedoc.json").write_text(json.dumps(live), encoding="utf-8")
-    stats = run_pipeline(
-        tmp_path,
-        {"dry_run": True, "entry_file": "main.py", "propagate_changes": False},
-    )
     assert stats["would_resume"] == 0
     assert stats["would_call_llm_for"] == 1
+    assert json.loads(
+        (output / ".codedoc_progress.json").read_text(encoding="utf-8")
+    ) == checkpoint
 
 
 def test_dry_run_is_provider_free_and_filesystem_read_only(tmp_path, monkeypatch):
@@ -356,7 +345,6 @@ def test_max_files_counts_only_agent_files(tmp_path):
         set(file_map),
         None,
         existing,
-        {},
         [],
         {"propagate_changes": False, "max_files": 1},
     )
@@ -567,19 +555,20 @@ def test_run_cli_returns_two_for_invalid_cli_input():
     assert run_cli(["--max-files", "not-an-int"]) == 2
 
 
-def test_safe_mode_hidden_but_accepted_and_warns_once(tmp_path, monkeypatch, capsys):
+def test_safe_mode_override_is_rejected_with_migration_guidance(tmp_path):
     from codedoc.cli.cli import build_parser
     from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
 
     help_text = build_parser().format_help()
     assert "--safe-mode" not in help_text
     write_py(tmp_path / "main.py")
-    patch_provider(monkeypatch)
-    run_pipeline(
-        tmp_path,
-        {"entry_file": "main.py", "safe_mode": True, "propagate_changes": False},
-    )
-    assert capsys.readouterr().out.count("--safe-mode") == 1
+    with pytest.raises(ConfigError, match="safe_mode") as excinfo:
+        run_pipeline(
+            tmp_path,
+            {"entry_file": "main.py", "safe_mode": True, "dry_run": True},
+        )
+    assert "always active" in str(excinfo.value)
 
 
 def test_workflow_is_manual_safe_and_packaged_in_metadata():

@@ -1,7 +1,7 @@
 """
 Provider-aware rate-limit profiles for codedoc.
 
-0.8.1: Extracts provider-specific rate-limit signal lists and backoff
+Extracts provider-specific rate-limit signal lists and backoff
 parameters from the hardcoded ``_RATE_LIMIT_SIGNALS`` tuple in
 ``pipeline.py`` into configurable per-provider profiles.
 

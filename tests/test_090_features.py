@@ -190,13 +190,8 @@ class TestPreflightOutputTargets:
             )
         assert not provider_called
 
-    def test_foreign_json_sibling_does_not_fail_preflight_for_md(self, tmp_path, monkeypatch):
-        """0.9.8: a foreign JSON sibling of an MD target no longer fails preflight.
-
-        The recovery file is the dedicated ``crash_recovery_report.json`` and the
-        stable output is ``report.md``; an unrelated ``report.json`` is neither,
-        so it does not block the run and is left untouched.
-        """
+    def test_foreign_json_conversion_sibling_fails_before_provider(self, tmp_path, monkeypatch):
+        """A same-stem fallback is validated strictly before paid work."""
         provider_called = []
         monkeypatch.setattr(
             "codedoc.pipeline.create_provider",
@@ -211,10 +206,15 @@ class TestPreflightOutputTargets:
         foreign.write_text('{"foreign": true}', encoding="utf-8")
 
         from codedoc.pipeline import run_pipeline
-        run_pipeline(tmp_path, {"entry_file": "src.py", "output_dir": "out/report.md"})
+        from codedoc.utils.errors import ConfigError
 
-        assert provider_called
-        assert (out_dir / "report.md").exists()
+        with pytest.raises(ConfigError, match="conversion sibling"):
+            run_pipeline(
+                tmp_path, {"entry_file": "src.py", "output_dir": "out/report.md"}
+            )
+
+        assert not provider_called
+        assert not (out_dir / "report.md").exists()
         assert foreign.read_text(encoding="utf-8") == '{"foreign": true}'
 
     def test_foreign_target_leaves_no_new_output_directory(self, tmp_path, monkeypatch):
@@ -384,7 +384,7 @@ class TestConfigurableContentTruncation:
     def test_max_content_chars_invalid_type_raises(self):
         from codedoc.utils.errors import ConfigError
         from codedoc.core.loader import load_config
-        with pytest.raises(ConfigError, match="positive integer"):
+        with pytest.raises(ConfigError, match="integer"):
             load_config(Path("."), {"max_content_chars": "not-a-number"})
 
     def test_content_not_truncated_when_below_limit(self):

@@ -1,11 +1,10 @@
-"""Shared pipeline planning for codedoc (0.9.2).
+"""Shared pipeline planning for codedoc.
 
 The planning helper computes every routing decision — selection, forcing,
-propagation, unchanged skipping, identical-content reuse, legacy checkpoint
-reuse, and the paid-file cap — into one immutable :class:`PipelinePlan` that
-both ``--dry-run`` and real execution consume.  It may read source contents
-and hashes, but it never writes, never creates a provider, and never
-initializes ``SafeWriter``.
+propagation, unchanged skipping, identical-content reuse, and the paid-file cap
+— into one immutable :class:`PipelinePlan` that both ``--dry-run`` and real
+execution consume.  It may read source contents and hashes, but it never writes,
+never creates a provider, and never initializes ``SafeWriter``.
 
 Format detection and ownership inspection live in ``codedoc.core.output``;
 this module only consumes their results.
@@ -18,10 +17,12 @@ from pathlib import Path
 
 from codedoc.core.db import compute_file_hash, source_char_count
 from codedoc.core.graph import DependencyGraph
+from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST, ResolvedProfile
 from codedoc.core.record_meta import (
     CACHE_IDENTITY_KEYS,
     expected_analysis_identity,
     expected_max_context_revision,
+    normalized_identity_value,
 )
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
@@ -32,19 +33,22 @@ logger = get_logger(__name__)
 def _identity_matches(stored: dict, expected: dict) -> bool:
     """Compare every key in :data:`CACHE_IDENTITY_KEYS`.
 
-    An absent expected key and absent stored key compare equal; a
-    present-but-mismatched key blocks reuse.
+    Both the stored and the expected side are normalized through the shared
+    absent-default mapping (:func:`normalized_identity_value`), so an absent key
+    and an explicitly stored default (e.g. ``_prompt_profile_digest`` ==
+    ``NO_PROMPT_PROFILE_DIGEST``) compare equal; a present-but-mismatched key
+    blocks reuse.
     """
     if not isinstance(stored, dict):
         return False
     for key in CACHE_IDENTITY_KEYS:
-        if stored.get(key) != expected.get(key):
+        if normalized_identity_value(key, stored) != normalized_identity_value(key, expected):
             return False
     return True
 
 
 def _record_is_reusable(stored: dict | None, content_hash: str, expected: dict) -> bool:
-    """The single centralized reuse predicate (0.10.0).
+    """The single centralized reuse predicate.
 
     A stored record may be reused only when its content hash matches *and* every
     cache-identity key matches the expected revision/mode.  A record that matches
@@ -68,7 +72,6 @@ class PipelinePlan:
     process_rels: frozenset[str]
     unchanged_rels: frozenset[str]
     identical_reuse_rels: frozenset[str]
-    checkpoint_reuse_rels: frozenset[str]
     agent_rels: frozenset[str]
     entry_rel: str | None
     max_files: int
@@ -76,11 +79,10 @@ class PipelinePlan:
 
     @property
     def selected_rels(self) -> frozenset[str]:
-        """Read-only compatibility alias for :attr:`documented_rels` (0.10.0).
+        """Read-only compatibility alias for :attr:`documented_rels`.
 
-        The canonical field is now ``documented_rels``; ``selected_rels`` is
-        retained as a non-settable delegating property so existing callers do
-        not break.  Do not remove it in this release.
+        ``documented_rels`` is canonical; this non-settable delegating property
+        preserves compatibility for existing callers.
         """
         return self.documented_rels
 
@@ -98,8 +100,6 @@ class PlanMaterials:
     content_hashes: dict[str, str] = field(default_factory=dict)
     # rel_path -> existing doc record reused via identical content.
     identical_reuse_docs: dict[str, dict] = field(default_factory=dict)
-    # rel_path -> legacy checkpoint result (hash key already stripped).
-    checkpoint_reuse_docs: dict[str, dict] = field(default_factory=dict)
 
 
 def normalize_force_files(
@@ -139,9 +139,9 @@ def build_pipeline_plan(
     selected_rels: set[str],
     entry_rel: str | None,
     existing_docs: dict[str, dict],
-    checkpoint_records: dict[str, dict],
     forced_paths: list[str],
     config: dict,
+    resolved_profile: ResolvedProfile | None = None,
 ) -> tuple[PipelinePlan, PlanMaterials]:
     """Compute the full routing plan for one pipeline run, read-only.
 
@@ -156,11 +156,9 @@ def build_pipeline_plan(
     entry_rel:
         The resolved entry path, or ``None``.
     existing_docs:
-        Per-file records loaded read-only from existing output files.
-    checkpoint_records:
-        Eligible legacy ``.codedoc_progress.json`` records.  Must be empty
-        when the live backup already contains records (``SafeWriter.size == 0``
-        equivalence is the caller's responsibility).
+        Per-file records loaded read-only from the selected output target(s), or
+        the exact validated opposite-format sibling when a single-format target
+        is missing, overlaid with compatible ``crash_recovery.json`` records.
     forced_paths:
         Normalized project-relative forced paths (see
         :func:`normalize_force_files`).
@@ -189,13 +187,13 @@ def build_pipeline_plan(
         else:
             effective_forced.add(rel)
 
-    # 0.10.0: the run-level part of the expected cache identity (revision + mode),
+    # The run-level part of the expected cache identity (revision + mode),
     # shared by every file.
     base_identity = expected_analysis_identity(
         config.get("analysis_mode", "single")
     )
 
-    # 0.10.3: the per-file part — the truncation revision for a file large enough
+    # The per-file part — the truncation revision for a file large enough
     # to be truncated under the current ceiling / head ratio.  Read-only and
     # memoized; a file whose byte size is within the ceiling never reads its text
     # (it cannot be truncated).  The char count is computed exactly as the
@@ -213,11 +211,21 @@ def build_pipeline_plan(
                 head_ratio=head_ratio,
             )
         mcr = _mcr_cache[rel]
-        if mcr is None:
-            return base_identity
-        return {**base_identity, "_max_context_revision": mcr}
+        identity = dict(base_identity)
+        if mcr is not None:
+            identity["_max_context_revision"] = mcr
+        # An active prompt-customization profile contributes a per-file
+        # digest keyed on the file's language.  Omitted when no profile is active
+        # for that language, so the absent-default normalization keeps no-profile
+        # records reusable.
+        if resolved_profile is not None:
+            language = file_map[rel].get("language", "generic")
+            digest = resolved_profile.file_digest(language)
+            if digest != NO_PROMPT_PROFILE_DIGEST:
+                identity["_prompt_profile_digest"] = digest
+        return identity
 
-    # 0.10.0: index reusable candidates by content hash, retaining *all* records
+    # Index reusable candidates by content hash, retaining *all* records
     # with the same hash (was a single-record-per-hash last-writer-wins map).
     # Two records with identical content can carry different cache identities, so
     # the per-file loop must be free to pick a candidate that passes the
@@ -253,7 +261,6 @@ def build_pipeline_plan(
 
     materials = PlanMaterials()
     identical_reuse: set[str] = set()
-    checkpoint_reuse: set[str] = set()
     agent_rels: set[str] = set()
 
     for rel_path in graph.topological_order():
@@ -264,9 +271,8 @@ def build_pipeline_plan(
         materials.content_hashes[rel_path] = content_hash
 
         if rel_path in effective_forced:
-            # Forcing bypasses identical-content reuse and checkpoint reuse
-            # for the explicitly forced file.  Propagated dependents keep
-            # normal reuse behaviour below.
+            # Forcing bypasses identical-content reuse for the explicitly forced
+            # file.  Propagated dependents keep normal reuse behaviour below.
             agent_rels.add(rel_path)
             continue
 
@@ -289,40 +295,6 @@ def build_pipeline_plan(
             materials.identical_reuse_docs[rel_path] = candidate
             continue
 
-        # Legacy checkpoint reuse: eligible only when the checkpoint hash matches
-        # and the checkpoint carries a matching cache identity.  A checkpoint
-        # without the analysis revision/mode is reprocessed once.
-        if rel_path in checkpoint_records:
-            checkpoint_entry = checkpoint_records[rel_path]
-            stored_hash = checkpoint_entry.get("_checkpoint_hash", "")
-            checkpoint_candidate = {**checkpoint_entry, "hash": stored_hash}
-            if not stored_hash:
-                logger.info(
-                    "Checkpoint entry for '%s' has no hash — reprocessing.", rel_path
-                )
-                agent_rels.add(rel_path)
-            elif not _record_is_reusable(
-                checkpoint_candidate, content_hash, _expected_identity_for(rel_path)
-            ):
-                if content_hash == stored_hash:
-                    logger.info(
-                        "Checkpoint entry for '%s' predates the current analysis "
-                        "revision/mode — reprocessing.",
-                        rel_path,
-                    )
-                else:
-                    logger.info(
-                        "File '%s' was modified after it was checkpointed — reprocessing.",
-                        rel_path,
-                    )
-                agent_rels.add(rel_path)
-            else:
-                checkpoint_reuse.add(rel_path)
-                materials.checkpoint_reuse_docs[rel_path] = {
-                    k: v for k, v in checkpoint_entry.items() if k != "_checkpoint_hash"
-                }
-            continue
-
         agent_rels.add(rel_path)
 
     max_files = int(config.get("max_files", 0) or 0)
@@ -336,7 +308,6 @@ def build_pipeline_plan(
         process_rels=frozenset(process_rels),
         unchanged_rels=frozenset(unchanged_rels),
         identical_reuse_rels=frozenset(identical_reuse),
-        checkpoint_reuse_rels=frozenset(checkpoint_reuse),
         agent_rels=frozenset(agent_rels),
         entry_rel=entry_rel,
         max_files=max_files,

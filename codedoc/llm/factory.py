@@ -1,19 +1,7 @@
-"""
-LLM provider factory.
+"""Create the configured LLM provider.
 
-Reads the loaded config dict and returns the correct LLMProvider.
-Adding a new provider only requires adding a branch here.
-
-0.8.1 changes
--------------
-- ``_ANTHROPIC_PREFIXES``, ``_GEMINI_PREFIXES``, and ``_OPENAI_PREFIXES`` are
-  kept as module-level constants for backward compatibility and as fallbacks,
-  but the authoritative values now live in
-  ``DEFAULTS["provider_prefixes"]`` in ``loader.py``.
-- ``create_provider()`` passes the resolved ``config["provider_prefixes"]``
-  dict through to ``_resolve_api_provider()`` and ``_provider_api_key()``
-  so that provider auto-detection and API-key lookup use the same source of
-  truth.
+Resolved ``provider_prefixes`` drive provider detection and API-key lookup;
+module-level prefix constants remain compatibility fallbacks.
 
 Active providers
 ----------------
@@ -21,8 +9,8 @@ Active providers
   anthropic — Anthropic Claude
   gemini    — Google Gemini
 
-Reserved (not exposed in this release)
----------------------------------------
+Reserved compatibility provider
+-------------------------------
   ``codedoc.llm.local_provider`` remains importable for compatibility, but the
   factory and CLI do not expose a local-provider choice.
 """
@@ -50,6 +38,23 @@ _FALLBACK_PREFIXES: dict[str, list[str]] = {
     "openai":    list(_OPENAI_PREFIXES),
 }
 
+_DEFAULT_MODELS = {
+    "openai": "gpt-4o-mini",
+    "anthropic": "claude-haiku-4-5-20251001",
+    "gemini": "gemini-2.5-flash",
+}
+
+
+def describe_provider_selection(config: dict) -> tuple[str, str]:
+    """Return the provider/model pair that :func:`create_provider` will use."""
+    model = str(config.get("model_name", "") or "")
+    selected = _resolve_api_provider(
+        str(config.get("llm_provider", "auto")),
+        model.lower(),
+        config.get("provider_prefixes") or {},
+    )
+    return selected, model or _DEFAULT_MODELS[selected]
+
 
 def create_provider(config: dict) -> LLMProvider:
     """
@@ -71,7 +76,7 @@ def create_provider(config: dict) -> LLMProvider:
     base_url = config.get("api_base_url") or None
 
     if mode == "api":
-        # 0.9.2: provider-initialization error boundary.  Construction, import,
+        # Provider-initialization error boundary.  Construction, import,
         # and auth-configuration failures from provider SDKs are classified as
         # ProviderInitError (a ConfigError subclass → CLI exit code 2).
         try:
@@ -99,8 +104,8 @@ def _make_api(
         raise ConfigError(
             "API mode requires an API key. "
             "Set OPENAI_API_KEY, ANTHROPIC_API_KEY, or GEMINI_API_KEY "
-            "(or GOOGLE_API_KEY) in your .env file, or pass LLM_API_KEY "
-            "as a generic fallback."
+            "(or GOOGLE_API_KEY) as an environment variable, or pass "
+            "LLM_API_KEY as a generic fallback."
         )
 
     model_lower = model.lower()
@@ -110,21 +115,21 @@ def _make_api(
         from codedoc.llm.api_provider import AnthropicProvider
         return AnthropicProvider(
             api_key=api_key,
-            model=model or "claude-haiku-4-5-20251001",
+            model=model or _DEFAULT_MODELS["anthropic"],
         )
 
     if selected == "gemini":
         from codedoc.llm.api_provider import GeminiProvider
         return GeminiProvider(
             api_key=api_key,
-            model=model or "gemini-2.5-flash",
+            model=model or _DEFAULT_MODELS["gemini"],
         )
 
     # OpenAI or compatible endpoint (default)
     from codedoc.llm.api_provider import OpenAIProvider
     return OpenAIProvider(
         api_key=api_key,
-        model=model or "gpt-4o-mini",
+        model=model or _DEFAULT_MODELS["openai"],
         base_url=base_url,
     )
 

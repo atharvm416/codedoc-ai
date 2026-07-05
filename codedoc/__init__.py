@@ -1,7 +1,7 @@
 """codedoc: local-first, LLM-agnostic codebase documentation."""
 
-__version__ = "0.10.3"
-__author__ = "codedoc contributors"
+__version__ = "0.11.6"
+__author__ = "Atharv Mannur"
 
 
 def run_pipeline(*args, **kwargs):

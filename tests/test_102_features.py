@@ -587,7 +587,7 @@ class TestBuildGraphUnresolved:
             {"rel_path": "a.py", "path": a, "language": "python", "extension": ".py"},
             {"rel_path": "b.py", "path": b, "language": "python", "extension": ".py"},
         ]
-        reporter = ErrorReporter(tmp_path / "error.log")
+        reporter = ErrorReporter()
         graph, file_map, unresolved = _build_graph(all_files, tmp_path, reporter)
 
         # b.py should be a graph dependency of a.py

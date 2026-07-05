@@ -46,6 +46,9 @@ LOCAL_DEVELOPMENT.md
 .idea/
 *.swp
 *.swo
+*.bak-*
+profile.json
+prompt-profile-public-triple.json
 
 # OS
 .DS_Store
