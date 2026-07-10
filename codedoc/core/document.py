@@ -8,7 +8,9 @@ document and, if so, returns its normalized contents.
 
 Acceptance (encoded explicitly):
 
-- completed JSON with valid ``_codedoc`` metadata and schema ``1.3`` or ``1.4``;
+- current completed JSON with strict ``last_run`` / ``files`` shape;
+- legacy completed JSON with valid ``_codedoc`` metadata and schema ``1.3`` or
+  ``1.4``;
 - in-progress crash-recovery JSON (crash banner, ``status=in_progress``, or
   ``live_backup``) with schema ``1.4`` or a missing schema;
 - stale-build migration JSON with valid ``_codedoc`` ownership and schema
@@ -17,11 +19,22 @@ Acceptance (encoded explicitly):
 - current Markdown with a valid embedded lossless view;
 - legacy Markdown without an embedded view (visible parser).
 
-Versionless completed documents must satisfy stricter current ownership and
-canonical project/run shape checks. Unknown newer schemas, malformed versions,
-and unsupported extensions fail
+Versionless completed documents must satisfy stricter current or legacy
+ownership shape checks. Unknown newer schemas, malformed versions, and
+unsupported extensions fail
 closed (``ConfigError``).  Missing files raise ``FileNotFoundError`` — callers
 decide whether "missing" is acceptable.
+
+Document envelope contract:
+
+- current completed JSON is recognized by its strict versionless public shape:
+  ``last_run`` plus ``files`` with an ``entry_file`` in ``last_run``;
+- legacy completed JSON with top-level ``_codedoc`` / ``project`` / ``run`` is
+  still accepted for compatibility;
+- in-progress crash-recovery JSON still carries ``_codedoc`` because recovery
+  identity is internal state, not the completed public contract;
+- wrappers such as ``_codedoc`` and ``_crash_safety`` are removed from the public
+  view returned by this reader.
 """
 
 from __future__ import annotations
@@ -47,6 +60,19 @@ _ACCEPTED_SCHEMAS: frozenset[tuple[int, ...]] = frozenset({
     _CURRENT_SCHEMA_COMPONENTS,
 })
 _VALID_LEGACY_ROLES = (None, "stale_build")
+_LAST_RUN_ENTRY_SOURCES = {"explicit", "recovered", "auto-detected", "none"}
+_LAST_RUN_DOCUMENTATION_SCOPES = {"entry", "all"}
+_LAST_RUN_ANALYSIS_MODES = {"single", "triple"}
+_LAST_RUN_INTEGER_FIELDS = {
+    "files_scanned",
+    "files_selected",
+    "files_documented_by_llm",
+    "files_failed",
+    "files_unattempted",
+    "files_reused_unchanged",
+    "files_reused_identical_content",
+    "files_resumed_from_recovery",
+}
 
 
 @dataclass(frozen=True)
@@ -129,19 +155,26 @@ def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocu
             f"'{path}' does not appear to be a valid CodeDoc file (not a JSON object)."
         )
 
-    meta = data.get("_codedoc")
-    if not isinstance(meta, dict):
+    meta_obj = data.get("_codedoc")
+    if meta_obj is not None and not isinstance(meta_obj, dict):
         raise ConfigError(
             f"'{path}' does not appear to be a valid CodeDoc file. "
-            "The '_codedoc' metadata block is missing or malformed."
+            "The '_codedoc' metadata block is malformed."
         )
-    _validate_metadata(path, meta)
+    meta = meta_obj if isinstance(meta_obj, dict) else {}
+    if meta_obj is not None:
+        _validate_metadata(path, meta)
 
     in_progress = (
         "_crash_safety" in data
         or meta.get("status") == "in_progress"
         or meta.get("live_backup") is True
     )
+    if in_progress and meta_obj is None:
+        raise ConfigError(
+            f"'{path}' is an incomplete CodeDoc recovery file but is missing "
+            "the internal '_codedoc' recovery metadata."
+        )
 
     meta_schema = meta.get("schema_version")
     view_schema = data.get("schema_version")
@@ -160,9 +193,18 @@ def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocu
 
     _validate_json_schema(path, schema, in_progress=in_progress, legacy_role=legacy_role)
 
+    entry_file = _entry_file_from_view(data, meta)
+    if meta_obj is None:
+        meta = {"entry_file": entry_file}
     files = _extract_files(path, data.get("files"))
-    if schema is None and not in_progress and legacy_role != "stale_build":
-        _validate_versionless_completed_view(path, data, meta, files)
+    if not in_progress and legacy_role != "stale_build":
+        if meta_obj is None:
+            _validate_versionless_completed_view(
+                path, data, meta, files, allow_legacy=False
+            )
+        elif schema is None:
+            _validate_versionless_completed_view(path, data, meta, files)
+
     file_hashes = {
         f["path"]: f.get("hash", "")
         for f in files
@@ -181,7 +223,7 @@ def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocu
         format="json",
         metadata=copy.deepcopy(meta),
         schema_version=str(schema) if schema is not None else None,
-        entry_file=meta.get("entry_file"),
+        entry_file=entry_file,
         file_hashes=file_hashes,
         files=tuple(files),
         in_progress=in_progress,
@@ -261,7 +303,7 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
 
     emb_view = embedded.view if embedded.state == "valid" else None
     emb_project = emb_view.get("project") if isinstance(emb_view, dict) else None
-    if emb_view is not None and not isinstance(emb_project, dict):
+    if emb_project is not None and not isinstance(emb_project, dict):
         raise ConfigError(
             f"'{path}' contains a malformed embedded CodeDoc view: "
             "'project' must be an object."
@@ -270,7 +312,12 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
     lw_schema = lightweight_meta.get("schema_version") if lightweight_meta else None
     emb_schema = emb_view.get("schema_version") if emb_view else None
     lw_entry = lightweight_meta.get("entry_file") if lightweight_meta else None
-    emb_entry = emb_project.get("entry_file") if emb_project is not None else None
+    emb_last_run = emb_view.get("last_run") if isinstance(emb_view, dict) else None
+    emb_entry = None
+    if isinstance(emb_last_run, dict):
+        emb_entry = emb_last_run.get("entry_file")
+    if emb_entry is None and emb_project is not None:
+        emb_entry = emb_project.get("entry_file")
 
     if lightweight_meta is not None and emb_view is not None:
         if (
@@ -425,21 +472,80 @@ def _extract_files(path: Path, files_obj) -> list[dict]:
     return out
 
 
+def _entry_file_from_view(data: dict, metadata: dict) -> str | None:
+    """Return entry identity from new, legacy, or metadata-backed documents."""
+    if isinstance(data.get("last_run"), dict):
+        entry = data["last_run"].get("entry_file")
+        if entry is not None:
+            return entry
+    if isinstance(data.get("project"), dict):
+        entry = data["project"].get("entry_file")
+        if entry is not None:
+            return entry
+    return metadata.get("entry_file")
+
+
 def _validate_versionless_completed_view(
     path: Path,
     data: dict,
     metadata: dict,
     files: list[dict],
+    *,
+    allow_legacy: bool = True,
 ) -> None:
-    """Require the canonical ownership and shape envelope for current output."""
+    """Require a recognized versionless completed CodeDoc output shape."""
     project = data.get("project")
     run = data.get("run")
-    if not isinstance(project, dict) or not isinstance(run, dict):
+    last_run = data.get("last_run")
+    if "last_run" in data:
+        _validate_last_run(path, last_run)
+
+    if isinstance(project, dict) or isinstance(run, dict):
+        if not allow_legacy:
+            raise ConfigError(
+                f"'{path}' is not a valid current CodeDoc output: legacy "
+                "'project'/'run' blocks require legacy ownership metadata."
+            )
+        _validate_legacy_project_run(path, project, run, metadata, files)
+        return
+
+    if not isinstance(last_run, dict):
         raise ConfigError(
             f"'{path}' is not a valid versionless CodeDoc output: canonical "
-            "'project' and 'run' objects are required."
+            "'last_run' object is required."
         )
 
+    if "entry_file" not in last_run:
+        raise ConfigError(
+            f"'{path}' is not a valid versionless CodeDoc output: "
+            "'last_run.entry_file' is required."
+        )
+    entry = last_run.get("entry_file")
+    if entry is not None and not isinstance(entry, str):
+        raise ConfigError(f"'{path}' has a malformed last_run entry_file.")
+    if metadata.get("entry_file") != entry:
+        raise ConfigError(
+            f"'{path}' has contradictory versionless ownership metadata and "
+            "last_run entry file."
+        )
+    if len(files) > last_run["files_selected"]:
+        raise ConfigError(f"'{path}' has contradictory versionless file counts.")
+
+
+def _validate_legacy_project_run(
+    path: Path,
+    project: object,
+    run: object,
+    metadata: dict,
+    files: list[dict],
+) -> None:
+    """Validate the legacy project/run envelope."""
+    if not isinstance(project, dict) or not isinstance(run, dict):
+        raise ConfigError(
+            f"'{path}' is not a valid versionless CodeDoc output: legacy "
+            "'project' and 'run' objects must either both be present or both "
+            "be absent."
+        )
     required_project = {"entry_file", "file_count", "languages", "folders"}
     required_run = {
         "files_checked",
@@ -476,6 +582,49 @@ def _validate_versionless_completed_view(
         )
     if file_count != len(files) or run.get("files_documented") != len(files):
         raise ConfigError(f"'{path}' has contradictory versionless file counts.")
+
+
+def _validate_last_run(path: Path, last_run: object) -> None:
+    if not isinstance(last_run, dict):
+        raise ConfigError(f"'{path}' has a malformed last_run block.")
+
+    required = {
+        "entry_source",
+        "documentation_scope",
+        "analysis_mode",
+        *_LAST_RUN_INTEGER_FIELDS,
+    }
+    missing = required - set(last_run)
+    if missing:
+        raise ConfigError(
+            f"'{path}' has an incomplete last_run block: missing {sorted(missing)}."
+        )
+
+    if last_run.get("entry_source") not in _LAST_RUN_ENTRY_SOURCES:
+        raise ConfigError(f"'{path}' has a malformed last_run entry_source.")
+    if last_run.get("documentation_scope") not in _LAST_RUN_DOCUMENTATION_SCOPES:
+        raise ConfigError(f"'{path}' has a malformed last_run documentation_scope.")
+    if last_run.get("analysis_mode") not in _LAST_RUN_ANALYSIS_MODES:
+        raise ConfigError(f"'{path}' has a malformed last_run analysis_mode.")
+    if "entry_file" in last_run and last_run.get("entry_file") is not None and not isinstance(
+        last_run.get("entry_file"), str
+    ):
+        raise ConfigError(f"'{path}' has a malformed last_run entry_file.")
+
+    for field in _LAST_RUN_INTEGER_FIELDS:
+        value = last_run.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(f"'{path}' has a malformed last_run field '{field}'.")
+
+    partition_total = (
+        last_run["files_reused_unchanged"]
+        + last_run["files_reused_identical_content"]
+        + last_run["files_documented_by_llm"]
+        + last_run["files_failed"]
+        + last_run["files_unattempted"]
+    )
+    if last_run["files_selected"] != partition_total:
+        raise ConfigError(f"'{path}' has contradictory last_run file counts.")
 
 
 def records_by_path(document: CodedocDocument) -> dict[str, dict]:

@@ -30,7 +30,7 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def _resolve_entry_and_docs(root: Path, config: dict) -> None:
+def _resolve_entry_and_docs(root: Path, config: dict) -> str:
     """Auto-discover the entry point from the exact selected CodeDoc output only.
 
     Inspects only the exact selected final target(s) for the current format — the
@@ -43,7 +43,7 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
     ``detect_entry_file()`` auto-detection.
     """
     if config.get("entry_file"):
-        return
+        return "explicit"
 
     raw_output = config.get("output_dir", "codedoc")
     p = Path(raw_output)
@@ -73,7 +73,7 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
         if entry:
             logger.info("Resuming: entry '%s' read from '%s'", entry, candidate.name)
             config["entry_file"] = entry
-            return
+            return "recovered"
 
     # No exact selected output supplied an entry and no --entry was provided.
     # Leave config["entry_file"] unset so _select_files() calls
@@ -82,6 +82,7 @@ def _resolve_entry_and_docs(root: Path, config: dict) -> None:
         "No entry found in the exact selected output and no --entry provided. "
         "Auto-detection via detect_entry_file() will be attempted."
     )
+    return "pending"
 
 
 def _build_graph(

@@ -155,7 +155,8 @@ def test_versionless_foreign_or_contradictory_json_is_rejected(tmp_path):
         read_codedoc_document(foreign)
 
     data = json.loads(json_from_view(_view()))
-    data["project"]["entry_file"] = "other.py"
+    data["_codedoc"] = {"entry_file": "main.py"}
+    data["last_run"]["entry_file"] = "other.py"
     foreign.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ConfigError, match="contradictory"):
         read_codedoc_document(foreign)

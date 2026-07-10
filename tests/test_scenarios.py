@@ -642,15 +642,18 @@ def test_F2_md_metadata_contains_entry_file(tmp_path, monkeypatch):
     assert meta.get("entry_file") == "main.py"
 
 
-def test_F3_json_metadata_contains_entry_file(tmp_path, monkeypatch):
-    """F3: written JSON _codedoc block contains entry_file."""
+def test_F3_json_last_run_contains_entry_file(tmp_path, monkeypatch):
+    """F3: written JSON last_run block contains entry_file."""
     patch_provider(monkeypatch)
     (tmp_path / "main.py").write_text("x=1\n")
     from codedoc.pipeline import run_pipeline
     run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "json",
                              "propagate_changes": False, "parallel_agents": False})
     data = json.loads((tmp_path / "codedoc" / "codedoc.json").read_text())
-    assert data["_codedoc"]["entry_file"] == "main.py"
+    assert data["last_run"]["entry_file"] == "main.py"
+    assert "_codedoc" not in data
+    assert "project" not in data
+    assert "run" not in data
 
 
 # ---------------------------------------------------------------------------

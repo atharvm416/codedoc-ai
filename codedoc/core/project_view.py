@@ -110,23 +110,10 @@ def build_project_view(
             file["links"] = links
 
     folders = _folder_view(files)
-    languages = sorted({file["language"] for file in files if file.get("language")})
     dependency_catalog = _dependency_catalog(files)
 
     view = {
-        "project": {
-            "entry_file": entry_file,
-            "file_count": len(files),
-            "languages": languages,
-            "folders": [folder["path"] for folder in folders],
-        },
-        "run": {
-            "files_checked": stats.get("checked", 0),
-            "files_failed": stats.get("failed", 0),
-            "files_skipped": stats.get("skipped", 0),
-            "files_reused": stats.get("reused", 0),
-            "files_documented": len(files),
-        },
+        "last_run": _build_last_run(stats, entry_file, len(files)),
         "tree": _tree(paths),
         "folders": folders,
         "dependency_catalog": dependency_catalog,
@@ -134,6 +121,48 @@ def build_project_view(
         "files": files,
     }
     return {key: value for key, value in view.items() if value not in (None, "", [], {})}
+
+
+def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dict:
+    """Return the canonical truthful run metadata block."""
+    documented = _nonnegative_int(stats.get("checked", 0))
+    failed = _nonnegative_int(stats.get("failed", 0))
+    unchanged = _nonnegative_int(stats.get("skipped", 0))
+    identical = _nonnegative_int(stats.get("reused", 0))
+    unattempted = _nonnegative_int(stats.get("unattempted_files", 0))
+    selected = stats.get("files_selected")
+    if selected is None:
+        selected = max(
+            file_count,
+            documented + failed + unchanged + identical + unattempted,
+        )
+
+    return {
+        "entry_file": entry_file,
+        "entry_source": stats.get("entry_source")
+        or ("auto-detected" if entry_file else "none"),
+        "documentation_scope": stats.get("documentation_scope")
+        or ("entry" if entry_file else "all"),
+        "analysis_mode": stats.get("analysis_mode", "single"),
+        "files_scanned": _nonnegative_int(stats.get("files_scanned", selected)),
+        "files_selected": _nonnegative_int(selected),
+        "files_documented_by_llm": documented,
+        "files_failed": failed,
+        "files_unattempted": unattempted,
+        "files_reused_unchanged": unchanged,
+        "files_reused_identical_content": identical,
+        "files_resumed_from_recovery": _nonnegative_int(stats.get("resumed", 0)),
+    }
+
+
+def _nonnegative_int(value: object) -> int:
+    """Best-effort coercion for run counters assembled from internal stats."""
+    if isinstance(value, bool):
+        return int(value)
+    try:
+        return max(0, int(value))
+    except (TypeError, ValueError):
+        return 0
 
 
 # ---------------------------------------------------------------------------
@@ -145,19 +174,17 @@ def json_from_view(view: dict, error_summary: str = "") -> str:
     payload = without_schema_version(view)
     if error_summary and error_summary != "No errors.":
         payload["errors"] = error_summary
-    # Embed _codedoc metadata block first so it's easy to find
-    project = payload.get("project", {})
-    meta_block = {
-        "_codedoc": {
-            "entry_file": project.get("entry_file"),
-        }
-    }
     # Determinism: completed output carries no run-varying timestamp.
     # A caller-provided legacy view may still contain ``generated_at`` — never
     # propagate it into the completed payload.
     payload.pop("generated_at", None)
-    ordered = {**meta_block, **payload}
-    return json.dumps(ordered, indent=2, ensure_ascii=False)
+    # Completed JSON exposes last_run as the single run/project summary.
+    # Conversion helpers may still pass legacy views; never re-emit their
+    # transitional wrappers.
+    payload.pop("_codedoc", None)
+    payload.pop("project", None)
+    payload.pop("run", None)
+    return json.dumps(payload, indent=2, ensure_ascii=False)
 
 
 # ---------------------------------------------------------------------------
@@ -174,9 +201,10 @@ def read_codedoc_meta(file_path: Path) -> dict:
     the first run).
 
     Raises :class:`~codedoc.utils.errors.ConfigError` when the file cannot be
-    read, is not a recognised CodeDoc output, or is missing structural metadata
-    (e.g. the ``_codedoc`` block for JSON, or the ``<!-- codedoc-ai: ... -->``
-    comment for Markdown).
+    read, is not a recognised CodeDoc output, or is missing structural ownership
+    metadata (for example the current completed JSON shape, legacy JSON
+    ``_codedoc`` block, or the ``<!-- codedoc-ai: ... -->`` comment for
+    Markdown).
 
     Parsing and structural ownership are delegated to the centralized
     read-only document reader.  A function-local import keeps the dependency

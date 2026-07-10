@@ -1,5 +1,71 @@
 # Changelog
 
+## 0.11.9 - 2026-07-09
+
+### Completed JSON contract cleanup
+
+- Removed transitional top-level `run`, `_codedoc`, and `project` blocks from
+  newly written completed `codedoc.json` output. New completed JSON uses
+  `last_run` as the single run/project summary, with `last_run.entry_file`
+  carrying entry identity.
+- Kept backward-compatible readers for older completed JSON and Markdown that
+  still contain `_codedoc`, `project`, and `run`, so existing outputs remain
+  reusable for incremental runs and safe overwrites.
+- Kept internal `_codedoc` recovery metadata in `crash_recovery.json` and kept
+  the hidden Markdown ownership comment. Those are internal ownership/recovery
+  markers, not completed JSON user-facing blocks.
+
+## 0.11.8 - 2026-07-09
+
+### Truthful run and project metadata
+
+- Added a canonical `last_run` block whose field names match what CodeDoc
+  actually counted: LLM-documented files, failed files, unchanged cache reuse,
+  identical-content reuse, unattempted files, recovery-resumed files, selected
+  files, scanned files, entry source, documentation scope, and analysis mode.
+- Retained the legacy `run` block unchanged for one compatibility window, so
+  older CodeDoc builds can still recognize and safely overwrite newer output.
+  New consumers should read `last_run` and fall back to `run` only when parsing
+  documents produced before 0.11.8.
+- Corrected newly rendered Markdown and legacy summary labels. The old
+  `Files reused from cache` label was attached to identical-content reuse, not
+  unchanged cache reuse; new output renders `Files reused (unchanged)` and
+  `Files reused (identical content)` instead. The legacy parser still accepts
+  the old labels when reading older Markdown.
+- Documented the `_codedoc` ownership envelope and private underscore-prefixed
+  file-record keys.
+
+## 0.11.7 - 2026-07-09
+
+### CRLF-compatible legacy Markdown reading
+
+- Reading a CodeDoc Markdown document now canonicalizes CRLF and bare-CR line
+  endings to LF in memory before the visible-text parser runs. A legacy
+  Markdown file with Windows line endings — produced by any `core.autocrlf`
+  checkout or a Windows-written `codedoc.md` — is now parsed identically to its
+  LF form, so ownership checks, incremental reuse, and JSON/Markdown conversion
+  no longer silently return zero files on such input. The normalization is
+  in-memory only: no file on disk is rewritten.
+- The change is confined to the reader. Valid embedded base64 views remain
+  authoritative, absent embedded views still use the legacy visible parser,
+  invalid embedded views keep their fail-closed rejection, and the base64
+  payload bytes are untouched. Normalization only changes behaviour for
+  documents whose LF-equivalent form is already accepted as CodeDoc-owned;
+  malformed metadata, invalid embedded views, schema-less visible-only
+  documents, and marker-less foreign Markdown remain rejected. No prompt,
+  provider call, configuration, CLI surface, schema, cache identity, recovery
+  identity, or generated output format changes.
+- Test fixtures are now pinned to their committed bytes via a repository-root
+  `.gitattributes` (`tests/fixtures/** -text`), making the suite deterministic
+  across platforms and `core.autocrlf` settings.
+- Completed output and crash-recovery writes now use LF line endings on every
+  platform. This makes generated text bytes deterministic across Windows,
+  macOS, and Linux while the reader remains newline-agnostic for existing CRLF
+  documents.
+- The legacy `codedoc.core.output.write_summary()` helper now writes a minimal
+  owned CodeDoc Markdown document, so its `codedoc.md` can be safely overwritten
+  by a later normal pipeline run.
+
 ## 0.11.6 - 2026-07-05
 
 ### Safe cross-format incremental reuse

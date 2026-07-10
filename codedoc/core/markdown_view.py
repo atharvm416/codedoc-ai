@@ -78,6 +78,43 @@ _CODEDOC_VIEW_BASE64_RE = re.compile(
 # Markdown serialisation
 # ---------------------------------------------------------------------------
 
+def _project_overview_from_view(view: dict) -> dict:
+    """Return the visible project overview derived from the current view shape."""
+    legacy_project = view.get("project")
+    if isinstance(legacy_project, dict):
+        return legacy_project
+
+    files = view.get("files", [])
+    if not isinstance(files, list):
+        files = []
+    folders = view.get("folders", [])
+    if not isinstance(folders, list):
+        folders = []
+    last_run = view.get("last_run") if isinstance(view.get("last_run"), dict) else {}
+    languages = sorted({
+        file.get("language", "")
+        for file in files
+        if isinstance(file, dict) and file.get("language")
+    })
+    folder_names = [
+        folder.get("path")
+        for folder in folders
+        if isinstance(folder, dict) and folder.get("path")
+    ]
+    if not folder_names:
+        folder_names = sorted({
+            str(file.get("path", "")).split("/", 1)[0]
+            for file in files
+            if isinstance(file, dict) and file.get("path")
+        })
+    return {
+        "entry_file": last_run.get("entry_file"),
+        "file_count": len(files),
+        "languages": languages,
+        "folders": folder_names,
+    }
+
+
 def markdown_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as Markdown.
 
@@ -87,13 +124,15 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
     block allows :func:`markdown_to_view` to reconstruct the full public JSON
     view without any information loss on subsequent runs.
     """
-    project = view.get("project", {})
+    project = _project_overview_from_view(view)
     lines: list[str] = [
         _build_meta_comment(view, project),
         _build_full_view_comment(view),
         "# codedoc project documentation\n\n",
     ]
-    run = view.get("run", {})
+    last_run = view.get("last_run") or _last_run_from_legacy_run(
+        view.get("run", {}), project
+    )
 
     lines += [
         "## Project Overview\n\n",
@@ -102,11 +141,18 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
         f"- Languages: {', '.join(project.get('languages', [])) or 'unknown'}\n",
         f"- Folders: {', '.join(f'`{f}`' for f in project.get('folders', [])) or 'none'}\n\n",
         "## Run Summary\n\n",
-        f"- Files checked: {run.get('files_checked', 0)}\n",
-        f"- Files failed: {run.get('files_failed', 0)}\n",
-        f"- Files skipped: {run.get('files_skipped', 0)}\n",
-        f"- Files reused from cache: {run.get('files_reused', 0)}\n\n",
+        f"- Files documented by LLM: {last_run.get('files_documented_by_llm', 0)}\n",
+        f"- Files failed: {last_run.get('files_failed', 0)}\n",
+        f"- Files reused (unchanged): {last_run.get('files_reused_unchanged', 0)}\n",
+        "- Files reused (identical content): "
+        f"{last_run.get('files_reused_identical_content', 0)}\n",
     ]
+    if last_run.get("files_resumed_from_recovery", 0):
+        lines.append(
+            "- Files resumed from recovery: "
+            f"{last_run.get('files_resumed_from_recovery', 0)}\n"
+        )
+    lines.append("\n")
 
     lines += ["## Project Tree\n\n", "```text\n"]
     lines.extend(_render_tree_lines(view.get("tree", {})))
@@ -161,6 +207,25 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
 # Markdown → view (with lossless embedded-view fast path)
 # ---------------------------------------------------------------------------
 
+def _normalize_markdown_newlines(text: str) -> str:
+    r"""Canonicalize CRLF and bare-CR line endings to LF for the Markdown parsers.
+
+    The visible-text parsers below are written against ``\n`` separators and line
+    anchors (``\n\n`` section breaks, ``$`` end-of-line), so a Windows CRLF — or a
+    bare-CR — document defeats the section splitter and yields zero files.  Such
+    documents arise routinely: any ``core.autocrlf`` checkout and every
+    Windows-written ``codedoc.md`` land on disk with CRLF, and
+    :func:`~codedoc.core.document.read_codedoc_document` decodes the raw bytes
+    without universal-newline translation.
+
+    This is an in-memory canonicalization only.  It never rewrites a file on disk
+    and only changes behaviour for documents whose LF-equivalent form already
+    parses as CodeDoc-owned.  It is idempotent (safe to apply twice on the
+    embedded fast path).
+    """
+    return text.replace("\r\n", "\n").replace("\r", "\n")
+
+
 def markdown_to_view(markdown: str) -> dict:
     """Parse codedoc Markdown output back into the public JSON view shape.
 
@@ -173,6 +238,7 @@ def markdown_to_view(markdown: str) -> dict:
     (dependency metadata and some internal fields are not recoverable from the
     visible text alone) but still produces a best-effort result.
     """
+    markdown = _normalize_markdown_newlines(markdown)
     # Fast path: lossless embedded view takes precedence over the visible parser.
     embedded = read_embedded_view(markdown)
     if embedded is not None:
@@ -180,7 +246,7 @@ def markdown_to_view(markdown: str) -> dict:
 
     # Legacy visible-text parser (Markdown with no embedded block).
     project = _parse_project_overview(markdown)
-    run = _parse_run_summary(markdown)
+    last_run = _parse_run_summary(markdown)
     files = _parse_markdown_files(markdown)
     edges = _parse_dependency_edges(markdown)
     dependency_catalog = _parse_dependency_catalog(markdown)
@@ -203,19 +269,23 @@ def markdown_to_view(markdown: str) -> dict:
     folders = _folder_view(files) if files else []
     languages = sorted({file["language"] for file in files if file.get("language")})
     entry_file = project.get("entry_file")
+    project_entry = None if entry_file in (None, "not specified") else entry_file
+    file_count = project.get("file_count", len(files))
+    last_run = _complete_visible_last_run(last_run, project_entry, file_count)
 
     view = {
         "project": {
-            "entry_file": None if entry_file in (None, "not specified") else entry_file,
-            "file_count": project.get("file_count", len(files)),
+            "entry_file": project_entry,
+            "file_count": file_count,
             "languages": project.get("languages") or languages,
             "folders": project.get("folders") or [folder["path"] for folder in folders],
         },
+        "last_run": last_run,
         "run": {
-            "files_checked": run.get("files_checked", 0),
-            "files_failed": run.get("files_failed", 0),
-            "files_skipped": run.get("files_skipped", 0),
-            "files_reused": run.get("files_reused", 0),
+            "files_checked": last_run.get("files_documented_by_llm", 0),
+            "files_failed": last_run.get("files_failed", 0),
+            "files_skipped": last_run.get("files_reused_unchanged", 0),
+            "files_reused": last_run.get("files_reused_identical_content", 0),
             "files_documented": len(files),
         },
         "tree": _tree([file["path"] for file in files]),
@@ -238,6 +308,55 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
     return markdown_from_view(view, error_summary)
 
 
+def _last_run_from_legacy_run(run: dict, project: dict) -> dict:
+    """Project a legacy ``run`` block into the canonical ``last_run`` shape."""
+    file_count = _parse_int(str(project.get("file_count", 0)))
+    checked = _parse_int(str(run.get("files_checked", 0)))
+    failed = _parse_int(str(run.get("files_failed", 0)))
+    skipped = _parse_int(str(run.get("files_skipped", 0)))
+    reused = _parse_int(str(run.get("files_reused", 0)))
+    selected = max(file_count, checked + failed + skipped + reused)
+    entry_file = project.get("entry_file")
+    return {
+        "entry_file": entry_file,
+        "entry_source": "auto-detected" if entry_file else "none",
+        "documentation_scope": "entry" if entry_file else "all",
+        "analysis_mode": "single",
+        "files_scanned": selected,
+        "files_selected": selected,
+        "files_documented_by_llm": checked,
+        "files_failed": failed,
+        "files_unattempted": 0,
+        "files_reused_unchanged": skipped,
+        "files_reused_identical_content": reused,
+        "files_resumed_from_recovery": 0,
+    }
+
+
+def _complete_visible_last_run(last_run: dict, entry_file: str | None, file_count: int) -> dict:
+    """Fill lossy defaults for visible-only Markdown conversion."""
+    checked = last_run.get("files_documented_by_llm", 0)
+    failed = last_run.get("files_failed", 0)
+    unchanged = last_run.get("files_reused_unchanged", 0)
+    identical = last_run.get("files_reused_identical_content", 0)
+    unattempted = last_run.get("files_unattempted", 0)
+    selected = max(file_count, checked + failed + unchanged + identical + unattempted)
+    return {
+        "entry_file": entry_file,
+        "entry_source": "auto-detected" if entry_file else "none",
+        "documentation_scope": "entry" if entry_file else "all",
+        "analysis_mode": "single",
+        "files_scanned": selected,
+        "files_selected": selected,
+        "files_documented_by_llm": checked,
+        "files_failed": failed,
+        "files_unattempted": unattempted,
+        "files_reused_unchanged": unchanged,
+        "files_reused_identical_content": identical,
+        "files_resumed_from_recovery": last_run.get("files_resumed_from_recovery", 0),
+    }
+
+
 # ---------------------------------------------------------------------------
 # Embedded lossless view helpers
 # ---------------------------------------------------------------------------
@@ -250,6 +369,13 @@ def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
     from ``"valid"`` (usable view).  The strict document reader uses this to
     reject ``"invalid"`` rather than silently falling back to visible prose.
     """
+    # Defensive, not a fix: today's only regex (_CODEDOC_VIEW_BASE64_RE) is
+    # already \r-tolerant and .strip()s its capture, and the base64 group never
+    # contains a newline, so this normalization is a behavioural no-op on the
+    # embedded path.  It is applied at this independently-reachable read boundary
+    # (document.py calls it directly) so any regex added here later is
+    # newline-safe by construction, and it never alters the decoded payload bytes.
+    markdown = _normalize_markdown_newlines(markdown)
     match = _CODEDOC_VIEW_BASE64_RE.search(markdown)
     if not match:
         return EmbeddedViewResult(state="absent", view=None)
@@ -289,23 +415,18 @@ def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
         )
         return EmbeddedViewResult(state="invalid", view=None)
 
-    # Structural validation: require the three fields that make the view useful.
-    required = {"project", "run"}
-    missing = required - data.keys()
-    if missing:
+    # Structural validation: accept the current shape and the legacy
+    # embedded shape so older Markdown remains reusable.
+    has_current_shape = isinstance(data.get("last_run"), dict) and (
+        "files" not in data or isinstance(data.get("files"), list)
+    )
+    has_legacy_shape = isinstance(data.get("project"), dict) and isinstance(
+        data.get("run"), dict
+    ) and ("files" not in data or isinstance(data.get("files"), list))
+    if not has_current_shape and not has_legacy_shape:
         logger.warning(
-            "codedoc-ai-view-base64 is missing required fields %s; "
+            "codedoc-ai-view-base64 is missing required CodeDoc view fields; "
             "falling back to visible Markdown parser.",
-            sorted(missing),
-        )
-        return EmbeddedViewResult(state="invalid", view=None)
-
-    if not isinstance(data.get("project"), dict) or not isinstance(data.get("run"), dict) or (
-        "files" in data and not isinstance(data["files"], list)
-    ):
-        logger.warning(
-            "codedoc-ai-view-base64 has malformed project/files fields; "
-            "falling back to visible Markdown parser."
         )
         return EmbeddedViewResult(state="invalid", view=None)
 
@@ -327,13 +448,24 @@ def read_embedded_view(markdown: str) -> dict | None:
 def _public_view_for_embedding(view: dict) -> dict:
     """Return a sanitized copy of *view* safe to embed in Markdown.
 
-    Strips crash-safety markers, the ``_codedoc`` wrapper (which is added by
-    :func:`~codedoc.core.project_view.json_from_view` at JSON render time and
-    must not appear in the embedded block), and the deprecated run-varying
-    ``generated_at`` field (for run determinism).
+    Strips crash-safety markers, ownership wrappers, legacy completed-output
+    wrappers, and the deprecated run-varying ``generated_at`` field.  When a
+    legacy view is converted to Markdown, the embedded lossless view is promoted
+    to the current ``last_run`` shape instead of preserving ``project``/``run``.
     """
     excluded = {"_crash_safety", "_codedoc", "generated_at"}
     public = {k: v for k, v in view.items() if k not in excluded}
+    project = _project_overview_from_view(view)
+    if not isinstance(public.get("last_run"), dict):
+        public["last_run"] = _last_run_from_legacy_run(
+            public.get("run", {}) if isinstance(public.get("run"), dict) else {},
+            project,
+        )
+    elif "entry_file" not in public["last_run"]:
+        public["last_run"] = dict(public["last_run"])
+        public["last_run"]["entry_file"] = project.get("entry_file")
+    public.pop("project", None)
+    public.pop("run", None)
     return without_schema_version(public)
 
 
@@ -396,10 +528,22 @@ def _parse_project_overview(markdown: str) -> dict:
 def _parse_run_summary(markdown: str) -> dict:
     section = _section(markdown, "Run Summary")
     return {
-        "files_checked": _parse_int(_bullet_value(section, "Files checked")),
+        "files_documented_by_llm": _parse_int(
+            _bullet_value(section, "Files documented by LLM")
+            or _bullet_value(section, "Files checked")
+        ),
         "files_failed": _parse_int(_bullet_value(section, "Files failed")),
-        "files_skipped": _parse_int(_bullet_value(section, "Files skipped")),
-        "files_reused": _parse_int(_bullet_value(section, "Files reused from cache")),
+        "files_reused_unchanged": _parse_int(
+            _bullet_value(section, "Files reused (unchanged)")
+            or _bullet_value(section, "Files skipped")
+        ),
+        "files_reused_identical_content": _parse_int(
+            _bullet_value(section, "Files reused (identical content)")
+            or _bullet_value(section, "Files reused from cache")
+        ),
+        "files_resumed_from_recovery": _parse_int(
+            _bullet_value(section, "Files resumed from recovery")
+        ),
     }
 
 

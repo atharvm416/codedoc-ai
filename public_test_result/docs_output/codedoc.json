@@ -1,23 +1,17 @@
 {
-  "_codedoc": {
-    "entry_file": null
-  },
-  "project": {
+  "last_run": {
     "entry_file": null,
-    "file_count": 53,
-    "languages": [
-      "python"
-    ],
-    "folders": [
-      "codedoc"
-    ]
-  },
-  "run": {
-    "files_checked": 46,
+    "entry_source": "none",
+    "documentation_scope": "all",
+    "analysis_mode": "single",
+    "files_scanned": 53,
+    "files_selected": 53,
+    "files_documented_by_llm": 53,
     "files_failed": 0,
-    "files_skipped": 7,
-    "files_reused": 0,
-    "files_documented": 53
+    "files_unattempted": 0,
+    "files_reused_unchanged": 0,
+    "files_reused_identical_content": 0,
+    "files_resumed_from_recovery": 0
   },
   "tree": {
     "codedoc": {
@@ -250,7 +244,7 @@
   "folders": [
     {
       "path": "codedoc",
-      "summary": "Files under `codedoc` (53 python file(s)). Common concepts: error handling, re-exporting, exception handling, atomic file writing, Error handling.",
+      "summary": "Files under `codedoc` (53 python file(s)). Common concepts: re-exporting, error handling, Error handling, exception handling, atomic file writing.",
       "file_count": 53,
       "languages": [
         "python"
@@ -311,11 +305,11 @@
         "codedoc/utils/logger.py"
       ],
       "key_concepts": [
-        "error handling",
         "re-exporting",
+        "error handling",
+        "Error handling",
         "exception handling",
-        "atomic file writing",
-        "Error handling"
+        "atomic file writing"
       ]
     }
   ],
@@ -373,7 +367,7 @@
     {
       "name": "pathlib",
       "type": "sdk",
-      "used_for": "Path manipulation and representation.",
+      "used_for": "Path manipulation for file paths in error messages.",
       "files": [
         "codedoc/bootstrap.py",
         "codedoc/cli/cli.py",
@@ -479,7 +473,7 @@
     {
       "name": "argparse",
       "type": "sdk",
-      "used_for": "Used to handle command-line argument parsing.",
+      "used_for": "Used to handle command-line arguments for the CLI.",
       "files": [
         "codedoc/cli/cli.py"
       ],
@@ -488,7 +482,7 @@
     {
       "name": "ast",
       "type": "sdk",
-      "used_for": "Used for parsing Python source code into an AST",
+      "used_for": "Used for parsing the source code into an abstract syntax tree",
       "files": [
         "codedoc/parser/python_parser.py"
       ],
@@ -497,7 +491,7 @@
     {
       "name": "errno",
       "type": "sdk",
-      "used_for": "Error number constants for OS error classification.",
+      "used_for": "Error number constants for classifying OS errors.",
       "files": [
         "codedoc/core/io_diagnostics.py"
       ],
@@ -1437,8 +1431,8 @@
       ],
       "key_concepts": [
         "File hashing",
-        "File reading with encoding",
-        "Character counting based on file size"
+        "Text encoding",
+        "Character counting"
       ],
       "_deps": {
         "external": [
@@ -1452,12 +1446,12 @@
         "usage_notes": [
           {
             "import": "from pathlib import Path",
-            "used_for": "Used to handle file paths and read file content."
+            "used_for": "Used for file path manipulations and reading file content."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1477,7 +1471,7 @@
       "hash": "a6facc191b0414e1a78f0822b51673b9a2ca45775517fab9d18ae849d51f3f43",
       "path": "codedoc/core/dependency_kind.py",
       "language": "python",
-      "description": "This module classifies non-project dependencies as either third-party packages or standard-library modules, providing a stable package identifier for each import.",
+      "description": "This module classifies non-project dependencies as either third-party packages or standard-library modules, providing a stable identifier for each import.",
       "role_in_system": "It serves as the authoritative source for determining the type of non-project dependencies, ensuring consistent classification across the codebase.",
       "imports": [
         "__future__",
@@ -1487,11 +1481,11 @@
       "functions": [
         {
           "name": "classify_non_project_dependency",
-          "description": "Classifies and canonicalizes a single non-project dependency string, returning a DependencyName with its kind."
+          "description": "Classifies and canonicalizes a single non-project dependency string, returning its kind and canonical form."
         },
         {
           "name": "_python_stdlib_names",
-          "description": "Returns the active stdlib module-name set, preferring the interpreter's list."
+          "description": "Returns the active standard library module-name set, preferring the interpreter's list when available."
         },
         {
           "name": "_classify_dart",
@@ -1503,7 +1497,7 @@
         },
         {
           "name": "_classify_node",
-          "description": "Classifies Node.js dependencies, determining if they are built-in modules or external packages."
+          "description": "Classifies Node.js dependencies, identifying built-in modules and external packages."
         },
         {
           "name": "_normalize_relative",
@@ -1527,13 +1521,12 @@
       ],
       "_deps": {
         "dependency_refs": [
-          "__future__",
           "sys",
           "dataclasses"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1551,7 +1544,7 @@
       "path": "codedoc/core/io_diagnostics.py",
       "language": "python",
       "description": "This module classifies OS errors and formats diagnostic messages for local I/O failures, ensuring that sensitive information is not exposed while providing clear user-facing messages.",
-      "role_in_system": "It serves as a utility for handling and reporting I/O errors in a consistent manner across the codebase, allowing other modules to leverage its functionality for error classification and message formatting.",
+      "role_in_system": "It serves as a utility for handling and reporting I/O errors in a consistent manner across the codebase, allowing other modules to utilize its error classification and message formatting capabilities.",
       "imports": [
         "__future__",
         "errno",
@@ -1576,7 +1569,7 @@
         },
         {
           "name": "category_reason",
-          "description": "Returns the short human phrase for a given private category."
+          "description": "Returns the short human phrase for a given private error category."
         },
         {
           "name": "diagnose",
@@ -1584,7 +1577,7 @@
         },
         {
           "name": "format_local_io_error",
-          "description": "Composes a sanitized, actionable local I/O error message based on the provided lead, path, exception, and optional action."
+          "description": "Composes a sanitized, actionable local I/O error message based on the provided parameters."
         }
       ],
       "exports": [
@@ -1612,16 +1605,16 @@
         "usage_notes": [
           {
             "import": "errno",
-            "used_for": "Error number constants for OS error classification."
+            "used_for": "Error number constants for classifying OS errors."
           },
           {
             "import": "pathlib",
-            "used_for": "Path manipulation and representation."
+            "used_for": "Path manipulation for file paths in error messages."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1642,7 +1635,7 @@
       "path": "codedoc/core/usage.py",
       "language": "python",
       "description": "This module provides an approximate accounting mechanism for usage of a language model, estimating token counts based on input and output text.",
-      "role_in_system": "It serves as a utility for tracking and estimating the usage of language model calls within a larger application, ensuring thread safety during concurrent operations.",
+      "role_in_system": "It serves as a utility for tracking and estimating the usage of language model calls within a larger application, ensuring that usage statistics can be gathered in a thread-safe manner.",
       "imports": [
         "__future__",
         "threading"
@@ -1683,8 +1676,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1719,7 +1712,7 @@
         },
         {
           "name": "is_available",
-          "description": "An optional method that checks if the provider can currently accept requests, with a default implementation that always returns True."
+          "description": "An optional method that checks if the provider can currently accept requests, defaulting to always return True."
         }
       ],
       "classes": [
@@ -1746,12 +1739,12 @@
         "usage_notes": [
           {
             "import": "__future__",
-            "used_for": "Enables the use of annotations as string literals for forward references."
+            "used_for": "Enables the use of future features in Python, such as postponed evaluation of type annotations."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1781,13 +1774,13 @@
       "functions": [
         {
           "name": "get_rate_limit_profile",
-          "description": "Returns the rate-limit profile for a specified provider name, applying any configuration overrides if present."
+          "description": "Returns the rate-limit profile for a specified provider name, applying any configuration overrides."
         }
       ],
       "classes": [
         {
           "name": "RateLimitProfile",
-          "description": "Represents the rate-limit classification and backoff policy for a single provider, including attributes for provider name, signals, minimum backoff time, and backoff scale."
+          "description": "Represents the rate-limit classification and backoff policy for a single provider."
         }
       ],
       "exports": [
@@ -1810,12 +1803,12 @@
         "usage_notes": [
           {
             "import": "from dataclasses import dataclass, field",
-            "used_for": "To define the RateLimitProfile class with dataclass features."
+            "used_for": "Defines the RateLimitProfile class with dataclass features."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1834,7 +1827,7 @@
       "path": "codedoc/utils/errors.py",
       "language": "python",
       "description": "This file defines shared exceptions and an error reporting mechanism for the CodeDoc application, which collects issues during execution without writing to a persistent log.",
-      "role_in_system": "It provides a structured way to handle errors and exceptions that occur during the parsing and execution processes, ensuring that issues are reported and can be managed effectively.",
+      "role_in_system": "It provides a structured way to handle errors and report them during the execution of the CodeDoc pipeline, ensuring that issues are captured and can be reviewed without affecting the overall process.",
       "imports": [
         "__future__",
         "traceback"
@@ -1862,7 +1855,7 @@
         },
         {
           "name": "summary",
-          "description": "Returns a summary string for error-level entries only, which is embedded in the final output."
+          "description": "Returns a summary string for error-level entries only, formatted for inclusion in final outputs."
         }
       ],
       "classes": [
@@ -1945,8 +1938,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1987,8 +1980,8 @@
       "hash": "026e56c3f8c7a0295125cb882337df53a2653d96aa7b1aa045db3f2ab424da48",
       "path": "codedoc/utils/json_utils.py",
       "language": "python",
-      "description": "This module provides strict JSON text loading with nested duplicate-key rejection, ensuring that duplicate keys in JSON objects raise an error instead of silently overriding previous values.",
-      "role_in_system": "It serves as a utility for loading JSON data safely, preventing potential security issues and configuration errors by rejecting duplicate keys at any nesting level.",
+      "description": "This module provides strict JSON text loading with nested duplicate-key rejection, ensuring that duplicate keys in JSON objects raise an error rather than silently overriding previous values.",
+      "role_in_system": "This file serves as a utility for loading JSON data safely, preventing issues with duplicate keys that could lead to security vulnerabilities or configuration errors.",
       "imports": [
         "__future__",
         "json",
@@ -2003,11 +1996,11 @@
       "classes": [
         {
           "name": "DuplicateJSONKeyError",
-          "description": "Raised when a JSON object contains the same key more than once, subclassing ValueError to maintain compatibility with existing error handling."
+          "description": "An error raised when a JSON object contains the same key more than once."
         },
         {
           "name": "NonFiniteJSONNumberError",
-          "description": "Raised when JSON contains NaN or an Infinity token."
+          "description": "An error raised when JSON contains NaN or an Infinity token."
         }
       ],
       "exports": [
@@ -2016,9 +2009,9 @@
         "loads_no_duplicate_keys"
       ],
       "key_concepts": [
-        "Strict JSON parsing",
-        "Error handling for duplicate keys",
-        "Custom object_pairs_hook"
+        "strict JSON parsing",
+        "duplicate key rejection",
+        "error handling"
       ],
       "_deps": {
         "external": [
@@ -2040,8 +2033,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -2060,8 +2053,8 @@
       "hash": "5d24188dda7edd397db2d229aecb4c159280dc54b996b9a80e234a4de8d2e05d",
       "path": "codedoc/utils/logger.py",
       "language": "python",
-      "description": "Centralized logging for codedoc, providing a consistent logging interface and configuration across the application.",
-      "role_in_system": "This file supports the logging functionality of the codedoc application, allowing for configurable logging levels and formats, and managing third-party logger verbosity.",
+      "description": "This file provides centralized logging functionality for the codedoc project, allowing for consistent logging configuration and management across the application.",
+      "role_in_system": "It supports the rest of the codebase by providing a standardized way to create and manage loggers, ensuring that logging behavior is consistent and configurable throughout the application.",
       "imports": [
         "__future__",
         "logging",
@@ -2071,21 +2064,21 @@
       "functions": [
         {
           "name": "_configure",
-          "description": "Sets up the logging configuration, including handlers and log formats, and adjusts the log level for noisy third-party libraries."
+          "description": "Sets up the logging configuration, including handlers and log levels, ensuring that logging is properly initialized only once."
         },
         {
           "name": "get_logger",
-          "description": "Retrieves a logger instance with the specified name, ensuring the logging configuration is applied."
+          "description": "Retrieves a logger instance with the specified name, ensuring that logging is configured before returning the logger."
         },
         {
           "name": "set_level",
-          "description": "Changes the logging level at runtime, affecting both the root logger and specified noisy third-party loggers."
+          "description": "Changes the logging level at runtime, allowing dynamic adjustment of log verbosity."
         }
       ],
       "key_concepts": [
         "Logging configuration",
         "Dynamic log level adjustment",
-        "Third-party logger management"
+        "Conditional imports"
       ],
       "_deps": {
         "external": [
@@ -2096,9 +2089,6 @@
           "logging",
           "rich.console",
           "rich.logging"
-        ],
-        "warnings": [
-          "Potential ImportError if rich is not installed, leading to fallback to basic logging."
         ],
         "catalog_updates": [
           {
@@ -2118,8 +2108,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -2163,11 +2153,11 @@
       }
     },
     {
-      "hash": "1945a90b0f6765c3f7d904e256bddbfb3747187cd104fae950177e073cc3824c",
+      "hash": "7884996d6e31ede9a279b6dc08ff20d7b3358a97f74fb4ac19d15ead91838a09",
       "path": "codedoc/core/block_manager.py",
       "language": "python",
       "description": "This file provides atomic text writing functionality for safely replacing file contents while ensuring crash recovery. It implements methods to write text to files without truncating existing content, using temporary files to guarantee atomicity.",
-      "role_in_system": "This file serves as a core component for managing file writing operations in the codedoc project, particularly for ensuring that completed outputs and crash recovery processes are handled safely and reliably.",
+      "role_in_system": "This file serves as the core mechanism for writing and replacing text files in a safe manner, which is utilized by other components in the codebase for handling output and configuration files.",
       "imports": [
         "__future__",
         "os",
@@ -2180,33 +2170,33 @@
       "functions": [
         {
           "name": "atomic_write_text",
-          "description": "Writes text to a specified path atomically, ensuring that the existing file is not truncated or altered until the write is confirmed to be successful."
+          "description": "Writes text to a specified path atomically, ensuring that the existing file is not truncated or altered until the write is confirmed successful."
         },
         {
           "name": "create_text_exclusive",
-          "description": "Creates a new file at the specified path with the given text, refusing to overwrite any existing file, directory, or symlink."
+          "description": "Creates a new file with the specified text, refusing to overwrite any existing file at the target path."
         },
         {
           "name": "replace_text_atomic_no_backup",
-          "description": "Replaces the contents of a specified regular file with new text atomically, without creating a backup, and only if certain conditions are met."
+          "description": "Replaces the contents of a specified file with new text atomically, without creating a backup of the original file."
         },
         {
           "name": "_replace_with_lock_retry",
-          "description": "Attempts to atomically rename a temporary file over a target file, retrying in case of transient Windows lock errors."
+          "description": "Attempts to rename a temporary file over the target file, retrying in case of transient Windows lock errors."
         },
         {
           "name": "_relax_to_default_mode",
-          "description": "Sets the file mode of a specified path to the process default, ensuring compatibility with typical file creation behaviors."
+          "description": "Sets the file mode of a specified path to the process default, ensuring it is not owner-only."
         },
         {
           "name": "_silent_unlink",
-          "description": "Removes a specified path if it exists, suppressing any errors that occur during the cleanup process."
+          "description": "Removes a specified path if it exists, suppressing any errors that occur during the deletion."
         }
       ],
       "classes": [
         {
           "name": "BlockError",
-          "description": "An error class that indicates issues with existing owned-block markers being malformed or unsafe."
+          "description": "An error class that indicates issues with existing block markers being malformed or unsafe."
         }
       ],
       "exports": [
@@ -2234,17 +2224,13 @@
         ],
         "usage_notes": [
           {
-            "import": "codedoc.core.io_diagnostics",
-            "used_for": "Provides constants and functions for handling Windows lock errors."
-          },
-          {
-            "import": "codedoc.utils.errors",
-            "used_for": "Defines the ConfigError class used for error handling."
+            "import": "from codedoc.utils.errors import ConfigError",
+            "used_for": "Defines a custom error for handling block-related issues."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2296,6 +2282,10 @@
         {
           "name": "_default_common_block",
           "description": "The developer-standard common payload for one (mode, agent) block."
+        },
+        {
+          "name": "_dep_members",
+          "description": "Build the six dependencies_analysis members."
         }
       ],
       "classes": [
@@ -2309,23 +2299,25 @@
         }
       ],
       "key_concepts": [
-        "JSON shape block",
-        "prompt profiles",
+        "JSON shape profiles",
+        "prompt customization",
         "validation of user profiles"
       ],
       "_deps": {
+        "internal": [
+          "codedoc.utils.errors"
+        ],
         "external": [
           "hashlib",
           "json",
           "dataclasses",
           "pathlib",
-          "typing",
-          "codedoc.utils.errors"
+          "typing"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2357,8 +2349,8 @@
       "hash": "d4c788c40f3df8ac1db7d3b2b7aad9abf5caafd01044c9130cb9541b2d8339a0",
       "path": "codedoc/agents/base_agent.py",
       "language": "python",
-      "description": "Abstract base agent that provides shared functionality for various agent types, including prompt building, JSON extraction, and error handling.",
-      "role_in_system": "Serves as a foundational class for all agents in the system, ensuring consistent behavior and shared methods for handling content and interactions with the LLM.",
+      "description": "Abstract base agent that provides shared functionality for agents handling structure, dependency, and documentation. It includes methods for prompt building, JSON extraction, and error handling.",
+      "role_in_system": "This file serves as a foundational class for various agent implementations, ensuring they adhere to a common interface and share utility methods for processing content and interacting with a language model.",
       "imports": [
         "__future__",
         "json",
@@ -2376,25 +2368,25 @@
         },
         {
           "name": "_truncate",
-          "description": "Defensive truncation fallback for direct agent callers to ensure content does not exceed maximum character limits."
+          "description": "Defensive truncation fallback for direct agent callers, ensuring content does not exceed maximum character limits."
         },
         {
           "name": "_call_llm",
-          "description": "Calls the LLM with a prompt and handles errors, wrapping them in AgentError."
+          "description": "Calls the language model and returns raw text, handling errors and usage accounting."
         },
         {
           "name": "_parse_json",
-          "description": "Extracts and parses a JSON object from the LLM output, handling potential markdown formatting."
+          "description": "Extracts and parses a JSON object from the language model's output, handling potential markdown formatting."
         },
         {
           "name": "_safe_run",
-          "description": "Wrapper that catches all errors during the run process and returns a fallback dictionary instead of crashing."
+          "description": "Wrapper that catches errors during the execution of the agent's run method and returns a fallback dictionary."
         }
       ],
       "classes": [
         {
           "name": "BaseAgent",
-          "description": "Abstract agent class that requires subclasses to implement a run method for analyzing files."
+          "description": "Abstract agent class that requires subclasses to implement a run method for analyzing files and returning results."
         }
       ],
       "exports": [
@@ -2414,6 +2406,7 @@
           "codedoc.utils.logger"
         ],
         "external": [
+          "__future__",
           "json",
           "re",
           "abc"
@@ -2427,12 +2420,12 @@
         "usage_notes": [
           {
             "import": "codedoc.utils.logger",
-            "used_for": "Provides logging functionality for error handling and debugging."
+            "used_for": "Logging debug and warning messages related to agent operations."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2501,15 +2494,15 @@
         },
         {
           "name": "_build_rate_limit_exhausted_abort",
-          "description": "Constructs an UnrecoverableProviderError for a persistent rate limit situation."
+          "description": "Constructs an UnrecoverableProviderError for a persistent rate limit or quota exhaustion scenario."
         },
         {
           "name": "_raise_rate_limit_exhausted",
-          "description": "Logs a warning and raises an abort error when a rate limit is persistently exceeded."
+          "description": "Logs a warning and raises an abort error when a persistent rate limit is detected."
         },
         {
           "name": "_detect_limit_type",
-          "description": "Classifies the type of rate limit from an error message string."
+          "description": "Classifies the type of rate limit based on the error message."
         },
         {
           "name": "_parse_retry_after",
@@ -2519,8 +2512,8 @@
       "key_concepts": [
         "exception chaining",
         "error classification",
-        "rate limiting",
-        "billing errors"
+        "rate limit detection",
+        "billing error handling"
       ],
       "_deps": {
         "internal": [
@@ -2537,14 +2530,14 @@
         ],
         "usage_notes": [
           {
-            "import": "from codedoc.llm.rate_limit_profile import RateLimitProfile",
-            "used_for": "Type hinting for the profile parameter in _is_rate_limit_error and _classify_failure."
+            "import": "from codedoc.utils.logger import get_logger",
+            "used_for": "Initializes a logger for this module."
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2566,8 +2559,8 @@
       "hash": "89d4ae325efb86282d3c349ea4beedde6099e539c3c0cf617e016463f9d21c93",
       "path": "codedoc/core/graph.py",
       "language": "python",
-      "description": "This file provides functionality for managing a dependency graph, which represents the relationships between files based on their import statements. It includes methods for adding files and dependencies, retrieving dependencies and dependents, and performing topological sorting.",
-      "role_in_system": "The DependencyGraph class serves as a core component for analyzing and resolving file dependencies within the codedoc project, facilitating import resolution and dependency tracking.",
+      "description": "This file provides functionality for managing a dependency graph, which represents the relationships between files based on their import dependencies. It includes methods for adding files and dependencies, retrieving dependencies and dependents, and performing topological sorting.",
+      "role_in_system": "This file supports the overall project by enabling import resolution and dependency tracking, which are essential for understanding how files interact and depend on each other within the codebase.",
       "imports": [
         "__future__",
         "collections",
@@ -2577,23 +2570,23 @@
       "functions": [
         {
           "name": "resolve_import",
-          "description": "Resolves an import string to a known project-relative path based on the current file and a set of all files."
+          "description": "Resolves an import string to a known project-relative path based on the current file and all known files."
+        },
+        {
+          "name": "summary",
+          "description": "Generates a summary of the dependency graph, including the number of nodes and edges."
         }
       ],
       "classes": [
         {
           "name": "DependencyGraph",
-          "description": "Represents a directed graph where edges indicate file imports, providing methods to manage and query file dependencies."
+          "description": "Represents a directed graph where edges indicate file import relationships, providing methods to manage and query dependencies."
         }
       ],
-      "exports": [
-        "DependencyGraph",
-        "resolve_import"
-      ],
       "key_concepts": [
-        "dependency graph",
-        "topological sorting",
-        "import resolution"
+        "Directed graph",
+        "Topological sorting",
+        "Dependency resolution"
       ],
       "_deps": {
         "internal": [
@@ -2601,10 +2594,13 @@
         ],
         "dependency_refs": [
           "codedoc.utils.logger"
+        ],
+        "warnings": [
+          "Potential cycle warning emitted if a cycle is detected in the dependency graph."
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2669,7 +2665,7 @@
         },
         {
           "name": "stats",
-          "description": "Returns a count of files in each status category."
+          "description": "Returns a count of the different statuses of files in the queue."
         },
         {
           "name": "iter_checked",
@@ -2681,7 +2677,7 @@
         },
         {
           "name": "snapshot",
-          "description": "Returns a dictionary mapping relative paths to their statuses."
+          "description": "Returns a dictionary mapping relative paths to their statuses for all known files."
         }
       ],
       "classes": [
@@ -2712,8 +2708,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2736,7 +2732,7 @@
       "path": "codedoc/core/scanner.py",
       "language": "python",
       "description": "This file scans a project directory to detect file languages based on their extensions without using a language model. It allows callers to specify rules for skipping directories, mapping extensions to languages, and identifying entry files.",
-      "role_in_system": "This file serves as a core component of the codedoc project, enabling the identification of file types and facilitating the processing of project files based on their languages.",
+      "role_in_system": "This file serves as a core component of the codedoc project, enabling the identification of file types within a project structure, which is essential for further processing and documentation generation.",
       "imports": [
         "__future__",
         "stat",
@@ -2765,8 +2761,7 @@
         "detect_entry_file"
       ],
       "key_concepts": [
-        "file scanning",
-        "language detection",
+        "file extension mapping",
         "directory traversal",
         "symlink handling"
       ],
@@ -2784,13 +2779,13 @@
           "typing"
         ],
         "warnings": [
-          "No unused imports or potential cycles detected."
+          "The 'supported_extensions' parameter is deprecated."
         ],
         "catalog_updates": [
           {
             "name": "codedoc.utils.logger",
             "type": "internal",
-            "used_for": "logging scan results and warnings"
+            "used_for": "logging scan progress and warnings"
           }
         ],
         "usage_notes": [
@@ -2800,9 +2795,9 @@
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2825,8 +2820,8 @@
       "hash": "74aaba83a00206da0aa064bad53f53f708fdc91e65c39dacd0edf30bc5d3a2c0",
       "path": "codedoc/llm/api_provider.py",
       "language": "python",
-      "description": "This file provides implementations for API-based language model (LLM) providers, specifically for OpenAI, Anthropic Claude, and Google Gemini. It defines a common interface for these providers to ensure consistent behavior across different LLM APIs.",
-      "role_in_system": "This file serves as a bridge between the application and various LLM APIs, allowing the application to interact with different providers in a uniform manner.",
+      "description": "This file provides implementations for API-based language model (LLM) providers, specifically for OpenAI, Anthropic Claude, and Google Gemini. It defines a common interface for these providers to facilitate interaction with various LLM APIs.",
+      "role_in_system": "This file serves as a bridge between the application and different LLM APIs, allowing for a unified way to interact with multiple providers while adhering to a consistent interface.",
       "imports": [
         "__future__",
         "codedoc.llm.base",
@@ -2868,8 +2863,8 @@
       ],
       "key_concepts": [
         "Provider pattern",
-        "Error handling",
-        "API interaction"
+        "API interaction",
+        "Error handling"
       ],
       "_deps": {
         "internal": [
@@ -2909,12 +2904,12 @@
         "usage_notes": [
           {
             "import": "from codedoc.llm.base import LLMProvider",
-            "used_for": "Base class for all LLM providers, ensuring a consistent interface."
+            "used_for": "Base class for all LLM provider implementations."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2940,7 +2935,7 @@
       "path": "codedoc/llm/local_provider.py",
       "language": "python",
       "description": "This file implements a local LLM provider that connects to locally running LLMs via an OpenAI-compatible API, specifically for Ollama and LM Studio. It is designed to be excluded from the public runtime but serves as a reserved implementation for future use.",
-      "role_in_system": "The LocalProvider class allows the application to interact with local LLM services, providing a way to generate completions using models hosted on the local machine.",
+      "role_in_system": "This module provides a way to interact with local LLMs, allowing the rest of the codebase to utilize these models through a standardized API, while being intentionally dormant in the current setup.",
       "imports": [
         "__future__",
         "urllib.error",
@@ -2972,7 +2967,7 @@
       "key_concepts": [
         "OpenAI-compatible API",
         "local LLM interaction",
-        "error handling"
+        "dormant module"
       ],
       "_deps": {
         "internal": [
@@ -3006,8 +3001,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3028,8 +3023,8 @@
       "hash": "3087c4c3e0cdcfebdca8a0d6f457ee43f2b45c87856ada496760833ad417a3fe",
       "path": "codedoc/parser/generic_parser.py",
       "language": "python",
-      "description": "This file implements a generic import parser that uses regex to extract import statements from various programming languages. It is designed to handle languages that do not have a dedicated parser, such as Java, Dart, C#, Kotlin, Swift, Go, Ruby, Rust, and C/C++. The parser operates deterministically without the involvement of any language model.",
-      "role_in_system": "The generic parser serves as a fallback mechanism for extracting import statements from source code files in multiple programming languages, allowing the overall codebase to handle a wider range of languages without requiring dedicated parsers for each one.",
+      "description": "This file implements a generic import parser that uses regex to extract import statements from various programming languages. It is designed to handle languages that do not have a dedicated parser, providing a fallback mechanism for import extraction.",
+      "role_in_system": "The generic parser serves as a utility within the codebase to facilitate the extraction of import statements from multiple programming languages, enhancing the overall functionality of the project by allowing it to support a wider range of languages.",
       "imports": [
         "__future__",
         "re",
@@ -3040,41 +3035,42 @@
       "functions": [
         {
           "name": "_decode_go_interpreted",
-          "description": "Decodes the contents of a Go interpreted string literal, handling various escape sequences and ensuring that the output is a valid UTF-8 string."
+          "description": "Decodes the contents of a Go interpreted string literal, handling various escape sequences."
         },
         {
           "name": "_strip_go_comments",
-          "description": "Removes Go block and line comments from the provided text to ensure that import extraction is not affected by commented-out code."
+          "description": "Removes Go block and line comments from the provided text to ensure accurate import extraction."
         },
         {
           "name": "_parse_go",
-          "description": "Extracts Go import statements from the provided content, ignoring string literals and comments that are not actual imports."
+          "description": "Extracts Go import paths from the content while ignoring comments and non-import string literals."
         },
         {
           "name": "parse",
-          "description": "Extracts import strings from a specified file using regex patterns based on the provided programming language, returning a list of raw import strings."
+          "description": "Extracts import strings from a specified file using regex patterns based on the provided programming language."
         }
-      ],
-      "exports": [
-        "parse"
       ],
       "key_concepts": [
         "regex-based import extraction",
         "language-specific import patterns",
-        "fallback import handling"
+        "fallback import patterns"
       ],
       "_deps": {
         "internal": [
           "codedoc.utils.errors",
           "codedoc.utils.logger"
         ],
+        "external": [
+          "re",
+          "pathlib"
+        ],
         "dependency_refs": [
           "ParseError",
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3092,8 +3088,8 @@
       "hash": "1b8f2d0e84f30d87ef5225e0269fe6ace51ab89baa75c2e1bd06170279d7a74e",
       "path": "codedoc/parser/python_parser.py",
       "language": "python",
-      "description": "This file provides a parser for extracting import statements from Python source files using the Abstract Syntax Tree (AST) module. It is designed to be deterministic and does not rely on machine learning models.",
-      "role_in_system": "The parser supports the overall codebase by enabling the extraction of module dependencies, which can be useful for documentation generation, dependency analysis, and code understanding.",
+      "description": "This file defines a Python import parser that utilizes the built-in `ast` module to extract import statements from Python files.",
+      "role_in_system": "It serves as a utility to analyze Python files for their import dependencies, which can be useful for documentation generation or code analysis tools.",
       "imports": [
         "__future__",
         "ast",
@@ -3104,7 +3100,7 @@
       "functions": [
         {
           "name": "parse",
-          "description": "Extracts import strings from a Python file and returns them as a list of module names."
+          "description": "Extracts import strings from a Python file using AST and returns module names as strings."
         }
       ],
       "key_concepts": [
@@ -3128,18 +3124,18 @@
           {
             "name": "ParseError",
             "type": "internal",
-            "used_for": "Error handling during parsing operations"
+            "used_for": "Error handling during parsing of Python files"
           },
           {
             "name": "get_logger",
             "type": "internal",
-            "used_for": "Logging information and debugging"
+            "used_for": "Logging import parsing activities"
           }
         ],
         "usage_notes": [
           {
             "import": "ast",
-            "used_for": "Used for parsing Python source code into an AST"
+            "used_for": "Used for parsing the source code into an abstract syntax tree"
           },
           {
             "import": "pathlib",
@@ -3147,8 +3143,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3195,8 +3191,8 @@
           "codedoc.utils.logger.get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3214,8 +3210,8 @@
       "hash": "4f77d944eec4853b256a063a2a1659549d462c4dcae6ab56a9b9b9aba7a82289",
       "path": "codedoc/utils/__init__.py",
       "language": "python",
-      "description": "This file serves as an initializer for the codedoc.utils module, re-exporting key functionalities and error classes from the logger and errors submodules.",
-      "role_in_system": "It connects the logger and errors functionalities to the broader codedoc.utils namespace, allowing for easier access and organization of utility functions and error handling across the codebase.",
+      "description": "This file serves as an initializer for the codedoc.utils module, re-exporting key logging and error handling functionalities to provide a unified interface for users of the module.",
+      "role_in_system": "It connects various utility functions and error classes from the codedoc.utils.logger and codedoc.utils.errors modules, allowing for streamlined access to logging and error management features throughout the codebase.",
       "imports": [
         "codedoc.utils.logger",
         "codedoc.utils.errors"
@@ -3251,10 +3247,20 @@
           "codedoc.utils.errors.AgentError",
           "codedoc.utils.errors.OutputError",
           "codedoc.utils.errors.ErrorReporter"
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.utils.logger import get_logger, set_level",
+            "used_for": "Provides logging functionality for the module."
+          },
+          {
+            "import": "from codedoc.utils.errors import CodeDocError, ParseError, LLMError, ConfigError, AgentError, OutputError, ErrorReporter",
+            "used_for": "Defines various error classes for error handling in the module."
+          }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3267,8 +3273,8 @@
       "hash": "bf84e4b7e9a43119fe405ff6b9b053e23f0a68492ee4c2f1caa324f5fcb2f508",
       "path": "codedoc/core/record_meta.py",
       "language": "python",
-      "description": "This file manages private metadata for CodeDoc file records, ensuring that certain keys are preserved across various formats while preventing unauthorized data exposure.",
-      "role_in_system": "It serves as a registry for private record keys that are used to maintain cache identity and ensure the integrity of documentation generation processes.",
+      "description": "This file manages private metadata for CodeDoc file records, ensuring that certain keys are preserved across various formats while preventing unauthorized data from being included in the output.",
+      "role_in_system": "It serves as a registry for private keys that are essential for maintaining the integrity and identity of file records during processing and caching.",
       "imports": [
         "__future__",
         "codedoc.core.prompt_profiles"
@@ -3276,7 +3282,7 @@
       "functions": [
         {
           "name": "normalized_identity_value",
-          "description": "Returns the normalized value of a key from a source dictionary, accounting for absent defaults."
+          "description": "Normalizes the value of a given key from a source dictionary, applying absent-default mappings."
         },
         {
           "name": "expected_analysis_identity",
@@ -3293,7 +3299,7 @@
       ],
       "key_concepts": [
         "private metadata management",
-        "cache identity preservation",
+        "cache identity keys",
         "truncation handling"
       ],
       "_deps": {
@@ -3301,7 +3307,7 @@
           "codedoc.core.prompt_profiles"
         ],
         "dependency_refs": [
-          "NO_PROMPT_PROFILE_DIGEST"
+          "codedoc.core.prompt_profiles"
         ],
         "usage_notes": [
           {
@@ -3310,8 +3316,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3350,11 +3356,11 @@
         },
         {
           "name": "review_batch",
-          "description": "Processes a batch of prompts, calling a language model and returning a cleaned review verdict."
+          "description": "Processes a single batch of prompts, calling a language model and returning a cleaned review verdict."
         },
         {
           "name": "review",
-          "description": "Reviews multiple batches of prompts, aggregating the results into a ReviewOutcome."
+          "description": "Reviews multiple batches of prompts, aggregating the outcomes into a single ReviewOutcome."
         }
       ],
       "classes": [
@@ -3364,12 +3370,12 @@
         },
         {
           "name": "PromptCustomizationValidationAgent",
-          "description": "An agent that reviews prompt customizations in batches, extending the functionality of BaseAgent."
+          "description": "A specialized agent that reviews prompt customizations in batches, inheriting from BaseAgent."
         }
       ],
       "exports": [
-        "ReviewOutcome",
-        "PromptCustomizationValidationAgent"
+        "PromptCustomizationValidationAgent",
+        "ReviewOutcome"
       ],
       "key_concepts": [
         "batch processing",
@@ -3413,18 +3419,18 @@
           {
             "name": "codedoc.utils.json_utils",
             "type": "internal",
-            "used_for": "providing JSON utility functions"
+            "used_for": "providing JSON utilities for handling duplicate keys"
           }
         ],
         "usage_notes": [
           {
-            "import": "from codedoc.agents.base_agent import BaseAgent",
-            "used_for": "extends the BaseAgent class to implement specific review functionality"
+            "import": "from codedoc.utils.json_utils import loads_no_duplicate_keys",
+            "used_for": "to safely load JSON without duplicate keys"
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3469,7 +3475,7 @@
         },
         {
           "name": "_clean_str_list",
-          "description": "Cleans a list of strings by trimming, removing empty entries, and enforcing uniqueness and length limits."
+          "description": "Cleans a list of strings by trimming, removing empty or non-string items, and enforcing uniqueness."
         },
         {
           "name": "_clean_symbols",
@@ -3477,7 +3483,7 @@
         },
         {
           "name": "_clean_object_list",
-          "description": "Cleans a list of objects based on required fields and caps, ensuring valid structure and uniqueness."
+          "description": "Cleans a list of fixed-schema objects, enforcing required fields and uniqueness."
         },
         {
           "name": "_clean_dependencies",
@@ -3485,11 +3491,11 @@
         },
         {
           "name": "clean_structure_response",
-          "description": "Cleans a StructureAgent response to conform to the bounded schema, returning a filtered dictionary."
+          "description": "Cleans a StructureAgent response to conform to the bounded schema."
         },
         {
           "name": "clean_dependency_response",
-          "description": "Cleans a DependencyAgent response, preserving the expected structure while filtering out invalid entries."
+          "description": "Cleans a DependencyAgent response, preserving the expected structure for dependencies."
         },
         {
           "name": "clean_documentation_response",
@@ -3513,9 +3519,9 @@
           "AgentError"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3571,9 +3577,9 @@
         }
       ],
       "key_concepts": [
-        "Provider selection and instantiation",
-        "Configuration-driven design",
-        "Error handling for provider initialization"
+        "Provider selection",
+        "API key resolution",
+        "Model auto-detection"
       ],
       "_deps": {
         "internal": [
@@ -3581,6 +3587,10 @@
           "codedoc.utils.errors",
           "codedoc.utils.logger",
           "codedoc.llm.api_provider"
+        ],
+        "external": [
+          "__future__",
+          "os"
         ],
         "dependency_refs": [
           "codedoc.llm.base",
@@ -3595,8 +3605,8 @@
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3620,7 +3630,7 @@
       "path": "codedoc/core/planning.py",
       "language": "python",
       "description": "This file provides shared pipeline planning functionality for the codedoc project, computing routing decisions for document processing without modifying any data or creating new providers.",
-      "role_in_system": "It serves as a core component in the codedoc system, facilitating the planning of document processing workflows by determining which files to process based on various criteria.",
+      "role_in_system": "It serves as a core component in the codedoc system, facilitating the planning of document processing workflows by determining which documents to process, reuse, or skip based on various criteria.",
       "imports": [
         "__future__",
         "dataclasses",
@@ -3635,11 +3645,11 @@
       "functions": [
         {
           "name": "_identity_matches",
-          "description": "Compares stored and expected cache identity keys to determine if they match."
+          "description": "Compares stored and expected identity keys to determine if they match."
         },
         {
           "name": "_record_is_reusable",
-          "description": "Determines if a stored record can be reused based on its content hash and cache identity."
+          "description": "Determines if a stored record can be reused based on its content hash and identity keys."
         },
         {
           "name": "normalize_force_files",
@@ -3665,9 +3675,9 @@
         "PlanMaterials"
       ],
       "key_concepts": [
-        "immutable data structures",
-        "routing decisions",
-        "dependency graph processing"
+        "Immutable data structures",
+        "Routing decisions",
+        "Dependency management"
       ],
       "_deps": {
         "internal": [
@@ -3694,11 +3704,17 @@
           "normalized_identity_value",
           "ConfigError",
           "get_logger"
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.utils.errors import ConfigError",
+            "used_for": "Used to raise configuration errors when file paths are invalid."
+          }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3723,8 +3739,8 @@
       "hash": "07a6fcb95c5b91b9ab44515e359e218d5f3cf8865bdcf7231a7bafd5ef19f82f",
       "path": "codedoc/agents/dependency_agent.py",
       "language": "python",
-      "description": "This file defines the DependencyAgent, which analyzes import relationships in Python files to determine their usage, categorize them as internal or external, and identify potential dependency risks.",
-      "role_in_system": "The DependencyAgent serves as a specialized tool within the codebase for assessing and managing dependencies, enhancing code quality and maintainability.",
+      "description": "This file defines the DependencyAgent, which analyzes import relationships in Python files to determine their usage, categorize them as internal or external, and identify any dependency risks.",
+      "role_in_system": "The DependencyAgent serves as a specialized tool within the codebase for assessing and managing dependencies, ensuring that the project maintains a clean and efficient import structure.",
       "imports": [
         "__future__",
         "codedoc.agents.base_agent",
@@ -3772,8 +3788,8 @@
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3795,8 +3811,8 @@
       "hash": "e1d3afc87be5fb631d0cb07b6b08de4fbbf1ba9e65aac929a179f7f315cc5f34",
       "path": "codedoc/agents/documentation_agent.py",
       "language": "python",
-      "description": "The Documentation Agent generates polished documentation for a file by taking outputs from StructureAgent and DependencyAgent, providing enriched descriptions, clear roles in the system, and human-readable summaries suitable for markdown output.",
-      "role_in_system": "This file serves as a component that processes and formats documentation based on analyses from other agents, ensuring that the output is clear and useful for developers new to the codebase.",
+      "description": "Documentation Agent that generates polished documentation for a file based on outputs from StructureAgent and DependencyAgent.",
+      "role_in_system": "It serves as a bridge between the analysis of code structure and dependencies, producing human-readable documentation for developers.",
       "imports": [
         "__future__",
         "codedoc.agents.base_agent",
@@ -3812,34 +3828,34 @@
         },
         {
           "name": "run",
-          "description": "Executes the documentation generation process using the provided file context."
+          "description": "Executes the documentation generation process using the provided file details and context."
         },
         {
           "name": "run_with_context",
-          "description": "Runs the documentation generation with pre-computed structure and dependency results."
+          "description": "Executes the documentation generation process with pre-computed structure and dependency results."
         },
         {
           "name": "_safe_run_with_context",
-          "description": "Safely runs the documentation generation and handles exceptions, logging any errors encountered."
+          "description": "Safely runs the documentation generation process and handles exceptions."
         },
         {
           "name": "_run_with_context",
-          "description": "Handles the core logic for generating documentation with the provided context and cleans the response."
+          "description": "Handles the core logic for generating documentation with the provided context."
         }
       ],
       "classes": [
         {
           "name": "DocumentationAgent",
-          "description": "A specialized agent that generates documentation based on code analysis and context."
+          "description": "Inherits from BaseAgent and implements methods to generate documentation based on code analysis."
         }
       ],
       "exports": [
         "DocumentationAgent"
       ],
       "key_concepts": [
-        "documentation generation",
-        "prompt construction",
-        "contextual processing"
+        "prompt generation",
+        "documentation creation",
+        "contextual analysis"
       ],
       "_deps": {
         "internal": [
@@ -3860,8 +3876,8 @@
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3884,8 +3900,8 @@
       "hash": "2704e6a87041f4b62b66cd7387e4614dc674be7077742b64522f3aa13154660e",
       "path": "codedoc/agents/file_documentation_agent.py",
       "language": "python",
-      "description": "This file implements a combined per-file documentation agent that analyzes a single file to produce a structured JSON object containing documentation, structure, and dependency analysis.",
-      "role_in_system": "The FileDocumentationAgent serves as the primary interface for generating documentation from code files, integrating various analysis components into a single call.",
+      "description": "This file implements a combined per-file documentation agent that analyzes a single file and produces a structured JSON object containing its structure, dependency analysis, and documentation.",
+      "role_in_system": "The FileDocumentationAgent serves as the primary interface for generating documentation from code files, integrating various analysis components into a single output.",
       "imports": [
         "__future__",
         "codedoc.agents.base_agent",
@@ -3896,21 +3912,18 @@
       "functions": [
         {
           "name": "build_prompt",
-          "description": "Constructs the prompt to be sent to the provider, including system instructions and the formatted code content."
-        },
-        {
-          "name": "run",
-          "description": "Executes the documentation generation process by calling the language model and cleaning the response."
+          "description": "Constructs the prompt to be sent to the provider, including system instructions and the formatted content of the file."
         }
       ],
       "classes": [
         {
           "name": "FileDocumentationAgent",
-          "description": "The main agent class that handles the documentation generation in single mode for a given file."
+          "description": "The default agent for single-mode documentation analysis, which processes a file and returns a cleaned JSON response."
         }
       ],
       "exports": [
         "FileDocumentationAgent",
+        "build_prompt",
         "MAX_CATALOG_UPDATE_ITEMS",
         "MAX_COMBINED_RESPONSE_CHARS",
         "MAX_DEPENDENCY_ITEMS_PER_LIST",
@@ -3930,9 +3943,9 @@
         "clean_combined_response"
       ],
       "key_concepts": [
-        "single mode documentation generation",
-        "prompt construction for language model",
-        "response cleaning and filtering"
+        "single-mode analysis",
+        "combined JSON response",
+        "response cleaning"
       ],
       "usage_example": "from codedoc.agents.file_documentation_agent import FileDocumentationAgent",
       "_deps": {
@@ -3950,8 +3963,8 @@
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3973,7 +3986,7 @@
       "path": "codedoc/agents/structure_agent.py",
       "language": "python",
       "description": "The Structure Agent analyzes a file's internal structure, identifying key functions, classes, exported symbols, and the file's role within the overall system.",
-      "role_in_system": "This file serves as a component that processes source code files to extract and clean structural information, aiding in understanding and documentation.",
+      "role_in_system": "This file serves as a component that processes source code files to extract and clean structural information, facilitating better understanding and documentation of the codebase.",
       "imports": [
         "__future__",
         "codedoc.agents.base_agent",
@@ -4001,9 +4014,9 @@
         "StructureAgent"
       ],
       "key_concepts": [
-        "prompt construction",
-        "response cleaning",
-        "code analysis"
+        "Prompt generation",
+        "Code analysis",
+        "Response cleaning"
       ],
       "_deps": {
         "internal": [
@@ -4028,19 +4041,11 @@
           {
             "import": "from codedoc.agents.response_cleaning import clean_structure_response",
             "used_for": "Cleans the raw analysis response from the language model."
-          },
-          {
-            "import": "from codedoc.core.prompt_profiles import ResolvedShapeBlock",
-            "used_for": "Defines the structure of the prompt shape used in the analysis."
-          },
-          {
-            "import": "from codedoc.utils.logger import get_logger",
-            "used_for": "Sets up logging for the StructureAgent."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4062,8 +4067,8 @@
       "hash": "e4e00cb7ade72ea78b100a7bb076764b0646978a4bd750384d8fd74310a5799e",
       "path": "codedoc/llm/__init__.py",
       "language": "python",
-      "description": "This file serves as the package initializer for the codedoc.llm module, re-exporting key components such as LLMProvider and create_provider to facilitate their use in other parts of the codebase.",
-      "role_in_system": "It connects the llm module's functionality by exposing essential classes and functions, allowing other modules to easily access and utilize the language model provider capabilities.",
+      "description": "This file serves as the package initializer for the codedoc.llm module, re-exporting key components from the base and factory submodules to provide a simplified interface for users of the module.",
+      "role_in_system": "It connects the base functionality of LLMProvider and the provider creation logic from the factory, allowing other parts of the codebase to easily access and utilize these components.",
       "imports": [
         "codedoc.llm.base",
         "codedoc.llm.factory"
@@ -4084,10 +4089,32 @@
         "dependency_refs": [
           "codedoc.llm.base.LLMProvider",
           "codedoc.llm.factory.create_provider"
+        ],
+        "catalog_updates": [
+          {
+            "name": "codedoc.llm.base.LLMProvider",
+            "type": "internal",
+            "used_for": "providing a standard interface for language model providers"
+          },
+          {
+            "name": "codedoc.llm.factory.create_provider",
+            "type": "internal",
+            "used_for": "creating instances of language model providers"
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.llm import LLMProvider",
+            "used_for": "accessing the LLMProvider class directly"
+          },
+          {
+            "import": "from codedoc.llm import create_provider",
+            "used_for": "utilizing the factory function to create providers"
+          }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4100,8 +4127,8 @@
       "hash": "86e7f9274a3335505324769500edbf44a1f38e8d8857ca9e2e2c8f4d56001f23",
       "path": "codedoc/agents/orchestrator.py",
       "language": "python",
-      "description": "The Orchestrator class coordinates multi-agent processing for file analysis, allowing for either a single combined call or a triple call to different agents for detailed analysis.",
-      "role_in_system": "This file serves as a central point for managing the interactions between various analysis agents, facilitating the processing of files in a structured manner.",
+      "description": "Agent Orchestrator that coordinates per-file analysis in selectable modes, either single or triple, merging results from various agents.",
+      "role_in_system": "Supports the analysis of files by coordinating multiple agents to extract structure, dependencies, and documentation, returning a unified result.",
       "imports": [
         "__future__",
         "concurrent.futures",
@@ -4132,7 +4159,7 @@
         },
         {
           "name": "_process_single",
-          "description": "Handles the single mode of analysis by making one combined provider call."
+          "description": "Handles the single mode analysis by making one combined provider call."
         },
         {
           "name": "_merge_single",
@@ -4140,7 +4167,7 @@
         },
         {
           "name": "_run_sequential",
-          "description": "Executes agents in a sequential manner, useful for local LLMs with limited VRAM."
+          "description": "Runs agents sequentially for analysis when parallel mode is disabled."
         },
         {
           "name": "_merge",
@@ -4150,16 +4177,13 @@
       "classes": [
         {
           "name": "Orchestrator",
-          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution of analysis agents."
+          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution modes."
         }
-      ],
-      "exports": [
-        "Orchestrator"
       ],
       "key_concepts": [
         "multi-agent processing",
         "file analysis",
-        "parallel and sequential execution"
+        "result merging"
       ],
       "_deps": {
         "internal": [
@@ -4179,23 +4203,24 @@
           "time"
         ],
         "dependency_refs": [
-          "LLMProvider",
-          "UsageAccumulator",
-          "ResolvedProfile",
-          "FileDocumentationAgent",
-          "StructureAgent",
-          "DependencyAgent",
-          "DocumentationAgent",
-          "truncate_for_llm",
-          "get_logger",
-          "expected_analysis_identity",
-          "expected_max_context_revision",
-          "NO_PROMPT_PROFILE_DIGEST"
+          "__future__",
+          "concurrent.futures",
+          "time",
+          "codedoc.agents.base_agent",
+          "codedoc.agents.file_documentation_agent",
+          "codedoc.agents.structure_agent",
+          "codedoc.agents.dependency_agent",
+          "codedoc.agents.documentation_agent",
+          "codedoc.core.record_meta",
+          "codedoc.core.prompt_profiles",
+          "codedoc.core.usage",
+          "codedoc.llm.base",
+          "codedoc.utils.logger"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4227,7 +4252,7 @@
       "path": "codedoc/agents/__init__.py",
       "language": "python",
       "description": "This file serves as the package initializer for the codedoc.agents module, re-exporting key agent classes for easier access and organization within the codebase.",
-      "role_in_system": "It connects various agent classes into a single namespace, allowing other parts of the codebase to import these classes directly from the agents package.",
+      "role_in_system": "It connects various agent classes into a single namespace, allowing other parts of the codebase to import these classes directly from the agents package without needing to know their individual module paths.",
       "imports": [
         "codedoc.agents.orchestrator",
         "codedoc.agents.base_agent",
@@ -4261,8 +4286,8 @@
           "codedoc.agents.documentation_agent"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4278,18 +4303,18 @@
       }
     },
     {
-      "hash": "d9b1c6e1720d62198154bb4751062b9d618452851bcfaa9aa6487d06d4ba521e",
+      "hash": "0770fe2df066f332adb53a0ca1885adbae399e12921891a9b6a18a4c177c2047",
       "path": "codedoc/__init__.py",
       "language": "python",
-      "description": "This file serves as the entry point for the codedoc package, providing a lightweight interface to run the documentation pipeline without loading unnecessary dependencies until needed.",
-      "role_in_system": "It connects to the codedoc.pipeline module to facilitate the execution of the documentation pipeline, allowing users to generate documentation in a modular and efficient manner.",
+      "description": "This file serves as the initializer for the codedoc package, providing a lightweight interface to run the documentation pipeline without loading unnecessary dependencies until needed.",
+      "role_in_system": "It connects to the rest of the codebase by exposing the run_pipeline function, which delegates the actual work to the pipeline module, thus maintaining a clean and efficient import structure.",
       "imports": [
         "codedoc.pipeline"
       ],
       "functions": [
         {
           "name": "run_pipeline",
-          "description": "Runs the documentation pipeline by importing the actual implementation from the codedoc.pipeline module when called."
+          "description": "Runs the documentation pipeline by importing the run_pipeline function from the codedoc.pipeline module."
         }
       ],
       "exports": [
@@ -4310,12 +4335,12 @@
         "usage_notes": [
           {
             "import": "from codedoc import run_pipeline",
-            "used_for": "Allows users to execute the documentation pipeline."
+            "used_for": "To execute the documentation pipeline from another module."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4331,15 +4356,15 @@
       "hash": "1bbfaa1ceb96f18f7d03c82eb9fd5f54b17fbf5144b62a3c734947358f87939c",
       "path": "codedoc/__main__.py",
       "language": "python",
-      "description": "This file allows the execution of the codedoc CLI by invoking the main function when the module is run as a script.",
-      "role_in_system": "This file serves as the entry point for the codedoc application, connecting the command line interface to the rest of the codedoc codebase.",
+      "description": "This file allows the execution of the codedoc CLI by using the command 'python -m codedoc'.",
+      "role_in_system": "It serves as the entry point for the codedoc application, invoking the main function from the CLI module to start the command-line interface.",
       "imports": [
         "codedoc.cli.cli"
       ],
       "functions": [
         {
           "name": "main",
-          "description": "Executes the main functionality of the codedoc CLI."
+          "description": "This function is called to execute the main logic of the codedoc CLI."
         }
       ],
       "exports": [
@@ -4347,7 +4372,7 @@
       ],
       "key_concepts": [
         "entry point",
-        "command line interface"
+        "command-line interface"
       ],
       "_deps": {
         "internal": [
@@ -4359,12 +4384,12 @@
         "usage_notes": [
           {
             "import": "from codedoc.cli.cli import main",
-            "used_for": "Imports the main function to be executed when the module is run."
+            "used_for": "Imports the main function to be executed when the module is run directly."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4376,8 +4401,8 @@
       "hash": "19fb34759d25e354de0860566db71c69d8ed2edf4600f2d3fc43358048700710",
       "path": "codedoc/bootstrap.py",
       "language": "python",
-      "description": "This file performs runtime checks to ensure that the codedoc library is installed and importable in the current Python environment. It emphasizes that package installation should be handled by package managers rather than at runtime.",
-      "role_in_system": "This file supports the codedoc library by providing a mechanism to verify its availability, which is crucial for ensuring that other parts of the codebase can rely on its functionality without encountering import errors.",
+      "description": "This file performs runtime checks to ensure that the codedoc library is installed and importable in the current Python environment. It emphasizes that package installation should be handled by package managers like pip, uv, or poetry, rather than at runtime.",
+      "role_in_system": "This file supports the codedoc library by providing a mechanism to verify its availability in the user's environment, which is crucial for the library's functionality.",
       "imports": [
         "__future__",
         "pathlib",
@@ -4387,7 +4412,7 @@
       "functions": [
         {
           "name": "ensure_codedoc_installed",
-          "description": "Checks if the codedoc package is importable and logs the result."
+          "description": "Checks if the codedoc package can be imported, logging the result and returning a boolean value."
         }
       ],
       "key_concepts": [
@@ -4401,12 +4426,11 @@
           "codedoc"
         ],
         "external": [
+          "__future__",
           "pathlib"
         ],
         "dependency_refs": [
-          "codedoc.utils.logger",
-          "codedoc",
-          "pathlib"
+          "codedoc.utils.logger"
         ],
         "catalog_updates": [
           {
@@ -4418,12 +4442,12 @@
         "usage_notes": [
           {
             "import": "from codedoc.bootstrap import ensure_codedoc_installed",
-            "used_for": "to verify if the codedoc library is installed before proceeding with operations that depend on it"
+            "used_for": "to check if the codedoc library is importable"
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4444,7 +4468,7 @@
       "path": "codedoc/cli/__init__.py",
       "language": "python",
       "description": "This file serves as the package initializer for the codedoc.cli module, re-exporting the main function from the codedoc.cli.cli module to provide a simplified interface for users of the codedoc CLI.",
-      "role_in_system": "This file connects the codedoc.cli package to the main functionality defined in codedoc.cli.cli, allowing users to access the main entry point of the CLI application directly through the codedoc.cli namespace.",
+      "role_in_system": "It connects the codedoc.cli module to the main function defined in codedoc.cli.cli, allowing users to access the CLI functionality directly through the codedoc.cli namespace.",
       "imports": [
         "codedoc.cli.cli"
       ],
@@ -4464,12 +4488,12 @@
         "usage_notes": [
           {
             "import": "from codedoc.cli.cli import main",
-            "used_for": "Re-exporting the main function for CLI usage."
+            "used_for": "Re-exporting the main function for CLI access"
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4478,11 +4502,11 @@
       }
     },
     {
-      "hash": "f345772ad844921bbe7b30e70a49e9c835b00184a4ab631531c46d33177dddc0",
+      "hash": "dc8097264e1d0c51f7ea36b6d0eb2fdf58645c774a0de884a4f9bf3b4d0c3fbc",
       "path": "codedoc/cli/cli.py",
       "language": "python",
       "description": "This file serves as the command-line interface (CLI) entry point for the codedoc tool, which generates documentation for codebases using AI.",
-      "role_in_system": "It connects to the rest of the codedoc codebase by providing a user interface for invoking documentation generation, handling command-line arguments, and managing the execution flow based on user input.",
+      "role_in_system": "It connects to the rest of the codedoc codebase by providing a user interface for initiating documentation generation, handling command-line arguments, and managing the flow of execution based on user input.",
       "imports": [
         "__future__",
         "argparse",
@@ -4511,20 +4535,23 @@
       "key_concepts": [
         "command-line argument parsing",
         "documentation generation",
-        "error handling"
+        "AI integration"
       ],
       "usage_example": "codedoc.cli.cli.main()",
       "_deps": {
         "internal": [
+          "codedoc",
           "codedoc.pipeline",
           "codedoc.core.config_template",
           "codedoc.utils.errors",
           "codedoc.core.io_diagnostics"
         ],
         "external": [
+          "__future__",
           "argparse",
           "sys",
-          "pathlib"
+          "pathlib",
+          "traceback"
         ],
         "dependency_refs": [
           "__future__",
@@ -4541,13 +4568,13 @@
         "usage_notes": [
           {
             "import": "argparse",
-            "used_for": "Used to handle command-line argument parsing."
+            "used_for": "Used to handle command-line arguments for the CLI."
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4575,7 +4602,7 @@
       "path": "codedoc/core/__init__.py",
       "language": "python",
       "description": "This file serves as the core module for the codedoc package, providing access to essential components for loading configurations, scanning files, managing processing queues, and handling dependencies.",
-      "role_in_system": "It acts as an initializer that re-exports key functionalities from various submodules, allowing other parts of the codebase to access these components seamlessly.",
+      "role_in_system": "It acts as an initializer that re-exports key functionalities from various submodules, allowing other parts of the codebase to access these components easily.",
       "imports": [
         "codedoc.core.loader",
         "codedoc.core.scanner",
@@ -4628,8 +4655,8 @@
           "SafeWriter"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4667,7 +4694,7 @@
       "functions": [
         {
           "name": "build_default_config",
-          "description": "Generates a complete default configuration dictionary with resolved default values for all public config keys."
+          "description": "Generates a complete default configuration dictionary with all public keys and their resolved default values."
         },
         {
           "name": "render_default_config_json",
@@ -4693,7 +4720,7 @@
       "key_concepts": [
         "Configuration management",
         "Default values generation",
-        "Data validation"
+        "Error handling in JSON processing"
       ],
       "_deps": {
         "internal": [
@@ -4720,19 +4747,42 @@
           "dataclasses",
           "pathlib"
         ],
-        "usage_notes": [
+        "catalog_updates": [
           {
-            "import": "codedoc.core.loader",
-            "used_for": "Provides the DEFAULTS and validation functions for configuration data."
+            "name": "codedoc.core.block_manager",
+            "type": "internal",
+            "used_for": "Managing text block operations in the codedoc application."
           },
           {
-            "import": "codedoc.core.prompt_profiles",
-            "used_for": "Supplies the default prompt profiles for the configuration."
+            "name": "codedoc.core.loader",
+            "type": "internal",
+            "used_for": "Loading default configurations and validating config data."
+          },
+          {
+            "name": "codedoc.core.prompt_profiles",
+            "type": "internal",
+            "used_for": "Providing default prompt profiles for the codedoc application."
+          },
+          {
+            "name": "codedoc.utils.errors",
+            "type": "internal",
+            "used_for": "Defining custom error types for configuration handling."
+          },
+          {
+            "name": "codedoc.utils.json_utils",
+            "type": "internal",
+            "used_for": "Utilities for handling JSON data, including error handling for duplicates and non-finite numbers."
+          }
+        ],
+        "usage_notes": [
+          {
+            "import": "from codedoc.core.config_template import init_config",
+            "used_for": "Used to initialize the configuration for a project."
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4755,11 +4805,11 @@
       }
     },
     {
-      "hash": "0815c92e5e06e7279dab875b86b2e73be3ae2566204475b41fc351acaf16f3ad",
+      "hash": "3bdcd9711edaf39688064b0f72ad6eaa94876d0d4016a31de1dbbd909fbb1fcc",
       "path": "codedoc/core/discovery.py",
       "language": "python",
-      "description": "This file is responsible for discovering entry points, constructing a dependency graph, and selecting files based on entry reachability within the CodeDoc system. It facilitates the extraction of metadata from existing CodeDoc outputs and manages the relationships between files in a project.",
-      "role_in_system": "This module connects to the CodeDoc pipeline by providing essential functions for entry recovery, graph construction, and file selection, ensuring that documentation generation is based on accurate project structure and dependencies.",
+      "description": "This file is responsible for discovering entry points, constructing dependency graphs, and selecting files based on entry reachability within the CodeDoc system. It facilitates the extraction of metadata from existing CodeDoc outputs and manages the relationships between files in a project.",
+      "role_in_system": "This module connects to the CodeDoc pipeline by providing essential functions for entry recovery, graph construction, and file selection, ensuring that documentation generation is based on accurate and reachable project files.",
       "imports": [
         "__future__",
         "pathlib",
@@ -4773,7 +4823,7 @@
       "functions": [
         {
           "name": "_resolve_entry_and_docs",
-          "description": "Auto-discovers the entry point from the selected CodeDoc output by inspecting the specified output files for entry metadata."
+          "description": "Auto-discovers the entry point from the selected CodeDoc output by inspecting the specified output directory and reading entry metadata."
         },
         {
           "name": "_build_graph",
@@ -4781,7 +4831,7 @@
         },
         {
           "name": "_select_files",
-          "description": "Selects files for documentation based on the entry point and the specified documentation scope, returning reachable files and the entry file."
+          "description": "Selects files based on the documentation scope and the entry point, determining which files are reachable from the entry."
         },
         {
           "name": "_graph_edges",
@@ -4789,7 +4839,7 @@
         }
       ],
       "key_concepts": [
-        "dependency graph",
+        "dependency graph construction",
         "entry point discovery",
         "file selection based on reachability"
       ],
@@ -4817,8 +4867,8 @@
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4839,11 +4889,11 @@
       }
     },
     {
-      "hash": "671728e3ebd2c4b0b190f476da941e63432280266416696b41a81bb7062f43b0",
+      "hash": "5e6b495f658d77147d8e27694e252b399b0dc08fe3f2ba467178d08e4fc281ec",
       "path": "codedoc/core/document.py",
       "language": "python",
-      "description": "This module provides a centralized read-only parser for CodeDoc JSON and Markdown documents, ensuring structural validity and ownership validation without modifying the documents.",
-      "role_in_system": "It serves as the core component for parsing and validating CodeDoc documents, allowing other parts of the system to interact with these documents in a structured manner.",
+      "description": "Centralized read-only parser for CodeDoc JSON / Markdown documents, responsible for parsing and validating the structure of CodeDoc documents without modifying them.",
+      "role_in_system": "This file serves as the core component for reading and validating CodeDoc documents, ensuring they conform to expected schemas and formats, and providing structured access to their contents.",
       "imports": [
         "__future__",
         "copy",
@@ -4865,15 +4915,15 @@
         },
         {
           "name": "_validate_json_schema",
-          "description": "Validates the schema version of a JSON CodeDoc document against accepted schemas."
+          "description": "Validates the schema of a JSON CodeDoc document against accepted standards."
         },
         {
-          "name": "_read_markdown",
-          "description": "Reads and validates a Markdown CodeDoc document, extracting its metadata and embedded view."
+          "name": "_validate_last_run",
+          "description": "Validates the last_run block of a CodeDoc document to ensure it meets required structural criteria."
         },
         {
           "name": "records_by_path",
-          "description": "Returns a mapping of file paths to their corresponding records from a parsed CodedocDocument."
+          "description": "Returns a map of file paths to their corresponding records from a parsed CodeDoc document."
         }
       ],
       "classes": [
@@ -4883,14 +4933,13 @@
         }
       ],
       "exports": [
-        "CodedocDocument",
-        "read_codedoc_document"
+        "read_codedoc_document",
+        "CodedocDocument"
       ],
       "key_concepts": [
-        "read-only parsing",
+        "read-only document parsing",
         "schema validation",
-        "defensive copying",
-        "metadata extraction"
+        "defensive copying"
       ],
       "_deps": {
         "internal": [
@@ -4910,24 +4959,11 @@
           "codedoc.core.markdown_view",
           "codedoc.core.project_view",
           "codedoc.utils.errors"
-        ],
-        "catalog_updates": [
-          {
-            "name": "codedoc",
-            "type": "internal",
-            "used_for": "Core functionality for parsing CodeDoc documents."
-          }
-        ],
-        "usage_notes": [
-          {
-            "import": "from codedoc.core.document import read_codedoc_document",
-            "used_for": "To parse and validate CodeDoc documents in other modules."
-          }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4955,7 +4991,7 @@
       "path": "codedoc/core/execution.py",
       "language": "python",
       "description": "This file handles the execution of agent files, managing rate-limit handling, retries, and parallel processing. It is part of the internal module decomposition of the codedoc pipeline.",
-      "role_in_system": "This module serves as the execution layer for processing agent files, coordinating with various components like the orchestrator, queue, and error reporting to ensure efficient and reliable execution.",
+      "role_in_system": "This module serves as the execution engine for processing agent files, coordinating with various components like the orchestrator, queue, and error reporting to ensure efficient and reliable execution.",
       "imports": [
         "__future__",
         "concurrent.futures",
@@ -5015,7 +5051,7 @@
       "classes": [
         {
           "name": "_SequentialOutcome",
-          "description": "Represents the outcome of a sequential processing pass, indicating success and failure metrics."
+          "description": "Represents the outcome of a sequential processing pass, indicating success and failure counts."
         },
         {
           "name": "ExecutionOptions",
@@ -5084,14 +5120,14 @@
         ],
         "usage_notes": [
           {
-            "import": "from codedoc.utils.logger import get_logger",
-            "used_for": "Used to initialize a logger for this module."
+            "import": "from codedoc.core.error_classifier import _classify_failure",
+            "used_for": "Classifying errors during file processing."
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5124,7 +5160,7 @@
       "path": "codedoc/core/loader.py",
       "language": "python",
       "description": "Config loader for codedoc that manages configuration settings for the application.",
-      "role_in_system": "This file serves as the central configuration loader for the codedoc application, ensuring that all necessary settings are read and validated from a single configuration file.",
+      "role_in_system": "This file serves as the central point for loading and validating configuration settings necessary for the operation of the codedoc application.",
       "imports": [
         "__future__",
         "json",
@@ -5145,13 +5181,13 @@
         },
         {
           "name": "_has_provider_api_key",
-          "description": "Checks if any of the required API keys for providers are set in the environment variables."
+          "description": "Checks if any of the environment variables for API keys are set."
         }
       ],
       "key_concepts": [
         "Configuration management",
-        "Validation of settings",
-        "Environment variable checks"
+        "Error handling",
+        "Validation of input data"
       ],
       "_deps": {
         "internal": [
@@ -5177,14 +5213,22 @@
         ],
         "usage_notes": [
           {
-            "import": "from codedoc.utils.logger import get_logger",
-            "used_for": "Initializes the logger for this module."
+            "import": "codedoc.utils.errors",
+            "used_for": "Provides error handling for configuration issues."
+          },
+          {
+            "import": "codedoc.utils.json_utils",
+            "used_for": "Handles JSON loading with specific error checks."
+          },
+          {
+            "import": "codedoc.utils.logger",
+            "used_for": "Sets up logging for the configuration loading process."
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5210,11 +5254,11 @@
       }
     },
     {
-      "hash": "d8208f5cf213355bdbad3f8216fb638071bba2d735569c72504f3a00c262bf2e",
+      "hash": "cc58877ad2056c10fe67a1c1711670997a72a264effc51575648fc6ab101ee6a",
       "path": "codedoc/core/markdown_view.py",
       "language": "python",
-      "description": "This file handles the serialization and parsing of Markdown for codedoc project views, allowing for the rendering of project documentation in Markdown format and the conversion of Markdown back into a structured view.",
-      "role_in_system": "It serves as the Markdown interface for the codedoc project, facilitating the conversion between Markdown and JSON representations of project views while depending on the project_view module for assembly tasks.",
+      "description": "This file handles Markdown serialization and parsing for codedoc project views, allowing for the rendering of project views to Markdown and parsing Markdown back into view shapes.",
+      "role_in_system": "It connects to the codedoc.core.project_view module to manage the Markdown representation of project views, ensuring a one-way dependency for project assembly.",
       "imports": [
         "__future__",
         "base64",
@@ -5227,23 +5271,42 @@
       ],
       "functions": [
         {
-          "name": "markdown_from_view",
-          "description": "Renders a public project view as Markdown, including metadata and a base64-encoded view."
+          "name": "_project_overview_from_view",
+          "description": "Returns a visible project overview derived from the current view shape."
         },
         {
-          "name": "markdown_to_view",
-          "description": "Parses Markdown output back into the public JSON view shape, using an embedded view for lossless conversion when available."
+          "name": "markdown_from_view",
+          "description": "Renders a public project view as Markdown, including metadata and a lossless embedded view."
+        },
+        {
+          "name": "_normalize_markdown_newlines",
+          "description": "Canonicalizes line endings in Markdown text to ensure compatibility with parsers."
+        },
+        {
+          "name": "_render_tree_lines",
+          "description": "Recursively renders a tree structure into Markdown lines."
+        },
+        {
+          "name": "_append_file_markdown",
+          "description": "Appends Markdown representation of a file's details to the provided lines."
+        },
+        {
+          "name": "_append_list",
+          "description": "Appends a formatted list of items to the Markdown lines."
+        },
+        {
+          "name": "_append_named_items",
+          "description": "Appends a list of named items with descriptions to the Markdown lines."
         }
       ],
       "classes": [
         {
           "name": "EmbeddedViewResult",
-          "description": "Represents the result of attempting to read a Markdown embedded view, indicating whether the view is absent, valid, or invalid."
+          "description": "Represents the result of attempting to read a Markdown embedded view, indicating its state and associated view data."
         }
       ],
       "exports": [
-        "markdown_from_view",
-        "markdown_to_view"
+        "markdown_from_view"
       ],
       "key_concepts": [
         "Markdown serialization",
@@ -5256,6 +5319,7 @@
           "codedoc.utils.logger"
         ],
         "external": [
+          "__future__",
           "base64",
           "json",
           "re",
@@ -5263,17 +5327,13 @@
           "typing"
         ],
         "dependency_refs": [
-          "_folder_view",
-          "_prune_empty",
-          "_tree",
-          "json_from_view",
-          "without_schema_version",
-          "get_logger"
+          "codedoc.core.project_view",
+          "codedoc.utils.logger"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5297,11 +5357,11 @@
       }
     },
     {
-      "hash": "1053965f47446d8f9d06d2bbacecf8df2d1be5c389bfce2aadd502d7564ef04f",
+      "hash": "c084882e6031ddcccee86dab9d017e6b4ef8dd03940c551f82250ebd9439c82d",
       "path": "codedoc/core/output.py",
       "language": "python",
-      "description": "This file handles the writing of final output artifacts with ownership checks and atomic replacement, ensuring that the output files are correctly owned and can be safely written without conflicts.",
-      "role_in_system": "It connects to the rest of the codebase by providing functions that manage the output of project data in various formats, ensuring that the output process is safe and reliable.",
+      "description": "This file handles the writing of final artifacts with ownership checks and atomic replacement, ensuring that output files are correctly owned and safely written without intermediate build files.",
+      "role_in_system": "It connects to the rest of the codebase by providing functions to inspect ownership of output files, validate accessibility, and write project outputs, thus ensuring the integrity and safety of the output generation process.",
       "imports": [
         "__future__",
         "os",
@@ -5318,27 +5378,31 @@
       "functions": [
         {
           "name": "inspect_output_ownership",
-          "description": "Checks the ownership of output files to ensure they are not owned by foreign sources, returning a list of conflicts."
+          "description": "Inspects the ownership of output files and returns a list of conflicts for foreign-owned targets."
         },
         {
           "name": "preflight_output_targets",
-          "description": "Raises a ConfigError if any final output target is foreign-owned, preventing overwriting of files."
+          "description": "Raises a ConfigError if any final output target is foreign-owned, preventing overwriting of non-codedoc files."
         },
         {
           "name": "preflight_output_accessibility",
-          "description": "Verifies that the output directory is writable and can be created if it does not exist."
+          "description": "Verifies that the output directory is writable and can be created if absent, raising an OutputError on failure."
         },
         {
           "name": "read_existing_records",
-          "description": "Reads per-file records from a codedoc JSON output file in a read-only manner."
+          "description": "Reads per-file records from a codedoc JSON output file in a read-only manner, returning records or None based on ownership."
         },
         {
           "name": "write_project_outputs",
-          "description": "Writes the final combined output file(s) in the specified format, ensuring that existing files are owned by codedoc."
+          "description": "Writes the final combined output file(s) in the specified format, ensuring that existing files are codedoc-owned before overwriting."
+        },
+        {
+          "name": "validate_distinct_artifact_paths",
+          "description": "Rejects two distinct generated artifacts targeting the same path, ensuring unique output paths."
         },
         {
           "name": "write_summary",
-          "description": "Writes a backward-compatible summary of the project results for older callers."
+          "description": "Writes a backward-compatible summary for older callers, using the normal CodeDoc Markdown envelope."
         }
       ],
       "exports": [
@@ -5348,7 +5412,7 @@
       "key_concepts": [
         "ownership checks",
         "atomic file writing",
-        "error handling"
+        "output format handling"
       ],
       "_deps": {
         "internal": [
@@ -5366,21 +5430,21 @@
           "pathlib"
         ],
         "dependency_refs": [
+          "os",
+          "uuid",
+          "pathlib",
           "codedoc.core.block_manager",
           "codedoc.core.document",
           "codedoc.core.io_diagnostics",
           "codedoc.core.markdown_view",
           "codedoc.core.project_view",
           "codedoc.utils.errors",
-          "codedoc.utils.logger",
-          "os",
-          "uuid",
-          "pathlib"
+          "codedoc.utils.logger"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5405,11 +5469,11 @@
       }
     },
     {
-      "hash": "1ed7c55e4b0e3916214ac6578bc7654446d901909400d592e245cbe2d61c5e44",
+      "hash": "1a5e434477122fa56684630bebd24c4e44125afe28a020ba7bea0552c45b1af3",
       "path": "codedoc/core/project_view.py",
       "language": "python",
-      "description": "This file builds clean public project documentation views from cached records, handling serialization, parsing, and various project view constructions.",
-      "role_in_system": "It connects to the rest of the codebase by providing a structured way to generate and serialize project documentation views, while also managing dependencies and metadata.",
+      "description": "This file builds clean public project documentation views from cached records, handling serialization, parsing, and various metadata operations.",
+      "role_in_system": "It connects to the rest of the codebase by providing a structured view of project documentation, facilitating the generation of JSON and Markdown outputs from internal records.",
       "imports": [
         "__future__",
         "json",
@@ -5431,31 +5495,51 @@
         },
         {
           "name": "build_project_view",
-          "description": "Constructs a compact language-neutral view for public JSON/Markdown output from project records."
+          "description": "Constructs a compact language-neutral view for public JSON/Markdown output based on project records and statistics."
+        },
+        {
+          "name": "_build_last_run",
+          "description": "Generates metadata about the last run of the documentation generation process."
+        },
+        {
+          "name": "_nonnegative_int",
+          "description": "Attempts to coerce a value into a non-negative integer for run counters."
         },
         {
           "name": "json_from_view",
-          "description": "Renders a public project view as formatted JSON, embedding metadata and handling errors."
+          "description": "Renders a public project view as formatted JSON, excluding certain transient fields."
         },
         {
           "name": "read_codedoc_meta",
-          "description": "Reads CodeDoc metadata from a previously generated output file, returning the document's ownership metadata."
+          "description": "Reads CodeDoc metadata from a previously generated output file, returning ownership metadata."
         },
         {
-          "name": "clean_file_record",
-          "description": "Converts a raw pipeline record into a clean public file entry for JSON/Markdown output."
+          "name": "_folder_view",
+          "description": "Groups files by their top-level folder and summarizes their metadata."
+        },
+        {
+          "name": "_folder_summary",
+          "description": "Creates a summary string for a folder based on its files and languages."
+        },
+        {
+          "name": "_tree",
+          "description": "Constructs a tree structure from a list of file paths."
+        },
+        {
+          "name": "_top_folder",
+          "description": "Determines the top folder of a given file path."
         }
       ],
       "exports": [
         "build_project_view",
         "json_from_view",
-        "read_codedoc_meta",
-        "clean_file_record"
+        "read_codedoc_meta"
       ],
       "key_concepts": [
-        "project documentation views",
+        "project documentation",
+        "metadata handling",
         "dependency management",
-        "metadata handling"
+        "JSON serialization"
       ],
       "_deps": {
         "internal": [
@@ -5486,12 +5570,12 @@
           {
             "name": "KIND_EXTERNAL",
             "type": "external",
-            "used_for": "Identifying external dependencies in project views."
+            "used_for": "Identifying external dependencies in project documentation."
           },
           {
             "name": "KIND_SDK",
             "type": "external",
-            "used_for": "Identifying SDK dependencies in project views."
+            "used_for": "Identifying SDK dependencies in project documentation."
           }
         ],
         "usage_notes": [
@@ -5501,9 +5585,9 @@
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5537,7 +5621,7 @@
       "path": "codedoc/core/resume.py",
       "language": "python",
       "description": "Resume and recovery helpers for the documentation pipeline, managing the loading of stable documentation records and ensuring consistency across formats.",
-      "role_in_system": "This file supports the documentation pipeline by providing mechanisms to load existing documentation records, validate their consistency, and handle recovery scenarios without overwriting stable outputs.",
+      "role_in_system": "This file supports the documentation pipeline by providing mechanisms to load existing documentation records, validate their consistency, and handle recovery scenarios.",
       "imports": [
         "__future__",
         "os",
@@ -5553,36 +5637,32 @@
       "functions": [
         {
           "name": "_load_existing_file_docs",
-          "description": "Loads stable records from the selected target or its exact format sibling, ensuring consistency between JSON and Markdown formats."
+          "description": "Loads stable records from the selected target or its exact format sibling, ensuring consistency when both formats are present."
         },
         {
           "name": "_load_strict_fallback_records",
-          "description": "Returns records from an owned opposite-format fallback or raises an error if the fallback is not a readable document."
+          "description": "Returns records from an owned opposite-format fallback or raises an error if it fails to load."
         },
         {
           "name": "_load_json_records",
-          "description": "Loads per-file records from the exact JSON target, returning an empty dictionary if the target does not exist."
+          "description": "Loads per-file records from the exact JSON target."
         },
         {
           "name": "_load_md_records",
-          "description": "Loads per-file records from the exact Markdown target, returning an empty dictionary if the target does not exist."
+          "description": "Loads per-file records from the exact Markdown target."
         },
         {
           "name": "_assert_cross_document_consistency",
-          "description": "Raises a ConfigError if the JSON and Markdown outputs disagree on key document properties."
+          "description": "Raises an error if the JSON and Markdown outputs disagree on key identity fields."
         },
         {
           "name": "_public_record_to_doc",
-          "description": "Converts a public JSON file record back to a documentation dictionary, carrying over private keys."
+          "description": "Converts a public JSON file record back to a documentation dictionary."
         },
         {
           "name": "_build_documentation_records",
-          "description": "Builds documentation records for writing project outputs based on existing and new results."
+          "description": "Builds documentation records for writing project outputs."
         }
-      ],
-      "exports": [
-        "RECOVERY_FILENAME",
-        "_RECOVERY_IDENTITY_VERSION"
       ],
       "key_concepts": [
         "cross-document identity consistency",
@@ -5616,9 +5696,9 @@
           "get_logger"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5669,7 +5749,7 @@
         },
         {
           "name": "load",
-          "description": "Pre-populates the in-memory state from an existing recovery file or output, allowing for resumption of interrupted runs."
+          "description": "Pre-populates in-memory state from an existing recovery file or output, allowing for resumption of interrupted runs."
         },
         {
           "name": "size",
@@ -5683,7 +5763,7 @@
       "classes": [
         {
           "name": "SafeWriter",
-          "description": "A class that manages the live-output writing of completed file results, ensuring crash recovery and data integrity."
+          "description": "A class that manages live-output writing, persisting completed file results immediately and handling crash recovery."
         }
       ],
       "exports": [
@@ -5721,7 +5801,8 @@
           "codedoc.core.io_diagnostics",
           "codedoc.core.project_view",
           "codedoc.utils.errors",
-          "codedoc.utils.logger"
+          "codedoc.utils.logger",
+          "codedoc.core.document"
         ],
         "catalog_updates": [
           {
@@ -5730,14 +5811,34 @@
             "used_for": "providing atomic write functionality"
           },
           {
+            "name": "codedoc.core.db",
+            "type": "internal",
+            "used_for": "computing file hashes"
+          },
+          {
+            "name": "codedoc.core.io_diagnostics",
+            "type": "internal",
+            "used_for": "error classification and description"
+          },
+          {
+            "name": "codedoc.core.project_view",
+            "type": "internal",
+            "used_for": "cleaning file records"
+          },
+          {
             "name": "codedoc.utils.errors",
             "type": "internal",
-            "used_for": "defining error handling for backup write failures"
+            "used_for": "defining custom error types"
           },
           {
             "name": "codedoc.utils.logger",
             "type": "internal",
             "used_for": "logging functionality"
+          },
+          {
+            "name": "codedoc.core.document",
+            "type": "internal",
+            "used_for": "reading codedoc documents"
           }
         ],
         "usage_notes": [
@@ -5747,9 +5848,9 @@
           }
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5780,7 +5881,7 @@
       "path": "codedoc/parser/__init__.py",
       "language": "python",
       "description": "This file serves as the package initializer for the codedoc.parser module, re-exporting the parse_file function from the factory module to provide a simplified interface for users of the codedoc.parser package.",
-      "role_in_system": "It connects the factory module's functionality to the broader codedoc.parser namespace, allowing users to access parsing capabilities without needing to directly import from the factory module.",
+      "role_in_system": "This file connects the codedoc.parser.factory module to the rest of the codebase by exposing the parse_file function, allowing other parts of the application to utilize file parsing functionality without needing to directly reference the factory module.",
       "imports": [
         "codedoc.parser.factory"
       ],
@@ -5802,18 +5903,18 @@
           {
             "name": "codedoc.parser.factory",
             "type": "internal",
-            "used_for": "providing parsing functionality"
+            "used_for": "providing file parsing functionality"
           }
         ],
         "usage_notes": [
           {
             "import": "from codedoc.parser import parse_file",
-            "used_for": "to utilize the parse_file function for parsing files"
+            "used_for": "to access the parse_file function for parsing files"
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5829,7 +5930,7 @@
       "path": "codedoc/parser/factory.py",
       "language": "python",
       "description": "This file serves as a parser factory that selects the appropriate parser module based on the file descriptor provided by the scanner, returning a list of extracted import strings.",
-      "role_in_system": "It connects to the rest of the codebase by providing a mechanism to dynamically choose the correct parser for different programming languages, facilitating the import extraction process.",
+      "role_in_system": "It connects to the rest of the codebase by determining which specific parser to use for different programming languages, facilitating the parsing process for various file types.",
       "imports": [
         "__future__",
         "pathlib",
@@ -5840,12 +5941,11 @@
       "functions": [
         {
           "name": "parse_file",
-          "description": "Parses a file based on the provided descriptor and returns a list of import strings."
+          "description": "Parses a file based on its descriptor and returns a list of import strings."
         }
       ],
       "key_concepts": [
-        "Parser selection based on language tags",
-        "Error handling with custom exceptions"
+        "Parser selection based on language"
       ],
       "_deps": {
         "internal": [
@@ -5857,26 +5957,26 @@
           "pathlib"
         ],
         "dependency_refs": [
-          "codedoc.utils.errors.ParseError",
-          "codedoc.utils.logger.get_logger",
-          "pathlib.Path"
+          "ParseError",
+          "get_logger",
+          "Path"
         ],
         "catalog_updates": [
           {
-            "name": "codedoc.utils.errors.ParseError",
+            "name": "ParseError",
             "type": "internal",
             "used_for": "Error handling during parsing operations"
           }
         ],
         "usage_notes": [
           {
-            "import": "codedoc.utils.logger.get_logger",
-            "used_for": "Logging errors and information during parsing"
+            "import": "get_logger",
+            "used_for": "Logging errors and information during the parsing process"
           }
         ]
       },
-      "_analysis_mode": "single",
       "_analysis_revision": "file-doc-v2",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5897,11 +5997,11 @@
       }
     },
     {
-      "hash": "792d07558ff0aebd684e895f158f3912c711608fa590edb30edc9a30819ae38b",
+      "hash": "559ae1a3a6ffa91a53d91a39a2acdaec4f047b8430fa072de1ac519e706c4f0f",
       "path": "codedoc/pipeline.py",
       "language": "python",
       "description": "This file serves as a lifecycle coordinator for the codedoc documentation pipeline, managing the execution of various phases involved in generating documentation from code.",
-      "role_in_system": "It connects various components of the codedoc system by orchestrating the execution of core functionalities such as discovery, execution, and output generation, while ensuring proper configuration and error handling.",
+      "role_in_system": "It connects various components of the codedoc system by orchestrating the execution of core functionalities such as configuration loading, file scanning, and output generation.",
       "imports": [
         "__future__",
         "sys",
@@ -5933,32 +6033,21 @@
       "functions": [
         {
           "name": "run_pipeline",
-          "description": "Runs the full documentation pipeline on a project, handling configuration, scanning, planning, and execution."
+          "description": "Runs the full documentation pipeline on a project, handling configuration, scanning, execution, and output generation."
+        },
+        {
+          "name": "_estimate_planned_input_tokens",
+          "description": "Estimates the input tokens for planned LLM calls based on the pipeline plan and file content."
         }
       ],
       "exports": [
         "run_pipeline",
-        "_load_existing_file_docs_from_md",
-        "_public_record_to_doc",
-        "_RATE_LIMIT_SIGNALS",
-        "_agent_errors",
-        "_build_default_ladder",
-        "_cancel_pending",
-        "_detect_limit_type",
-        "_is_rate_limit_error",
-        "_log_file_progress",
-        "_parse_retry_after",
-        "_process_and_record",
-        "_process_descriptor_batch",
-        "_process_files_sequentially",
-        "_process_one_file",
-        "_process_one_file_with_retries",
-        "_safe_file_hash"
+        "_estimate_planned_input_tokens"
       ],
       "key_concepts": [
-        "pipeline lifecycle management",
-        "configuration handling",
-        "execution orchestration"
+        "pipeline execution",
+        "configuration management",
+        "output generation"
       ],
       "_deps": {
         "internal": [
@@ -6025,9 +6114,9 @@
           "build_recovery_identity"
         ]
       },
-      "_analysis_mode": "single",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_mode": "single",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [

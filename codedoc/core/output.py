@@ -367,19 +367,16 @@ def _swap_case_letter(value: str) -> str:
 # ---------------------------------------------------------------------------
 
 def write_summary(stats: dict, output_dir: Path, error_summary: str = "") -> Path:
-    """Backward compatible summary writer for older callers."""
+    """Backward compatible summary writer for older callers.
+
+    The helper still writes only aggregate counters, but it now uses the normal
+    CodeDoc Markdown envelope so the resulting file is recognized as owned and
+    can be safely overwritten by a later pipeline run.
+    """
     output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = output_dir / PROJECT_MARKDOWN
-    lines = [
-        "# codedoc summary\n\n",
-        f"- Files checked: {stats.get('checked', 0)}\n",
-        f"- Files failed: {stats.get('failed', 0)}\n",
-        f"- Files skipped: {stats.get('skipped', 0)}\n",
-        f"- Files reused from cache: {stats.get('reused', 0)}\n",
-    ]
-    if error_summary:
-        lines += ["\n## Errors\n\n```\n", error_summary, "\n```\n"]
+    view = build_project_view([], stats, entry_file=stats.get("entry_file"))
     # Route through the canonical atomic writer so a failed write leaves
     # the prior file intact instead of truncating it in place.
-    atomic_write_text(summary_path, "".join(lines))
+    atomic_write_text(summary_path, markdown_from_view(view, error_summary))
     return summary_path
