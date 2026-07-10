@@ -163,8 +163,9 @@ def test_public_output_converts_json_and_markdown_without_llm():
     converted = json.loads(json_from_markdown(markdown))
 
     assert "## Project Overview" in markdown
-    assert converted["project"]["entry_file"] == "main.py"
-    assert converted["project"]["languages"] == ["python"]
+    assert converted["last_run"]["entry_file"] == "main.py"
+    assert "project" not in converted
+    assert "run" not in converted
     assert converted["files"][0]["path"] == "main.py"
     assert converted["files"][0]["description"] == "Main entry point."
     assert converted["files"][0]["functions"] == [
@@ -874,7 +875,10 @@ def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
     )
 
     payload = json.loads(json_path.read_text(encoding="utf-8"))
-    assert payload["project"]["entry_file"] == "src/main.tsx"
+    assert payload["last_run"]["entry_file"] == "src/main.tsx"
+    assert "project" not in payload
+    assert "run" not in payload
+    assert "_codedoc" not in payload
     assert payload["tree"]["src"]["main.tsx"]["type"] == "file"
     assert payload["folders"][0]["path"] == "src"
     assert payload["dependency_catalog"][0]["name"] == "react"

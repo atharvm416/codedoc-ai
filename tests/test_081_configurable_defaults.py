@@ -376,7 +376,7 @@ def test_C9_custom_auto_entry_detected(tmp_path, monkeypatch):
     out = tmp_path / "codedoc" / "codedoc.json"
     assert out.exists()
     result = json.loads(out.read_text(encoding="utf-8"))
-    assert result.get("_codedoc", {}).get("entry_file") == "app_start.py", (
+    assert result.get("last_run", {}).get("entry_file") == "app_start.py", (
         "Custom auto-entry candidate must be detected and stored as entry_file"
     )
 

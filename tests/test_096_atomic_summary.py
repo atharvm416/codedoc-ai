@@ -11,7 +11,8 @@ from __future__ import annotations
 import pytest
 
 import codedoc.core.block_manager as block_manager
-from codedoc.core.output import PROJECT_MARKDOWN, write_summary
+from codedoc.core.document import read_codedoc_document
+from codedoc.core.output import PROJECT_MARKDOWN, _is_codedoc_owned, write_summary
 
 
 def _stats():
@@ -22,8 +23,21 @@ def test_write_summary_writes_expected_content(tmp_path):
     path = write_summary(_stats(), tmp_path, error_summary="boom")
     text = path.read_text(encoding="utf-8")
     assert path.name == PROJECT_MARKDOWN
-    assert "Files checked: 3" in text
+    assert "Files documented by LLM: 3" in text
+    assert "Files reused (unchanged): 1" in text
+    assert "Files reused (identical content): 2" in text
     assert "boom" in text
+    assert _is_codedoc_owned(path)
+    doc = read_codedoc_document(path)
+    assert doc.view["last_run"]["files_selected"] == 6
+    assert doc.view["last_run"]["files_reused_identical_content"] == 2
+
+
+def test_write_summary_uses_lf_line_endings(tmp_path):
+    path = write_summary(_stats(), tmp_path)
+    data = path.read_bytes()
+    assert b"\r\n" not in data
+    assert b"\n" in data
 
 
 def test_write_summary_preserves_prior_target_on_failure(tmp_path, monkeypatch):

@@ -237,7 +237,9 @@ def test_A3_embedded_view_decodes_to_valid_json():
 
     assert isinstance(data, dict), "Decoded payload must be a dict"
     assert "schema_version" not in data
-    assert "project" in data
+    assert "last_run" in data
+    assert "project" not in data
+    assert "run" not in data
     assert "files" in data
 
 
@@ -251,7 +253,9 @@ def test_A3_embedded_view_contains_expected_fields():
 
     assert embedded is not None
     assert "schema_version" not in embedded
-    assert embedded["project"]["entry_file"] == "main.py"
+    assert embedded["last_run"]["entry_file"] == "main.py"
+    assert "project" not in embedded
+    assert "run" not in embedded
     assert len(embedded["files"]) == 2
     assert embedded["dependency_graph"] == view["dependency_graph"]
     assert embedded["dependency_catalog"] == view["dependency_catalog"]

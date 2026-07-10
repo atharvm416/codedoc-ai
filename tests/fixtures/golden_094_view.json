@@ -1,22 +1,17 @@
 {
-  "project": {
+  "last_run": {
     "entry_file": "src/main.py",
-    "file_count": 3,
-    "languages": [
-      "markdown",
-      "python"
-    ],
-    "folders": [
-      ".",
-      "src"
-    ]
-  },
-  "run": {
-    "files_checked": 2,
+    "entry_source": "auto-detected",
+    "documentation_scope": "entry",
+    "analysis_mode": "single",
+    "files_scanned": 3,
+    "files_selected": 3,
+    "files_documented_by_llm": 2,
     "files_failed": 0,
-    "files_skipped": 1,
-    "files_reused": 0,
-    "files_documented": 3
+    "files_unattempted": 0,
+    "files_reused_unchanged": 1,
+    "files_reused_identical_content": 0,
+    "files_resumed_from_recovery": 0
   },
   "tree": {
     "README.md": {

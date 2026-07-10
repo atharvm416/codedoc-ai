@@ -25,6 +25,12 @@ def test_writes_utf8_content(tmp_path):
     assert target.read_text(encoding="utf-8") == "café ☕ ✓"
 
 
+def test_writes_lf_line_endings(tmp_path):
+    target = tmp_path / "out.json"
+    atomic_write_text(target, "a\nb\n")
+    assert target.read_bytes() == b"a\nb\n"
+
+
 def test_no_temp_file_left_after_success(tmp_path):
     target = tmp_path / "out.json"
     atomic_write_text(target, "data")

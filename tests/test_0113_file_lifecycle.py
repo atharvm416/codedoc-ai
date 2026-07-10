@@ -110,7 +110,7 @@ def test_both_mode_cross_document_entry_conflict_blocks(tmp_path, monkeypatch):
     md_target = output / "codedoc.md"
 
     doc = json_mod.loads(json_target.read_text(encoding="utf-8"))
-    doc["_codedoc"]["entry_file"] = "other.py"
+    doc["last_run"]["entry_file"] = "other.py"
     json_target.write_text(json_mod.dumps(doc), encoding="utf-8")
 
     with pytest.raises(ConfigError, match="entry file"):

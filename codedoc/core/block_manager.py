@@ -7,7 +7,7 @@ then atomically renames it over the target via :meth:`Path.replace`.
 
 Contract
 --------
-- UTF-8 encoding.
+- UTF-8 encoding with LF line endings on every platform.
 - Uniquely named temporary sibling in the target directory (concurrent writers
   never collide, and the final rename stays on one filesystem so it is atomic).
 - The temporary file is explicitly flushed and closed before the rename; a
@@ -75,7 +75,7 @@ def atomic_write_text(path: Path, text: str) -> None:
     )
     tmp = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             fd = -1
             handle.write(text)
             # Flush + fsync surface any deferred write failure here, before the
@@ -119,7 +119,7 @@ def create_text_exclusive(path: Path, text: str) -> None:
             "Choose a different path or pass --force."
         ) from exc
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())

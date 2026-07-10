@@ -1,0 +1,7 @@
+# Pin test fixture bytes so they are byte-identical on every platform and every
+# core.autocrlf setting.  Fixtures encode line endings as part of the test
+# contract (e.g. tests/fixtures/legacy_codedoc_14.md is read via raw bytes), so
+# any newline conversion on checkin/checkout would make the suite platform
+# dependent.  -text disables all EOL conversion for the fixture tree only; it is
+# deliberately not applied repo-wide, which would renormalize the whole tree.
+tests/fixtures/** -text

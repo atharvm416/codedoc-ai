@@ -402,10 +402,11 @@ def _print_dry_run_summary(stats: dict) -> None:
 def _print_run_summary(stats: dict) -> None:
     """Print the completion summary for a real run."""
     print("\ncodedoc complete.")
-    print(f"  Files documented : {stats['checked']}")
-    print(f"  Files reused     : {stats.get('reused', 0)}")
+    print(f"  Files documented by LLM       : {stats['checked']}")
+    print(f"  Files reused (unchanged)      : {stats.get('skipped', 0)}")
+    print(f"  Files reused (identical content): {stats.get('reused', 0)}")
     if stats.get("resumed", 0):
-        print(f"  Files resumed    : {stats['resumed']}")
+        print(f"  Files resumed from recovery   : {stats['resumed']}")
     print(f"  Files failed     : {stats['failed']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")

@@ -182,7 +182,7 @@ def run_pipeline(
     )
     profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
 
-    _resolve_entry_and_docs(root, config)
+    entry_resolution_source = _resolve_entry_and_docs(root, config)
     resolved_profile = build_resolved_profile(profile_action, analysis_mode)
     no_work_profile_stats = {
         "prompt_profile_source": profile_resolution.source,
@@ -341,6 +341,7 @@ def run_pipeline(
     reachable_rels, documented_rels, entry_rel = _select_files(
         root, config, graph, file_map
     )
+    entry_source = _final_entry_source(entry_resolution_source, entry_rel)
 
     # Count of scanned files excluded by entry-reachability selection (A1).
     # Zero when no entry is in effect (selected_rels == all scanned files).
@@ -582,6 +583,8 @@ def run_pipeline(
             "skipped": skipped,
             "reused": reused,
             "resumed": resumed,
+            "analysis_mode": analysis_mode,
+            "entry_source": entry_source,
             "entry_excluded": entry_excluded,
             **scope_stats,
             "output_dir": str(output_dir),
@@ -589,6 +592,7 @@ def run_pipeline(
             **no_work_profile_stats,
             **review_stats,
         }
+        _set_plan_counters(stats, plan)
         output_files = write_project_outputs(
             _build_documentation_records(
                 documented_rels,
@@ -654,6 +658,8 @@ def run_pipeline(
         "skipped": skipped,
         "reused": reused,
         "resumed": resumed,
+        "analysis_mode": analysis_mode,
+        "entry_source": entry_source,
         "entry_excluded": entry_excluded,
         **scope_stats,
         "rate_limit_warnings": rate_limit_warnings,
@@ -735,6 +741,7 @@ def run_pipeline(
         raise
 
     stats["output_dir"] = str(output_dir)
+    _set_plan_counters(stats, plan)
     output_files = write_project_outputs(
         _build_documentation_records(
             documented_rels,
@@ -789,6 +796,23 @@ def _set_issue_stats(
         stats["live_backup_path"] = None
 
 
+def _final_entry_source(resolution_source: str, entry_rel: str | None) -> str:
+    """Return the public entry-source value after auto-detection has run."""
+    if resolution_source in {"explicit", "recovered"}:
+        return resolution_source
+    return "auto-detected" if entry_rel else "none"
+
+
+def _set_plan_counters(stats: dict, plan: PipelinePlan) -> None:
+    """Populate provider-free plan counters needed by the public view."""
+    stats["files_scanned"] = len(plan.scanned_rels)
+    stats["files_selected"] = len(plan.documented_rels)
+    stats["unattempted_files"] = max(
+        0,
+        len(plan.agent_rels) - stats.get("checked", 0) - stats.get("failed", 0),
+    )
+
+
 def _set_usage_stats(
     stats: dict,
     usage: UsageAccumulator,
@@ -814,11 +838,6 @@ def _set_usage_stats(
     review_attempted = stats.get("prompt_customization_security_review_calls_attempted", 0)
     stats["documentation_calls_attempted"] = max(
         0, stats.get("attempted_calls", 0) - review_attempted
-    )
-    # Files the plan routed to the LLM that were neither completed nor failed
-    # (e.g. a run aborted early by the consecutive-failure health check).
-    stats["unattempted_files"] = max(
-        0, len(plan.agent_rels) - stats.get("checked", 0) - stats.get("failed", 0)
     )
     # Resolved from config so env/config-enabled partial mode reaches the CLI.
     stats["allow_partial"] = bool(config.get("allow_partial", False))

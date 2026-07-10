@@ -1,9 +1,98 @@
 # codedoc-ai
 
+> **codedoc-ai is an incremental documentation engine that treats documentation as
+> reusable state instead of regenerating it on every run.** It reprocesses only the
+> files whose content or analysis identity changed, so AI-generated documentation
+> stays deterministic, crash-safe, and cheap to keep current.
+
 `codedoc-ai` generates structured, incrementally reusable documentation for source
 repositories. It scans source locally, builds a deterministic dependency graph,
 sends only files that need analysis to a configured LLM, and writes JSON,
 Markdown, or both.
+
+## Why codedoc-ai
+
+Most documentation generators run once and regenerate everything from scratch.
+codedoc-ai is built as a documentation *memory layer* for AI-assisted
+development: it treats documentation as durable, reusable state rather than
+throwaway output.
+
+- It documents **incrementally** — only files whose source or analysis identity
+  changed are sent to the LLM; everything else is reused.
+- Its completed output is **deterministic** — the same inputs produce
+  byte-identical documents, with no timestamps to create spurious diffs.
+- It is **crash-safe** — an interrupted run resumes from a recovery file instead
+  of repeating paid work.
+- It **validates ownership** before writing, so it never overwrites a file it
+  does not recognize as its own.
+- It emits **structured JSON and Markdown** meant to be re-read by both humans
+  and tools.
+
+The result is documentation you can regenerate cheaply and trust to stay in sync
+with the code, run after run.
+
+## Architecture at a glance
+
+```mermaid
+flowchart TD
+    A["Repository"] --> B["Scan - local, deterministic"]
+    B --> C["Dependency graph, entry-based selection"]
+    C --> D["Plan"]
+    D -->|"unchanged (content hash + analysis identity)"| E["Reuse"]
+    D -->|"compatible crash-recovery work"| F["Resume"]
+    D -->|"changed files only"| G["LLM"]
+    E --> H["Write JSON / Markdown - atomic, ownership-guarded"]
+    F --> H
+    G --> H
+```
+
+<details>
+<summary>Plain-text version (for viewers that don't render Mermaid)</summary>
+
+```text
+        repository
+            │
+            ▼
+        scan (local, deterministic)
+            │
+            ▼
+        dependency graph  →  entry-based selection
+            │
+            ▼
+        plan  ─── reuse unchanged (content hash + analysis identity)
+            │  ── resume compatible crash-recovery work
+            │  ── send only changed files to the LLM
+            ▼
+        write JSON / Markdown  (atomic, ownership-guarded)
+```
+
+</details>
+
+For the full phase-by-phase run lifecycle — including cache and recovery identity
+and the failure invariants — see
+[RUN_FLOW.md](https://github.com/atharvm416/codedoc-ai/blob/main/RUN_FLOW.md).
+
+## Core design principles
+
+These principles are enforced by the code, not aspirational:
+
+- **Deterministic output** — identical inputs produce byte-identical documents;
+  completed output carries no timestamps.
+- **Incremental by default** — unchanged files are reused, never re-sent to the
+  provider.
+- **Fail-closed validation** — unknown configuration, malformed instruction
+  profiles, and foreign output files stop the run rather than being silently
+  ignored.
+- **Minimal cache invalidation** — a change reprocesses only the files it
+  actually affects.
+- **Explicit ownership** — codedoc-ai overwrites only files it recognizes as its
+  own output.
+- **Readable output contracts** — completed JSON and Markdown are structured for
+  humans, scripts, and AI assistants.
+- **Compatibility by validation** — CodeDoc reads recognized CodeDoc documents
+  and recovery files, and refuses foreign or malformed artifacts.
+- **Config over CLI sprawl** — deep customization lives in `codedoc.config.json`
+  (`codedoc --init-config`); the command-line surface stays small.
 
 ## Highlights
 
@@ -49,15 +138,34 @@ codedoc --documentation-scope all
 codedoc --dry-run --max-files 25
 ```
 
-The optional leading verbs `run` and `execute` are accepted aliases; examples
-use the shorter canonical spelling. An entry is optional: CodeDoc can recover it
-from the selected output, auto-detect a configured candidate, or document all
-scanned files when no candidate exists.
+An entry is optional: CodeDoc can recover it from the selected output,
+auto-detect a configured candidate, or document all scanned files when no
+candidate exists.
 
 On later runs, CodeDoc reuses unchanged owned records and reprocesses changed
 files. If you switch between JSON and Markdown and the requested target does not
 yet exist, the exact opposite-format sibling is validated and used as the
 conversion source; unchanged files require no provider call.
+
+## Using the output with AI assistants
+
+CodeDoc output is designed to be pasted into, indexed by, or attached to AI
+coding assistants. For the strongest results:
+
+- Use `--format both` when humans and tools will read the same run: Markdown is
+  easier to skim, while JSON is easier for agents and scripts to query.
+- Use `--entry` plus the default `documentation_scope: entry` for application
+  flows, CLIs, services, and libraries with a clear starting point.
+- Use `--documentation-scope all` for package indexes, SDK-style references, or
+  repositories where there is no meaningful entry file.
+- Run `codedoc --dry-run --max-files N` before a large or first-time run to see
+  how many files would reach the provider.
+- Keep `codedoc/codedoc.json` or `codedoc/codedoc.md` in a stable location so
+  future runs and AI assistants can compare against the same documentation
+  memory.
+- Prefer `analysis_mode: single` for fast, economical documentation. Use
+  `analysis_mode: triple` when dependency reasoning and role separation matter
+  more than provider-call count.
 
 ## File contract
 
@@ -73,11 +181,85 @@ There is no alternate-config search, external prompt-profile search, prompt
 directory, `.env` loading, checkpoint/build/database migration, directory-wide
 output discovery, persistent issue log, or managed `.gitignore` behavior. The
 only fallback is the deterministic same-name JSON/Markdown counterpart described
-below; stray legacy files are not opened, migrated, renamed, or deleted.
+below; unrelated files are not opened, migrated, renamed, or deleted.
 
 Temporary atomic-write siblings and writability probes are short-lived
 implementation details. They use unique names in the target directory and are
 cleaned up best-effort.
+
+### Output formats
+
+| Selection | Stable output | Best use |
+| --- | --- | --- |
+| `--format json` | `<output>/codedoc.json` or the exact `.json` path supplied to `--output` | Machine-readable project memory for scripts, CI, and AI agents. |
+| `--format md` | `<output>/codedoc.md` or the exact `.md` path supplied to `--output` | Human-readable documentation with hidden CodeDoc metadata for reuse. |
+| `--format both` | `codedoc.json` and `codedoc.md` inside the selected output directory | One run that serves both tools and humans. |
+
+Supplying `--output docs/report.json` or `--output docs/report.md` selects that
+exact file and infers the format from its extension. `--format both` writes two
+files and therefore requires an output directory.
+
+### Run metadata
+
+Completed JSON documents contain one canonical run-metadata block: `last_run`.
+It includes the entry file, entry source, documentation scope, analysis mode,
+scanned/selected counts, and the exact partition of what happened in the most
+recent run.
+
+If you are reading a CodeDoc document programmatically, use `last_run` for run
+metadata and `files[]` for per-file documentation.
+
+| `last_run` field | Meaning |
+| --- | --- |
+| `entry_file` | Entry file used for selection, or `null` when no entry was used. |
+| `entry_source` | `explicit`, `recovered`, `auto-detected`, or `none`. |
+| `documentation_scope` | `entry` or `all`. |
+| `analysis_mode` | `single` or `triple`. |
+| `files_scanned` | Supported source files found by the scanner. |
+| `files_selected` | Files selected for this documentation run. |
+| `files_documented_by_llm` | Files successfully documented by the provider in this run. |
+| `files_failed` | Selected files that errored in this run. |
+| `files_unattempted` | Selected files not attempted after a bounded abort. |
+| `files_reused_unchanged` | Files reused because content and analysis identity were unchanged. |
+| `files_reused_identical_content` | Files reused from another path with identical content. |
+| `files_resumed_from_recovery` | Files restored from compatible crash-recovery state. |
+
+The truthful `last_run` partition is:
+
+```text
+files_selected == files_reused_unchanged
+                + files_reused_identical_content
+                + files_documented_by_llm
+                + files_failed
+                + files_unattempted
+```
+
+The number of file records in the document may be less than
+`last_run.files_selected` when a first-run file failed or was unattempted before
+any prior record existed. `files_resumed_from_recovery` is a subset of
+`files_reused_unchanged`, not a separate partition category.
+
+Every key beginning with `_` inside a `files[]` record is internal to CodeDoc.
+External consumers should ignore those keys; they are persisted for cache,
+resume, and dependency reuse and are not a stable public contract.
+
+### Ownership markers
+
+Completed `codedoc.json` output is recognized from the strict CodeDoc document
+shape: `last_run` with `entry_file` plus the structured `files` collection.
+Foreign JSON without that shape is refused before overwrite.
+
+Other CodeDoc-managed artifacts still need internal ownership metadata:
+
+| Document | Ownership marker |
+| --- | --- |
+| Completed `codedoc.json` | `last_run.entry_file` plus structured `files` |
+| `crash_recovery.json` | Internal `_codedoc` recovery metadata |
+| `codedoc.md` | Hidden `<!-- codedoc-ai: ... -->` metadata comment |
+
+Completed JSON is the public machine-readable contract. Recovery JSON and
+Markdown carry their own internal ownership markers because they serve different
+runtime roles.
 
 ## Configuration
 
@@ -185,11 +367,7 @@ Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
 
 The only runtime instruction source is `prompt_profiles` inside the exact
 `codedoc.config.json` (or an in-memory Python override). Generated profiles are
-versionless and use `requested_shape`. Existing explicit schema versions remain
-readable:
-
-- schema v1 uses `fields`;
-- schema v2 uses `requested_shape` and is the generated/recommended form.
+versionless and use `requested_shape`.
 
 Every present mode uses a required `common` envelope and an optional
 `per_language` complete replacement:
@@ -210,10 +388,9 @@ Every present mode uses a required `common` envelope and an optional
 }
 ```
 
-The old flat mode layout is rejected with migration guidance. `per_extension` is
-reserved for a future additive design and is currently rejected. Its documented
-future precedence is `per_extension > per_language > common`, with full-block
-replacement rather than field merging.
+Unsupported profile layouts are rejected with targeted guidance. Language-level
+customization uses `per_language` as a complete-block replacement rather than
+field merging.
 
 `analysis_mode: single` exposes one combined editable instruction JSON at
 `single.common`. Triple mode exposes three independently editable instruction
@@ -246,7 +423,7 @@ only the requested format is written.
 
 A present fallback that is foreign or malformed blocks before provider contact
 instead of silently starting a paid fresh run. No directory walk, modification-
-time choice, unrelated default filename, or legacy candidate is used. Entry
+time choice, unrelated default filename, or extra candidate is used. Entry
 recovery remains tied to the selected output; when it is absent, ordinary source
 entry auto-detection runs.
 
@@ -332,4 +509,4 @@ safe mode, and managed output ignore files raise targeted configuration errors.
 
 ## License
 
-See [LICENSE](LICENSE).
+See [LICENSE](https://github.com/atharvm416/codedoc-ai/blob/main/LICENSE).
