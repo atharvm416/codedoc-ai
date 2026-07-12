@@ -54,7 +54,7 @@ def _validate(raw: dict):
     return validate_profile(
         raw,
         active_mode="single",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )

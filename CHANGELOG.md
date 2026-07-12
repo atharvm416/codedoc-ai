@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.12.0 - 2026-07-11
+
+### Extension-scoped prompt profiles
+
+- **Added extension-scoped prompt profiles.** The per-file override scope is
+  `per_extension`, keyed by file extension.
+  This is the only user-visible surface change.
+- Each file's effective requested-shape block is resolved by
+  `longest matching per_extension > common > built-in default`. Matching is on the
+  file's lowercased basename, so multi-part suffixes work and the longest match
+  wins (`.d.ts` beats `.ts`), matching is case-insensitive, and a file named
+  exactly `.ts` is not treated as a `.ts`-suffixed file. An override is a complete
+  replacement of the block, never a field-by-field merge.
+- Each `per_extension` key must be a lowercase dotted suffix (at most 32
+  characters) whose final segment is one of the project's configured extensions
+  (`extension_language_map`); a silently dead override such as `.pyy` when only
+  `.py` is configured is rejected. At most 64 overrides per mode. In triple mode
+  each override carries all three agent keys, and a non-empty `triple.per_extension`
+  requires `triple.common.documentation`.
+- Cache invalidation is confined to files whose effective block changed: editing a
+  used override reprocesses only the files that resolve to it, an unused override
+  costs zero provider calls and invalidates nothing, and a profile with no
+  `per_extension` renders byte-identical prompts and the exact prior
+  `_prompt_profile_digest` (the digest scheme stays `pp-v1`). Identical-content
+  reuse honours the destination file's extension scope.
+- The mandatory standards/safety review now covers each profile block reachable
+  by a planned file (the common block and each reachable `per_extension` override),
+  deduplicating byte-identical blocks so equivalent scopes are reviewed once.
+  `SAFE`/`RISKY`/`TOO_RISKY` semantics and the confirmation contract are unchanged.
+- **`crash_recovery.json` keeps recovery identity version 1** while dropping its
+  profile-wide compared field. Narrowing the compared identity field set is
+  backward-compatible, so no existing recovery file is invalidated by the upgrade.
+  Each recovered completed record is instead re-validated individually against the
+  current per-file `_prompt_profile_digest`, so an unrelated profile edit or a
+  newly added file no longer discards a resumable run.
+- The generated config (`--init-config`) and the regenerated `codedoc.config.json`
+  now emit `per_extension: {}` in each mode section. No
+  new CLI flag, environment variable, or top-level config key. Completed JSON /
+  Markdown output shape and `schema_version` are unchanged. OpenAI, Anthropic, and
+  Gemini preserve equivalent prompt-profile and mandatory-review behaviour.
+
 ## 0.11.9 - 2026-07-09
 
 ### Completed JSON contract cleanup

@@ -6,11 +6,11 @@
     "analysis_mode": "single",
     "files_scanned": 53,
     "files_selected": 53,
-    "files_documented_by_llm": 53,
+    "files_documented_by_llm": 6,
     "files_failed": 0,
     "files_unattempted": 0,
-    "files_reused_unchanged": 0,
-    "files_reused_identical_content": 0,
+    "files_reused_unchanged": 26,
+    "files_reused_identical_content": 21,
     "files_resumed_from_recovery": 0
   },
   "tree": {
@@ -1450,8 +1450,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1525,8 +1525,8 @@
           "dataclasses"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1613,8 +1613,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1676,8 +1676,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1743,8 +1743,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1807,8 +1807,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -1938,8 +1938,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -2033,8 +2033,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -2108,8 +2108,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "imported_by": [
@@ -2229,8 +2229,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2252,15 +2252,16 @@
       }
     },
     {
-      "hash": "a98caf1a7984cb54757a08f26473b86b05ace21d06d65a85e8a8331d10aaab2b",
+      "hash": "78b44225276a33028475fff7651d2b409ba83276f0bde15af7ed234cb7ddf375",
       "path": "codedoc/core/prompt_profiles.py",
       "language": "python",
-      "description": "Mode-based JSON prompt profiles.",
-      "role_in_system": "This module serves as the single source of truth for the requested JSON shape block embedded in CodeDoc's per-file provider prompts.",
+      "description": "This module defines mode-based JSON prompt profiles for CodeDoc, serving as the single source of truth for the requested JSON shape block embedded in various agents' prompts.",
+      "role_in_system": "It provides a canonical registry of editable fields for each (analysis_mode, agent) pair, ensuring that the prompts are rendered accurately and consistently across different agents.",
       "imports": [
         "__future__",
         "hashlib",
         "json",
+        "re",
         "dataclasses",
         "pathlib",
         "typing",
@@ -2268,40 +2269,45 @@
       ],
       "functions": [
         {
-          "name": "default_prompt_profiles",
-          "description": "Return the canonical prompt_profiles value under the common envelope."
+          "name": "_dep_members",
+          "description": "Builds the members for the dependencies_analysis container based on the provided parameters."
         },
         {
           "name": "specs_to_requested_shape",
-          "description": "Render normalized specs back into a literal requested_shape object."
+          "description": "Renders normalized specs back into a literal requested_shape object."
         },
         {
           "name": "_default_requested_shape",
-          "description": "The developer-standard requested_shape object for (mode, agent)."
+          "description": "Generates the developer-standard requested_shape object for a given (mode, agent)."
         },
         {
           "name": "_default_common_block",
-          "description": "The developer-standard common payload for one (mode, agent) block."
+          "description": "Creates the developer-standard common payload for one (mode, agent) block."
         },
         {
-          "name": "_dep_members",
-          "description": "Build the six dependencies_analysis members."
+          "name": "default_prompt_profiles",
+          "description": "Returns the canonical prompt_profiles value under the common envelope."
         }
       ],
       "classes": [
         {
           "name": "ShapeField",
-          "description": "One editable requested-shape field in the canonical registry."
+          "description": "Represents one editable requested-shape field in the canonical registry."
         },
         {
           "name": "ContainerField",
-          "description": "A nested object container with member fields."
+          "description": "Represents a nested object container with member fields."
         }
+      ],
+      "exports": [
+        "ShapeField",
+        "ContainerField",
+        "default_prompt_profiles"
       ],
       "key_concepts": [
         "JSON shape profiles",
         "prompt customization",
-        "validation of user profiles"
+        "data validation"
       ],
       "_deps": {
         "internal": [
@@ -2310,14 +2316,18 @@
         "external": [
           "hashlib",
           "json",
+          "re",
           "dataclasses",
           "pathlib",
           "typing"
+        ],
+        "dependency_refs": [
+          "codedoc.utils.errors"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2341,6 +2351,7 @@
           "hashlib",
           "json",
           "pathlib",
+          "re",
           "typing"
         ]
       }
@@ -2424,8 +2435,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2535,9 +2546,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2599,8 +2610,8 @@
           "Potential cycle warning emitted if a cycle is detected in the dependency graph."
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2708,8 +2719,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2795,9 +2806,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -2908,8 +2919,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3001,8 +3012,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3069,8 +3080,8 @@
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3143,8 +3154,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3191,8 +3202,8 @@
           "codedoc.utils.logger.get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3259,8 +3270,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3316,8 +3327,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3429,8 +3440,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3519,9 +3530,9 @@
           "AgentError"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3605,8 +3616,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3626,11 +3637,11 @@
       }
     },
     {
-      "hash": "02ab0a21d1c0eba3ea3d746ed07b44fce6092aa66ce3411c4ff8aede2dd46d4a",
+      "hash": "56ea4048d08a64b55ad0acb3dc632a22e85bc4b7301c842c9a6b1b56815389f7",
       "path": "codedoc/core/planning.py",
       "language": "python",
-      "description": "This file provides shared pipeline planning functionality for the codedoc project, computing routing decisions for document processing without modifying any data or creating new providers.",
-      "role_in_system": "It serves as a core component in the codedoc system, facilitating the planning of document processing workflows by determining which documents to process, reuse, or skip based on various criteria.",
+      "description": "This file provides shared pipeline planning functionality for the codedoc project, computing routing decisions for document processing in a structured and immutable manner.",
+      "role_in_system": "It serves as a core component for planning the execution of document processing pipelines, ensuring that decisions regarding file handling are made consistently and efficiently.",
       "imports": [
         "__future__",
         "dataclasses",
@@ -3653,11 +3664,11 @@
         },
         {
           "name": "normalize_force_files",
-          "description": "Normalizes forced file paths against the project root, ensuring they are valid and do not escape the root."
+          "description": "Normalizes forced file paths against the project root, ensuring they are valid and relative."
         },
         {
           "name": "build_pipeline_plan",
-          "description": "Computes the full routing plan for a pipeline run based on various inputs, returning a PipelinePlan and PlanMaterials."
+          "description": "Computes the full routing plan for a pipeline run based on various input parameters."
         }
       ],
       "classes": [
@@ -3712,9 +3723,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3788,8 +3799,8 @@
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3876,8 +3887,8 @@
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -3963,8 +3974,8 @@
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4044,8 +4055,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4113,8 +4124,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4124,11 +4135,11 @@
       }
     },
     {
-      "hash": "86e7f9274a3335505324769500edbf44a1f38e8d8857ca9e2e2c8f4d56001f23",
+      "hash": "70dc3b643a0cf10d257d24603dbafeac74e9bf74d567e9140ab138708338e965",
       "path": "codedoc/agents/orchestrator.py",
       "language": "python",
-      "description": "Agent Orchestrator that coordinates per-file analysis in selectable modes, either single or triple, merging results from various agents.",
-      "role_in_system": "Supports the analysis of files by coordinating multiple agents to extract structure, dependencies, and documentation, returning a unified result.",
+      "description": "Agent Orchestrator that coordinates per-file analysis in either single or triple modes, merging results from various agents to produce a flat record for documentation purposes.",
+      "role_in_system": "This file serves as a central coordinator for multiple agents that analyze code files, allowing for both concurrent and sequential processing based on the selected analysis mode.",
       "imports": [
         "__future__",
         "concurrent.futures",
@@ -4151,38 +4162,38 @@
         },
         {
           "name": "_result_has_agent_error",
-          "description": "Checks if a merged result carries an agent error on any sub-result."
+          "description": "Checks if a merged result contains an error from any of the agents."
         },
         {
           "name": "process",
-          "description": "Runs all agents on one file and returns the merged result."
+          "description": "Runs all agents on a single file and returns the merged result."
         },
         {
           "name": "_process_single",
-          "description": "Handles the single mode analysis by making one combined provider call."
+          "description": "Handles the single mode analysis by making one combined provider call and merging the results."
         },
         {
-          "name": "_merge_single",
-          "description": "Merges a cleaned combined response with deterministic identity fields."
+          "name": "_process_triple",
+          "description": "Handles the triple mode analysis by running three agents concurrently and merging their outputs."
         },
         {
           "name": "_run_sequential",
-          "description": "Runs agents sequentially for analysis when parallel mode is disabled."
+          "description": "Executes the agents in a sequential manner, useful for local LLMs with limited VRAM."
         },
         {
           "name": "_merge",
-          "description": "Combines all agent outputs into one flat result dictionary."
+          "description": "Combines outputs from all agents into a single flat result dictionary."
         }
       ],
       "classes": [
         {
           "name": "Orchestrator",
-          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution modes."
+          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution of analysis agents."
         }
       ],
       "key_concepts": [
         "multi-agent processing",
-        "file analysis",
+        "parallel and sequential execution",
         "result merging"
       ],
       "_deps": {
@@ -4203,7 +4214,6 @@
           "time"
         ],
         "dependency_refs": [
-          "__future__",
           "concurrent.futures",
           "time",
           "codedoc.agents.base_agent",
@@ -4218,9 +4228,9 @@
           "codedoc.utils.logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4286,8 +4296,8 @@
           "codedoc.agents.documentation_agent"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4303,11 +4313,11 @@
       }
     },
     {
-      "hash": "0770fe2df066f332adb53a0ca1885adbae399e12921891a9b6a18a4c177c2047",
+      "hash": "cd24cff96e3c94c46cb45893af8233fd462de352bb3cd7f862fcdd3f27b78cbd",
       "path": "codedoc/__init__.py",
       "language": "python",
       "description": "This file serves as the initializer for the codedoc package, providing a lightweight interface to run the documentation pipeline without loading unnecessary dependencies until needed.",
-      "role_in_system": "It connects to the rest of the codebase by exposing the run_pipeline function, which delegates the actual work to the pipeline module, thus maintaining a clean and efficient import structure.",
+      "role_in_system": "It connects to the codedoc.pipeline module to facilitate the execution of the documentation pipeline, allowing users to generate documentation in a modular fashion.",
       "imports": [
         "codedoc.pipeline"
       ],
@@ -4335,12 +4345,12 @@
         "usage_notes": [
           {
             "import": "from codedoc import run_pipeline",
-            "used_for": "To execute the documentation pipeline from another module."
+            "used_for": "To execute the documentation pipeline from the codedoc package."
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4388,8 +4398,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4446,8 +4456,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4492,8 +4502,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4572,9 +4582,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4655,8 +4665,8 @@
           "SafeWriter"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4781,8 +4791,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4867,8 +4877,8 @@
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -4961,9 +4971,9 @@
           "codedoc.utils.errors"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5125,9 +5135,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5226,9 +5236,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5331,9 +5341,9 @@
           "codedoc.utils.logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5442,9 +5452,9 @@
           "codedoc.utils.logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5585,9 +5595,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5617,7 +5627,7 @@
       }
     },
     {
-      "hash": "aa52f17c48cea429bdc104375f235d8eb0c25bef43c46cfc4221a3feeba6c0de",
+      "hash": "485b9e180342ef09c90cac6916a61d0d34349e3ff8d68914818539b735d364be",
       "path": "codedoc/core/resume.py",
       "language": "python",
       "description": "Resume and recovery helpers for the documentation pipeline, managing the loading of stable documentation records and ensuring consistency across formats.",
@@ -5641,7 +5651,7 @@
         },
         {
           "name": "_load_strict_fallback_records",
-          "description": "Returns records from an owned opposite-format fallback or raises an error if it fails to load."
+          "description": "Returns records from an owned opposite-format fallback or raises an error if it fails."
         },
         {
           "name": "_load_json_records",
@@ -5663,6 +5673,9 @@
           "name": "_build_documentation_records",
           "description": "Builds documentation records for writing project outputs."
         }
+      ],
+      "exports": [
+        "RECOVERY_FILENAME"
       ],
       "key_concepts": [
         "cross-document identity consistency",
@@ -5689,16 +5702,13 @@
           "records_by_path",
           "markdown_to_view",
           "read_codedoc_meta",
-          "CACHE_IDENTITY_KEYS",
-          "carry_private_keys",
-          "normalized_identity_value",
           "ConfigError",
           "get_logger"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5848,9 +5858,9 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5913,8 +5923,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5975,8 +5985,8 @@
           }
         ]
       },
-      "_analysis_revision": "file-doc-v2",
       "_analysis_mode": "single",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [
@@ -5997,11 +6007,11 @@
       }
     },
     {
-      "hash": "559ae1a3a6ffa91a53d91a39a2acdaec4f047b8430fa072de1ac519e706c4f0f",
+      "hash": "2a263b144fc526142229e3193f98f19f6a7e94ce54d726d067e3bea93758d476",
       "path": "codedoc/pipeline.py",
       "language": "python",
       "description": "This file serves as a lifecycle coordinator for the codedoc documentation pipeline, managing the execution of various phases involved in generating documentation from code.",
-      "role_in_system": "It connects various components of the codedoc system by orchestrating the execution of core functionalities such as configuration loading, file scanning, and output generation.",
+      "role_in_system": "It connects various components of the codedoc system by orchestrating the execution of core functionalities such as discovery, execution, and output generation, while ensuring proper configuration and error handling.",
       "imports": [
         "__future__",
         "sys",
@@ -6033,7 +6043,7 @@
       "functions": [
         {
           "name": "run_pipeline",
-          "description": "Runs the full documentation pipeline on a project, handling configuration, scanning, execution, and output generation."
+          "description": "Runs the full documentation pipeline on a project, handling configuration, scanning, planning, and execution."
         },
         {
           "name": "_estimate_planned_input_tokens",
@@ -6042,12 +6052,27 @@
       ],
       "exports": [
         "run_pipeline",
-        "_estimate_planned_input_tokens"
+        "_load_existing_file_docs_from_md",
+        "_public_record_to_doc",
+        "_RATE_LIMIT_SIGNALS",
+        "_agent_errors",
+        "_build_default_ladder",
+        "_cancel_pending",
+        "_detect_limit_type",
+        "_is_rate_limit_error",
+        "_log_file_progress",
+        "_parse_retry_after",
+        "_process_and_record",
+        "_process_descriptor_batch",
+        "_process_files_sequentially",
+        "_process_one_file",
+        "_process_one_file_with_retries",
+        "_safe_file_hash"
       ],
       "key_concepts": [
         "pipeline execution",
         "configuration management",
-        "output generation"
+        "token estimation for LLM calls"
       ],
       "_deps": {
         "internal": [
@@ -6071,8 +6096,7 @@
           "codedoc.llm.rate_limit_profile",
           "codedoc.parser.factory",
           "codedoc.utils.errors",
-          "codedoc.utils.logger",
-          "codedoc.agents"
+          "codedoc.utils.logger"
         ],
         "external": [
           "sys",
@@ -6114,9 +6138,9 @@
           "build_recovery_identity"
         ]
       },
-      "_analysis_revision": "file-doc-v2",
-      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_mode": "single",
+      "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
+      "_analysis_revision": "file-doc-v2",
       "reachable_from_entry": true,
       "links": {
         "internal_dependencies": [

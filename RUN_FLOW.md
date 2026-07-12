@@ -34,14 +34,17 @@ for a named output; no directory walk or unrelated sibling is permitted.
    normalized cache identity; any mismatch blocks before mutation/provider use.
 
 3. **Instruction resolution.** Resolve `prompt_profiles` as inline or absent,
-   validate schema v1/v2 under the required `common` envelope, choose single or
-   triple mode, and build deterministic documentation projection when a
-   single-only customization is selected in triple mode. No routing conversion
-   exists.
+   validate schema v1/v2 under the required `common` envelope and the optional
+   `per_extension` overrides, choose single or triple mode, and build
+   deterministic documentation projection when a single-only customization is
+   selected in triple mode. Each file's effective block is chosen by
+   `longest matching per_extension > common > built-in default` on the lowercased
+   basename. No routing conversion exists.
 
 4. **Scan and plan.** Scan source, construct the dependency graph, select entry
-   reachability/documentation scope, calculate per-language profile digests, and
-   build the versioned recovery identity.
+   reachability/documentation scope, compute per-file profile digests by
+   extension scope, and build the versioned recovery identity (which no longer
+   binds a profile-wide digest).
 
 5. **Exact recovery inspection.** Inspect only
    `<output_dir>/crash_recovery.json`. Missing means fresh state. A compatible
@@ -88,9 +91,12 @@ Per-file reuse uses the single centralized predicate over content hash and:
 - `_prompt_profile_digest`.
 
 The run-level recovery identity additionally binds project root, exact selected
-targets, entry, documentation scope, analysis mode/revision, and sorted effective
-profile digests by language. The run identity gates whether recovery may be
-overlaid; it does not replace per-file reuse checks.
+targets, entry, documentation scope, and analysis mode/revision. It no longer
+binds a profile-wide digest — narrowing the compared field set is
+backward-compatible and keeps recovery identity version 1. The run identity gates
+whether recovery may be overlaid; each overlaid record is still re-validated by
+the per-file reuse checks above, so `_prompt_profile_digest` selectively filters
+recovered records by extension scope.
 
 ## Failure invariants
 

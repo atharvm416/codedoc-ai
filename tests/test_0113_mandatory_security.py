@@ -7,7 +7,12 @@ import pytest
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
-from codedoc.core.prompt_profiles import ResolvedProfile, build_review_batches, validate_profile
+from codedoc.core.prompt_profiles import (
+    FileScope,
+    ResolvedProfile,
+    build_review_batches,
+    validate_profile,
+)
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
 
@@ -56,11 +61,13 @@ def _batches():
     profile = validate_profile(
         INLINE,
         active_mode="single",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
-    return build_review_batches(ResolvedProfile("single", profile), frozenset({"python"}))
+    return build_review_batches(
+        ResolvedProfile("single", profile), frozenset({FileScope(basename="main.py")})
+    )
 
 
 @pytest.mark.parametrize("verdict", ["SAFE", "RISKY", "TOO_RISKY"])

@@ -1,4 +1,4 @@
-"""0.11.0 — agent delivery, the shared post-clean filter, and per-language overrides.
+"""Agent delivery, the shared post-clean filter, and extension overrides.
 
 Covers Tests #12, #13, #14, #15 of the plan.
 """
@@ -14,11 +14,11 @@ from codedoc.core.prompt_profiles import (
     validate_profile,
 )
 
-LANGS = frozenset({"python", "java"})
+EXTS = frozenset({".py", ".java"})
 
 
 def _to_envelope(raw):
-    """Wrap a legacy flat profile dict into the 0.11.3 ``common`` envelope."""
+    """Wrap a legacy flat profile dict into the ``common`` envelope."""
     if not isinstance(raw, dict):
         return raw
     out = {k: v for k, v in raw.items() if k in ("schema_version", "$comment")}
@@ -26,23 +26,23 @@ def _to_envelope(raw):
         sec = raw["single"]
         common = {k: sec[k] for k in ("fields", "requested_shape") if k in sec}
         new_sec = {"common": common}
-        if "per_language" in sec:
-            new_sec["per_language"] = sec["per_language"]
+        if "per_extension" in sec:
+            new_sec["per_extension"] = sec["per_extension"]
         out["single"] = new_sec
     elif "single" in raw:
         out["single"] = raw["single"]
     if isinstance(raw.get("triple"), dict) and "common" not in raw["triple"]:
         sec = raw["triple"]
         agents = ("structure", "dependency", "documentation")
-        common, per_lang = {}, {}
+        common, per_ext = {}, {}
         for agent in agents:
             block = sec.get(agent, {})
             common[agent] = {k: block[k] for k in ("fields", "requested_shape") if k in block}
-            for lang, ov in (block.get("per_language") or {}).items():
-                per_lang.setdefault(lang, {})[agent] = ov
+            for ext, ov in (block.get("per_extension") or {}).items():
+                per_ext.setdefault(ext, {})[agent] = ov
         new_sec = {"common": common}
-        if per_lang:
-            new_sec["per_language"] = per_lang
+        if per_ext:
+            new_sec["per_extension"] = per_ext
         out["triple"] = new_sec
     elif "triple" in raw:
         out["triple"] = raw["triple"]
@@ -53,7 +53,7 @@ def _profile(raw, mode="single"):
     return ResolvedProfile(
         mode,
         validate_profile(
-            _to_envelope(raw), active_mode=mode, known_languages=LANGS,
+            _to_envelope(raw), active_mode=mode, known_extensions=EXTS,
             source="inline", source_path=None,
         ),
     )
@@ -109,7 +109,7 @@ def test_single_filters_omitted_top_level_and_nested_fields_and_stamps_digest():
     assert result["key_concepts"] == []
     # dependencies_analysis keeps only the requested nested member.
     assert result["dependencies_analysis"] == {"internal": ["a.py"]}
-    assert result["_prompt_profile_digest"] == resolved.file_digest("python")
+    assert result["_prompt_profile_digest"] == resolved.file_digest("a.py")
 
 
 def test_no_profile_delivery_is_identity_and_unstamped():
@@ -131,26 +131,26 @@ def test_default_equivalent_profile_is_inactive_and_unstamped():
     # developer-standard-equivalent -> no field dropped, no digest stamped.
     assert result["role_in_system"] == "drop-role"
     assert "_prompt_profile_digest" not in result
-    assert resolved.file_digest("python") == NO_PROMPT_PROFILE_DIGEST
+    assert resolved.file_digest("a.py") == NO_PROMPT_PROFILE_DIGEST
 
 
 # ---------------------------------------------------------------------------
-# Per-language overrides (Test #14)
+# Per-extension overrides (Test #14)
 # ---------------------------------------------------------------------------
 
-def test_per_language_override_selected_by_file_language():
+def test_per_extension_override_selected_by_file_basename():
     resolved = _profile({"single": {
         "fields": [{"key": "description", "type": "string", "instruction": "base"}],
-        "per_language": {"python": {"fields": [
+        "per_extension": {".py": {"fields": [
             {"key": "description", "type": "string", "instruction": "py"},
             {"key": "exports", "type": "string_list", "instruction": "py exports"}]}},
     }})
-    py = resolved.resolve_block("combined", "python")
-    java = resolved.resolve_block("combined", "java")
+    py = resolved.resolve_block("combined", "mod.py")
+    java = resolved.resolve_block("combined", "Mod.java")
     assert py.requested_field_paths == ("description", "exports")
     assert java.requested_field_paths == ("description",)
-    # Distinct rendered blocks => distinct per-language digests.
-    assert resolved.file_digest("python") != resolved.file_digest("java")
+    # Distinct rendered blocks => distinct per-extension digests.
+    assert resolved.file_digest("mod.py") != resolved.file_digest("Mod.java")
 
 
 # ---------------------------------------------------------------------------
@@ -206,7 +206,7 @@ def test_triple_filters_each_subagent_before_merge():
     # documentation kept only description (key_concepts/usage_example dropped).
     assert result["key_concepts"] == []
     assert result["usage_example"] == ""
-    assert result["_prompt_profile_digest"] == resolved.file_digest("python")
+    assert result["_prompt_profile_digest"] == resolved.file_digest("a.py")
 
 
 # ---------------------------------------------------------------------------
@@ -233,7 +233,7 @@ def test_provider_adapters_receive_identical_documentation_blocks(
     provider = getattr(api_provider, class_name)(api_key="k")
     resolved = _profile({"single": {"fields": [
         {"key": "description", "type": "string", "instruction": "Custom desc"}]}})
-    shape = resolved.resolve_block("combined", "python")
+    shape = resolved.resolve_block("combined", "a.py")
     result = Orchestrator(provider, resolved_profile=resolved).process(
         _descriptor(), "x=1", []
     )

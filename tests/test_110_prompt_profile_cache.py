@@ -15,11 +15,11 @@ from codedoc.core.prompt_profiles import (
 )
 from codedoc.core.record_meta import CACHE_IDENTITY_KEYS, normalized_identity_value
 
-LANGS = frozenset({"python", "java"})
+EXTS = frozenset({".py", ".java"})
 
 
 def _to_envelope(raw):
-    """Wrap a legacy flat profile dict into the 0.11.3 ``common`` envelope."""
+    """Wrap a legacy flat profile dict into the ``common`` envelope."""
     if not isinstance(raw, dict):
         return raw
     out = {k: v for k, v in raw.items() if k in ("schema_version", "$comment")}
@@ -27,23 +27,23 @@ def _to_envelope(raw):
         sec = raw["single"]
         common = {k: sec[k] for k in ("fields", "requested_shape") if k in sec}
         new_sec = {"common": common}
-        if "per_language" in sec:
-            new_sec["per_language"] = sec["per_language"]
+        if "per_extension" in sec:
+            new_sec["per_extension"] = sec["per_extension"]
         out["single"] = new_sec
     elif "single" in raw:
         out["single"] = raw["single"]
     if isinstance(raw.get("triple"), dict) and "common" not in raw["triple"]:
         sec = raw["triple"]
         agents = ("structure", "dependency", "documentation")
-        common, per_lang = {}, {}
+        common, per_ext = {}, {}
         for agent in agents:
             block = sec.get(agent, {})
             common[agent] = {k: block[k] for k in ("fields", "requested_shape") if k in block}
-            for lang, ov in (block.get("per_language") or {}).items():
-                per_lang.setdefault(lang, {})[agent] = ov
+            for ext, ov in (block.get("per_extension") or {}).items():
+                per_ext.setdefault(ext, {})[agent] = ov
         new_sec = {"common": common}
-        if per_lang:
-            new_sec["per_language"] = per_lang
+        if per_ext:
+            new_sec["per_extension"] = per_ext
         out["triple"] = new_sec
     elif "triple" in raw:
         out["triple"] = raw["triple"]
@@ -53,7 +53,7 @@ def _to_envelope(raw):
 def _resolved(raw, mode="single"):
     return ResolvedProfile(
         mode,
-        validate_profile(_to_envelope(raw), active_mode=mode, known_languages=LANGS,
+        validate_profile(_to_envelope(raw), active_mode=mode, known_extensions=EXTS,
                          source="inline", source_path=None),
     )
 
@@ -110,31 +110,31 @@ def test_digest_ignores_comment_and_schema_version_but_tracks_order():
     reordered = {"single": {"fields": [
         {"key": "exports", "type": "string_list", "instruction": "e"},
         {"key": "description", "type": "string", "instruction": "d"}]}}
-    da = _resolved(a).file_digest("python")
-    db = _resolved(b).file_digest("python")
-    dr = _resolved(reordered).file_digest("python")
+    da = _resolved(a).file_digest("a.py")
+    db = _resolved(b).file_digest("a.py")
+    dr = _resolved(reordered).file_digest("a.py")
     assert da == db          # $comment + schema_version do not affect the digest
     assert da != dr          # field order does affect the digest
     assert da != NO_PROMPT_PROFILE_DIGEST
 
 
-def test_language_local_change_invalidates_only_that_language():
+def test_extension_local_change_invalidates_only_that_extension():
     raw = {"single": {
         "fields": [{"key": "description", "type": "string", "instruction": "base"}],
-        "per_language": {"python": {"fields": [
+        "per_extension": {".py": {"fields": [
             {"key": "description", "type": "string", "instruction": "py only"}]}}}}
     resolved = _resolved(raw)
-    # java uses the base block; python uses the override -> different digests.
-    assert resolved.file_digest("java") != resolved.file_digest("python")
+    # a.java uses the base block; a.py uses the override -> different digests.
+    assert resolved.file_digest("a.java") != resolved.file_digest("a.py")
 
     raw2 = {"single": {
         "fields": [{"key": "description", "type": "string", "instruction": "base"}],
-        "per_language": {"python": {"fields": [
+        "per_extension": {".py": {"fields": [
             {"key": "description", "type": "string", "instruction": "py CHANGED"}]}}}}
     resolved2 = _resolved(raw2)
-    # java digest unchanged; python digest changed.
-    assert resolved2.file_digest("java") == resolved.file_digest("java")
-    assert resolved2.file_digest("python") != resolved.file_digest("python")
+    # a.java digest unchanged; a.py digest changed.
+    assert resolved2.file_digest("a.java") == resolved.file_digest("a.java")
+    assert resolved2.file_digest("a.py") != resolved.file_digest("a.py")
 
 
 # ---------------------------------------------------------------------------

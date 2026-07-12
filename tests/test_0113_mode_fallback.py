@@ -21,7 +21,7 @@ def _custom_single_profile():
     return validate_profile(
         raw,
         active_mode="triple",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
@@ -31,26 +31,26 @@ def test_single_only_triple_profile_projects_without_conversion():
     action = classify_profile_action(_custom_single_profile(), "triple")
     assert action.action == PROFILE_ACTION_EXECUTABLE
     resolved = build_resolved_profile(action, "triple")
-    assert not resolved.resolve_block("structure", "python").active
-    assert not resolved.resolve_block("dependency", "python").active
-    documentation = resolved.resolve_block("documentation", "python")
+    assert not resolved.resolve_block("structure", "a.py").active
+    assert not resolved.resolve_block("dependency", "a.py").active
+    documentation = resolved.resolve_block("documentation", "a.py")
     assert documentation.active
     assert set(documentation.requested_field_paths) <= documentation_projectable_paths()
     assert "Describe this file for a maintainer." in documentation.text
-    assert resolved.file_digest("python") != NO_PROMPT_PROFILE_DIGEST
+    assert resolved.file_digest("a.py") != NO_PROMPT_PROFILE_DIGEST
 
 
 def test_default_equivalent_single_only_profile_uses_builtin_triple_defaults():
     profile = validate_profile(
         default_prompt_profiles("single"),
         active_mode="triple",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
     resolved = build_resolved_profile(classify_profile_action(profile, "triple"), "triple")
-    assert resolved.file_digest("python") == NO_PROMPT_PROFILE_DIGEST
-    assert not resolved.resolve_block("documentation", "python").active
+    assert resolved.file_digest("a.py") == NO_PROMPT_PROFILE_DIGEST
+    assert not resolved.resolve_block("documentation", "a.py").active
 
 
 def _custom_triple_missing_documentation():
@@ -69,14 +69,14 @@ def test_explicit_triple_may_omit_documentation():
     profile = validate_profile(
         raw,
         active_mode="triple",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
     assert sorted(profile.triple.keys()) == ["dependency", "structure"]
     resolved = build_resolved_profile(classify_profile_action(profile, "triple"), "triple")
-    assert resolved.resolve_block("structure", "python").active
-    assert not resolved.resolve_block("documentation", "python").active
+    assert resolved.resolve_block("structure", "a.py").active
+    assert not resolved.resolve_block("documentation", "a.py").active
 
 
 def test_explicit_triple_missing_documentation_projects_from_single():
@@ -90,12 +90,12 @@ def test_explicit_triple_missing_documentation_projects_from_single():
     profile = validate_profile(
         raw,
         active_mode="triple",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
     resolved = build_resolved_profile(classify_profile_action(profile, "triple"), "triple")
-    documentation = resolved.resolve_block("documentation", "python")
+    documentation = resolved.resolve_block("documentation", "a.py")
     assert documentation.active
     assert "Projected description from single." in documentation.text
     assert set(documentation.requested_field_paths) <= documentation_projectable_paths()
@@ -109,7 +109,7 @@ def test_explicit_triple_missing_structure_or_dependency_rejects(missing_agent):
         validate_profile(
             raw,
             active_mode="triple",
-            known_languages=frozenset({"python"}),
+            known_extensions=frozenset({".py"}),
             source="inline",
             source_path=None,
         )
@@ -124,12 +124,12 @@ def test_documentation_projectable_paths_drift_guard():
     )
 
 
-def test_single_only_triple_profile_projects_per_language_overrides():
-    """Projection must carry per-language overrides, not just the base block."""
+def test_single_only_triple_profile_projects_per_extension_overrides():
+    """Projection must carry per-extension overrides, not just the base block."""
     raw = default_prompt_profiles("single")
     raw["single"]["common"]["requested_shape"]["description"] = "Base description."
-    raw["single"]["per_language"] = {
-        "javascript": {
+    raw["single"]["per_extension"] = {
+        ".js": {
             "requested_shape": {
                 **raw["single"]["common"]["requested_shape"],
                 "description": "JS-specific description.",
@@ -139,32 +139,32 @@ def test_single_only_triple_profile_projects_per_language_overrides():
     profile = validate_profile(
         raw,
         active_mode="triple",
-        known_languages=frozenset({"python", "javascript"}),
+        known_extensions=frozenset({".py", ".js"}),
         source="inline",
         source_path=None,
     )
     resolved = build_resolved_profile(classify_profile_action(profile, "triple"), "triple")
-    py_doc = resolved.resolve_block("documentation", "python")
-    js_doc = resolved.resolve_block("documentation", "javascript")
+    py_doc = resolved.resolve_block("documentation", "a.py")
+    js_doc = resolved.resolve_block("documentation", "a.js")
     assert "Base description." in py_doc.text
     assert "JS-specific description." in js_doc.text
     assert "Base description." not in js_doc.text
 
 
-def test_triple_per_language_documentation_requires_common_documentation():
+def test_triple_per_extension_documentation_requires_common_documentation():
     raw = _custom_triple_missing_documentation()
-    raw["triple"]["per_language"] = {
-        "python": {
+    raw["triple"]["per_extension"] = {
+        ".py": {
             "structure": raw["triple"]["common"]["structure"],
             "dependency": raw["triple"]["common"]["dependency"],
             "documentation": {"requested_shape": {"description": "x"}},
         }
     }
-    with pytest.raises(ConfigError, match="per_language"):
+    with pytest.raises(ConfigError, match="per_extension"):
         validate_profile(
             raw,
             active_mode="triple",
-            known_languages=frozenset({"python"}),
+            known_extensions=frozenset({".py"}),
             source="inline",
             source_path=None,
         )

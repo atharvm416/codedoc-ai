@@ -96,7 +96,7 @@
           "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
         }
       },
-      "per_language": {}
+      "per_extension": {}
     },
     "triple": {
       "common": {
@@ -163,7 +163,7 @@
           }
         }
       },
-      "per_language": {}
+      "per_extension": {}
     }
   }
 }

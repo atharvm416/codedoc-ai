@@ -409,7 +409,6 @@ def test_every_reuse_source_requires_complete_matching_identity(
 @pytest.mark.parametrize("mode", ["single", "triple"])
 def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, mode):
     from codedoc.core.db import compute_file_hash
-    from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
     from codedoc.core.resume import RECOVERY_FILENAME, build_recovery_identity
     from codedoc.pipeline import run_pipeline
 
@@ -427,7 +426,6 @@ def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, m
         documentation_scope="entry",
         analysis_mode=mode,
         analysis_revision=ANALYSIS_REVISION,
-        profile_digests_by_language={"python": NO_PROMPT_PROFILE_DIGEST},
     )
     (output / RECOVERY_FILENAME).write_text(
         json.dumps(

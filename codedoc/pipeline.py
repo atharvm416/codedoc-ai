@@ -167,7 +167,10 @@ def run_pipeline(
     dry_run = bool(config.get("dry_run", False))
 
     analysis_mode = config.get("analysis_mode", "single")
-    known_languages = frozenset(config["extension_language_map"].values())
+    # The configured extension keys (lowercased) gate ``per_extension`` overrides.
+    # The language tag no longer selects a profile scope, so the language set is no
+    # longer computed here.
+    known_extensions = frozenset(e.lower() for e in config["extension_language_map"])
     # Resolve and classify the prompt profile BEFORE entry resolution,
     # artifact/ownership inspection, existing-output reads, source scanning, graph
     # building, and planning.  Both calls are read-only and provider-free.  A
@@ -177,7 +180,7 @@ def run_pipeline(
     profile_resolution = resolve_profile_source(
         config,
         root,
-        known_languages=known_languages,
+        known_extensions=known_extensions,
         active_mode=analysis_mode,
     )
     profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
@@ -356,11 +359,12 @@ def run_pipeline(
     forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
     # Build the versioned recovery identity from the now-known project root,
-    # selected targets, entry, scope, analysis mode/revision, and sorted
-    # per-language profile digests for the selected file set.
-    selected_languages = sorted(
-        {file_map[rel].get("language", "generic") for rel in documented_rels}
-    )
+    # selected targets, entry, scope, and analysis mode/revision.  The run-level
+    # identity no longer binds a profile-wide digest: per-file
+    # ``_prompt_profile_digest`` values in CACHE_IDENTITY_KEYS already re-validate
+    # every recovered record individually, so narrowing this field set keeps
+    # version 1 (a backward-compatible narrowing) and never discards resumable
+    # work for an unrelated profile edit or a newly added file.
     recovery_identity = build_recovery_identity(
         project_root=root,
         json_target=json_target,
@@ -369,9 +373,6 @@ def run_pipeline(
         documentation_scope=config.get("documentation_scope", "entry"),
         analysis_mode=analysis_mode,
         analysis_revision=ANALYSIS_REVISION,
-        profile_digests_by_language={
-            lang: resolved_profile.file_digest(lang) for lang in selected_languages
-        },
     )
     # Inspect the single exact recovery file, read-only.  A real run blocks on an
     # incompatible / foreign / malformed / completed recovery file; a dry run
@@ -406,10 +407,13 @@ def run_pipeline(
         resolved_profile=resolved_profile,
     )
 
-    planned_languages = frozenset(
-        file_map[rel].get("language", "generic") for rel in plan.agent_rels
+    # The exact set of file scopes reachable by a planned agent file drives which
+    # profile components (common and per-extension) are reviewed.  An explicitly
+    # empty set means no planned agent file is reachable, so no review is built.
+    planned_scopes = frozenset(
+        resolved_profile.scope_for(file_map[rel]) for rel in plan.agent_rels
     )
-    review_batches = build_review_batches(resolved_profile, planned_languages)
+    review_batches = build_review_batches(resolved_profile, planned_scopes)
 
     if dry_run:
         return _build_dry_run_stats(
@@ -843,6 +847,38 @@ def _set_usage_stats(
     stats["allow_partial"] = bool(config.get("allow_partial", False))
 
 
+_SCOPE_PRECEDENCE = ("extension", "common", "built-in")
+
+
+def _prompt_profile_scope_counts(
+    plan: PipelinePlan,
+    file_map: dict[str, dict],
+    resolved_profile: ResolvedProfile | None,
+) -> dict[str, int]:
+    """Count planned agent files by the strongest scope their bundle resolved to.
+
+    Counted over ``plan.agent_rels`` with precedence ``extension > common >
+    built-in`` (a triple-mode file is counted once, under the strongest scope any
+    of its three agents resolved to), so the counts sum to ``len(agent_rels)``.
+    """
+    counts = {"extension": 0, "common": 0, "built-in": 0}
+    for rel in plan.agent_rels:
+        if resolved_profile is None:
+            counts["built-in"] += 1
+            continue
+        bundle = resolved_profile.resolve_bundle(
+            resolved_profile.scope_for(file_map[rel])
+        )
+        strongest = "built-in"
+        for selection in bundle.selections.values():
+            if _SCOPE_PRECEDENCE.index(selection.scope) < _SCOPE_PRECEDENCE.index(
+                strongest
+            ):
+                strongest = selection.scope
+        counts[strongest] += 1
+    return counts
+
+
 def _build_dry_run_stats(
     plan: PipelinePlan,
     file_map: dict[str, dict],
@@ -906,6 +942,9 @@ def _build_dry_run_stats(
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
+        "prompt_profile_scope_counts": _prompt_profile_scope_counts(
+            plan, file_map, resolved_profile
+        ),
         **profile_stats,
     }
 
@@ -920,7 +959,7 @@ def _base_profile_stats(
     affected_rels = {
         rel
         for rel in plan.documented_rels
-        if resolved.is_active_for(file_map[rel].get("language", "generic"))
+        if resolved.is_active_for(resolved.scope_for(file_map[rel]).basename)
     }
     affected = len(affected_rels)
     return {
@@ -1015,21 +1054,18 @@ def _estimate_planned_input_tokens(
         language = descriptor.get("language", "generic")
         head_fraction = config.get("truncation_head_ratio", 0.70)
         content = truncate_for_llm(content, max_chars, head_fraction=head_fraction)
+        # The profile block is selected by extension scope (basename), matching
+        # exactly what real execution will send for this file.
+        bundle = (
+            resolved_profile.resolve_bundle(resolved_profile.scope_for(descriptor))
+            if resolved_profile is not None
+            else None
+        )
         if analysis_mode == "triple":
-            structure_shape = (
-                resolved_profile.resolve_block("structure", language)
-                if resolved_profile is not None
-                else None
-            )
-            dependency_shape = (
-                resolved_profile.resolve_block("dependency", language)
-                if resolved_profile is not None
-                else None
-            )
+            structure_shape = bundle.selections["structure"].block if bundle else None
+            dependency_shape = bundle.selections["dependency"].block if bundle else None
             documentation_shape = (
-                resolved_profile.resolve_block("documentation", language)
-                if resolved_profile is not None
-                else None
+                bundle.selections["documentation"].block if bundle else None
             )
             prompts = (
                 structure_agent.build_prompt(
@@ -1043,11 +1079,7 @@ def _estimate_planned_input_tokens(
                 ),
             )
         else:
-            combined_shape = (
-                resolved_profile.resolve_block("combined", language)
-                if resolved_profile is not None
-                else None
-            )
+            combined_shape = bundle.selections["combined"].block if bundle else None
             prompts = (
                 file_documentation_agent.build_prompt(
                     rel_path, content, imports, language, combined_shape

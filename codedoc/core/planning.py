@@ -13,7 +13,7 @@ this module only consumes their results.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from codedoc.core.db import compute_file_hash, source_char_count
 from codedoc.core.graph import DependencyGraph
@@ -214,13 +214,14 @@ def build_pipeline_plan(
         identity = dict(base_identity)
         if mcr is not None:
             identity["_max_context_revision"] = mcr
-        # An active prompt-customization profile contributes a per-file
-        # digest keyed on the file's language.  Omitted when no profile is active
-        # for that language, so the absent-default normalization keeps no-profile
-        # records reusable.
+        # An active prompt-customization profile contributes a per-file digest
+        # keyed on the file's basename (extension scope).  The basename is derived
+        # from the ``rel`` key itself — no descriptor field is needed.  Omitted
+        # when no profile is active for that scope, so the absent-default
+        # normalization keeps no-profile records reusable.
         if resolved_profile is not None:
-            language = file_map[rel].get("language", "generic")
-            digest = resolved_profile.file_digest(language)
+            basename = PurePosixPath(rel).name.lower()
+            digest = resolved_profile.file_digest(basename)
             if digest != NO_PROMPT_PROFILE_DIGEST:
                 identity["_prompt_profile_digest"] = digest
         return identity

@@ -15,7 +15,7 @@ embedded in CodeDoc's per-file provider prompts.  The agents
   prompt **byte for byte** when no profile is active;
 - validates an optional user profile (inline config or external JSON file) that
   may reorder fields, rewrite per-field instruction text, omit optional fields,
-  and provide per-language overrides — restricted to the registered vocabulary
+  and provide per-extension overrides — restricted to the registered vocabulary
   and the cleaner-accepted value types;
 - renders a custom block in which every user instruction is a JSON-escaped string
   value (never raw prompt structure);
@@ -35,8 +35,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field as dataclass_field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Mapping
 
 from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
@@ -66,9 +67,23 @@ MAX_PROFILE_SECURITY_MESSAGE_CHARS = 500
 NO_PROMPT_PROFILE_DIGEST = "no-prompt-profile-v1"
 # Per-field bounds for deterministic validation.
 MAX_INSTRUCTION_CHARS = 2_000
-MAX_LANGUAGE_OVERRIDES_PER_AGENT = 64
+# Maximum ``per_extension`` overrides accepted per mode section.  Bounds override
+# *count*; the serialized-byte cap (:data:`MAX_PROMPT_PROFILE_FILE_BYTES`) bounds
+# *size* and is checked first, so a hostile config cannot force unbounded work.
+MAX_EXTENSION_OVERRIDES_PER_MODE = 64
+# Maximum characters in one ``per_extension`` key (e.g. ``".d.ts"``).
+MAX_EXTENSION_KEY_CHARS = 32
+# Maximum items in a ``$comment`` list, independent of extension override bounds.
+MAX_COMMENT_LIST_ITEMS = 64
+# A valid ``per_extension`` key: one or more lowercase dotted suffix segments,
+# e.g. ``.py``, ``.js``, ``.d.ts``, ``.test.js``.  Rejects uppercase, whitespace,
+# path separators, glob metacharacters, empty segments, a trailing dot, and a
+# dot-only value.
+_EXTENSION_KEY_RE = re.compile(r"^(?:\.[a-z0-9_+-]+)+$")
 
-# Digest scheme tag — bump if the rendering/hashing scheme changes.
+# Digest scheme tag — bump if the rendering/hashing scheme changes. A
+# ``common``-only profile digests byte-identically to prior releases, so the
+# scheme stays ``pp-v1``.
 _DIGEST_SCHEME = "pp-v1"
 
 # The marker line that begins every requested-shape block.
@@ -556,8 +571,8 @@ class ShapeFieldSpec:
 
 @dataclass(frozen=True)
 class AgentProfile:
-    fields: tuple[ShapeFieldSpec, ...]
-    per_language: Mapping[str, tuple[ShapeFieldSpec, ...]] = dataclass_field(
+    fields: tuple[ShapeFieldSpec, ...]                              # common
+    per_extension: Mapping[str, tuple[ShapeFieldSpec, ...]] = dataclass_field(
         default_factory=dict
     )
 
@@ -581,6 +596,28 @@ class ResolvedShapeBlock:
     digest: str
     active: bool
     requested_field_paths: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class FileScope:
+    """Everything scope resolution needs about one file."""
+
+    basename: str          # lowercased; "" means "no extension matching"
+
+
+@dataclass(frozen=True)
+class ResolvedShapeSelection:
+    block: ResolvedShapeBlock
+    scope: str             # "extension" | "common" | "built-in"
+    selector: str | None   # ".d.ts" | None
+
+
+@dataclass(frozen=True)
+class ResolvedFileShapeBundle:
+    mode: str                                        # "single" | "triple"
+    scope: FileScope
+    selections: Mapping[str, ResolvedShapeSelection]  # agent -> selection
+    digest: str                                      # the per-file digest
 
 
 @dataclass(frozen=True)
@@ -680,8 +717,8 @@ def _precheck_mode_sections(raw: dict) -> None:
             keys = ", ".join(repr(k) for k in flat_keys)
             raise _err(
                 f"{mode}: the {keys} block must move under a 'common' scope, e.g. "
-                f'{{"{mode}": {{"common": {{...}}, "per_language": {{}}}}}}. The flat '
-                "flat mode layout is not accepted."
+                f'{{"{mode}": {{"common": {{...}}}}}}. The flat mode layout is not '
+                "accepted."
             )
         raise _err(
             f"{mode} must contain a 'common' scope, e.g. "
@@ -689,23 +726,21 @@ def _precheck_mode_sections(raw: dict) -> None:
         )
 
 
-def _reject_section_keys(section: dict, where: str) -> None:
-    """A mode section may contain only ``common`` and an optional ``per_language``.
+# The accepted set for a mode section, named verbatim in the rejection message.
+_ACCEPTED_SECTION_KEYS_MSG = "{'common', 'per_extension'}"
 
-    ``per_extension`` is reserved for a future additive design and is rejected
-    rather than silently ignored.
+
+def _reject_section_keys(section: dict, where: str) -> None:
+    """A mode section may contain only ``common`` and an optional ``per_extension``.
+
+    Every unrecognized key is rejected with the generic unknown-property error.
     """
-    if "per_extension" in section:
-        raise _err(
-            f"{where}: 'per_extension' is reserved for a future additive design "
-            "and is not accepted; use 'common' and an optional 'per_language' only."
-        )
-    extra = set(section) - {"common", "per_language"}
+    extra = set(section) - {"common", "per_extension"}
     if extra:
         raise _err(
             f"{where} has unknown propert{'ies' if len(extra) > 1 else 'y'} "
-            f"{sorted(extra)}; a mode section may contain only 'common' and an "
-            "optional 'per_language'."
+            f"{sorted(extra)}; a mode section may contain only "
+            f"{_ACCEPTED_SECTION_KEYS_MSG}."
         )
 
 
@@ -797,7 +832,7 @@ def _validate_comment(raw: dict) -> None:
             raise _err("$comment string is too long.")
         return
     if isinstance(comment, list):
-        if len(comment) > MAX_LANGUAGE_OVERRIDES_PER_AGENT:
+        if len(comment) > MAX_COMMENT_LIST_ITEMS:
             raise _err("$comment list has too many items.")
         for item in comment:
             if not _is_real_str(item) or len(item) > MAX_INSTRUCTION_CHARS:
@@ -1049,55 +1084,143 @@ def _enforce_required_fields(
             )
 
 
-def _validate_per_language_overrides(
-    raw_per_language: object,
+def _validate_extension_key(
+    key: object, known_extensions: frozenset[str], where: str
+) -> None:
+    """Validate one ``per_extension`` key.
+
+    The key must be a lowercase dotted suffix (``.py``, ``.d.ts``), at most
+    :data:`MAX_EXTENSION_KEY_CHARS` characters, and its **final** segment must be
+    one of the project's configured extensions — so ``.d.ts`` is accepted when
+    ``.ts`` is configured, but ``.pyy`` is rejected as a silently dead override.
+    """
+    if not _is_real_str(key) or not key:
+        raise _err(f"{where} keys must be non-empty extension strings.")
+    if len(key) > MAX_EXTENSION_KEY_CHARS:
+        raise _err(
+            f"{where}: extension key '{key}' exceeds {MAX_EXTENSION_KEY_CHARS} "
+            "characters."
+        )
+    if not _EXTENSION_KEY_RE.match(key):
+        raise _err(
+            f"{where}: '{key}' is not a valid extension key; use lowercase dotted "
+            'suffixes such as ".py", ".js", or ".d.ts".'
+        )
+    final_segment = "." + key.rsplit(".", 1)[1]
+    if final_segment not in known_extensions:
+        raise _err(
+            f"{where}: the final segment '{final_segment}' of '{key}' is not a "
+            "configured extension for this project. Configured extensions: "
+            f"{sorted(known_extensions)}."
+        )
+
+
+def _validate_override_block(
+    raw_override: object,
     mode: str,
     agent: str,
     shape_key: str,
     version: int,
-    known_languages: frozenset[str],
+    where: str,
+) -> tuple[ShapeFieldSpec, ...]:
+    """Validate one complete override block (``{shape_key: ...}``) for an agent."""
+    if not isinstance(raw_override, dict):
+        raise _err(f"{where} must be an object.")
+    _reject_block_keys(raw_override, where, {shape_key}, version)
+    if shape_key not in raw_override:
+        container = "list" if version == LEGACY_PROMPT_PROFILE_SCHEMA_VERSION else "object"
+        raise _err(f"{where} must contain a '{shape_key}' {container}.")
+    return _validate_shape_block(raw_override[shape_key], mode, agent, where, version)
+
+
+def _validate_per_extension_single(
+    raw_per_extension: object,
+    version: int,
+    known_extensions: frozenset[str],
     where: str,
 ) -> dict[str, tuple[ShapeFieldSpec, ...]]:
-    """Validate one agent's ``per_language`` map of ``{shape_key}`` overrides."""
-    per_language: dict[str, tuple[ShapeFieldSpec, ...]] = {}
-    if raw_per_language is None:
-        return per_language
-    if not isinstance(raw_per_language, dict):
+    """Validate ``single.per_extension``: ``{ext: {shape_key: ...}}`` overrides."""
+    per_extension: dict[str, tuple[ShapeFieldSpec, ...]] = {}
+    if raw_per_extension is None:
+        return per_extension
+    if not isinstance(raw_per_extension, dict):
         raise _err(f"{where} must be an object.")
-    if len(raw_per_language) > MAX_LANGUAGE_OVERRIDES_PER_AGENT:
+    if len(raw_per_extension) > MAX_EXTENSION_OVERRIDES_PER_MODE:
         raise _err(
-            f"{where}: at most {MAX_LANGUAGE_OVERRIDES_PER_AGENT} language "
+            f"{where}: at most {MAX_EXTENSION_OVERRIDES_PER_MODE} extension "
             "overrides are allowed."
         )
-    for language, raw_override in raw_per_language.items():
-        if not _is_real_str(language) or not language:
-            raise _err(f"{where} keys must be non-empty language tags.")
-        if language not in known_languages:
-            raise _err(
-                f"{where}: '{language}' is not a known language tag for this project."
-            )
-        if not isinstance(raw_override, dict):
-            raise _err(f"{where}['{language}'] must be an object.")
-        _reject_block_keys(raw_override, f"{where}['{language}']", {shape_key}, version)
-        if shape_key not in raw_override:
-            container = "list" if version == LEGACY_PROMPT_PROFILE_SCHEMA_VERSION else "object"
-            raise _err(f"{where}['{language}'] must contain a '{shape_key}' {container}.")
-        per_language[language] = _validate_shape_block(
-            raw_override[shape_key], mode, agent, f"{where}['{language}']", version
+    shape_key = _VERSION_SHAPE_KEY[version]
+    for key, raw_override in raw_per_extension.items():
+        _validate_extension_key(key, known_extensions, where)
+        per_extension[key] = _validate_override_block(
+            raw_override, "single", "combined", shape_key, version, f"{where}['{key}']"
         )
-    return per_language
+    return per_extension
+
+
+def _validate_per_extension_triple(
+    raw_per_extension: object,
+    version: int,
+    known_extensions: frozenset[str],
+    common: dict,
+    where: str,
+) -> dict[str, dict[str, tuple[ShapeFieldSpec, ...]]]:
+    """Validate ``triple.per_extension`` into per-agent ``{ext: specs}`` maps.
+
+    Each override is a complete replacement carrying all three agent keys.  A
+    non-empty ``triple.per_extension`` requires ``triple.common.documentation``,
+    because without it no documentation ``AgentProfile`` exists and the override
+    would be silently dropped.
+    """
+    per_extension_by_agent: dict[str, dict[str, tuple[ShapeFieldSpec, ...]]] = {
+        agent: {} for agent in VALID_AGENTS_BY_MODE["triple"]
+    }
+    if raw_per_extension is None:
+        raw_per_extension = {}
+    if not isinstance(raw_per_extension, dict):
+        raise _err(f"{where} must be an object.")
+    if raw_per_extension and "documentation" not in common:
+        raise _err(
+            f"{where} requires triple.common.documentation because a per-extension "
+            "override replaces all three agents; add triple.common.documentation "
+            f"or remove the {where} overrides."
+        )
+    if len(raw_per_extension) > MAX_EXTENSION_OVERRIDES_PER_MODE:
+        raise _err(
+            f"{where}: at most {MAX_EXTENSION_OVERRIDES_PER_MODE} extension "
+            "overrides are allowed."
+        )
+    shape_key = _VERSION_SHAPE_KEY[version]
+    expected_agents = set(VALID_AGENTS_BY_MODE["triple"])
+    for key, raw_override in raw_per_extension.items():
+        _validate_extension_key(key, known_extensions, where)
+        loc = f"{where}['{key}']"
+        if not isinstance(raw_override, dict):
+            raise _err(f"{loc} must be an object.")
+        if set(raw_override) != expected_agents:
+            raise _err(
+                f"{loc} must contain exactly the three agent keys "
+                f"{sorted(expected_agents)} (complete replacement); got "
+                f"{sorted(raw_override)}."
+            )
+        for agent in VALID_AGENTS_BY_MODE["triple"]:
+            per_extension_by_agent[agent][key] = _validate_override_block(
+                raw_override[agent], "triple", agent, shape_key, version, f"{loc}.{agent}"
+            )
+    return per_extension_by_agent
 
 
 def _validate_single_section(
     raw_single: object,
-    known_languages: frozenset[str],
+    known_extensions: frozenset[str],
     version: int,
 ) -> AgentProfile:
     """Validate a ``single`` section under the ``common`` envelope.
 
     Reads the base combined block from ``single.common`` and its optional
-    ``single.per_language`` overrides, returning the unchanged
-    ``AgentProfile(fields=..., per_language=...)`` contract.
+    ``single.per_extension`` overrides, returning the
+    ``AgentProfile(fields=..., per_extension=...)`` contract.
     """
     if not isinstance(raw_single, dict):
         raise _err("single must be an object.")
@@ -1111,34 +1234,31 @@ def _validate_single_section(
         container = "list" if version == LEGACY_PROMPT_PROFILE_SCHEMA_VERSION else "object"
         raise _err(f"single.common must contain a '{shape_key}' {container}.")
     base = _validate_shape_block(common[shape_key], "single", "combined", "single.common", version)
-    per_language = _validate_per_language_overrides(
-        raw_single.get("per_language"),
-        "single",
-        "combined",
-        shape_key,
+    per_extension = _validate_per_extension_single(
+        raw_single.get("per_extension"),
         version,
-        known_languages,
-        "single.per_language",
+        known_extensions,
+        "single.per_extension",
     )
-    return AgentProfile(fields=base, per_language=per_language)
+    return AgentProfile(fields=base, per_extension=per_extension)
 
 
 def _validate_triple_section(
     raw_triple: object,
-    known_languages: frozenset[str],
+    known_extensions: frozenset[str],
     version: int,
 ) -> dict[str, AgentProfile]:
     """Validate a ``triple`` section under the ``common`` envelope.
 
     Reads the agent blocks from ``triple.common.{structure,dependency,
-    documentation}`` and decomposes the mode-level ``triple.per_language`` map
-    ``{lang: {structure, dependency, documentation}}`` into the existing per-agent
-    ``AgentProfile.per_language`` maps.  ``structure`` and ``dependency`` are
+    documentation}`` and decomposes the mode-level ``triple.per_extension`` map
+    ``{ext: {structure, dependency, documentation}}`` into the per-agent
+    ``AgentProfile.per_extension`` maps.  ``structure`` and ``dependency`` are
     required in ``triple.common``; ``documentation`` is optional there (missing
     documentation resolves later via projection of a compatible ``single.common``
     profile, then built-in defaults — see :meth:`ResolvedProfile._agent_profile`).
-    Each ``per_language`` override must still carry all three agent keys
-    (complete replacement semantics); that stricter rule is unchanged.
+    Each ``per_extension`` override must carry all three agent keys (complete
+    replacement semantics).
     """
     if not isinstance(raw_triple, dict):
         raise _err("'triple' must be an object.")
@@ -1171,57 +1291,17 @@ def _validate_triple_section(
             raw_block[shape_key], "triple", agent, f"triple.common.{agent}", version
         )
 
-    per_language_by_agent: dict[str, dict[str, tuple[ShapeFieldSpec, ...]]] = {
-        agent: {} for agent in VALID_AGENTS_BY_MODE["triple"]
-    }
-    raw_per_language = raw_triple.get("per_language")
-    if raw_per_language is None:
-        raw_per_language = {}
-    if not isinstance(raw_per_language, dict):
-        raise _err("triple.per_language must be an object.")
-    if raw_per_language and "documentation" not in common:
-        raise _err(
-            "triple.per_language requires triple.common.documentation because a "
-            "per-language override replaces all three agents; add "
-            "triple.common.documentation or remove the triple.per_language overrides."
-        )
-    if len(raw_per_language) > MAX_LANGUAGE_OVERRIDES_PER_AGENT:
-        raise _err(
-            f"triple.per_language: at most {MAX_LANGUAGE_OVERRIDES_PER_AGENT} "
-            "language overrides are allowed."
-        )
-    for language, raw_override in raw_per_language.items():
-        if not _is_real_str(language) or not language:
-            raise _err("triple.per_language keys must be non-empty language tags.")
-        if language not in known_languages:
-            raise _err(
-                f"triple.per_language: '{language}' is not a known language tag "
-                "for this project."
-            )
-        if not isinstance(raw_override, dict):
-            raise _err(f"triple.per_language['{language}'] must be an object.")
-        if set(raw_override) != expected_agents:
-            raise _err(
-                f"triple.per_language['{language}'] must contain exactly the three "
-                f"agent keys {sorted(expected_agents)} (complete replacement); got "
-                f"{sorted(raw_override)}."
-            )
-        for agent in VALID_AGENTS_BY_MODE["triple"]:
-            raw_block = raw_override[agent]
-            where = f"triple.per_language['{language}'].{agent}"
-            if not isinstance(raw_block, dict):
-                raise _err(f"{where} must be an object.")
-            _reject_block_keys(raw_block, where, {shape_key}, version)
-            if shape_key not in raw_block:
-                container = "list" if version == LEGACY_PROMPT_PROFILE_SCHEMA_VERSION else "object"
-                raise _err(f"{where} must contain a '{shape_key}' {container}.")
-            per_language_by_agent[agent][language] = _validate_shape_block(
-                raw_block[shape_key], "triple", agent, where, version
-            )
+    per_extension_by_agent = _validate_per_extension_triple(
+        raw_triple.get("per_extension"),
+        version,
+        known_extensions,
+        common,
+        "triple.per_extension",
+    )
     return {
         agent: AgentProfile(
             fields=base_by_agent[agent],
-            per_language=per_language_by_agent[agent],
+            per_extension=per_extension_by_agent[agent],
         )
         for agent in base_by_agent
     }
@@ -1231,7 +1311,7 @@ def validate_profile(
     raw: object,
     *,
     active_mode: str,
-    known_languages: frozenset[str],
+    known_extensions: frozenset[str],
     source: str,
     source_path: Path | None,
 ) -> PromptProfileConfig:
@@ -1240,7 +1320,9 @@ def validate_profile(
     Validates every present section (``single`` and/or ``triple``) under the
     ``common`` instruction envelope, enforces the closed vocabulary, types,
     bounds, and required fields, and requires the *active_mode* section to be
-    present.  Raises ``ConfigError`` on any violation.
+    present.  ``known_extensions`` is the set of lowercased configured extension
+    keys used to reject silently-dead ``per_extension`` overrides.  Raises
+    ``ConfigError`` on any violation.
 
     A ``single``-only profile selected in triple mode remains valid: Workstream D
     resolves it by deterministic projection of the compatible ``single.common``
@@ -1263,11 +1345,11 @@ def validate_profile(
 
     single: AgentProfile | None = None
     if "single" in raw:
-        single = _validate_single_section(raw["single"], known_languages, version)
+        single = _validate_single_section(raw["single"], known_extensions, version)
 
     triple: dict[str, AgentProfile] | None = None
     if "triple" in raw:
-        triple = _validate_triple_section(raw["triple"], known_languages, version)
+        triple = _validate_triple_section(raw["triple"], known_extensions, version)
 
     if single is None and triple is None:
         raise _err("the profile must define a 'single' and/or 'triple' section.")
@@ -1293,7 +1375,7 @@ def resolve_profile_source(
     config: dict,
     root: Path,
     *,
-    known_languages: frozenset[str],
+    known_extensions: frozenset[str],
     active_mode: str,
 ) -> ProfileResolution:
     """Resolve and validate the inline prompt profile, or report an absent source.
@@ -1303,6 +1385,9 @@ def resolve_profile_source(
     - ``inline``: a non-null ``prompt_profiles`` value from the exact config file
       or an in-memory override;
     - ``absent``: no profile — developer defaults are used.
+
+    ``known_extensions`` is the set of lowercased configured extension keys used
+    to validate ``per_extension`` keys.
 
     External profile files, auto-detection, and the disable flag were removed, so
     no filesystem is probed here (``root`` is accepted for signature stability).
@@ -1315,7 +1400,7 @@ def resolve_profile_source(
         profile = validate_profile(
             inline,
             active_mode=active_mode,
-            known_languages=known_languages,
+            known_extensions=known_extensions,
             source="inline",
             source_path=None,
         )
@@ -1355,25 +1440,45 @@ def project_single_to_documentation(single_profile: AgentProfile) -> AgentProfil
     """Project a customized ``single`` profile onto a triple documentation profile.
 
     Deterministic, registry-owned, and provider-free.  Projects **both** the base
-    ``fields`` and every ``per_language`` entry, keeping only the field paths also
+    ``fields`` and every ``per_extension`` entry, keeping only the field paths also
     registered to ``("triple", "documentation")`` while preserving relative order,
     types, and instruction text.  The required documentation ``description`` is
     always present because it is required for ``single``/``combined`` too.  It
     never copies functions, classes, exports, or dependency analysis.  Returns a
-    full :class:`AgentProfile` (base + per_language) so the existing
-    ``_effective_specs(agent, language)`` applies per-language overrides through
-    the normal path without the projection needing a ``language`` argument.
+    full :class:`AgentProfile` (base + per_extension) so the existing
+    ``_effective_specs(agent, selector)`` applies per-extension overrides through
+    the normal path.
     """
     base = _project_specs_to_documentation(single_profile.fields)
-    per_language = {
-        language: _project_specs_to_documentation(specs)
-        for language, specs in single_profile.per_language.items()
+    per_extension = {
+        ext: _project_specs_to_documentation(specs)
+        for ext, specs in single_profile.per_extension.items()
     }
-    return AgentProfile(fields=base, per_language=per_language)
+    return AgentProfile(fields=base, per_extension=per_extension)
+
+
+def _match_extension_selector(basename: str, keys: frozenset[str]) -> str | None:
+    """Return the longest configured *key* matching *basename*, or ``None``.
+
+    A key ``k`` matches when ``basename.endswith(k)`` and ``len(basename) >
+    len(k)`` — so a dotfile named exactly ``.ts`` does not match the ``.ts``
+    override.  Among matches, the greatest ``len(k)`` wins (``.d.ts`` beats
+    ``.ts``); keys are unique, so there is never a tie.
+    """
+    best: str | None = None
+    for key in keys:
+        if basename.endswith(key) and len(basename) > len(key):
+            if best is None or len(key) > len(best):
+                best = key
+    return best
 
 
 class ResolvedProfile:
     """Renders requested-shape blocks and digests for one analysis mode.
+
+    Scope resolution follows ``longest matching per_extension > common >
+    built-in default``.  An override is a complete replacement of the block,
+    never a field-by-field merge.
 
     A ``profile`` of ``None`` (no profile or absent) means every block is the
     developer standard: blocks are byte-identical to the frozen developer-standard
@@ -1389,13 +1494,21 @@ class ResolvedProfile:
     ``structure`` and ``dependency`` are required there); the documentation
     agent then resolves via the same projection of a compatible ``single``
     section when one is also present, else built-in defaults.
+
+    ``resolve_bundle`` is memoized on the matched extension selector (derived
+    from the basename), so a project with 10 000 files performs at most
+    ``len(per_extension) + 1`` renders per mode.
     """
 
     def __init__(self, mode: str, profile: PromptProfileConfig | None) -> None:
         self.mode = mode
         self.profile = profile
-        self._block_cache: dict[tuple[str, str], ResolvedShapeBlock] = {}
-        self._digest_cache: dict[str, str] = {}
+        # Memoized bundle core (selections + digest) keyed on the matched
+        # extension selector (``str`` or ``None``).
+        self._core_cache: dict[
+            str | None, tuple[dict[str, ResolvedShapeSelection], str]
+        ] = {}
+        self._extension_keys: frozenset[str] | None = None
         # Memoized projected documentation profile for a single-only triple-mode
         # profile; computed at most once per ResolvedProfile.
         self._projected_doc: AgentProfile | None = None
@@ -1432,11 +1545,35 @@ class ResolvedProfile:
         # 'single.common' profile if one is present, else built-in defaults.
         return self._documentation_projection()
 
-    def _effective_specs(self, agent: str, language: str) -> list[_ResolvedField]:
+    def _mode_extension_keys(self) -> frozenset[str]:
+        """Union of every agent's ``per_extension`` keys for this mode.
+
+        Validation guarantees the keys are consistent across the triple agents,
+        so this equals any customized agent's key set.
+        """
+        if self._extension_keys is None:
+            keys: set[str] = set()
+            for agent in self._agents():
+                agent_profile = self._agent_profile(agent)
+                if agent_profile is not None:
+                    keys.update(agent_profile.per_extension)
+            self._extension_keys = frozenset(keys)
+        return self._extension_keys
+
+    def _selector_for(self, basename: str) -> str | None:
+        if not basename:
+            return None
+        # Match on the lowercased basename so a direct ``resolve_block`` /
+        # ``file_digest`` caller need not pre-normalize (``scope_for`` already does).
+        return _match_extension_selector(basename.lower(), self._mode_extension_keys())
+
+    def _effective_specs(self, agent: str, selector: str | None) -> list[_ResolvedField]:
         agent_profile = self._agent_profile(agent)
         if agent_profile is None:
             return _default_resolved_fields(self.mode, agent)
-        specs = agent_profile.per_language.get(language, agent_profile.fields)
+        specs = agent_profile.fields
+        if selector is not None:
+            specs = agent_profile.per_extension.get(selector, agent_profile.fields)
         return [
             _ResolvedField(
                 path=spec.key, type=spec.type, instruction=spec.instruction
@@ -1444,65 +1581,96 @@ class ResolvedProfile:
             for spec in specs
         ]
 
-    def _is_active(self, agent: str, language: str) -> bool:
-        effective = self._effective_specs(agent, language)
-        return effective != _default_resolved_fields(self.mode, agent)
+    def _scope_kind_for(self, agent: str, selector: str | None) -> tuple[str, str | None]:
+        agent_profile = self._agent_profile(agent)
+        if agent_profile is None:
+            return "built-in", None
+        if selector is not None and selector in agent_profile.per_extension:
+            return "extension", selector
+        return "common", None
 
     def _agents(self) -> tuple[str, ...]:
         return VALID_AGENTS_BY_MODE[self.mode]
 
+    def _bundle_core(
+        self, selector: str | None
+    ) -> tuple[dict[str, ResolvedShapeSelection], str]:
+        """Resolve and memoize per-agent selections + the per-file digest.
+
+        Memoized on *selector* so every file sharing a matched suffix (or none)
+        renders at most once.  The digest payload is byte-identical to prior
+        releases for a ``common``-only profile: it renders every agent's effective
+        block (default text for inactive agents) exactly as before.
+        """
+        cached = self._core_cache.get(selector)
+        if cached is not None:
+            return cached
+        agents = self._agents()
+        rendered: dict[str, tuple[str, tuple[str, ...], bool]] = {}
+        for agent in agents:
+            specs = self._effective_specs(agent, selector)
+            active = specs != _default_resolved_fields(self.mode, agent)
+            if active:
+                text = _render_block(self.mode, agent, specs)
+                field_paths = tuple(rf.path for rf in specs)
+            else:
+                text = default_shape_block(self.mode, agent)
+                field_paths = default_field_paths(self.mode, agent)
+            rendered[agent] = (text, field_paths, active)
+
+        any_active = any(active for _, _, active in rendered.values())
+        if self.profile is None or not any_active:
+            digest = NO_PROMPT_PROFILE_DIGEST
+        else:
+            payload = self.mode + "\n" + "\n--\n".join(rendered[a][0] for a in agents)
+            digest = (
+                f"{_DIGEST_SCHEME}:"
+                + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+            )
+
+        selections: dict[str, ResolvedShapeSelection] = {}
+        for agent in agents:
+            text, field_paths, active = rendered[agent]
+            scope_kind, sel = self._scope_kind_for(agent, selector)
+            selections[agent] = ResolvedShapeSelection(
+                block=ResolvedShapeBlock(
+                    text=text,
+                    digest=digest,
+                    active=active,
+                    requested_field_paths=field_paths,
+                ),
+                scope=scope_kind,
+                selector=sel,
+            )
+        core = (selections, digest)
+        self._core_cache[selector] = core
+        return core
+
     # -- public -------------------------------------------------------------
 
-    def resolve_block(self, agent: str, language: str) -> ResolvedShapeBlock:
-        cache_key = (agent, language)
-        cached = self._block_cache.get(cache_key)
-        if cached is not None:
-            return cached
-        active = self._is_active(agent, language)
-        if not active:
-            block = ResolvedShapeBlock(
-                text=default_shape_block(self.mode, agent),
-                digest=self.file_digest(language),
-                active=False,
-                requested_field_paths=default_field_paths(self.mode, agent),
-            )
-        else:
-            effective = self._effective_specs(agent, language)
-            block = ResolvedShapeBlock(
-                text=_render_block(self.mode, agent, effective),
-                digest=self.file_digest(language),
-                active=True,
-                requested_field_paths=tuple(rf.path for rf in effective),
-            )
-        self._block_cache[cache_key] = block
-        return block
+    def scope_for(self, descriptor: dict) -> FileScope:
+        """Return the :class:`FileScope` for a scanned file descriptor."""
+        rel_path = descriptor.get("rel_path", "") or ""
+        return FileScope(basename=PurePosixPath(rel_path).name.lower())
 
-    def file_digest(self, language: str) -> str:
-        cached = self._digest_cache.get(language)
-        if cached is not None:
-            return cached
-        if self.profile is None:
-            self._digest_cache[language] = NO_PROMPT_PROFILE_DIGEST
-            return NO_PROMPT_PROFILE_DIGEST
-        agents = self._agents()
-        any_active = any(self._is_active(agent, language) for agent in agents)
-        if not any_active:
-            self._digest_cache[language] = NO_PROMPT_PROFILE_DIGEST
-            return NO_PROMPT_PROFILE_DIGEST
-        blocks = [
-            _render_block(self.mode, agent, self._effective_specs(agent, language))
-            for agent in agents
-        ]
-        payload = self.mode + "\n" + "\n--\n".join(blocks)
-        digest = (
-            f"{_DIGEST_SCHEME}:"
-            + hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    def resolve_bundle(self, scope: FileScope) -> ResolvedFileShapeBundle:
+        """Resolve every agent block and the per-file digest for *scope* (memoized)."""
+        selector = self._selector_for(scope.basename)
+        selections, digest = self._bundle_core(selector)
+        return ResolvedFileShapeBundle(
+            mode=self.mode, scope=scope, selections=selections, digest=digest
         )
-        self._digest_cache[language] = digest
+
+    def resolve_block(self, agent: str, basename: str = "") -> ResolvedShapeBlock:
+        selections, _ = self._bundle_core(self._selector_for(basename))
+        return selections[agent].block
+
+    def file_digest(self, basename: str = "") -> str:
+        _, digest = self._bundle_core(self._selector_for(basename))
         return digest
 
-    def is_active_for(self, language: str) -> bool:
-        return self.file_digest(language) != NO_PROMPT_PROFILE_DIGEST
+    def is_active_for(self, basename: str = "") -> bool:
+        return self.file_digest(basename) != NO_PROMPT_PROFILE_DIGEST
 
 
 # ---------------------------------------------------------------------------
@@ -1541,7 +1709,7 @@ def _agent_profile_is_default(agent_profile: AgentProfile, mode: str, agent: str
 
     if as_resolved(agent_profile.fields) != default:
         return False
-    return all(as_resolved(specs) == default for specs in agent_profile.per_language.values())
+    return all(as_resolved(specs) == default for specs in agent_profile.per_extension.values())
 
 
 def classify_profile_action(
@@ -1552,7 +1720,7 @@ def classify_profile_action(
     Deterministic and provider-free.  A customized single-only profile selected in
     triple mode is ``executable``: ``ResolvedProfile`` resolves the documentation
     agent by deterministic projection of the compatible single fields (base and
-    every per-language override) — no paid routing conversion is ever required.
+    every per-extension override) — no paid routing conversion is ever required.
     """
     if profile is None:
         return ProfileActionPlan(PROFILE_ACTION_EXECUTABLE, None)
@@ -1572,7 +1740,7 @@ def classify_profile_action(
         # Developer-standard-equivalent single: use built-in triple defaults.
         return ProfileActionPlan(PROFILE_ACTION_LOCAL_DEFAULT, None)
     # A customized single-only structure resolves via documentation projection
-    # (including its per-language overrides), so it is directly executable.
+    # (including its per-extension overrides), so it is directly executable.
     return ProfileActionPlan(PROFILE_ACTION_EXECUTABLE, profile)
 
 
@@ -1700,45 +1868,76 @@ class ReviewBatch:
     text: str
 
 
+def _reachable_selectors(
+    resolved: ResolvedProfile,
+    planned_scopes: frozenset[FileScope] | None,
+) -> set[str | None]:
+    """Return the matched extension selectors reachable by the planned files.
+
+    ``None`` (the argument) invokes the compatibility common-only behaviour — only
+    the ``common`` block (selector ``None``) is reachable.  An explicitly supplied
+    empty ``frozenset()`` means no planned agent file is reachable, so nothing is.
+    """
+    if planned_scopes is None:
+        return {None}
+    return {resolved._selector_for(scope.basename) for scope in planned_scopes}
+
+
 def build_review_units(
     resolved: ResolvedProfile,
-    planned_languages: frozenset[str],
+    planned_scopes: frozenset[FileScope] | None = None,
 ) -> tuple[list[ReviewUnit], dict[str, ReviewComponent]]:
     """Build canonical review units for active blocks reachable by planned files.
 
-    A distinct active block is reviewed once regardless of how many languages map
-    to it: languages without a per-language override share the agent's base block
-    (component language ``*``); each distinct reachable override is its own
-    component.  Returns ``([], {})`` when nothing requires review.
+    A review **component** is identified by ``f"{mode}/{agent}/{scope_key}"`` where
+    ``scope_key`` is ``"*"`` (the common block) or ``f"ext:{suffix}"``.  Components
+    are built only for scopes reachable by a planned agent file: an unused
+    ``per_extension`` entry is structurally validated elsewhere but creates no
+    review unit here.  Identical review signatures (same block text and field/
+    type/instruction units) collapse to one, retaining the first in canonical
+    order (agent order, then ``"*"``, then ``ext:`` descending by length then
+    ascending lexically).  Returns ``([], {})`` when nothing requires review.
     """
     units: list[ReviewUnit] = []
     components: dict[str, ReviewComponent] = {}
-    if resolved.profile is None or not planned_languages:
+    if resolved.profile is None:
+        return units, components
+    selectors = _reachable_selectors(resolved, planned_scopes)
+    if not selectors:
         return units, components
 
+    seen_signatures: dict[tuple, str] = {}
     for agent in VALID_AGENTS_BY_MODE[resolved.mode]:
-        agent_profile = resolved._agent_profile(agent)
-        if agent_profile is None:
-            continue
-        # Base block: reachable when a planned language uses no override.
-        base_langs = sorted(
-            lang for lang in planned_languages if lang not in agent_profile.per_language
-        )
-        groups: list[tuple[str, str]] = []  # (component_language, representative_lang)
-        if base_langs:
-            groups.append(("*", base_langs[0]))
-        for lang in sorted(agent_profile.per_language):
-            if lang in planned_languages:
-                groups.append((lang, lang))
+        # Collect the distinct scope keys this agent resolves to across reachable
+        # selectors, in canonical order: "*" first, then ext: (longest first).
+        scope_keys: dict[str, str | None] = {}
+        for selector in selectors:
+            scope_kind, sel = resolved._scope_kind_for(agent, selector)
+            scope_key = "*" if scope_kind != "extension" else f"ext:{sel}"
+            scope_keys.setdefault(scope_key, sel)
 
-        for component_language, representative in groups:
-            if not resolved._is_active(agent, representative):
-                continue
-            specs = resolved._effective_specs(agent, representative)
-            component_id = f"{resolved.mode}/{agent}/{component_language}"
+        def _order(item: tuple[str, str | None]) -> tuple:
+            scope_key, sel = item
+            if scope_key == "*":
+                return (0, 0, "")
+            return (1, -len(sel or ""), sel or "")
+
+        for scope_key, sel in sorted(scope_keys.items(), key=_order):
+            specs = resolved._effective_specs(agent, sel)
+            if specs == _default_resolved_fields(resolved.mode, agent):
+                continue  # not active -> no review unit and no paid call
+            block_text = _render_block(resolved.mode, agent, specs)
+            signature = (
+                block_text,
+                tuple((rf.path, rf.type, rf.instruction) for rf in specs),
+            )
+            if signature in seen_signatures:
+                continue  # identical component already represented
+            component_id = f"{resolved.mode}/{agent}/{scope_key}"
+            seen_signatures[signature] = component_id
             components[component_id] = ReviewComponent(
                 component=component_id,
-                block_text=_render_block(resolved.mode, agent, specs),
+                block_text=block_text,
                 fields=tuple((rf.path, rf.type) for rf in specs),
             )
             for rf in specs:
@@ -1927,10 +2126,10 @@ def pack_review_batches(
 
 def build_review_batches(
     resolved: ResolvedProfile,
-    planned_languages: frozenset[str],
+    planned_scopes: frozenset[FileScope] | None = None,
 ) -> list[ReviewBatch]:
     """Convenience: build units then pack them into review batches."""
-    units, components = build_review_units(resolved, planned_languages)
+    units, components = build_review_units(resolved, planned_scopes)
     if not units:
         return []
     review_id = "rev-" + _stream_digest(units, components)[:16]
@@ -2116,15 +2315,13 @@ def default_prompt_profiles(
 
     This is the single source of the generated/recommended prompt-profile shape
     used by runtime resolution and ``--init-config``. Each present mode section
-    carries an explicit
-    ``common`` scope and an empty ``per_language`` map; no ``per_extension`` key is
-    emitted (that scope is reserved for a future release).  The result is
-    developer-standard-equivalent, so an unedited generated profile is inert (no
-    semantic review, no cache invalidation) when reloaded through
+    carries an explicit ``common`` scope and an empty ``per_extension`` map. The
+    result is developer-standard-equivalent, so an unedited generated profile is
+    inert (no semantic review, no cache invalidation) when reloaded through
     :func:`validate_profile`. The generated default omits ``schema_version`` and
-    uses current ``requested_shape`` syntax. Passing a version explicitly is a
-    compatibility/testing facility that selects legacy syntax without emitting
-    a public version marker.
+    uses current ``requested_shape`` syntax.
+    Passing a version explicitly is a compatibility/testing facility that selects
+    legacy syntax without emitting a public version marker.
     """
     selected_version = (
         CURRENT_PROMPT_PROFILE_SCHEMA_VERSION
@@ -2135,7 +2332,7 @@ def default_prompt_profiles(
     if mode in (None, "single"):
         profiles["single"] = {
             "common": _default_common_block("single", "combined", selected_version),
-            "per_language": {},
+            "per_extension": {},
         }
     if mode in (None, "triple"):
         profiles["triple"] = {
@@ -2143,6 +2340,6 @@ def default_prompt_profiles(
                 agent: _default_common_block("triple", agent, selected_version)
                 for agent in VALID_AGENTS_BY_MODE["triple"]
             },
-            "per_language": {},
+            "per_extension": {},
         }
     return profiles

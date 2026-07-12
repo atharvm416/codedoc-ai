@@ -41,21 +41,46 @@ def test_both_inline_schema_versions_validate_under_common(version):
     profile = validate_profile(
         raw,
         active_mode="triple",
-        known_languages=frozenset({"python"}),
+        known_extensions=frozenset({".py"}),
         source="inline",
         source_path=None,
     )
     assert profile.schema_version == version
 
 
-def test_flat_layout_and_reserved_per_extension_are_rejected():
+def test_flat_layout_is_rejected_and_per_extension_is_accepted():
     raw = default_prompt_profiles("single")
     raw["single"] = raw["single"]["common"]
     with pytest.raises(ConfigError, match="common"):
-        validate_profile(raw, active_mode="single", known_languages=frozenset(), source="inline", source_path=None)
+        validate_profile(raw, active_mode="single", known_extensions=frozenset(), source="inline", source_path=None)
 
+    # An empty per_extension is accepted (the generated default carries it).
     raw = default_prompt_profiles("single")
-    raw["single"]["per_extension"] = {}
-    with pytest.raises(ConfigError, match="per_extension"):
-        validate_profile(raw, active_mode="single", known_languages=frozenset(), source="inline", source_path=None)
+    profile = validate_profile(
+        raw, active_mode="single", known_extensions=frozenset({".py"}),
+        source="inline", source_path=None,
+    )
+    assert profile.single.per_extension == {}
+
+    # A populated, registry-valid per_extension override is accepted.
+    raw = default_prompt_profiles("single")
+    raw["single"]["per_extension"] = {
+        ".js": {"requested_shape": {"description": "JS-specific summary."}}
+    }
+    profile = validate_profile(
+        raw, active_mode="single", known_extensions=frozenset({".py", ".js"}),
+        source="inline", source_path=None,
+    )
+    assert set(profile.single.per_extension) == {".js"}
+
+
+@pytest.mark.parametrize("bad_key", ["per_file", "per_category"])
+def test_unknown_section_keys_name_the_accepted_set(bad_key):
+    raw = default_prompt_profiles("single")
+    raw["single"][bad_key] = {}
+    with pytest.raises(ConfigError, match=r"\{'common', 'per_extension'\}"):
+        validate_profile(
+            raw, active_mode="single", known_extensions=frozenset({".py"}),
+            source="inline", source_path=None,
+        )
 

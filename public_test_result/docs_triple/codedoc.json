@@ -6,12 +6,12 @@
     "analysis_mode": "triple",
     "files_scanned": 53,
     "files_selected": 53,
-    "files_documented_by_llm": 53,
+    "files_documented_by_llm": 1,
     "files_failed": 0,
     "files_unattempted": 0,
-    "files_reused_unchanged": 0,
-    "files_reused_identical_content": 0,
-    "files_resumed_from_recovery": 0
+    "files_reused_unchanged": 36,
+    "files_reused_identical_content": 16,
+    "files_resumed_from_recovery": 53
   },
   "tree": {
     "codedoc": {
@@ -2369,15 +2369,16 @@
       }
     },
     {
-      "hash": "a98caf1a7984cb54757a08f26473b86b05ace21d06d65a85e8a8331d10aaab2b",
+      "hash": "78b44225276a33028475fff7651d2b409ba83276f0bde15af7ed234cb7ddf375",
       "path": "codedoc/core/prompt_profiles.py",
       "language": "python",
-      "description": "This module defines JSON prompt profiles for CodeDoc, managing the structure and validation of prompt shapes used by various agents.",
-      "role_in_system": "It serves as the authoritative source for the JSON shape block in CodeDoc's file provider prompts, ensuring consistency and validation.",
+      "description": "This module defines JSON prompt profiles for different analysis modes in CodeDoc, serving as a registry for editable fields and their validation. It acts as the single source of truth for the requested JSON shape block embedded in CodeDoc's per-file provider prompts, ensuring that agents render the correct structure and validate user profiles against a defined schema.",
+      "role_in_system": "It acts as the central authority for generating and validating JSON shapes used in various CodeDoc agents, ensuring consistency and correctness in the profiles used across different analysis modes.",
       "imports": [
         "__future__",
         "hashlib",
         "json",
+        "re",
         "dataclasses",
         "pathlib",
         "typing",
@@ -2386,11 +2387,11 @@
       "functions": [
         {
           "name": "_dep_members",
-          "description": "Builds the members for the dependencies_analysis container, adjusting for different agent styles."
+          "description": "Builds the members for the dependencies_analysis container based on the provided parameters."
         },
         {
           "name": "specs_to_requested_shape",
-          "description": "Renders normalized specs back into a literal requested_shape object."
+          "description": "Renders normalized specifications back into a literal requested_shape object."
         },
         {
           "name": "_default_requested_shape",
@@ -2402,7 +2403,7 @@
         },
         {
           "name": "default_prompt_profiles",
-          "description": "Returns the canonical prompt_profiles value under the common envelope."
+          "description": "Returns the canonical prompt_profiles value under the common envelope for runtime resolution."
         }
       ],
       "classes": [
@@ -2414,10 +2415,6 @@
           "name": "ContainerField",
           "description": "Defines a nested object container with member fields."
         }
-      ],
-      "exports": [
-        "ShapeField",
-        "ContainerField"
       ],
       "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
       "_analysis_revision": "file-doc-v2",
@@ -2445,6 +2442,7 @@
           "hashlib",
           "json",
           "pathlib",
+          "re",
           "typing"
         ]
       }
@@ -3918,11 +3916,11 @@
       }
     },
     {
-      "hash": "02ab0a21d1c0eba3ea3d746ed07b44fce6092aa66ce3411c4ff8aede2dd46d4a",
+      "hash": "56ea4048d08a64b55ad0acb3dc632a22e85bc4b7301c842c9a6b1b56815389f7",
       "path": "codedoc/core/planning.py",
       "language": "python",
-      "description": "This file provides shared pipeline planning functionality for codedoc, computing routing decisions into an immutable PipelinePlan for both dry-run and real execution. It ensures efficient reuse and management of document records based on their content and dependencies, while never writing or creating providers.",
-      "role_in_system": "It serves as a planning helper that determines how files are processed based on their content and dependencies, ensuring efficient reuse and management of document records.",
+      "description": "This file provides shared pipeline planning functionality for codedoc, computing routing decisions into an immutable PipelinePlan for both dry-run and real execution. It ensures efficient reuse of existing records and manages dependencies, allowing for a structured approach to file processing within the codedoc system.",
+      "role_in_system": "It serves as a planning helper that determines how files are processed in the codedoc system, ensuring efficient reuse of existing records and managing dependencies. The planning logic encapsulated in this file is crucial for maintaining the integrity and efficiency of the pipeline execution.",
       "imports": [
         "__future__",
         "dataclasses",
@@ -3962,10 +3960,14 @@
           "description": "Holds auxiliary data needed to execute the pipeline plan without recomputing routing decisions."
         }
       ],
+      "exports": [
+        "PipelinePlan",
+        "PlanMaterials"
+      ],
       "key_concepts": [
         "Immutable data structures for routing decisions",
         "Centralized predicates for record reuse",
-        "Dependency graph management"
+        "Dependency management through a graph structure"
       ],
       "_deps": {
         "internal": [
@@ -3989,36 +3991,14 @@
           "ConfigError",
           "get_logger"
         ],
-        "catalog_updates": [
-          {
-            "name": "codedoc.core.db",
-            "type": "internal",
-            "used_for": "Database operations related to file processing"
-          },
-          {
-            "name": "codedoc.core.graph",
-            "type": "internal",
-            "used_for": "Dependency graph management for files"
-          },
-          {
-            "name": "codedoc.utils.errors",
-            "type": "internal",
-            "used_for": "Error handling specific to configuration issues"
-          },
-          {
-            "name": "codedoc.utils.logger",
-            "type": "internal",
-            "used_for": "Logging functionality for tracking operations"
-          }
-        ],
         "usage_notes": [
           {
             "import": "get_logger",
-            "used_for": "Used to create a logger instance for this module"
+            "used_for": "Used to create a logger instance for this module."
           },
           {
             "import": "ConfigError",
-            "used_for": "Custom error raised for configuration-related issues"
+            "used_for": "Custom error raised for configuration-related issues."
           }
         ]
       },
@@ -4515,11 +4495,11 @@
       }
     },
     {
-      "hash": "86e7f9274a3335505324769500edbf44a1f38e8d8857ca9e2e2c8f4d56001f23",
+      "hash": "70dc3b643a0cf10d257d24603dbafeac74e9bf74d567e9140ab138708338e965",
       "path": "codedoc/agents/orchestrator.py",
       "language": "python",
-      "description": "The Orchestrator coordinates multi-agent processing for file analysis, allowing for either a single combined call or a triple call to different agents for detailed analysis. It manages the interaction between various analysis agents, including the FileDocumentationAgent, StructureAgent, DependencyAgent, and DocumentationAgent, to produce a unified result for file documentation.",
-      "role_in_system": "It serves as a central controller that manages the execution of multiple agents, enabling both parallel and sequential processing modes to optimize performance based on the analysis requirements.",
+      "description": "This file defines the Orchestrator class, which coordinates multi-agent processing for file analysis in either single or triple modes. It manages the interactions between various analysis agents, such as the FileDocumentationAgent, StructureAgent, DependencyAgent, and DocumentationAgent, to efficiently process files and return a merged result that includes structure and dependency analysis.",
+      "role_in_system": "The Orchestrator serves as a central controller that manages the execution of multiple agents, allowing for both parallel and sequential processing of file analysis. It ensures that the results from different agents are combined into a single output, which is then used for further processing or documentation generation.",
       "imports": [
         "__future__",
         "concurrent.futures",
@@ -4553,12 +4533,12 @@
           "description": "Handles the single mode of analysis by making one combined provider call."
         },
         {
-          "name": "_merge_single",
-          "description": "Merges a cleaned combined response with deterministic identity fields."
+          "name": "_process_triple",
+          "description": "Handles the triple mode of analysis by running three agents concurrently."
         },
         {
           "name": "_run_sequential",
-          "description": "Executes agents in sequence for analysis when parallel processing is not used."
+          "description": "Executes the agents in a sequential manner, useful for local LLMs."
         },
         {
           "name": "_merge",
@@ -4568,15 +4548,17 @@
       "classes": [
         {
           "name": "Orchestrator",
-          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution of analysis agents."
+          "description": "Coordinates multi-agent processing for a single file, allowing for both parallel and sequential execution modes."
         }
+      ],
+      "exports": [
+        "Orchestrator"
       ],
       "key_concepts": [
         "multi-agent processing",
-        "parallel and sequential execution",
-        "result merging"
+        "parallel and sequential execution modes",
+        "result merging from multiple agents"
       ],
-      "usage_example": "from codedoc.agents.orchestrator import Orchestrator",
       "_deps": {
         "internal": [
           "codedoc.agents.base_agent",
@@ -4591,7 +4573,6 @@
           "codedoc.utils.logger"
         ],
         "dependency_refs": [
-          "truncate_for_llm",
           "FileDocumentationAgent",
           "StructureAgent",
           "DependencyAgent",
@@ -4624,12 +4605,20 @@
         ],
         "usage_notes": [
           {
-            "import": "codedoc.agents.base_agent",
-            "used_for": "Provides utility functions for LLM processing"
+            "import": "codedoc.agents.file_documentation_agent",
+            "used_for": "Used to generate documentation for the analyzed file"
           },
           {
-            "import": "codedoc.utils.logger",
-            "used_for": "Used for logging analysis results and warnings"
+            "import": "codedoc.agents.structure_agent",
+            "used_for": "Used to analyze the structure of the file"
+          },
+          {
+            "import": "codedoc.agents.dependency_agent",
+            "used_for": "Used to analyze dependencies in the file"
+          },
+          {
+            "import": "codedoc.agents.documentation_agent",
+            "used_for": "Used to provide documentation context during analysis"
           }
         ]
       },
@@ -4768,11 +4757,11 @@
       }
     },
     {
-      "hash": "0770fe2df066f332adb53a0ca1885adbae399e12921891a9b6a18a4c177c2047",
+      "hash": "cd24cff96e3c94c46cb45893af8233fd462de352bb3cd7f862fcdd3f27b78cbd",
       "path": "codedoc/__init__.py",
       "language": "python",
-      "description": "This file serves as the initializer for the codedoc package, providing a lightweight interface to run a documentation pipeline. It allows users to access the documentation functionality without loading unnecessary dependencies until the pipeline is actually invoked.",
-      "role_in_system": "It acts as a central point for accessing the documentation functionality of the codedoc package, ensuring that the initial import remains lightweight by lazily importing the actual implementation only when needed.",
+      "description": "This file serves as the initializer for the codedoc package, providing a lightweight interface to run a documentation pipeline. It allows users to access the documentation functionality without loading unnecessary dependencies, ensuring that the initial import remains efficient.",
+      "role_in_system": "It acts as the entry point for the codedoc package, facilitating the execution of the documentation pipeline while keeping the import process lightweight by lazily loading the actual implementation only when needed.",
       "imports": [
         "codedoc.pipeline"
       ],
@@ -4806,7 +4795,7 @@
         ],
         "usage_notes": [
           {
-            "import": "codedoc.pipeline",
+            "import": "from codedoc.pipeline import run_pipeline as _run_pipeline",
             "used_for": "Lazily imported to keep initial import lightweight"
           }
         ]
@@ -6376,11 +6365,11 @@
       }
     },
     {
-      "hash": "aa52f17c48cea429bdc104375f235d8eb0c25bef43c46cfc4221a3feeba6c0de",
+      "hash": "485b9e180342ef09c90cac6916a61d0d34349e3ff8d68914818539b735d364be",
       "path": "codedoc/core/resume.py",
       "language": "python",
-      "description": "This module provides helpers for resuming and recovering documentation in a pipeline, including loading stable documentation records and ensuring consistency between different formats. It manages the documentation state, ensuring that recovery processes do not overwrite existing stable outputs.",
-      "role_in_system": "It plays a critical role in managing the documentation state, ensuring that recovery processes do not overwrite existing stable outputs. The module handles loading records from JSON and Markdown formats, checks for consistency between them, and reconstructs documentation from public records.",
+      "description": "This module provides helpers for resuming and recovering documentation in a pipeline, including loading stable documentation records and ensuring consistency between different formats. It manages the state and recovery of documentation, allowing the pipeline to handle failures gracefully.",
+      "role_in_system": "It acts as a critical component in managing documentation state and recovery, ensuring that the documentation pipeline can handle failures gracefully by loading existing documentation records and validating their consistency.",
       "imports": [
         "__future__",
         "os",
@@ -6457,53 +6446,6 @@
           "normalized_identity_value",
           "ConfigError",
           "get_logger"
-        ],
-        "catalog_updates": [
-          {
-            "name": "codedoc.core.db",
-            "type": "internal",
-            "used_for": "Database operations related to documentation"
-          },
-          {
-            "name": "codedoc.core.document",
-            "type": "internal",
-            "used_for": "Handling codedoc documents"
-          },
-          {
-            "name": "codedoc.core.markdown_view",
-            "type": "internal",
-            "used_for": "Converting Markdown to view format"
-          },
-          {
-            "name": "codedoc.core.project_view",
-            "type": "internal",
-            "used_for": "Reading project metadata"
-          },
-          {
-            "name": "codedoc.core.record_meta",
-            "type": "internal",
-            "used_for": "Managing metadata for records"
-          },
-          {
-            "name": "codedoc.utils.errors",
-            "type": "internal",
-            "used_for": "Error handling utilities"
-          },
-          {
-            "name": "codedoc.utils.logger",
-            "type": "internal",
-            "used_for": "Logging utilities for the project"
-          }
-        ],
-        "usage_notes": [
-          {
-            "import": "os",
-            "used_for": "File path manipulations and existence checks"
-          },
-          {
-            "import": "pathlib",
-            "used_for": "Path handling for file operations"
-          }
         ]
       },
       "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
@@ -6824,11 +6766,11 @@
       }
     },
     {
-      "hash": "559ae1a3a6ffa91a53d91a39a2acdaec4f047b8430fa072de1ac519e706c4f0f",
+      "hash": "2a263b144fc526142229e3193f98f19f6a7e94ce54d726d067e3bea93758d476",
       "path": "codedoc/pipeline.py",
       "language": "python",
-      "description": "This file serves as a lifecycle coordinator for the documentation pipeline in the codedoc project, managing the execution of various phases in the documentation process. It integrates multiple components of the codedoc system, ensuring that the documentation pipeline runs smoothly from configuration to output generation.",
-      "role_in_system": "It connects various internal modules responsible for loading configurations, executing agents, and managing output, thereby facilitating a structured approach to generating documentation.",
+      "description": "This file serves as a lifecycle coordinator for the documentation pipeline in codedoc, managing the execution of various phases in the documentation process. It integrates multiple components of the codedoc system, ensuring that the documentation pipeline runs smoothly from configuration to output generation.",
+      "role_in_system": "It connects various modules responsible for loading configurations, executing agents, and managing outputs, thereby facilitating a structured approach to generating documentation from source code.",
       "imports": [
         "__future__",
         "sys",
@@ -6860,11 +6802,11 @@
       "functions": [
         {
           "name": "run_pipeline",
-          "description": "Executes the full documentation pipeline on a project, handling configuration, scanning, planning, and output generation."
+          "description": "Runs the full documentation pipeline on a project, handling configuration, scanning, execution, and output."
         },
         {
           "name": "_estimate_planned_input_tokens",
-          "description": "Estimates the input tokens for planned LLM calls based on the structure and dependencies of the documentation prompts."
+          "description": "Estimates the input tokens for planned LLM calls based on the pipeline plan and file map."
         }
       ],
       "exports": [
@@ -6873,13 +6815,6 @@
         "initial_calls_per_file",
         "PromptCustomizationValidationAgent",
         "ensure_codedoc_installed",
-        "_build_graph",
-        "_graph_edges",
-        "_resolve_entry_and_docs",
-        "_select_files",
-        "ExecutionContext",
-        "ExecutionOptions",
-        "execute_agent_files",
         "load_config",
         "inspect_output_ownership",
         "preflight_output_accessibility",
@@ -6899,7 +6834,14 @@
         "ANALYSIS_REVISION",
         "RECOVERY_FILENAME",
         "_build_documentation_records",
-        "_load_existing_file_docs"
+        "_load_existing_file_docs",
+        "build_recovery_identity",
+        "load_recovery_records_if_compatible",
+        "SafeWriter",
+        "scan_files",
+        "UsageAccumulator",
+        "estimate_tokens",
+        "create_provider"
       ],
       "key_concepts": [
         "pipeline execution phases",

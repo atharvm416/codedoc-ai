@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from codedoc.core.document import read_codedoc_document, records_by_path
-from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
 from codedoc.core.record_meta import ANALYSIS_REVISION, CACHE_IDENTITY_KEYS
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
@@ -264,7 +263,6 @@ def _write_compatible_md_recovery(tmp_path: Path, replacement: str) -> Path:
         documentation_scope="all",
         analysis_mode="single",
         analysis_revision=ANALYSIS_REVISION,
-        profile_digests_by_language={"python": NO_PROMPT_PROFILE_DIGEST},
     )
     recovery = out / RECOVERY_FILENAME
     writer = SafeWriter(recovery, "md", "main.py", {}, identity)

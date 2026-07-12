@@ -148,10 +148,21 @@ class Orchestrator:
             self.llm.provider_name,
         )
 
+        # Resolve one bundle per file (extension scope) and thread it through every
+        # agent prompt and the stamped record digest.  ``None`` when no profile is
+        # active, exactly reproducing the developer-standard prompts.
+        bundle = (
+            self.resolved_profile.resolve_bundle(
+                self.resolved_profile.scope_for(descriptor)
+            )
+            if self.resolved_profile is not None
+            else None
+        )
+
         if self.analysis_mode == "triple":
-            result = self._process_triple(descriptor, content, imports, language)
+            result = self._process_triple(descriptor, content, imports, language, bundle)
         else:
-            result = self._process_single(descriptor, content, imports, language)
+            result = self._process_single(descriptor, content, imports, language, bundle)
 
         # Attach cache-identity keys to every successful flat result before it is
         # recorded.  Failed results (an error on structure/dependencies/
@@ -169,10 +180,8 @@ class Orchestrator:
             )
             if mcr is not None:
                 result["_max_context_revision"] = mcr
-            if self.resolved_profile is not None:
-                digest = self.resolved_profile.file_digest(language)
-                if digest != NO_PROMPT_PROFILE_DIGEST:
-                    result["_prompt_profile_digest"] = digest
+            if bundle is not None and bundle.digest != NO_PROMPT_PROFILE_DIGEST:
+                result["_prompt_profile_digest"] = bundle.digest
         return result
 
     # ------------------------------------------------------------------
@@ -180,16 +189,13 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _process_single(
-        self, descriptor: dict, content: str, imports: list[str], language: str
+        self, descriptor: dict, content: str, imports: list[str], language: str,
+        bundle=None,
     ) -> dict:
         """One combined provider call, merged into the flat record."""
         file_path = descriptor["rel_path"]
         t_start = time.monotonic()
-        shape = (
-            self.resolved_profile.resolve_block("combined", language)
-            if self.resolved_profile is not None
-            else None
-        )
+        shape = self._profile_block(bundle, "combined")
         cleaned = self._call_agent(
             self._file_agent, file_path, content, imports, language, shape
         )
@@ -281,23 +287,24 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _process_triple(
-        self, descriptor: dict, content: str, imports: list[str], language: str
+        self, descriptor: dict, content: str, imports: list[str], language: str,
+        bundle=None,
     ) -> dict:
         file_path = descriptor["rel_path"]
         t_start = time.monotonic()
 
         if self.parallel:
             structure, dependencies = self._run_parallel(
-                file_path, content, imports, language, t_start
+                file_path, content, imports, language, bundle, t_start
             )
         else:
             structure, dependencies = self._run_sequential(
-                file_path, content, imports, language, t_start
+                file_path, content, imports, language, bundle, t_start
             )
 
         # DocumentationAgent always gets the other agents' context
         t_doc_start = time.monotonic()
-        doc_shape = self._profile_block("documentation", language)
+        doc_shape = self._profile_block(bundle, "documentation")
         if doc_shape is None:
             documentation = self._doc_agent._safe_run_with_context(
                 file_path, content, imports, language, structure, dependencies
@@ -325,7 +332,7 @@ class Orchestrator:
 
     def _run_parallel(
         self, file_path: str, content: str, imports: list[str], language: str,
-        t_start: float | None = None,
+        bundle=None, t_start: float | None = None,
     ) -> tuple[dict, dict]:
         if t_start is None:
             t_start = time.monotonic()
@@ -333,12 +340,12 @@ class Orchestrator:
             future_struct = pool.submit(
                 self._call_agent, self._structure_agent,
                 file_path, content, imports, language,
-                self._profile_block("structure", language),
+                self._profile_block(bundle, "structure"),
             )
             future_dep = pool.submit(
                 self._call_agent, self._dependency_agent,
                 file_path, content, imports, language,
-                self._profile_block("dependency", language),
+                self._profile_block(bundle, "dependency"),
             )
             structure = future_struct.result()
             dependencies = future_dep.result()
@@ -350,13 +357,13 @@ class Orchestrator:
 
     def _run_sequential(
         self, file_path: str, content: str, imports: list[str], language: str,
-        t_start: float | None = None,
+        bundle=None, t_start: float | None = None,
     ) -> tuple[dict, dict]:
         if t_start is None:
             t_start = time.monotonic()
         structure = self._call_agent(
             self._structure_agent, file_path, content, imports, language,
-            self._profile_block("structure", language),
+            self._profile_block(bundle, "structure"),
         )
         elapsed_struct = time.monotonic() - t_start
         self._log_agent_result("structure", file_path, structure, elapsed_struct)
@@ -364,16 +371,18 @@ class Orchestrator:
         t_dep = time.monotonic()
         dependencies = self._call_agent(
             self._dependency_agent, file_path, content, imports, language,
-            self._profile_block("dependency", language),
+            self._profile_block(bundle, "dependency"),
         )
         elapsed_dep = time.monotonic() - t_dep
         self._log_agent_result("dependencies", file_path, dependencies, elapsed_dep)
         return structure, dependencies
 
-    def _profile_block(self, agent: str, language: str):
-        if self.resolved_profile is None:
+    @staticmethod
+    def _profile_block(bundle, agent: str):
+        """Return the resolved shape block for *agent* from the file's bundle."""
+        if bundle is None:
             return None
-        return self.resolved_profile.resolve_block(agent, language)
+        return bundle.selections[agent].block
 
     @staticmethod
     def _call_agent(agent, file_path, content, imports, language, shape):
