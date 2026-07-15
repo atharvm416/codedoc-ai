@@ -33,7 +33,6 @@ from codedoc.core.db import compute_file_hash
 from codedoc.core.error_classifier import (
     _classify_failure,
     _detect_limit_type,
-    _is_rate_limit_error,
     _parse_retry_after,
     _raise_rate_limit_exhausted,
 )
@@ -48,6 +47,7 @@ from codedoc.utils.errors import (
     LiveBackupWriteError,
     OutputError,
     ParseError,
+    ResponseContractError,
     UnrecoverableProviderError,
 )
 from codedoc.utils.logger import get_logger
@@ -71,6 +71,7 @@ from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-expo
     _build_terminal_abort,
     _classify_permanent_error,
     _has_provider_or_agent_error,
+    _is_rate_limit_error,
     _is_terminal_billing_error,
     _walk_chain,
 )
@@ -522,10 +523,11 @@ def _process_descriptor_batch(
                         queue.mark_checked(rel_path)
                         stats["checked"] += 1
                         _log_file_progress("OK(late)", rel_path, completed, total)
-                elif verdict == "input":
+                elif verdict in ("input", "response_contract_final"):
                     # The identical oversized input cannot succeed on a second
-                    # processing path.  Record it here and keep processing other
-                    # files without placing it on the sequential retry list.
+                    # processing path; a deterministic response-contract rejection
+                    # must never become a duplicate whole-file call.  Record here
+                    # and keep processing other files without a sequential retry.
                     error_reporter.record(exc, context=rel_path)
                     queue.mark_failed(rel_path, str(exc))
                     stats["failed"] += 1
@@ -639,7 +641,7 @@ def _process_files_sequentially(
             stats["failed"] += 1
             consecutive_failures += 1
             failures += 1
-            if not _is_rate_limit_error(exc, profile):
+            if _classify_failure(exc, profile) != "rate_limit":
                 all_failures_rate_limited = False
             _log_file_progress("FAIL", rel_path, index, total, str(exc))
         except Exception as exc:
@@ -648,7 +650,7 @@ def _process_files_sequentially(
             stats["failed"] += 1
             consecutive_failures += 1
             failures += 1
-            if not _is_rate_limit_error(exc, profile):
+            if _classify_failure(exc, profile) != "rate_limit":
                 all_failures_rate_limited = False
             _log_file_progress("FAIL", rel_path, index, total, str(exc))
 
@@ -695,7 +697,10 @@ def _process_one_file_with_retries(
                 raise _build_terminal_abort(
                     exc, orchestrator.llm.provider_name, verdict
                 )
-            if verdict == "input":
+            if verdict in ("input", "response_contract_final"):
+                # An oversized input or a deterministic response-contract rejection
+                # re-raises immediately: it is recorded as a normal failed file
+                # without consuming a guaranteed-to-fail retry attempt.
                 raise
             if attempt < retry_attempts:
                 # Apply Retry-After sleep for rate-limit errors in sequential mode.
@@ -747,7 +752,29 @@ def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
     result = orchestrator.process(descriptor, content, imports)
     errors = _agent_errors(result)
     if errors:
-        raise AgentError(orchestrator.__class__.__name__, descriptor["rel_path"], "; ".join(errors))
+        message = "; ".join(errors)
+        terminal_error = _terminal_sibling_error(
+            result, descriptor["rel_path"]
+        )
+        if terminal_error is not None:
+            # A contract failure in one triple-mode sibling must not mask a
+            # simultaneous billing/credential/model failure in another. Preserve
+            # the terminal signal so the retry wrapper aborts the run.
+            raise terminal_error
+        marker = _response_contract_final_marker(result)
+        if marker is not None:
+            diagnostic, correction_attempted = marker
+            # A deterministic response-contract rejection is non-retryable: raise a
+            # typed error carrying the bounded diagnostic and the opt-out/exhausted
+            # distinction so the classifier keeps it off every retry ladder.
+            raise ResponseContractError(
+                orchestrator.__class__.__name__,
+                descriptor["rel_path"],
+                message,
+                diagnostic=diagnostic,
+                correction_attempted=correction_attempted,
+            )
+        raise AgentError(orchestrator.__class__.__name__, descriptor["rel_path"], message)
     return result
 
 
@@ -759,6 +786,45 @@ def _agent_errors(result: dict) -> list[str]:
             agent = value.get("agent", key)
             errors.append(f"{agent}: {value['error']}")
     return errors
+
+
+def _response_contract_final_marker(result: dict) -> tuple | None:
+    """Return ``(diagnostic, correction_attempted)`` if any inspected sub-result
+    carries the non-retryable ``response_contract_final`` marker, else ``None``."""
+    for key in ("structure", "dependencies_analysis", "documentation"):
+        value: Any = result.get(key, {})
+        if isinstance(value, dict) and value.get("response_contract_final"):
+            return (
+                value.get("response_contract_diagnostic"),
+                bool(value.get("response_contract_correction_attempted", False)),
+            )
+    return None
+
+
+def _terminal_sibling_error(result: dict, file_path: str) -> AgentError | None:
+    """Return a non-contract terminal/global agent error, if one is present.
+
+    Triple-mode agents return error dictionaries, which discard the original
+    exception type. Reclassify only unmarked sibling errors from their bounded
+    message before selecting a contract-final marker. Rate-limit and transient
+    siblings intentionally do not override the no-whole-file-retry contract.
+    """
+    for key in ("structure", "dependencies_analysis", "documentation"):
+        value: Any = result.get(key, {})
+        if (
+            not isinstance(value, dict)
+            or not value.get("error")
+            or value.get("response_contract_final")
+        ):
+            continue
+        candidate = AgentError(
+            str(value.get("agent", key)),
+            file_path,
+            str(value["error"]),
+        )
+        if _classify_failure(candidate, None) in ("terminal_billing", "global"):
+            return candidate
+    return None
 
 
 def _safe_file_hash(file_path: Path | None) -> str:

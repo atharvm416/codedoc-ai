@@ -4,6 +4,7 @@
   "model_name": "",
   "api_key": null,
   "analysis_mode": "single",
+  "response_correction_enabled": false,
   "output_format": "both",
   "documentation_scope": "all",
   "prompt_profiles": {

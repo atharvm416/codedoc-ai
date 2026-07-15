@@ -67,7 +67,7 @@ def test_digest_in_cache_identity_keys():
 
 
 def test_absent_default_digest_matches_explicit_no_profile():
-    base = {"_analysis_revision": "file-doc-v2", "_analysis_mode": "single"}
+    base = {"_analysis_revision": "file-doc-v3", "_analysis_mode": "single"}
     explicit = {**base, "_prompt_profile_digest": NO_PROMPT_PROFILE_DIGEST}
     assert _identity_matches(base, explicit)
     assert _identity_matches(explicit, base)
@@ -76,13 +76,13 @@ def test_absent_default_digest_matches_explicit_no_profile():
 
 
 def test_active_digest_invalidates_cache():
-    base = {"_analysis_revision": "file-doc-v2", "_analysis_mode": "single"}
+    base = {"_analysis_revision": "file-doc-v3", "_analysis_mode": "single"}
     assert not _identity_matches(base, {**base, "_prompt_profile_digest": "pp-v1:x"})
 
 
 def test_composition_with_other_identity_keys_through_single_predicate():
     stored = {
-        "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
         "_max_context_revision": "truncate-v1:max=12000:head=0.7000",
         "_prompt_profile_digest": "pp-v1:abc",
     }
@@ -155,7 +155,7 @@ def _profile_shaped_view():
             "path": "a.py", "language": "python", "hash": "abc",
             "description": "kept", "exports": ["E"], "key_concepts": ["k"],
             "_prompt_profile_digest": "pp-v1:abc",
-            "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+            "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
         }],
     }
 

@@ -298,8 +298,8 @@ def test_legacy_record_without_identity_reprocessed_once(tmp_path, monkeypatch):
     assert rec["_analysis_mode"] == "single"
 
 
-@pytest.mark.parametrize("mode,expected_calls", [("single", 2), ("triple", 6)])
-def test_file_retry_repeats_the_resolved_modes_full_call_set(
+@pytest.mark.parametrize("mode,expected_calls", [("single", 1), ("triple", 3)])
+def test_response_contract_failure_does_not_repeat_full_call_set(
     tmp_path, monkeypatch, mode, expected_calls
 ):
     from codedoc.pipeline import run_pipeline
@@ -324,8 +324,8 @@ def test_file_retry_repeats_the_resolved_modes_full_call_set(
             "propagate_changes": False,
         },
     )
-    assert stats["checked"] == 1
-    assert stats["failed"] == 0
+    assert stats["checked"] == 0
+    assert stats["failed"] == 1
     assert stats["planned_calls"] == (1 if mode == "single" else 3)
     assert stats["attempted_calls"] == expected_calls
     assert provider.calls == expected_calls

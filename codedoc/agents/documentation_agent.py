@@ -10,12 +10,11 @@ generates the final polished documentation for a file:
 
 from __future__ import annotations
 
-from codedoc.agents.base_agent import BaseAgent
-from codedoc.agents.response_cleaning import clean_documentation_response
+from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.response_cleaning import clean_documentation_report
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
-    filter_cleaned_response_for_profile,
 )
 from codedoc.utils.logger import get_logger
 
@@ -42,6 +41,7 @@ Code:
 {shape_block}
 
 Rules:
+""" + EXACT_JSON_RESPONSE_RULES + """
 - Base the documentation only on the provided code and analyses
 - Write for a developer who is new to this codebase
 - Be specific — avoid generic phrases like 'this file contains utility functions'
@@ -145,7 +145,7 @@ class DocumentationAgent(BaseAgent):
             )
         except Exception as exc:
             logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
-            return {"error": str(exc), "agent": self.agent_name}
+            return self._agent_error_result(exc)
 
     def _run_with_context(
         self,
@@ -157,19 +157,32 @@ class DocumentationAgent(BaseAgent):
         dependencies: dict,
         requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
+        truncated = self._truncate(content, file_path)
         system, prompt = build_prompt(
             file_path,
-            self._truncate(content, file_path),
+            truncated,
             language,
             structure,
             dependencies,
             requested_shape,
         )
+        shape_block = (
+            requested_shape.text
+            if requested_shape is not None
+            else default_shape_block("triple", "documentation")
+        )
         raw = self._call_llm(prompt, system=system)
-        result = self._parse_json(raw, file_path)
-        cleaned = clean_documentation_response(result, file_path)
-        cleaned = filter_cleaned_response_for_profile(
-            cleaned, requested_shape, mode="triple", agent="documentation"
+        cleaned = self._finalize_response(
+            raw,
+            mode="triple",
+            agent="documentation",
+            file_path=file_path,
+            clean_reporter=clean_documentation_report,
+            resolved_shape=requested_shape,
+            content=truncated,
+            imports=imports,
+            language=language,
+            shape_block=shape_block,
         )
 
         logger.debug("DocumentationAgent: completed %s", file_path)

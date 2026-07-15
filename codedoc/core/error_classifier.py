@@ -19,7 +19,12 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
-from codedoc.utils.errors import AgentError, LLMError, UnrecoverableProviderError
+from codedoc.utils.errors import (
+    AgentError,
+    LLMError,
+    ResponseContractError,
+    UnrecoverableProviderError,
+)
 from codedoc.utils.logger import get_logger
 
 if TYPE_CHECKING:
@@ -234,15 +239,25 @@ def _classify_failure(
 ) -> str:
     """Apply the fixed failure precedence to *exc* and return a verdict.
 
-    Returns one of ``"terminal_billing"``, ``"rate_limit"``, ``"global"``,
-    ``"input"``, or ``"transient"``.  Precedence:
+    Returns one of ``"response_contract_final"``, ``"terminal_billing"``,
+    ``"rate_limit"``, ``"global"``, ``"input"``, or ``"transient"``.  Precedence:
 
-    1. terminal-billing (checked first; co-occurs with quota/429 signals);
+    0. response-contract-final (checked first; a deterministic response-contract
+       rejection is non-retryable, and a correction call that failed on a
+       rate-limit/transport fault is wrapped in a ``ResponseContractError`` whose
+       wrapped cause would otherwise match the rate-limit branch below);
+    1. terminal-billing (co-occurs with quota/429 signals);
     2. rate-limit;
     3. global-permanent (abort);
     4. input-permanent (fail this file, continue run);
     5. transient (existing retry/sleep behavior).
+
+    ``repair`` never wraps a correction fault that classifies as
+    ``"terminal_billing"`` or ``"global"`` (it re-raises those unchanged), so no
+    genuine run-level abort reaches this early check.
     """
+    if any(isinstance(node, ResponseContractError) for node in _walk_chain(exc)):
+        return "response_contract_final"
     provider_or_agent_error = _has_provider_or_agent_error(exc)
     if provider_or_agent_error and _is_terminal_billing_error(exc):
         return "terminal_billing"

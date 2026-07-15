@@ -22,7 +22,7 @@ def _identity(tmp_path: Path, **changes):
         "entry_file": "main.py",
         "documentation_scope": "entry",
         "analysis_mode": "single",
-        "analysis_revision": "file-doc-v2",
+        "analysis_revision": "file-doc-v3",
     }
     values.update(changes)
     return build_recovery_identity(**values)

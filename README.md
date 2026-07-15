@@ -295,9 +295,36 @@ Useful defaults include:
 | `follow_symlinks` | `false` |
 | `propagate_changes` | `true` |
 | `rate_limit_adaptive` | `true` |
+| `response_correction_enabled` | `false` |
 
 Run `codedoc --init-config` rather than copying a partial example when you need
 the complete current key set.
+
+### Response correction (opt-in)
+
+Provider responses must satisfy a deterministic JSON contract: the requested
+keys, the requested types, a non-empty value for every required field, and at
+least one usable requested field. A response that fails the contract is rejected
+with a bounded, structured diagnostic.
+
+Response correction is **disabled by default**. Set
+`"response_correction_enabled": true` to opt into at most **one** targeted
+correction call per failed agent response — a single extra paid provider call
+that asks the model to repair the response to the exact schema, preserving valid
+facts and inventing nothing.
+
+- With correction **off** (the default), a rejected response is **not** silently
+  converted into a whole-file retry; the file fails once, at its initial call.
+- With correction **on**, one repair call is made for that agent response; if the
+  repair also fails the contract, the file fails without a further retry.
+- Correction is **not** a factuality bypass. Malformed output or a missing or
+  empty required field can still fail a file whether correction is on or off.
+- `file_retry_attempts` remains the policy for transport, rate-limit, and other
+  recoverable failures; it is unaffected by response correction.
+- At `--verbose` (`log_level: DEBUG`), diagnostics add only bounded structural
+  metadata (removed field paths and reason codes, returned value types, a parse
+  position, a response character count). No raw provider-response text, source,
+  prompt, or credential is ever logged.
 
 ## Command-line options
 

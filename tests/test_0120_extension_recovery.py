@@ -33,7 +33,7 @@ def _identity(tmp_path, **changes):
         "entry_file": "main.py",
         "documentation_scope": "entry",
         "analysis_mode": "single",
-        "analysis_revision": "file-doc-v2",
+        "analysis_revision": "file-doc-v3",
     }
     values.update(changes)
     return build_recovery_identity(**values)
@@ -114,7 +114,7 @@ def _resolved(common_desc, per_extension):
 def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
-        "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
     if digest != NO_PROMPT_PROFILE_DIGEST:
@@ -161,7 +161,7 @@ def test_no_instruction_text_in_recovery_file(tmp_path):
     main.write_text("x = 1\n", encoding="utf-8")
     record = {
         "path": "main.py", "hash": compute_file_hash(main), "description": "documented",
-        "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
         "_prompt_profile_digest": "pp-v1:deadbeef",
     }
     recovery = _write_recovery(tmp_path, identity, {"main.py": record})

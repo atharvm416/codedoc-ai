@@ -49,7 +49,7 @@ def _descriptor(path, rel):
 def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
-        "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
     if digest != NO_PROMPT_PROFILE_DIGEST:
@@ -134,7 +134,7 @@ def test_identical_content_reuse_honours_destination_scope(tmp_path):
 def test_reuse_predicate_rejects_digest_mismatch():
     # _record_is_reusable / _identity_matches remain digest-sensitive.
     base = {
-        "hash": "h", "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "hash": "h", "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
         "_prompt_profile_digest": "pp-v1:aaa",
     }
     expected_same = dict(base)

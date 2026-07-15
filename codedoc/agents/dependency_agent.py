@@ -9,12 +9,11 @@ Analyses import relationships:
 
 from __future__ import annotations
 
-from codedoc.agents.base_agent import BaseAgent
-from codedoc.agents.response_cleaning import clean_dependency_response
+from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.response_cleaning import clean_dependency_report
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
-    filter_cleaned_response_for_profile,
 )
 from codedoc.utils.logger import get_logger
 
@@ -36,6 +35,7 @@ Code:
 {shape_block}
 
 Rules:
+""" + EXACT_JSON_RESPONSE_RULES + """
 - Internal imports start with ./ or ../ (JS/TS) or are relative paths (Python/Dart/Java)
 - External imports are package names (e.g. react, lodash, django, flutter/material.dart)
 - dependency_refs should list every imported dependency using stable normalized names
@@ -89,15 +89,27 @@ class DependencyAgent(BaseAgent):
         language: str,
         requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
+        truncated = self._truncate(content, file_path)
         system, prompt = build_prompt(
-            file_path, self._truncate(content, file_path), imports, language,
-            requested_shape,
+            file_path, truncated, imports, language, requested_shape,
+        )
+        shape_block = (
+            requested_shape.text
+            if requested_shape is not None
+            else default_shape_block("triple", "dependency")
         )
         raw = self._call_llm(prompt, system=system)
-        result = self._parse_json(raw, file_path)
-        cleaned = clean_dependency_response(result, file_path)
-        cleaned = filter_cleaned_response_for_profile(
-            cleaned, requested_shape, mode="triple", agent="dependency"
+        cleaned = self._finalize_response(
+            raw,
+            mode="triple",
+            agent="dependency",
+            file_path=file_path,
+            clean_reporter=clean_dependency_report,
+            resolved_shape=requested_shape,
+            content=truncated,
+            imports=imports,
+            language=language,
+            shape_block=shape_block,
         )
 
         dep_analysis = cleaned.get("dependencies_analysis", {})

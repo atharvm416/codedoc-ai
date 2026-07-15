@@ -23,6 +23,8 @@ from codedoc.agents.file_documentation_agent import FileDocumentationAgent
 from codedoc.agents.structure_agent import StructureAgent
 from codedoc.agents.dependency_agent import DependencyAgent
 from codedoc.agents.documentation_agent import DocumentationAgent
+from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+from codedoc.agents.response_diagnostics import CorrectionLedger
 from codedoc.core.record_meta import (
     expected_analysis_identity,
     expected_max_context_revision,
@@ -80,6 +82,8 @@ class Orchestrator:
         analysis_mode: str = "single",
         truncation_head_ratio: float = 0.70,
         resolved_profile: ResolvedProfile | None = None,
+        response_correction_enabled: bool = False,
+        correction_ledger: CorrectionLedger | None = None,
     ) -> None:
         if analysis_mode not in VALID_ANALYSIS_MODES:
             raise ValueError(
@@ -100,6 +104,21 @@ class Orchestrator:
         self._structure_agent = StructureAgent(llm, max_content_chars=max_content_chars, usage=usage)
         self._dependency_agent = DependencyAgent(llm, max_content_chars=max_content_chars, usage=usage)
         self._doc_agent = DocumentationAgent(llm, max_content_chars=max_content_chars, usage=usage)
+        # Build exactly one shared correction component and inject it into all four
+        # agents.  Only when a run-level ledger is supplied; a directly constructed
+        # orchestrator (no ledger) leaves every agent's ``_correction`` as ``None``,
+        # so an eligible response-contract failure is final with no correction call.
+        if correction_ledger is not None:
+            correction = ResponseCorrectionAgent(
+                llm, usage, correction_ledger, response_correction_enabled
+            )
+            for agent in (
+                self._file_agent,
+                self._structure_agent,
+                self._dependency_agent,
+                self._doc_agent,
+            ):
+                agent._correction = correction
 
     def process(
         self,
@@ -260,7 +279,24 @@ class Orchestrator:
         self, descriptor: dict, imports: list[str], failure: dict
     ) -> dict:
         """Flat record for a failed combined call: identity preserved, error on
-        the ``documentation`` key so ``_agent_errors()`` detects one failure."""
+        the ``documentation`` key so ``_agent_errors()`` detects one failure.
+
+        The response-contract marker fields (``response_contract_final``,
+        ``response_contract_diagnostic``, ``response_contract_correction_attempted``)
+        are copied onto the same sub-result so the execution layer can classify the
+        failure as a non-retryable response-contract failure.
+        """
+        documentation: dict = {
+            "error": failure.get("error", "unknown"),
+            "agent": failure.get("agent", "FileDocumentationAgent"),
+        }
+        for marker_key in (
+            "response_contract_final",
+            "response_contract_diagnostic",
+            "response_contract_correction_attempted",
+        ):
+            if marker_key in failure:
+                documentation[marker_key] = failure[marker_key]
         return {
             "file_path": descriptor["rel_path"],
             "language": descriptor.get("language", ""),
@@ -275,10 +311,7 @@ class Orchestrator:
             "dependencies_analysis": {},
             "key_concepts": [],
             "usage_example": "",
-            "documentation": {
-                "error": failure.get("error", "unknown"),
-                "agent": failure.get("agent", "FileDocumentationAgent"),
-            },
+            "documentation": documentation,
             "state": "checked",
         }
 

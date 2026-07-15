@@ -24,7 +24,7 @@ def _records() -> list[dict]:
             "hash": "h-main",
             "file_path": "main.py",
             "language": "python",
-            "_analysis_revision": "file-doc-v2",
+            "_analysis_revision": "file-doc-v3",
             "_analysis_mode": "single",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_prompt_profile_digest": "no-profile",

@@ -7,13 +7,12 @@ Provides shared prompt building, JSON extraction, and error handling.
 
 from __future__ import annotations
 
-import json
-import re
 from abc import ABC, abstractmethod
 
+from codedoc.agents.response_diagnostics import extract_json_candidate, process_response
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import AgentError
+from codedoc.utils.errors import AgentError, ResponseContractError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -28,6 +27,21 @@ TRUNCATION_MARKER = "\n... [truncated] ...\n"
 # ~70/30 head/tail split keeps import/context bias while making late class and
 # function definitions visible.
 TRUNCATION_HEAD_FRACTION = 0.70
+
+# Strong exact-response contract clauses, interpolated once into every agent's
+# ``_PROMPT_TEMPLATE`` so the four modules cannot drift apart.  Kept free of ``{``
+# / ``}`` so it can be concatenated into a ``str.format`` template safely.  Each
+# of the four assembled prompts must contain every clause verbatim.
+EXACT_JSON_RESPONSE_RULES = (
+    "- Return one JSON object only\n"
+    "- No Markdown fences and no prose outside the JSON\n"
+    "- Use exactly the requested top-level keys\n"
+    "- Do not rename requested keys or invent aliases for them\n"
+    "- Preserve the requested scalar/list/object type of each field\n"
+    "- Provide every required field with a non-empty, valid value\n"
+    "- Omit optional information only as the schema permits\n"
+    "- Never invent facts to fill a field"
+)
 
 
 def truncate_for_llm(
@@ -69,6 +83,45 @@ def truncate_for_llm(
     return head + marker + tail
 
 
+def _call_llm_counted(
+    llm: LLMProvider,
+    usage: UsageAccumulator | None,
+    *,
+    agent_name: str,
+    prompt: str,
+    system: str = "",
+) -> str:
+    """The single provider-call accounting path for initial and correction calls.
+
+    Records estimated input tokens before the call and a success (with estimated
+    output tokens) or a failure after, isolating accounting errors from the call
+    outcome, and wraps provider exceptions as
+    ``AgentError(agent_name, "unknown", str(exc))``.  Both ``BaseAgent._call_llm``
+    and ``ResponseCorrectionAgent`` delegate here so provider/usage accounting is
+    never duplicated.
+    """
+    if usage is not None:
+        try:
+            usage.record_input(system, prompt)
+        except Exception:
+            logger.debug("Usage accounting failed for input estimate", exc_info=True)
+    try:
+        raw = llm.complete_json(prompt, system=system)
+    except Exception as exc:
+        if usage is not None:
+            try:
+                usage.record_failure()
+            except Exception:
+                logger.debug("Usage accounting failed for failed call", exc_info=True)
+        raise AgentError(agent_name, "unknown", str(exc)) from exc
+    if usage is not None:
+        try:
+            usage.record_success(raw)
+        except Exception:
+            logger.debug("Usage accounting failed for successful call", exc_info=True)
+    return raw
+
+
 class BaseAgent(ABC):
     """
     Abstract agent.
@@ -88,6 +141,11 @@ class BaseAgent(ABC):
         self.llm = llm
         self._max_content_chars = max_content_chars
         self._usage = usage
+        # Shared correction component, injected by the orchestrator after the four
+        # agents are constructed.  ``None`` (the default for a directly constructed
+        # agent, or an orchestrator built without a correction ledger) means an
+        # eligible response-contract failure raises without any correction call.
+        self._correction: "object | None" = None
 
     @abstractmethod
     def run(
@@ -139,58 +197,121 @@ class BaseAgent(ABC):
     def _call_llm(self, prompt: str, system: str = "") -> str:
         """Call the LLM and return raw text. Wraps errors as AgentError.
 
-        When a :class:`UsageAccumulator` is attached, every provider attempt
-        records estimated input tokens immediately before the call, then a
-        success (with estimated output tokens) or a failure.  Accounting
-        problems never change the outcome of the provider call itself.
+        Delegates to the shared :func:`_call_llm_counted` accounting path so
+        initial and correction calls are counted identically.
         """
-        usage = self._usage
-        if usage is not None:
-            try:
-                usage.record_input(system, prompt)
-            except Exception:
-                logger.debug("Usage accounting failed for input estimate", exc_info=True)
-        try:
-            raw = self.llm.complete_json(prompt, system=system)
-        except Exception as exc:
-            if usage is not None:
-                try:
-                    usage.record_failure()
-                except Exception:
-                    logger.debug("Usage accounting failed for failed call", exc_info=True)
-            raise AgentError(self.agent_name, "unknown", str(exc)) from exc
-        if usage is not None:
-            try:
-                usage.record_success(raw)
-            except Exception:
-                logger.debug("Usage accounting failed for successful call", exc_info=True)
-        return raw
+        return _call_llm_counted(
+            self.llm, self._usage,
+            agent_name=self.agent_name, prompt=prompt, system=system,
+        )
 
     def _parse_json(self, raw: str, file_path: str) -> dict:
         """
         Extract and parse a JSON object from LLM output.
         Handles models that wrap JSON in markdown fences.
+
+        Delegates candidate selection/parsing to the one shared extraction in
+        :mod:`codedoc.agents.response_diagnostics`. Error messages contain only
+        bounded structural metadata, never provider-response excerpts, so custom
+        ``BaseAgent`` subclasses cannot leak echoed source or secrets through
+        ``_safe_run`` warning logs.
         """
-        # Strip markdown fences if present
-        cleaned = re.sub(r"```(?:json)?", "", raw).strip().rstrip("`").strip()
-
-        # Find the outermost { ... }
-        start = cleaned.find("{")
-        end = cleaned.rfind("}")
-        if start == -1 or end == -1:
+        outcome = extract_json_candidate(raw)
+        if outcome.kind == "object":
+            return outcome.value
+        if outcome.kind == "json_parse_error":
             raise AgentError(
                 self.agent_name, file_path,
-                f"LLM did not return a JSON object. Raw output: {raw[:200]}"
+                f"JSON parse error: {outcome.parse_error}"
             )
-        json_str = cleaned[start:end + 1]
+        # no_json_object or top_level_not_object: the legacy path never parsed a
+        # brace-less candidate, so both surface the same historical message.
+        raise AgentError(
+            self.agent_name, file_path,
+            "LLM did not return a JSON object."
+        )
 
+    def _finalize_response(
+        self,
+        raw: str,
+        *,
+        mode: str,
+        agent: str,
+        file_path: str,
+        clean_reporter,
+        resolved_shape,
+        content: str,
+        imports: list[str],
+        language: str,
+        shape_block: str,
+    ) -> dict:
+        """Validate *raw* through the canonical path, correcting once if eligible.
+
+        Runs the shared :func:`~codedoc.agents.response_diagnostics.process_response`
+        (extraction -> clean -> profile filter -> no-usable-fields ->
+        registry-required-field validation).  On an eligible
+        :class:`ResponseContractError`, when a shared correction component is
+        injected (``self._correction is not None``) it calls ``repair`` exactly
+        once with the bounded correction input and the identical validation path;
+        otherwise the typed failure propagates without any correction call.
+        """
+        def _revalidate(text: str) -> dict:
+            return process_response(
+                text, mode=mode, agent=agent, file_path=file_path,
+                clean_reporter=clean_reporter, resolved_shape=resolved_shape,
+            )
+
+        contract_error: ResponseContractError | None = None
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError as exc:
-            raise AgentError(
-                self.agent_name, file_path,
-                f"JSON parse error: {exc}. Raw snippet: {json_str[:200]}"
-            ) from exc
+            return _revalidate(raw)
+        except ResponseContractError as exc:
+            if self._correction is None:
+                raise
+            contract_error = exc
+
+        # Invoke correction *outside* the ``except`` block so a provider fault
+        # raised by the correction call is not implicitly chained (``__context__``)
+        # to the initial ``ResponseContractError``.  Such a chain would make
+        # ``_classify_failure`` return ``response_contract_final`` for a genuine
+        # terminal-billing/global correction fault and defeat the run-level abort.
+        correction_input = {
+            "agent": agent,
+            "mode": mode,
+            "file_path": file_path,
+            "language": language,
+            "content": content,
+            "imports": list(imports),
+            "shape_block": shape_block,
+            "original_response": raw,
+        }
+        return self._correction.repair(
+            agent=agent,
+            file_path=file_path,
+            diagnostic=contract_error.diagnostic,
+            correction_input=correction_input,
+            revalidate=_revalidate,
+        )
+
+    def _agent_error_result(self, exc: Exception) -> dict:
+        """Build the error-dict fallback for a failed agent run.
+
+        For a :class:`ResponseContractError` the dict additionally carries the
+        non-retryable marker ``response_contract_final``, a bounded json-safe
+        diagnostic summary, and ``response_contract_correction_attempted`` so the
+        execution layer can re-raise a typed, non-retryable failure and accounting
+        can distinguish an opt-out rejection from an exhausted correction.  Every
+        other exception returns the historical ``{"error", "agent"}`` dict.
+        """
+        result = {"error": str(exc), "agent": self.agent_name}
+        if isinstance(exc, ResponseContractError):
+            result["response_contract_final"] = True
+            result["response_contract_correction_attempted"] = exc.correction_attempted
+            if exc.diagnostic is not None:
+                summary = getattr(exc.diagnostic, "as_summary", None)
+                result["response_contract_diagnostic"] = (
+                    summary() if callable(summary) else exc.diagnostic
+                )
+        return result
 
     def _safe_run(
         self,
@@ -210,7 +331,7 @@ class BaseAgent(ABC):
             return self.run(file_path, content, imports, language, requested_shape)
         except AgentError as exc:
             logger.warning("%s failed on %s: %s", self.agent_name, file_path, exc)
-            return {"error": str(exc), "agent": self.agent_name}
+            return self._agent_error_result(exc)
         except Exception as exc:
             logger.warning("%s unexpected error on %s: %s", self.agent_name, file_path, exc)
-            return {"error": str(exc), "agent": self.agent_name}
+            return self._agent_error_result(exc)

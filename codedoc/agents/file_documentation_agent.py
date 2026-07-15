@@ -24,11 +24,10 @@ one strict contract.  They are re-exported here for backward compatibility.
 
 from __future__ import annotations
 
-from codedoc.agents.base_agent import BaseAgent
+from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
-    filter_cleaned_response_for_profile,
 )
 
 # Re-export the shared bounds + cleaners so existing imports of
@@ -56,6 +55,7 @@ from codedoc.agents.response_cleaning import (  # noqa: F401  (re-export)
     _clean_str_list,
     _clean_symbols,
     _enforce_global_cap,
+    clean_combined_report,
     clean_combined_response,
 )
 from codedoc.utils.logger import get_logger
@@ -78,6 +78,7 @@ Code:
 {shape_block}
 
 Rules:
+""" + EXACT_JSON_RESPONSE_RULES + """
 - Use only information from the provided code and parser imports
 - functions and classes must be ones DEFINED IN this file — never list an imported
   or re-exported name as a local function or class unless it is also defined here
@@ -148,15 +149,27 @@ class FileDocumentationAgent(BaseAgent):
         language: str,
         requested_shape: ResolvedShapeBlock | None = None,
     ) -> dict:
+        truncated = self._truncate(content, file_path)
         system, prompt = build_prompt(
-            file_path, self._truncate(content, file_path), imports, language,
-            requested_shape,
+            file_path, truncated, imports, language, requested_shape,
+        )
+        shape_block = (
+            requested_shape.text
+            if requested_shape is not None
+            else default_shape_block("single", "combined")
         )
         raw = self._call_llm(prompt, system=system)
-        result = self._parse_json(raw, file_path)
-        cleaned = clean_combined_response(result, file_path)
-        cleaned = filter_cleaned_response_for_profile(
-            cleaned, requested_shape, mode="single", agent="combined"
+        cleaned = self._finalize_response(
+            raw,
+            mode="single",
+            agent="combined",
+            file_path=file_path,
+            clean_reporter=clean_combined_report,
+            resolved_shape=requested_shape,
+            content=truncated,
+            imports=imports,
+            language=language,
+            shape_block=shape_block,
         )
         logger.debug(
             "FileDocumentationAgent: %s → %d functions, %d classes",

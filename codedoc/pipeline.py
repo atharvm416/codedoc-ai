@@ -44,6 +44,7 @@ from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
+from codedoc.agents.response_diagnostics import CorrectionLedger
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.discovery import (
     _build_graph,
@@ -444,6 +445,11 @@ def run_pipeline(
         )
 
     usage = UsageAccumulator()
+    # One run-level correction ledger, initialized with the resolved opt-in flag,
+    # constructed beside the usage accumulator and threaded through the
+    # orchestrator to the single shared correction component.
+    correction_enabled = bool(config.get("response_correction_enabled", False))
+    correction_ledger = CorrectionLedger(correction_enabled)
     llm = None
     review_stats = _base_profile_stats(
         resolved_profile, profile_resolution, plan, file_map, review_batches
@@ -619,7 +625,7 @@ def run_pipeline(
         stats["output_files"] = [str(path) for path in output_files if path]
         recorder.delete()
         _set_issue_stats(stats, error_reporter, recovery_path)
-        _set_usage_stats(stats, usage, plan, config)
+        _set_usage_stats(stats, usage, plan, config, correction_ledger)
         return stats
 
     # Build the agent-file queue in topological order.
@@ -655,6 +661,8 @@ def run_pipeline(
         analysis_mode=config.get("analysis_mode", "single"),
         truncation_head_ratio=config.get("truncation_head_ratio", 0.70),
         resolved_profile=resolved_profile,
+        response_correction_enabled=correction_enabled,
+        correction_ledger=correction_ledger,
     )
     stats = {
         "checked": 0,
@@ -771,7 +779,7 @@ def run_pipeline(
     # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
     _set_issue_stats(stats, error_reporter, recovery_path)
-    _set_usage_stats(stats, usage, plan, config)
+    _set_usage_stats(stats, usage, plan, config, correction_ledger)
 
     logger.info(
         "Done. checked=%d failed=%d skipped=%d output=%s",
@@ -822,6 +830,7 @@ def _set_usage_stats(
     usage: UsageAccumulator,
     plan: PipelinePlan,
     config: dict,
+    correction_ledger: CorrectionLedger | None = None,
 ) -> None:
     """Populate planned/actual usage keys on *stats* in-place.
 
@@ -830,6 +839,13 @@ def _set_usage_stats(
     analysis_mode = config.get("analysis_mode", "single")
     per_file = initial_calls_per_file(analysis_mode)
     stats.update(usage.snapshot())
+    # Correction statistics are run-level metadata, snapshot beside the existing
+    # documentation-call counter.  Every correction provider call is one paid
+    # attempt already counted in ``attempted_calls`` and therefore a subset of
+    # ``documentation_calls_attempted``; these keys are reported additionally, not
+    # subtracted, so the call-category invariant below is preserved unchanged.
+    if correction_ledger is not None:
+        stats.update(correction_ledger.snapshot())
     stats["analysis_mode"] = analysis_mode
     stats["initial_calls_per_file"] = per_file
     stats["planned_calls"] = len(plan.agent_rels) * per_file
@@ -905,6 +921,12 @@ def _build_dry_run_stats(
     # single mode embeds only known inputs, so its input estimate is exact;
     # triple mode's documentation prompt estimate is a lower bound.
     estimate_is_lower_bound = analysis_mode == "triple"
+    # Correction is opt-in.  The worst case is one extra call per planned per-agent
+    # documentation call; it is 0 when correction is disabled.  The baseline
+    # estimate stays the expected charge; the ceiling below is a worst case.
+    correction_enabled = bool(config.get("response_correction_enabled", False))
+    estimated_calls = len(plan.agent_rels) * per_file
+    correction_possible_max = estimated_calls if correction_enabled else 0
     review_batches = review_batches or []
     profile_stats = (
         _base_profile_stats(
@@ -932,7 +954,10 @@ def _build_dry_run_stats(
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": recovery_resumed,
         "forced": len(plan.forced_rels),
-        "estimated_calls": len(plan.agent_rels) * per_file,
+        "estimated_calls": estimated_calls,
+        "response_correction_enabled": correction_enabled,
+        "response_correction_calls_possible_max": correction_possible_max,
+        "estimated_calls_max_with_correction": estimated_calls + correction_possible_max,
         "estimated_input_tokens": _estimate_planned_input_tokens(
             plan, file_map, config, resolved_profile
         ),

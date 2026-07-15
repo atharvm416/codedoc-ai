@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.12.1 - Unreleased
+
+### Response diagnostics and targeted correction
+
+- **Structured response diagnostics.** Every rejected provider response now
+  produces a bounded, structured diagnostic with a stable top-level reason code
+  (`no_json_object`, `json_parse_error`, `top_level_not_object`,
+  `no_usable_fields`, `missing_required`) and bounded per-field removal reasons
+  (`unknown_field`, `wrong_type`, `empty_value`, `invalid_value`, `duplicate`,
+  `item_limit`, `response_cap`, `not_requested`). Normal logs emit one concise
+  rejection line; `--verbose` adds only bounded structural metadata. No raw
+  response, source, prompt, or credential text is ever logged or attached.
+- **Stronger exact-JSON prompt rules.** One shared clause block
+  (`EXACT_JSON_RESPONSE_RULES`) is interpolated into all four documentation
+  prompts so they cannot drift: return one JSON object only; no fences or prose;
+  exactly the requested keys; no renamed keys; preserve each field's type; every
+  required field non-empty and valid; omit optional data only as the schema
+  allows; invent no facts.
+- **Registry-driven acceptance.** A response is rejected when any effective
+  registry-required field is missing or empty, or when none of the effective
+  requested fields survive cleaning and profile filtering — enforced identically
+  in single and triple modes.
+- **Targeted response correction (opt-in, disabled by default).** New config key
+  `response_correction_enabled` (strict boolean, default `false`, config-only —
+  no CLI flag or environment variable). When enabled, an eligible response-contract
+  failure receives at most one targeted correction call through the shared
+  usage-counted provider path; the corrected text is revalidated through the
+  identical acceptance path. Correction is invoked per agent per file and never
+  reruns a successful sibling agent.
+- **No duplicate whole-file retry for contract failures.** A response-contract
+  rejection is classified `response_contract_final` and is non-retryable in both
+  the parallel and sequential paths, whether correction is disabled or has been
+  attempted. A correction call that fails on a rate-limit/transport fault ends
+  correction for that file; a billing/credential/model correction fault stays a
+  run-level abort with crash recovery left resumable.
+- **Run-level correction statistics.** A thread-safe correction ledger reports
+  `response_contract_failures` and correction call attempts/successes/failures in
+  run statistics and the console summary. Each correction call is one paid attempt
+  already counted in `attempted_calls`, so it stays a subset of
+  `documentation_calls_attempted`; the existing call-category invariant is
+  unchanged. `--dry-run` reports whether correction is enabled and a bounded
+  worst-case call ceiling. These stay internal run metadata, absent from completed
+  JSON/Markdown output.
+- **Cache identity advances to `file-doc-v3`.** The rendered requested-shape block
+  and its `_prompt_profile_digest` are unchanged, but the strengthened prompt
+  semantics and stricter acceptance change generation strategy, so matching
+  `file-doc-v2` records are reprocessed once.
+
 ## 0.12.0 - 2026-07-11
 
 ### Extension-scoped prompt profiles

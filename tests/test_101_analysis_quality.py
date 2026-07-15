@@ -1,7 +1,7 @@
 """0.10.1 — deterministic dependency projection, shared enrichment, truncation.
 
 Covers Workstreams F (cross-mode dependency consistency), G (shared strict
-cleaning, aligned prompt semantics, and the file-doc-v2 cache invalidation), and
+cleaning, aligned prompt semantics, and the file-doc-v3 cache invalidation), and
 H (head-plus-tail bounded source context).
 """
 from __future__ import annotations
@@ -192,9 +192,9 @@ def test_both_prompt_families_share_symbol_and_usage_definitions():
 
 
 def test_cache_identity_is_v2():
-    assert ANALYSIS_REVISION == "file-doc-v2"
+    assert ANALYSIS_REVISION == "file-doc-v3"
     assert expected_analysis_identity("single") == {
-        "_analysis_revision": "file-doc-v2",
+        "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
     }
 

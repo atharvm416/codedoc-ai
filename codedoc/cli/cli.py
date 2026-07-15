@@ -362,6 +362,19 @@ def _print_dry_run_summary(stats: dict) -> None:
         print(f"  Forced                 : {stats['forced']}")
     print(f"  Would call LLM for     : {stats.get('would_call_llm_for', 0)} file(s)")
     print(f"  Estimated LLM calls    : {stats.get('estimated_calls', 0)}")
+    correction_enabled = stats.get("response_correction_enabled", False)
+    if correction_enabled:
+        print(
+            f"  Response correction    : enabled "
+            f"(up to {stats.get('response_correction_calls_possible_max', 0)} extra call(s))"
+        )
+        print(
+            f"  Worst-case LLM calls   : {stats.get('estimated_calls_max_with_correction', 0)} "
+            "(baseline + one correction per documentation call; worst case, not an "
+            "expected charge)"
+        )
+    else:
+        print("  Response correction    : disabled (0 possible extra calls)")
     if stats.get("disconnected_paid_files", 0):
         print(
             "  Disconnected paid files: "
@@ -448,6 +461,14 @@ def _print_run_summary(stats: dict) -> None:
             f"  Tokens (approx.) : ~{stats.get('estimated_input_tokens', 0)} in / "
             f"~{stats.get('estimated_output_tokens', 0)} out "
             "(character estimate, not a tokenizer)"
+        )
+    # Correction summary: one line only when a targeted correction was attempted.
+    corrections = stats.get("response_correction_calls_attempted", 0)
+    if corrections > 0:
+        print(
+            f"  Response corrections: {corrections} attempted "
+            f"({stats.get('response_correction_calls_succeeded', 0)} succeeded, "
+            f"{stats.get('response_correction_calls_failed', 0)} failed)"
         )
     _print_prompt_profile_run(stats)
 

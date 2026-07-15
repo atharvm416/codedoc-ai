@@ -116,7 +116,7 @@ def _oversized_plan(tmp_path, stored_mcr, *, max_chars=1000, head_ratio=0.70):
         "path": "main.py",
         "hash": compute_file_hash(src),
         "description": "cached",
-        "_analysis_revision": "file-doc-v2",
+        "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
     }
     if stored_mcr is not _OMIT:
@@ -175,7 +175,7 @@ def _small_plan(tmp_path, *, max_chars, head_ratio=0.70):
     # A small file would never carry _max_context_revision.
     record = {
         "path": "main.py", "hash": compute_file_hash(src), "description": "cached",
-        "_analysis_revision": "file-doc-v2", "_analysis_mode": "single",
+        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     config = {
         "propagate_changes": False, "max_files": 0, "analysis_mode": "single",

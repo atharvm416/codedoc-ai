@@ -21,12 +21,15 @@ from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
 # Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
 # changes in a way that should invalidate previously cached records.
 #
-# The current revision is ``file-doc-v2``: prompt semantics (precise local-symbol
-# / export / usage-example definitions, the head-plus-tail truncation marker) and
-# response cleaning define the contract for both ``single`` and ``triple`` modes.
-# Older ``file-doc-v1`` records remain readable but are reprocessed exactly once
-# under the current contract before reuse.
-ANALYSIS_REVISION = "file-doc-v2"
+# The current revision is ``file-doc-v3``: the strengthened exact-JSON response
+# rules shared across all four prompts, plus stricter response acceptance
+# (registry-required-field validation and rejection of a response that retains
+# none of its requested fields), change generation semantics for both ``single``
+# and ``triple`` modes even though the rendered requested-shape block — and the
+# ``_prompt_profile_digest`` computed from it — are unchanged.  Older
+# ``file-doc-v2`` (and ``file-doc-v1``) records remain readable but are
+# reprocessed exactly once under the current contract before reuse.
+ANALYSIS_REVISION = "file-doc-v3"
 
 # Per-file truncation identity token.  The head-plus-tail truncation of an
 # oversized file depends on the effective ``max_content_chars`` ceiling and the

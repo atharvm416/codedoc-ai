@@ -50,6 +50,20 @@ class SmartFake:
                 "warnings": ["warn"] if self.verdict == "RISKY" else [],
             })
         self.doc_calls += 1
+        if "Analyse the imports" in prompt:
+            # A dependency agent can validly report that this file has no
+            # dependencies; use the exact dependency response shape rather than
+            # feeding it the combined-agent fixture below.
+            return json.dumps({
+                "dependencies_analysis": {
+                    "internal": [],
+                    "external": [],
+                    "dependency_refs": [],
+                    "catalog_updates": [],
+                    "usage_notes": [],
+                    "warnings": [],
+                }
+            })
         return json.dumps({
             "description": "A file.", "role_in_system": "core",
             "functions": [{"name": "f", "description": "does f"}],

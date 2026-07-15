@@ -67,10 +67,27 @@ for a named output; no directory walk or unrelated sibling is permitted.
 
 8. **Execution.** Process dependencies before dependents where possible. Single
    mode makes one combined documentation call per file; triple mode runs
-   structure, dependency, and documentation agents. Each completed record is
-   atomically persisted to the fixed recovery file. Recoverable failures follow
-   bounded retry/rate-limit rules; terminal/provider/persistence failures stop and
-   preserve recovery.
+   structure, dependency, and documentation agents. Each agent response passes one
+   canonical validation path: JSON candidate extraction, parse, top-level object
+   check, strict cleaning, profile filtering, a check that at least one requested
+   field survives, and registry-required-field validation. A response that fails
+   this contract is rejected with a bounded, structured diagnostic (a stable
+   top-level reason code plus bounded per-field removal reasons) that carries no
+   raw response, source, prompt, or credential text.
+
+   When response correction is enabled (`response_correction_enabled: true`), each
+   agent's response boundary makes at most one targeted correction call for its own
+   eligible failure, revalidated through the identical path; a successful sibling
+   agent is never rerun. When correction is disabled, the eligible failure is
+   final at the initial call. Either way the failure is classified
+   `response_contract_final` and is non-retryable, so a response-contract rejection
+   never becomes a duplicate whole-file call. A correction call that fails on a
+   rate-limit/transport fault ends correction for that file (still
+   `response_contract_final`); a billing/credential/model correction fault stays a
+   run-level terminal abort. Each completed record is atomically persisted to the
+   fixed recovery file. Other recoverable failures follow the bounded
+   retry/rate-limit rules governed by `file_retry_attempts`;
+   terminal/provider/persistence failures stop and preserve recovery.
 
 9. **Finalization.** Render all selected payloads before replacement. Markdown is
    atomically replaced before JSON in both mode; this is per-artifact atomicity,
