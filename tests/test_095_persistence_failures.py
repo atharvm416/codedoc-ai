@@ -11,6 +11,7 @@ Covers:
 """
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -18,7 +19,12 @@ import pytest
 import codedoc.core.execution as ex
 import codedoc.core.safe_writer as safe_writer_mod
 from codedoc.core.safe_writer import SafeWriter
-from codedoc.utils.errors import ErrorReporter, LiveBackupWriteError, OutputError
+from codedoc.utils.errors import (
+    ErrorReporter,
+    InsufficientSourceError,
+    LiveBackupWriteError,
+    OutputError,
+)
 
 
 def _writer(tmp_path):
@@ -140,6 +146,48 @@ def test_failed_record_preserves_previously_persisted_records(tmp_path, monkeypa
     assert "b.py" not in on_disk
 
 
+def test_discard_removes_record_and_recorded_marker(tmp_path):
+    sw = _writer(tmp_path)
+    sw.initialize_empty()
+    sw.record("a.py", _result("a.py"), file_hash="h")
+
+    sw.discard("a.py")
+
+    assert sw.size == 0
+    assert sw.has_record("a.py") is False
+    assert sw.recorded_this_run("a.py") is False
+    payload = json.loads((tmp_path / "codedoc.json").read_text(encoding="utf-8"))
+    assert payload["files"] == []
+
+
+def test_discard_absent_record_does_not_flush(tmp_path, monkeypatch):
+    sw = _writer(tmp_path)
+
+    def unexpected_flush():
+        raise AssertionError("absent discard must not flush")
+
+    monkeypatch.setattr(sw, "_flush_locked", unexpected_flush)
+    sw.discard("missing.py")
+
+
+def test_discard_failure_restores_record_and_marker(tmp_path, monkeypatch):
+    sw = _writer(tmp_path)
+    sw.initialize_empty()
+    sw.record("a.py", _result("a.py"), file_hash="h")
+
+    def boom(path, text):
+        raise OSError("no space")
+
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", boom)
+    with pytest.raises(LiveBackupWriteError):
+        sw.discard("a.py")
+
+    assert sw.size == 1
+    assert sw.has_record("a.py") is True
+    assert sw.recorded_this_run("a.py") is True
+    assert sw.get_record("a.py") is not None
+
+
 # ---------------------------------------------------------------------------
 # Execution layer: persistence failure is fatal (no retry, no reclassification)
 # ---------------------------------------------------------------------------
@@ -159,12 +207,16 @@ class _FakeQueue:
     def __init__(self):
         self.checked: list[str] = []
         self.failed: list[tuple[str, str]] = []
+        self.skipped: list[tuple[str, str]] = []
 
     def mark_checked(self, rel_path):
         self.checked.append(rel_path)
 
     def mark_failed(self, rel_path, reason):
         self.failed.append((rel_path, reason))
+
+    def mark_skipped_insufficient_source(self, rel_path, reason):
+        self.skipped.append((rel_path, reason))
 
 
 class _CountingFailRecorder:
@@ -185,6 +237,26 @@ class _CountingFailRecorder:
 
     def has_record(self, rel_path):
         return False
+
+
+class _DiscardFailRecorder:
+    """Recorder whose discard fails before a skip can be committed."""
+
+    def __init__(self):
+        self.discard_calls = 0
+
+    def discard(self, rel_path):
+        self.discard_calls += 1
+        raise LiveBackupWriteError("codedoc.json", "could not persist discard")
+
+    def record(self, rel_path, result, file_hash=""):
+        raise AssertionError("insufficient source must not be recorded")
+
+    def recorded_this_run(self, rel_path):
+        return False
+
+    def get_record(self, rel_path):
+        return None
 
 
 def _descriptors(tmp_path, count):
@@ -283,3 +355,73 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
     # observed, but queued work must be cancelled rather than all being started.
     assert orchestrator.process_calls <= 2
     assert recorder.record_calls <= 2
+
+
+def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
+    tmp_path, monkeypatch
+):
+    descriptor = _descriptors(tmp_path, 1)[0]
+    monkeypatch.setattr(
+        ex,
+        "_process_one_file",
+        lambda _descriptor, _orchestrator: (_ for _ in ()).throw(
+            InsufficientSourceError(
+                descriptor["rel_path"], "empty_or_whitespace_only"
+            )
+        ),
+    )
+    recorder = _DiscardFailRecorder()
+    queue = _FakeQueue()
+    stats = {"checked": 0, "failed": 0, "skipped_insufficient_source": 0}
+
+    with pytest.raises(LiveBackupWriteError):
+        ex._process_files_sequentially(
+            [descriptor],
+            _FakeOrchestrator(),
+            queue,
+            stats,
+            ErrorReporter(),
+            retry_attempts=3,
+            max_consecutive_failures=5,
+            new_results={},
+            recorder=recorder,
+        )
+
+    assert recorder.discard_calls == 1
+    assert stats["skipped_insufficient_source"] == 0
+    assert queue.skipped == []
+    assert queue.failed == []
+
+
+def test_parallel_skip_discard_failure_uses_fatal_abort_protocol(
+    tmp_path, monkeypatch
+):
+    descriptor = _descriptors(tmp_path, 1)[0]
+    monkeypatch.setattr(
+        ex,
+        "_process_one_file",
+        lambda _descriptor, _orchestrator: (_ for _ in ()).throw(
+            InsufficientSourceError(
+                descriptor["rel_path"], "empty_or_whitespace_only"
+            )
+        ),
+    )
+    recorder = _DiscardFailRecorder()
+    queue = _FakeQueue()
+    stats = {"checked": 0, "failed": 0, "skipped_insufficient_source": 0}
+
+    with pytest.raises(LiveBackupWriteError):
+        ex._process_descriptor_batch(
+            [descriptor],
+            _FakeOrchestrator(),
+            queue,
+            stats,
+            ErrorReporter(),
+            max_workers=1,
+            recorder=recorder,
+        )
+
+    assert recorder.discard_calls == 1
+    assert stats["skipped_insufficient_source"] == 0
+    assert queue.skipped == []
+    assert queue.failed == []

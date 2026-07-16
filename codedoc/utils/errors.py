@@ -27,6 +27,15 @@ class ParseError(CodeDocError):
         super().__init__(f"ParseError in '{file_path}': {reason}")
 
 
+class InsufficientSourceError(CodeDocError):
+    """Raised when a source file contains no non-whitespace content."""
+
+    def __init__(self, file_path: str, reason: str):
+        self.file_path = file_path
+        self.reason = reason
+        super().__init__(f"InsufficientSourceError in '{file_path}': {reason}")
+
+
 class LLMError(CodeDocError):
     """Raised when an LLM call fails or returns invalid output."""
 

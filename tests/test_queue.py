@@ -1,6 +1,12 @@
 """Tests for ProcessingQueue."""
 
-from codedoc.core.queue import ProcessingQueue, STATUS_CHECKED, STATUS_FAILED, STATUS_UNCHECKED
+from codedoc.core.queue import (
+    ProcessingQueue,
+    STATUS_CHECKED,
+    STATUS_FAILED,
+    STATUS_SKIPPED_INSUFFICIENT_SOURCE,
+    STATUS_UNCHECKED,
+)
 
 
 def make_descriptor(rel_path: str) -> dict:
@@ -34,6 +40,16 @@ class TestProcessingQueue:
         q.next()
         q.mark_failed("a.py", "boom")
         assert q.status_of("a.py") == STATUS_FAILED
+
+    def test_mark_skipped_insufficient_source_is_terminal(self):
+        q = ProcessingQueue()
+        q.add(make_descriptor("a.py"))
+        q.next()
+        q.mark_skipped_insufficient_source("a.py", "empty_or_whitespace_only")
+        assert q.status_of("a.py") == STATUS_SKIPPED_INSUFFICIENT_SOURCE
+        assert q.all_checked()
+        assert not q.has_pending()
+        assert q.stats()[STATUS_SKIPPED_INSUFFICIENT_SOURCE] == 1
 
     def test_all_checked(self):
         q = ProcessingQueue()

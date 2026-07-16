@@ -57,6 +57,7 @@ from codedoc.core.execution import (
     ExecutionOptions,
     execute_agent_files,
 )
+from codedoc.core.feasibility import build_feasibility_notes
 from codedoc.core.loader import load_config
 from codedoc.core.output import (
     inspect_output_ownership,
@@ -71,6 +72,7 @@ from codedoc.core.planning import (
 )
 from codedoc.core.prompt_profiles import (
     ProfileResolution,
+    REVIEW_SYSTEM,
     ResolvedProfile,
     ReviewBatch,
     build_resolved_profile,
@@ -78,7 +80,7 @@ from codedoc.core.prompt_profiles import (
     classify_profile_action,
     resolve_profile_source,
 )
-from codedoc.core.queue import ProcessingQueue
+from codedoc.core.queue import ProcessingQueue, STATUS_SKIPPED_INSUFFICIENT_SOURCE
 from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
@@ -89,6 +91,7 @@ from codedoc.core.resume import (
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
+from codedoc.core.source_precheck import insufficient_source
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider, describe_provider_selection
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
@@ -198,6 +201,8 @@ def run_pipeline(
         "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_feasibility_notes": 0,
+        "prompt_customization_feasibility_advisories": (),
         "documentation_calls_planned": 0,
         "documentation_calls_attempted": 0,
     }
@@ -305,6 +310,7 @@ def run_pipeline(
                 "disconnected_planned_calls": 0,
                 "would_process": 0,
                 "would_call_llm_for": 0,
+                "would_skip_insufficient_source": 0,
                 "unchanged": 0,
                 "would_reuse": 0,
                 "would_resume": 0,
@@ -313,6 +319,7 @@ def run_pipeline(
                 "estimated_input_tokens": 0,
                 "estimate_is_lower_bound": config.get("analysis_mode", "single") == "triple",
                 "max_files": int(config.get("max_files", 0) or 0),
+                "max_files_candidate_files": 0,
                 "max_files_exceeded": False,
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
@@ -324,6 +331,7 @@ def run_pipeline(
             "checked": 0,
             "failed": 0,
             "skipped": 0,
+            "skipped_insufficient_source": 0,
             "entry_excluded": 0,
             "analysis_mode": config.get("analysis_mode", "single"),
             "initial_calls_per_file": initial_calls_per_file(
@@ -415,6 +423,7 @@ def run_pipeline(
         resolved_profile.scope_for(file_map[rel]) for rel in plan.agent_rels
     )
     review_batches = build_review_batches(resolved_profile, planned_scopes)
+    feasibility_notes = build_feasibility_notes(resolved_profile, planned_scopes)
 
     if dry_run:
         return _build_dry_run_stats(
@@ -428,6 +437,7 @@ def run_pipeline(
             profile_resolution,
             review_batches,
             recovery_resumed=len(recovery_records),
+            feasibility_notes=feasibility_notes,
         )
 
     scope_stats = _build_scope_stats(
@@ -438,7 +448,7 @@ def run_pipeline(
     # any mutation, writer initialization, or provider creation.
     if plan.max_files_exceeded:
         raise ConfigError(
-            f"This run would send {len(plan.agent_rels)} file(s) to the LLM, "
+            f"This run has {len(plan.agent_rels)} documentation-call candidate(s), "
             f"which exceeds the configured max_files limit of {plan.max_files}. "
             "Inspect the plan first with --dry-run, and raise --max-files only "
             "after reviewing it."
@@ -452,7 +462,12 @@ def run_pipeline(
     correction_ledger = CorrectionLedger(correction_enabled)
     llm = None
     review_stats = _base_profile_stats(
-        resolved_profile, profile_resolution, plan, file_map, review_batches
+        resolved_profile,
+        profile_resolution,
+        plan,
+        file_map,
+        review_batches,
+        feasibility_notes=feasibility_notes,
     )
     if review_batches:
         # This is a mandatory, non-overridable, probabilistic semantic
@@ -590,6 +605,7 @@ def run_pipeline(
         stats: dict = {
             "checked": 0,
             "failed": 0,
+            "skipped_insufficient_source": 0,
             "skipped": skipped,
             "reused": reused,
             "resumed": resumed,
@@ -667,6 +683,7 @@ def run_pipeline(
     stats = {
         "checked": 0,
         "failed": 0,
+        "skipped_insufficient_source": 0,
         "skipped": skipped,
         "reused": reused,
         "resumed": resumed,
@@ -754,9 +771,14 @@ def run_pipeline(
 
     stats["output_dir"] = str(output_dir)
     _set_plan_counters(stats, plan)
+    skipped_rels = {
+        rel
+        for rel, status in queue.snapshot().items()
+        if status == STATUS_SKIPPED_INSUFFICIENT_SOURCE
+    }
     output_files = write_project_outputs(
         _build_documentation_records(
-            documented_rels,
+            documented_rels - skipped_rels,
             file_map,
             graph.topological_order(),
             existing_docs,
@@ -821,7 +843,10 @@ def _set_plan_counters(stats: dict, plan: PipelinePlan) -> None:
     stats["files_selected"] = len(plan.documented_rels)
     stats["unattempted_files"] = max(
         0,
-        len(plan.agent_rels) - stats.get("checked", 0) - stats.get("failed", 0),
+        len(plan.agent_rels)
+        - stats.get("checked", 0)
+        - stats.get("failed", 0)
+        - stats.get("skipped_insufficient_source", 0),
     )
 
 
@@ -906,6 +931,8 @@ def _build_dry_run_stats(
     profile_resolution: ProfileResolution | None = None,
     review_batches: list[ReviewBatch] | None = None,
     recovery_resumed: int = 0,
+    *,
+    feasibility_notes: tuple[str, ...],
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -925,12 +952,30 @@ def _build_dry_run_stats(
     # documentation call; it is 0 when correction is disabled.  The baseline
     # estimate stays the expected charge; the ceiling below is a worst case.
     correction_enabled = bool(config.get("response_correction_enabled", False))
-    estimated_calls = len(plan.agent_rels) * per_file
+    skip_rels: set[str] = set()
+    for rel_path in plan.agent_rels:
+        descriptor = file_map[rel_path]
+        try:
+            content = descriptor["path"].read_text(
+                encoding="utf-8-sig", errors="replace"
+            )
+        except Exception:
+            continue
+        if insufficient_source(content)[0]:
+            skip_rels.add(rel_path)
+    frozen_skip_rels = frozenset(skip_rels)
+    remaining = len(plan.agent_rels) - len(frozen_skip_rels)
+    estimated_calls = remaining * per_file
     correction_possible_max = estimated_calls if correction_enabled else 0
     review_batches = review_batches or []
     profile_stats = (
         _base_profile_stats(
-            resolved_profile, profile_resolution, plan, file_map, review_batches
+            resolved_profile,
+            profile_resolution,
+            plan,
+            file_map,
+            review_batches,
+            feasibility_notes=feasibility_notes,
         )
         if resolved_profile is not None and profile_resolution is not None
         else {}
@@ -939,7 +984,7 @@ def _build_dry_run_stats(
         profile_stats["prompt_customization_security_review"] = "pending"
     if profile_stats:
         # Dry-run projects the documentation plan without attempting any call.
-        profile_stats["documentation_calls_planned"] = len(plan.agent_rels) * per_file
+        profile_stats["documentation_calls_planned"] = estimated_calls
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
@@ -949,7 +994,8 @@ def _build_dry_run_stats(
         "initial_calls_per_file": per_file,
         **scope_stats,
         "would_process": len(plan.process_rels),
-        "would_call_llm_for": len(plan.agent_rels),
+        "would_call_llm_for": remaining,
+        "would_skip_insufficient_source": len(frozen_skip_rels),
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": recovery_resumed,
@@ -959,10 +1005,16 @@ def _build_dry_run_stats(
         "response_correction_calls_possible_max": correction_possible_max,
         "estimated_calls_max_with_correction": estimated_calls + correction_possible_max,
         "estimated_input_tokens": _estimate_planned_input_tokens(
-            plan, file_map, config, resolved_profile
+            plan,
+            file_map,
+            config,
+            resolved_profile,
+            skip_rels=frozen_skip_rels,
+            review_batches=review_batches,
         ),
         "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
+        "max_files_candidate_files": len(plan.agent_rels),
         "max_files_exceeded": plan.max_files_exceeded,
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
@@ -980,6 +1032,8 @@ def _base_profile_stats(
     plan: PipelinePlan,
     file_map: dict[str, dict],
     batches: list[ReviewBatch],
+    *,
+    feasibility_notes: tuple[str, ...],
 ) -> dict:
     affected_rels = {
         rel
@@ -999,6 +1053,8 @@ def _base_profile_stats(
         "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_feasibility_notes": len(feasibility_notes),
+        "prompt_customization_feasibility_advisories": feasibility_notes,
         "documentation_calls_planned": 0,
         "documentation_calls_attempted": 0,
     }
@@ -1047,6 +1103,9 @@ def _estimate_planned_input_tokens(
     file_map: dict[str, dict],
     config: dict,
     resolved_profile: ResolvedProfile | None = None,
+    *,
+    skip_rels: frozenset[str] = frozenset(),
+    review_batches: list[ReviewBatch] | tuple[ReviewBatch, ...] = (),
 ) -> int:
     """Estimate input tokens for the planned LLM calls — a lower bound.
 
@@ -1067,6 +1126,8 @@ def _estimate_planned_input_tokens(
     max_chars = config.get("max_content_chars", 12000)
     total = 0
     for rel_path in plan.agent_rels:
+        if rel_path in skip_rels:
+            continue
         descriptor = file_map[rel_path]
         try:
             content = descriptor["path"].read_text(encoding="utf-8-sig", errors="replace")
@@ -1112,4 +1173,6 @@ def _estimate_planned_input_tokens(
             )
         for system, prompt in prompts:
             total += estimate_tokens(system) + estimate_tokens(prompt)
+    for batch in review_batches:
+        total += estimate_tokens(REVIEW_SYSTEM) + estimate_tokens(batch.text)
     return total

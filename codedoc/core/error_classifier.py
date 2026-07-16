@@ -21,6 +21,7 @@ from typing import TYPE_CHECKING
 
 from codedoc.utils.errors import (
     AgentError,
+    InsufficientSourceError,
     LLMError,
     ResponseContractError,
     UnrecoverableProviderError,
@@ -138,6 +139,16 @@ def _walk_chain(exc: BaseException):
         current = current.__cause__ or current.__context__
 
 
+def _find_insufficient_source_error(
+    exc: BaseException,
+) -> InsufficientSourceError | None:
+    """Return the first insufficient-source error in *exc*'s chain."""
+    for node in _walk_chain(exc):
+        if isinstance(node, InsufficientSourceError):
+            return node
+    return None
+
+
 def _has_provider_or_agent_error(exc: BaseException) -> bool:
     """Return whether *exc* came through the provider/agent boundary.
 
@@ -239,23 +250,28 @@ def _classify_failure(
 ) -> str:
     """Apply the fixed failure precedence to *exc* and return a verdict.
 
-    Returns one of ``"response_contract_final"``, ``"terminal_billing"``,
-    ``"rate_limit"``, ``"global"``, ``"input"``, or ``"transient"``.  Precedence:
+    Returns one of ``"insufficient_source"``, ``"response_contract_final"``,
+    ``"terminal_billing"``, ``"rate_limit"``, ``"global"``, ``"input"``, or
+    ``"transient"``.  Precedence:
 
-    0. response-contract-final (checked first; a deterministic response-contract
+    0. insufficient-source (a deterministic local condition whose path may contain
+       provider-like rate-limit signal text);
+    1. response-contract-final (a deterministic response-contract
        rejection is non-retryable, and a correction call that failed on a
        rate-limit/transport fault is wrapped in a ``ResponseContractError`` whose
        wrapped cause would otherwise match the rate-limit branch below);
-    1. terminal-billing (co-occurs with quota/429 signals);
-    2. rate-limit;
-    3. global-permanent (abort);
-    4. input-permanent (fail this file, continue run);
-    5. transient (existing retry/sleep behavior).
+    2. terminal-billing (co-occurs with quota/429 signals);
+    3. rate-limit;
+    4. global-permanent (abort);
+    5. input-permanent (fail this file, continue run);
+    6. transient (existing retry/sleep behavior).
 
     ``repair`` never wraps a correction fault that classifies as
     ``"terminal_billing"`` or ``"global"`` (it re-raises those unchanged), so no
     genuine run-level abort reaches this early check.
     """
+    if _find_insufficient_source_error(exc) is not None:
+        return "insufficient_source"
     if any(isinstance(node, ResponseContractError) for node in _walk_chain(exc)):
         return "response_contract_final"
     provider_or_agent_error = _has_provider_or_agent_error(exc)

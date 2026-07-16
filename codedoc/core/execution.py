@@ -33,17 +33,20 @@ from codedoc.core.db import compute_file_hash
 from codedoc.core.error_classifier import (
     _classify_failure,
     _detect_limit_type,
+    _find_insufficient_source_error,
     _parse_retry_after,
     _raise_rate_limit_exhausted,
 )
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import _public_record_to_doc
 from codedoc.core.safe_writer import SafeWriter
+from codedoc.core.source_precheck import insufficient_source
 from codedoc.llm.rate_limit_profile import RateLimitProfile
 from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import (
     AgentError,
     ErrorReporter,
+    InsufficientSourceError,
     LiveBackupWriteError,
     OutputError,
     ParseError,
@@ -523,6 +526,25 @@ def _process_descriptor_batch(
                         queue.mark_checked(rel_path)
                         stats["checked"] += 1
                         _log_file_progress("OK(late)", rel_path, completed, total)
+                elif verdict == "insufficient_source":
+                    matched = _find_insufficient_source_error(exc)
+                    reason = matched.reason if matched else ""
+                    try:
+                        recorder.discard(rel_path)
+                    except LiveBackupWriteError as discard_exc:
+                        fatal_error = discard_exc
+                        _cancel_pending(future_map)
+                        break
+                    queue.mark_skipped_insufficient_source(rel_path, reason)
+                    stats["skipped_insufficient_source"] += 1
+                    consecutive_failures = 0
+                    _log_file_progress(
+                        "SKIP",
+                        rel_path,
+                        completed,
+                        total,
+                        f"insufficient source: {reason} — not sent to provider",
+                    )
                 elif verdict in ("input", "response_contract_final"):
                     # The identical oversized input cannot succeed on a second
                     # processing path; a deterministic response-contract rejection
@@ -635,6 +657,18 @@ def _process_files_sequentially(
             # recoverable AgentError/OutputError and generic handlers below
             # (UnrecoverableProviderError is an LLMError, not one of those).
             raise
+        except InsufficientSourceError as exc:
+            recorder.discard(rel_path)
+            queue.mark_skipped_insufficient_source(rel_path, exc.reason)
+            stats["skipped_insufficient_source"] += 1
+            consecutive_failures = 0
+            _log_file_progress(
+                "SKIP",
+                rel_path,
+                index,
+                total,
+                f"insufficient source: {exc.reason} — not sent to provider",
+            )
         except (ParseError, OutputError, AgentError) as exc:
             error_reporter.record(exc, context=rel_path)
             queue.mark_failed(rel_path, str(exc))
@@ -697,10 +731,10 @@ def _process_one_file_with_retries(
                 raise _build_terminal_abort(
                     exc, orchestrator.llm.provider_name, verdict
                 )
-            if verdict in ("input", "response_contract_final"):
-                # An oversized input or a deterministic response-contract rejection
-                # re-raises immediately: it is recorded as a normal failed file
-                # without consuming a guaranteed-to-fail retry attempt.
+            if verdict in ("insufficient_source", "input", "response_contract_final"):
+                # A deterministic local skip, oversized input, or final
+                # response-contract rejection re-raises immediately for the
+                # outer router, without consuming a guaranteed-to-fail retry.
                 raise
             if attempt < retry_attempts:
                 # Apply Retry-After sleep for rate-limit errors in sequential mode.
@@ -748,6 +782,9 @@ def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
     logger.info("[START] %s | provider=%s", rel_path, orchestrator.llm.provider_name)
     file_path: Path = descriptor["path"]
     content = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    insufficient, reason = insufficient_source(content)
+    if insufficient:
+        raise InsufficientSourceError(rel_path, reason)
     imports = parse_file(descriptor)
     result = orchestrator.process(descriptor, content, imports)
     errors = _agent_errors(result)

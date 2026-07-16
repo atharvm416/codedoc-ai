@@ -286,6 +286,18 @@ def _has_resolved_prompt_profile(stats: dict) -> bool:
     return stats.get("prompt_profile_source") == "inline"
 
 
+def _print_feasibility_advisories(stats: dict | None, *, file=None) -> None:
+    """Print bounded, non-blocking prompt feasibility notes when present."""
+    if not isinstance(stats, dict):
+        return
+    notes = stats.get("prompt_customization_feasibility_advisories", ())
+    if not notes:
+        return
+    print("Feasibility advisory (non-blocking):", file=file)
+    for note in notes:
+        print(f"- {note}", file=file)
+
+
 def _print_prompt_profile_dry_run(stats: dict) -> None:
     """Print projected profile/review costs without changing no-profile output."""
     if not _has_resolved_prompt_profile(stats):
@@ -303,6 +315,7 @@ def _print_prompt_profile_dry_run(stats: dict) -> None:
     print(f"    Documentation calls   : {documentation} planned")
     print(f"    Security-review calls : {review} planned")
     print(f"    Total paid calls      : {documentation + review} planned")
+    _print_feasibility_advisories(stats)
 
 
 def _print_prompt_profile_run(stats: dict) -> None:
@@ -327,6 +340,7 @@ def _print_prompt_profile_run(stats: dict) -> None:
     )
     print(f"    Documentation calls   : {documentation} attempted")
     print(f"    Total attempted calls : {documentation + review}")
+    _print_feasibility_advisories(stats)
 
 
 def _print_dry_run_summary(stats: dict) -> None:
@@ -360,6 +374,12 @@ def _print_dry_run_summary(stats: dict) -> None:
         print(f"  Would resume           : {stats['would_resume']}")
     if stats.get("forced", 0):
         print(f"  Forced                 : {stats['forced']}")
+    if stats.get("would_skip_insufficient_source", 0):
+        print(
+            "  Would skip (insufficient): "
+            f"{stats.get('would_skip_insufficient_source', 0)} file(s) — "
+            "empty or whitespace-only; no documentation call."
+        )
     print(f"  Would call LLM for     : {stats.get('would_call_llm_for', 0)} file(s)")
     print(f"  Estimated LLM calls    : {stats.get('estimated_calls', 0)}")
     correction_enabled = stats.get("response_correction_enabled", False)
@@ -377,7 +397,7 @@ def _print_dry_run_summary(stats: dict) -> None:
         print("  Response correction    : disabled (0 possible extra calls)")
     if stats.get("disconnected_paid_files", 0):
         print(
-            "  Disconnected paid files: "
+            "  Disconnected candidates: "
             f"{stats['disconnected_paid_files']} "
             f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
         )
@@ -395,8 +415,12 @@ def _print_dry_run_summary(stats: dict) -> None:
 
     if stats.get("max_files_exceeded"):
         print(
-            f"\n  WARNING: the plan ({stats.get('would_call_llm_for', 0)} paid "
-            f"file(s)) exceeds --max-files {stats.get('max_files', 0)}. "
+            "\n  WARNING: the plan "
+            f"({stats.get('max_files_candidate_files', 0)} "
+            "documentation-call candidate(s)) exceeds "
+            f"--max-files {stats.get('max_files', 0)}; "
+            f"{stats.get('would_call_llm_for', 0)} would actually be sent after "
+            "source gating. "
             "The corresponding real run would stop with exit code 2 before "
             "writing anything or calling any provider."
         )
@@ -418,6 +442,12 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Files documented by LLM       : {stats['checked']}")
     print(f"  Files reused (unchanged)      : {stats.get('skipped', 0)}")
     print(f"  Files reused (identical content): {stats.get('reused', 0)}")
+    if stats.get("skipped_insufficient_source", 0):
+        print(
+            "Skipped (insufficient source): "
+            f"{stats.get('skipped_insufficient_source', 0)} file(s) — "
+            "empty or whitespace-only, not sent to the provider."
+        )
     if stats.get("resumed", 0):
         print(f"  Files resumed from recovery   : {stats['resumed']}")
     print(f"  Files failed     : {stats['failed']}")
@@ -442,7 +472,8 @@ def _print_run_summary(stats: dict) -> None:
         print("  Disconnected set : included by documentation_scope='all'")
     if stats.get("disconnected_paid_files", 0):
         print(
-            f"  Disconnected paid: {stats['disconnected_paid_files']} file(s), "
+            "  Disconnected candidates: "
+            f"{stats['disconnected_paid_files']} file(s), "
             f"{stats.get('disconnected_planned_calls', 0)} planned initial calls"
         )
     print(f"  Output directory : {stats['output_dir']}")
@@ -730,6 +761,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             # ordinary setup error, so the paid cost of the aborted review is
             # visible.
             err_stats = getattr(exc, "stats", None)
+            _print_feasibility_advisories(err_stats, file=sys.stderr)
             if isinstance(err_stats, dict) and (
                 "prompt_customization_security_review_calls_attempted" in err_stats
             ):

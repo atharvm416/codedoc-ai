@@ -147,6 +147,12 @@ files. If you switch between JSON and Markdown and the requested target does not
 yet exist, the exact opposite-format sibling is validated and used as the
 conversion source; unchanged files require no provider call.
 
+Empty and whitespace-only source files are skipped before parsing and before
+their per-file documentation calls. They are not failures and incur no per-file
+provider charge. The run reports them through
+`files_skipped_insufficient_source`; if a skipped path had documentation in an
+older output, that stale record is omitted from the new completed output.
+
 ## Using the output with AI assistants
 
 CodeDoc output is designed to be pasted into, indexed by, or attached to AI
@@ -475,6 +481,10 @@ LLM documentation call. `SAFE` continues, `RISKY` requires explicit per-run
 confirmation, and `TOO_RISKY` always stops. Initialization, unedited defaults,
 dry runs, cache-only work, and deterministic JSON↔Markdown conversion make no
 security-review call. There is no stored bypass.
+CodeDoc also computes deterministic, non-blocking feasibility advisories when a
+custom field appears to require cross-file context that a per-file pass cannot
+see. These advisories are provider-free, appear in dry-run and real-run summaries,
+never block a run, and never change the standards/safety review verdict.
 Fixed system roles, factuality/safety rules, parser facts, cleaners, provider
 selection, scanning, retry, cache, ownership, and artifact serialization are not
 customizable.
@@ -537,8 +547,12 @@ path but never creates, changes, or deletes it.
 ## Planning and diagnostics
 
 `--dry-run` performs scanning and planning without persistent mutation, provider
-creation, or API calls. `--max-files N` counts only files that would make
-documentation calls. `--force-files PATH` bypasses reuse for a selected file.
+creation, or API calls. It reports empty/whitespace-only files separately and
+excludes their expected documentation calls and prompt tokens. `--max-files N`
+remains a conservative cap over pre-gate documentation-call candidates, while
+dry-run also shows how many candidates would actually reach documentation calls
+after its read-only source snapshot. `--force-files PATH` bypasses reuse for a
+selected file.
 
 Issues are bounded in memory, printed to the terminal, and included in permitted
 final/recovery metadata. CodeDoc does not write `error.log`.

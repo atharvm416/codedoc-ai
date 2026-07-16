@@ -8,7 +8,11 @@ import json
 import pytest
 
 from codedoc.core.discovery import _resolve_entry_and_docs
-from codedoc.core.document import read_codedoc_document
+from codedoc.core.document import (
+    _LAST_RUN_INTEGER_FIELDS,
+    _LAST_RUN_OPTIONAL_INTEGER_FIELDS,
+    read_codedoc_document,
+)
 from codedoc.core.markdown_view import markdown_from_view, markdown_to_view
 from codedoc.core.output import _is_codedoc_owned, write_summary
 from codedoc.core.planning import PipelinePlan
@@ -16,6 +20,17 @@ from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.core.record_meta import PRIVATE_RECORD_KEYS
 from codedoc.pipeline import _final_entry_source, _set_plan_counters
 from codedoc.utils.errors import ConfigError
+
+_REQUIRED_LAST_RUN_INTEGER_FIELDS = {
+    "files_scanned",
+    "files_selected",
+    "files_documented_by_llm",
+    "files_failed",
+    "files_unattempted",
+    "files_reused_unchanged",
+    "files_reused_identical_content",
+    "files_resumed_from_recovery",
+}
 
 
 def _records() -> list[dict]:
@@ -97,6 +112,7 @@ def test_last_run_is_truthful_and_legacy_wrappers_are_removed():
         "files_documented_by_llm": 1,
         "files_failed": 1,
         "files_unattempted": 1,
+        "files_skipped_insufficient_source": 0,
         "files_reused_unchanged": 2,
         "files_reused_identical_content": 1,
         "files_resumed_from_recovery": 1,
@@ -108,6 +124,7 @@ def test_last_run_is_truthful_and_legacy_wrappers_are_removed():
         + view["last_run"]["files_documented_by_llm"]
         + view["last_run"]["files_failed"]
         + view["last_run"]["files_unattempted"]
+        + view["last_run"]["files_skipped_insufficient_source"]
     )
     assert len(view["files"]) < view["last_run"]["files_selected"]
     assert view["last_run"]["files_resumed_from_recovery"] <= view["last_run"][
@@ -176,6 +193,51 @@ def test_json_reader_accepts_valid_last_run(tmp_path):
     assert "_codedoc" not in doc.view
 
 
+def test_skip_counter_is_additive_optional_on_read(tmp_path):
+    assert _LAST_RUN_INTEGER_FIELDS == _REQUIRED_LAST_RUN_INTEGER_FIELDS
+    assert "files_skipped_insufficient_source" not in _LAST_RUN_INTEGER_FIELDS
+    assert _LAST_RUN_OPTIONAL_INTEGER_FIELDS == {
+        "files_skipped_insufficient_source"
+    }
+
+    data = json.loads(json_from_view(_view()))
+    data["last_run"].pop("files_skipped_insufficient_source")
+    path = tmp_path / "without-additive-counter.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    document = read_codedoc_document(path)
+    assert "files_skipped_insufficient_source" not in document.view["last_run"]
+    assert _partition_sum(document.view["last_run"]) == document.view["last_run"][
+        "files_selected"
+    ]
+
+
+def test_nonzero_skip_counter_round_trips_only_through_embedded_markdown_view():
+    stats = {
+        **_stats(),
+        "files_selected": 7,
+        "skipped_insufficient_source": 1,
+    }
+    view = build_project_view(_records(), stats, entry_file="main.py")
+    markdown = markdown_from_view(view)
+
+    assert markdown_to_view(markdown) == view
+    assert view["last_run"]["files_skipped_insufficient_source"] == 1
+    assert "Files skipped insufficient source" not in markdown
+    assert _partition_sum(view["last_run"]) == view["last_run"]["files_selected"]
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+def test_json_reader_rejects_malformed_optional_skip_counter(tmp_path, value):
+    data = json.loads(json_from_view(_view()))
+    data["last_run"]["files_skipped_insufficient_source"] = value
+    path = tmp_path / "malformed-optional-counter.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        read_codedoc_document(path)
+
+
 @pytest.mark.parametrize(
     ("label", "mutate"),
     [
@@ -241,6 +303,7 @@ def _partition_sum(last_run: dict) -> int:
         + last_run["files_documented_by_llm"]
         + last_run["files_failed"]
         + last_run["files_unattempted"]
+        + last_run.get("files_skipped_insufficient_source", 0)
     )
 
 

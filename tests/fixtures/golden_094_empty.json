@@ -9,6 +9,7 @@
     "files_documented_by_llm": 0,
     "files_failed": 0,
     "files_unattempted": 0,
+    "files_skipped_insufficient_source": 0,
     "files_reused_unchanged": 0,
     "files_reused_identical_content": 0,
     "files_resumed_from_recovery": 0

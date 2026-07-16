@@ -130,11 +130,19 @@ def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dic
     unchanged = _nonnegative_int(stats.get("skipped", 0))
     identical = _nonnegative_int(stats.get("reused", 0))
     unattempted = _nonnegative_int(stats.get("unattempted_files", 0))
+    skipped_insufficient = _nonnegative_int(
+        stats.get("skipped_insufficient_source", 0)
+    )
     selected = stats.get("files_selected")
     if selected is None:
         selected = max(
             file_count,
-            documented + failed + unchanged + identical + unattempted,
+            documented
+            + failed
+            + unchanged
+            + identical
+            + unattempted
+            + skipped_insufficient,
         )
 
     return {
@@ -149,6 +157,7 @@ def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dic
         "files_documented_by_llm": documented,
         "files_failed": failed,
         "files_unattempted": unattempted,
+        "files_skipped_insufficient_source": skipped_insufficient,
         "files_reused_unchanged": unchanged,
         "files_reused_identical_content": identical,
         "files_resumed_from_recovery": _nonnegative_int(stats.get("resumed", 0)),

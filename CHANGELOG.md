@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.12.2 - Unreleased
+
+### Source sufficiency and prompt feasibility
+
+- Empty and whitespace-only source files are now skipped before parsing and
+  before any per-file documentation agent runs. They consume no per-file provider
+  call, are counted separately from failures through
+  `files_skipped_insufficient_source`, and cannot resurrect stale documentation
+  from completed output or crash recovery.
+- Dry-run reports insufficient-source skips separately and removes their expected
+  documentation calls and input-token contribution in both single and triple
+  modes. The conservative `max_files` guard continues to count pre-gate
+  documentation-call candidates and now labels them accordingly.
+- Active prompt-profile fields can produce bounded, deterministic feasibility
+  advisories when their instructions appear to require cross-file context. The
+  advisories add no provider calls, are available in dry-run and real-run/error
+  summaries, never block execution, and do not alter the mandatory
+  `SAFE`/`RISKY`/`TOO_RISKY` standards/safety review.
+- Dry-run input-token estimates now include mandatory prompt-customization review
+  batches when such review is planned. No CLI command, flag, environment variable,
+  config key, cache identity, prompt bytes, or per-file output schema was added.
+
 ## 0.12.1 - Unreleased
 
 ### Response diagnostics and targeted correction
