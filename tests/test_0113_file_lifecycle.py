@@ -12,6 +12,7 @@ from codedoc.core.resume import (
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.utils.errors import ConfigError
+from tests.support.providers import SmartFake
 
 
 def _identity(tmp_path: Path, **changes):
@@ -51,7 +52,6 @@ def test_missing_target_rejects_foreign_opposite_format_sibling(tmp_path):
 
 
 def test_completed_run_uses_only_fixed_recovery_filename(tmp_path, monkeypatch):
-    from tests.test_110_prompt_profile_cli import SmartFake
     from codedoc.pipeline import run_pipeline
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
@@ -68,7 +68,6 @@ def test_both_mode_cross_document_hash_conflict_blocks(tmp_path, monkeypatch):
     deterministic pre-provider conflict, not a silently-picked-by-mtime target."""
     import json as json_mod
 
-    from tests.test_110_prompt_profile_cli import SmartFake
     from codedoc.pipeline import run_pipeline
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
@@ -95,7 +94,6 @@ def test_both_mode_cross_document_entry_conflict_blocks(tmp_path, monkeypatch):
     pre-provider conflict."""
     import json as json_mod
 
-    from tests.test_110_prompt_profile_cli import SmartFake
     from codedoc.pipeline import run_pipeline
 
     (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")

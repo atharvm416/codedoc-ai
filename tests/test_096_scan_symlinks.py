@@ -14,6 +14,8 @@ import pytest
 
 from codedoc.core.scanner import scan_files
 
+pytestmark = pytest.mark.platform
+
 
 def _write_py(path, text="x = 1\n"):
     path.parent.mkdir(parents=True, exist_ok=True)

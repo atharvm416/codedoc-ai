@@ -1,5 +1,36 @@
 # Changelog
 
+## 0.12.3 - Unreleased
+
+### Test support, determinism, and configuration hygiene
+
+- **Shared test support package.** Fakes, prompt-profile constants, and the
+  fake-SDK provider installers that five test modules previously imported from
+  two other test modules now live in `tests/support/` (`providers.py`,
+  `profiles.py`), which pytest never collects. No collected test module
+  imports another collected test module.
+- **Deterministic retry and rate-limit tests.** `tests/support/clocks.py`
+  provides `capture_sleeps(monkeypatch, target)`, which stubs a named sleep
+  callable and records the requested delays instead of waiting for them. The
+  two tests that previously spent real time in provider backoff now assert
+  the exact requested delay sequence and complete in milliseconds; direct
+  `time.sleep` remains only at the three concurrency-coordination sites that
+  cannot be expressed deterministically.
+- **Pytest configuration cleanup.** Removed the dead `asyncio_mode = "auto"`
+  option and the unused `pytest-asyncio` dev dependency (no async test exists
+  in the suite). Registered a `platform` marker for filesystem/OS-sensitive
+  tests, enabled `strict_markers`, and added `--durations=20` to the default
+  run.
+- **Structural guard.** `tests/test_suite_architecture.py` enforces, without
+  importing any collected test module, that no test-to-test imports exist,
+  that `tests/support/` stays uncollectable, that direct `time.sleep` is
+  confined to the allowlisted modules, and that every registered marker is
+  documented in `CONTRIBUTING.md`.
+
+This is a test-infrastructure release. Production behavior, public APIs,
+prompt bytes, cache identity, output schemas, and provider behavior are
+unchanged.
+
 ## 0.12.2 - Unreleased
 
 ### Source sufficiency and prompt feasibility

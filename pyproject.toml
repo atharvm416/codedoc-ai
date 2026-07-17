@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.12.2"
+version = "0.12.3"
 description = "Generate structured, incremental documentation for any codebase using OpenAI, Anthropic, or Gemini"
 readme = "README.md"
 license = "MIT"
@@ -47,7 +47,6 @@ dependencies = [
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
-    "pytest-asyncio>=0.21",
     "black>=23.0",
     "ruff>=0.1",
     "build>=1.0",
@@ -74,12 +73,14 @@ codedoc = ["templates/*.yml"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-asyncio_mode = "auto"
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 3
+markers = [
+    "platform: filesystem or OS-sensitive behavior; may skip on restricted filesystems",
+]
 # tests/conftest.py redirects the temp ROOT into the repo (.pyt_tmp) so a
 # locked/permission-denied system temp dir (e.g. Windows %TEMP%\pytest-of-<user>)
 # does not make the suite unrunnable. We intentionally do NOT use --basetemp,
 # which force-removes a fixed directory each run and fails on Windows when that
 # directory is locked. Disable the cache plugin for deterministic runs.
-addopts = "-p no:cacheprovider"
+addopts = "-p no:cacheprovider --strict-markers --durations=20"

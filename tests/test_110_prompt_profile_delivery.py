@@ -225,7 +225,7 @@ def test_provider_adapters_receive_identical_documentation_blocks(
     monkeypatch, installer, class_name, response_kw
 ):
     from codedoc.llm import api_provider
-    from tests import test_095_provider_contracts as contracts
+    from tests.support import providers as contracts
 
     rec = {}
     response = json.dumps({"description": "adapter result"})

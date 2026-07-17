@@ -19,8 +19,6 @@ from __future__ import annotations
 
 import json
 import re
-import sys
-import types
 import urllib.error
 from pathlib import Path
 
@@ -28,123 +26,9 @@ import pytest
 
 from codedoc.core.execution import _is_rate_limit_error
 from codedoc.utils.errors import LLMError
+from tests.support.providers import _install_anthropic, _install_gemini, _install_openai
 
 _JSON_HINT = "Respond ONLY with valid JSON"
-
-
-# ---------------------------------------------------------------------------
-# Shared fake response shapes
-# ---------------------------------------------------------------------------
-
-class _OpenAIMessage:
-    def __init__(self, content):
-        self.content = content
-
-
-class _OpenAIChoice:
-    def __init__(self, content):
-        self.message = _OpenAIMessage(content)
-
-
-class _OpenAIResponse:
-    def __init__(self, content):
-        self.choices = [_OpenAIChoice(content)]
-
-
-class _AnthropicBlock:
-    def __init__(self, text):
-        self.text = text
-
-
-class _AnthropicResponse:
-    def __init__(self, text):
-        self.content = [_AnthropicBlock(text)]
-
-
-class _GeminiResponse:
-    def __init__(self, text):
-        self.text = text
-
-
-# ---------------------------------------------------------------------------
-# Fake SDK installers
-# ---------------------------------------------------------------------------
-
-def _install_openai(monkeypatch, rec, *, content='{"ok": true}', error=None):
-    mod = types.ModuleType("openai")
-
-    class _Completions:
-        def create(self, **kwargs):
-            rec["create_kwargs"] = kwargs
-            rec.setdefault("create_calls", []).append(kwargs)
-            if error is not None:
-                raise error
-            return _OpenAIResponse(content)
-
-    class _Chat:
-        def __init__(self):
-            self.completions = _Completions()
-
-    class OpenAI:
-        def __init__(self, api_key=None, base_url=None):
-            rec["init"] = {"api_key": api_key, "base_url": base_url}
-            self.chat = _Chat()
-
-    mod.OpenAI = OpenAI
-    monkeypatch.setitem(sys.modules, "openai", mod)
-
-
-def _install_anthropic(monkeypatch, rec, *, text='{"ok": true}', error=None):
-    mod = types.ModuleType("anthropic")
-
-    class _Messages:
-        def create(self, **kwargs):
-            rec["create_kwargs"] = kwargs
-            rec.setdefault("create_calls", []).append(kwargs)
-            if error is not None:
-                raise error
-            return _AnthropicResponse(text)
-
-    class Anthropic:
-        def __init__(self, api_key=None):
-            rec["init"] = {"api_key": api_key}
-            self.messages = _Messages()
-
-    mod.Anthropic = Anthropic
-    monkeypatch.setitem(sys.modules, "anthropic", mod)
-
-
-def _install_gemini(monkeypatch, rec, *, text='{"ok": true}', error=None):
-    google = types.ModuleType("google")
-    genai = types.ModuleType("google.genai")
-    gtypes = types.ModuleType("google.genai.types")
-
-    class GenerateContentConfig:
-        def __init__(self, **kwargs):
-            self.__dict__.update(kwargs)
-            rec.setdefault("configs", []).append(kwargs)
-
-    gtypes.GenerateContentConfig = GenerateContentConfig
-
-    class _Models:
-        def generate_content(self, model, contents, config):
-            rec["generate"] = {"model": model, "contents": contents, "config": config}
-            rec.setdefault("generate_calls", []).append(rec["generate"])
-            if error is not None:
-                raise error
-            return _GeminiResponse(text)
-
-    class Client:
-        def __init__(self, api_key=None):
-            rec["init"] = {"api_key": api_key}
-            self.models = _Models()
-
-    genai.Client = Client
-    genai.types = gtypes
-    google.genai = genai
-    monkeypatch.setitem(sys.modules, "google", google)
-    monkeypatch.setitem(sys.modules, "google.genai", genai)
-    monkeypatch.setitem(sys.modules, "google.genai.types", gtypes)
 
 
 def _make(provider_cls_name):

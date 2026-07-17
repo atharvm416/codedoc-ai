@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 
+from tests.support.clocks import capture_sleeps
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -362,7 +364,6 @@ def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
     (tmp_path / "b.py").write_text("x=1\n")
 
     call_count = {"n": 0}
-    sleep_calls: list[float] = []
 
     class RetryAfterProvider:
         provider_name = "openai"
@@ -385,7 +386,7 @@ def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RetryAfterProvider())
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
+    sleep_calls = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.pipeline import run_pipeline
     run_pipeline(tmp_path, {
@@ -420,7 +421,6 @@ def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
     (tmp_path / "b.py").write_text("x=1\n")
 
     call_count = {"n": 0}
-    sleep_calls: list[float] = []
 
     class NoRetryAfterProvider:
         provider_name = "openai"
@@ -442,7 +442,7 @@ def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: NoRetryAfterProvider())
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
+    sleep_calls = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.pipeline import run_pipeline
     run_pipeline(tmp_path, {
@@ -475,7 +475,6 @@ def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
     (tmp_path / "b.py").write_text("x=1\n")
 
     call_count = {"n": 0}
-    sleep_calls: list[float] = []
 
     class RLProvider:
         provider_name = "openai"
@@ -497,7 +496,7 @@ def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda s: sleep_calls.append(s))
+    sleep_calls = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.pipeline import run_pipeline
     run_pipeline(tmp_path, {
@@ -552,7 +551,7 @@ def test_D12_warning_dict_has_all_required_fields(tmp_path, monkeypatch):
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
+    capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.pipeline import run_pipeline
     stats = run_pipeline(tmp_path, {
@@ -618,7 +617,7 @@ def test_D13_cli_summary_shows_compact_line_when_events(tmp_path, monkeypatch, c
             return self.complete_json(prompt)
 
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: RLProvider())
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
+    capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.cli.cli import main
     try:
@@ -684,7 +683,7 @@ def test_D14_no_files_dropped_after_step_down(tmp_path, monkeypatch):
         fail_calls=3, provider_name="openai",
     )
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: provider)
-    monkeypatch.setattr("codedoc.core.execution.time.sleep", lambda _: None)
+    capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
     from codedoc.pipeline import run_pipeline
     stats = run_pipeline(tmp_path, {

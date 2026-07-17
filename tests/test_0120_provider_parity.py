@@ -15,7 +15,7 @@ import pytest
 
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import PromptCustomizationValidationError
-from tests.test_095_provider_contracts import (
+from tests.support.providers import (
     _AnthropicResponse,
     _GeminiResponse,
     _OpenAIResponse,

@@ -17,16 +17,14 @@ import json
 
 import pytest
 
-import codedoc.core.execution as ex
 from codedoc.utils.errors import LLMError, UnrecoverableProviderError
+from tests.support.clocks import capture_sleeps
 
 
 @pytest.fixture
 def captured_sleeps(monkeypatch):
     """Stub execution-layer ``time.sleep`` and record every requested duration."""
-    sleeps: list[float] = []
-    monkeypatch.setattr(ex.time, "sleep", lambda s: sleeps.append(s))
-    return sleeps
+    return capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
 
 
 def _patch_provider(monkeypatch, provider):

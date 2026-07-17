@@ -17,7 +17,8 @@ from codedoc.core.resume import (
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ConfigError, OutputError
-from tests.test_110_prompt_profile_cli import INLINE, SmartFake
+from tests.support.profiles import INLINE
+from tests.support.providers import SmartFake
 
 
 def _config(output_format: str, output_dir: str = "docs") -> dict:

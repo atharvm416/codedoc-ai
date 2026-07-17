@@ -51,6 +51,30 @@ wheel into a clean environment, and smoke-tests `import codedoc`,
 `codedoc --version`, and `codedoc --help`. CI never publishes, makes paid
 provider calls, or requires provider secrets.
 
+## Test Suite Conventions
+
+- **No imports between collected test modules.** A file matching
+  `tests/test_*.py` must never import another `tests/test_*.py` module.
+  Reusable fakes, profile constants, and clock helpers live in
+  `tests/support/`, which is never collected by pytest.
+- **A helper needs a real importer before it moves to `tests/support/`.** A
+  helper used by only one caller belongs in that caller's own test module.
+  `tests/conftest.py` stays limited to pytest hooks and genuinely shared
+  fixtures, not generic importable helpers.
+- **Retry, backoff, and rate-limit tests use `tests/support/clocks.py`.** Its
+  `capture_sleeps(monkeypatch, target)` helper replaces the named sleep
+  callable with a recorder and asserts the requested delay sequence instead of
+  waiting for it. Direct `time.sleep` in a test is reserved for the three
+  concurrency-coordination sites the structural guard allowlists.
+- **The `platform` marker** flags filesystem- or OS-sensitive tests (for
+  example `tests/test_096_scan_symlinks.py`). Run
+  `python -m pytest -m "not platform"` to skip them on a restricted
+  filesystem.
+- `tests/test_suite_architecture.py` enforces all of the above structurally
+  (no test-to-test imports, no collected file or `Test*` class under
+  `tests/support/`, the `time.sleep` allowlist, and that every registered
+  marker is documented here).
+
 ## Run lifecycle
 
 The verified phase ordering of a run — read-only preflight, scan/plan, the

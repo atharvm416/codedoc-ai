@@ -10,7 +10,6 @@ from pathlib import Path
 
 import pytest
 
-import codedoc.core.block_manager as block_manager
 from codedoc.core.block_manager import ATOMIC_REPLACE_RETRY_DELAYS_S, atomic_write_text
 from codedoc.core.io_diagnostics import (
     CATEGORY_IO,
@@ -27,6 +26,7 @@ from codedoc.core.io_diagnostics import (
 )
 from codedoc.core.output import preflight_output_accessibility
 from codedoc.utils.errors import OutputError
+from tests.support.clocks import capture_sleeps
 
 
 # ---------------------------------------------------------------------------
@@ -126,9 +126,7 @@ def _patch_replace(monkeypatch, fail_times: int, winerror: int | None = 32,
 
 
 def _patch_sleep(monkeypatch):
-    sleeps: list[float] = []
-    monkeypatch.setattr(block_manager.time, "sleep", lambda s: sleeps.append(s))
-    return sleeps
+    return capture_sleeps(monkeypatch, "codedoc.core.block_manager.time.sleep")
 
 
 def test_immediate_replace_success_performs_no_sleeps(tmp_path, monkeypatch):

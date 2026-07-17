@@ -30,6 +30,7 @@ from pathlib import Path
 import pytest
 
 from codedoc.core.record_meta import ANALYSIS_REVISION
+from tests.support.clocks import capture_sleeps
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +482,7 @@ def test_7b_changed_hash_triggers_reprocess_and_replaces_slot(tmp_path, monkeypa
 
 def test_9_rate_limit_ladder_steps_down(tmp_path, monkeypatch):
     """Test 9: rate-limit error causes ladder step-down; no descriptors dropped."""
+    sleeps = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
     # Files must import each other so all 3 are reachable from entry a.py
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("from c import y\nx=1\n")
@@ -526,6 +528,7 @@ def test_9_rate_limit_ladder_steps_down(tmp_path, monkeypatch):
 
     warnings = stats.get("rate_limit_warnings", [])
     assert len(warnings) > 0, "Expected at least one rate-limit step-down warning"
+    assert sleeps == [5.0]
 
 
 def test_9b_non_rate_limit_errors_do_not_step_down(tmp_path, monkeypatch):
@@ -666,6 +669,7 @@ def test_10_rate_limit_detector_walks_cause_chain(tmp_path):
 
 def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch, capsys):
     """Test 10b: step-down prints provider name and original max_parallel to stdout."""
+    sleeps = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
     # Files must import each other so all 3 are reachable from entry a.py
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("from c import y\nx=1\n")
@@ -711,6 +715,7 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
     # The step-down message reports the original max_parallel and the reduced level.
     assert "max_parallel_files" in captured.out
     assert "reduced to" in out
+    assert sleeps == [5.0, 7.5, 11.25]
 
 
 def test_10b_no_warning_on_successful_run(tmp_path, monkeypatch, capsys):

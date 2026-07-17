@@ -11,67 +11,8 @@ import pytest
 import codedoc.pipeline as pipe
 from codedoc.cli.cli import build_parser, run_cli
 from codedoc.utils.errors import ConfigError, PromptCustomizationValidationError
-
-INLINE = {"schema_version": 1, "single": {"common": {"fields": [
-    {"key": "description", "type": "string", "instruction": "Describe the file."},
-    {"key": "key_concepts", "type": "string_list", "instruction": "List concepts."},
-]}}}
-
-
-class SmartFake:
-    """Serves both the review verdict and documentation responses."""
-
-    provider_name = "fake"
-
-    def __init__(self, verdict="SAFE"):
-        self.verdict = verdict
-        self.review_calls = 0
-        self.doc_calls = 0
-
-    def complete_json(self, prompt, system=""):
-        if "standards/safety review" in prompt:
-            self.review_calls += 1
-            review_id = next(
-                line.split(": ", 1)[1]
-                for line in prompt.splitlines()
-                if line.startswith("review_id: ")
-            )
-            ordinal, count = next(
-                line.split(": ", 1)[1].split("/", 1)
-                for line in prompt.splitlines()
-                if line.startswith("batch: ")
-            )
-            return json.dumps({
-                "review_id": review_id,
-                "batch_index": int(ordinal),
-                "batch_count": int(count),
-                "verdict": self.verdict,
-                "reasons": ["bad"] if self.verdict == "TOO_RISKY" else [],
-                "warnings": ["warn"] if self.verdict == "RISKY" else [],
-            })
-        self.doc_calls += 1
-        if "Analyse the imports" in prompt:
-            # A dependency agent can validly report that this file has no
-            # dependencies; use the exact dependency response shape rather than
-            # feeding it the combined-agent fixture below.
-            return json.dumps({
-                "dependencies_analysis": {
-                    "internal": [],
-                    "external": [],
-                    "dependency_refs": [],
-                    "catalog_updates": [],
-                    "usage_notes": [],
-                    "warnings": [],
-                }
-            })
-        return json.dumps({
-            "description": "A file.", "role_in_system": "core",
-            "functions": [{"name": "f", "description": "does f"}],
-            "key_concepts": ["kc"], "usage_example": "import x",
-        })
-
-    def complete(self, prompt, system="", temperature=0.1):
-        return self.complete_json(prompt, system)
+from tests.support.profiles import INLINE
+from tests.support.providers import SmartFake
 
 
 @pytest.fixture

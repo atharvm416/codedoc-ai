@@ -10,7 +10,7 @@ import pytest
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.execution import _agent_errors
-from tests.test_095_provider_contracts import (
+from tests.support.providers import (
     _install_anthropic,
     _install_gemini,
     _install_openai,
