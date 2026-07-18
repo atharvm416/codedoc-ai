@@ -8,6 +8,7 @@ skipped.
 
 from __future__ import annotations
 
+import errno
 import os
 
 import pytest
@@ -194,7 +195,16 @@ def test_deeply_nested_acyclic_tree_no_recursion_error(tmp_path):
     current = tmp_path
     for i in range(depth):
         current = current / f"d{i}"
-    _write_py(current / "leaf.py")
+    try:
+        _write_py(current / "leaf.py")
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG:
+            pytest.skip(
+                "platform PATH_MAX is too small to build a tree deep enough to "
+                "exercise the iterative walk (e.g. macOS caps paths at 1024 bytes); "
+                "the iterative-walk property is OS-independent and covered on Linux"
+            )
+        raise
 
     files = scan_files(tmp_path, supported_extensions=[".py"])
     assert any(f["rel_path"].endswith("leaf.py") for f in files)
