@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.12.4 - 2026-07-18
+
+### Ownership-based test architecture and review-local CI
+
+- **Ownership-based test tree.** The suite now lives under explicit `unit`,
+  `integration`, `contract`, `e2e`, `platform`, and `meta` levels. Test
+  directories are packages, fixtures have purpose-specific homes, and shared
+  helpers are behavior-named modules with at least two consumers.
+- **Expanded structural contract.** The single AST-based meta guard enforces
+  test-module placement and naming, package initializers, immutable golden
+  location, support-module consumer counts, sleep boundaries, and exact
+  platform-marker ownership without importing collected tests.
+- **Review-local CI.** Supported Python versions run the unit/meta, integration,
+  and contract/end-to-end selections independently; a dedicated Linux, Windows,
+  and macOS platform matrix covers OS-sensitive tests. Python 3.12 rows feed one
+  combined coverage report without re-running tests for coverage.
+
 ## 0.12.3 - Unreleased
 
 ### Test support, determinism, and configuration hygiene

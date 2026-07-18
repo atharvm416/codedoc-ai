@@ -44,36 +44,66 @@ python -m build
 python -m twine check dist/*
 ```
 
-Continuous integration (`.github/workflows/ci.yml`) runs the full test suite on
-Python 3.10–3.12, Ruff over the complete repository, and a
-packaging job that builds the sdist and wheel, runs `twine check`, installs the
-wheel into a clean environment, and smoke-tests `import codedoc`,
-`codedoc --version`, and `codedoc --help`. CI never publishes, makes paid
-provider calls, or requires provider secrets.
+Continuous integration (`.github/workflows/ci.yml`) runs three review-local test
+selections on Python 3.10-3.12: unit plus meta, integration, and contract plus
+end-to-end. A separate platform matrix covers Linux on all supported Python
+versions and Windows and macOS on Python 3.12. Successful Python 3.12 test rows
+contribute data to one combined coverage report. Ruff still checks the complete
+repository, and the packaging job builds and validates distributions and
+smoke-tests an installed wheel. CI never publishes, makes paid provider calls,
+or requires provider secrets.
 
 ## Test Suite Conventions
 
-- **No imports between collected test modules.** A file matching
-  `tests/test_*.py` must never import another `tests/test_*.py` module.
-  Reusable fakes, profile constants, and clock helpers live in
-  `tests/support/`, which is never collected by pytest.
-- **A helper needs a real importer before it moves to `tests/support/`.** A
-  helper used by only one caller belongs in that caller's own test module.
-  `tests/conftest.py` stays limited to pytest hooks and genuinely shared
-  fixtures, not generic importable helpers.
-- **Retry, backoff, and rate-limit tests use `tests/support/clocks.py`.** Its
-  `capture_sleeps(monkeypatch, target)` helper replaces the named sleep
-  callable with a recorder and asserts the requested delay sequence instead of
-  waiting for it. Direct `time.sleep` in a test is reserved for the three
-  concurrency-coordination sites the structural guard allowlists.
-- **The `platform` marker** flags filesystem- or OS-sensitive tests (for
-  example `tests/test_096_scan_symlinks.py`). Run
-  `python -m pytest -m "not platform"` to skip them on a restricted
-  filesystem.
-- `tests/test_suite_architecture.py` enforces all of the above structurally
-  (no test-to-test imports, no collected file or `Test*` class under
-  `tests/support/`, the `time.sleep` allowlist, and that every registered
-  marker is documented here).
+The target test tree is organized by ownership and execution environment:
+
+```text
+tests/
++-- unit/          # isolated behavior of one component
++-- integration/   # collaboration among repository components
++-- contract/      # stable public, configuration, output, and provider contracts
++-- e2e/           # complete user-visible workflows
++-- platform/      # filesystem- or OS-sensitive behavior
++-- meta/          # structural checks over the suite itself
++-- support/       # behavior-named helpers shared by two or more test modules
+`-- fixtures/      # inert test data, including immutable goldens
+```
+
+Every directory containing a test module carries an `__init__.py`. This gives
+each test module a unique import identity, prevents same-basename collisions,
+and makes collection behavior consistent across pytest import modes (T1).
+
+Run the same targeted selections used by CI with:
+
+```bash
+python -m pytest tests/unit tests/meta
+python -m pytest tests/integration
+python -m pytest tests/contract tests/e2e
+python -m pytest tests/platform
+```
+
+`python -m pytest` remains the canonical local full-suite command.
+
+- No collected test module imports another collected `test_*.py` module.
+- A helper used by one test module stays local to that module. A behavior-named
+  module moves to `tests/support/` only when at least two collected test modules
+  import it; `tests/conftest.py` remains limited to pytest hooks and genuinely
+  shared fixtures.
+- Golden files live in `tests/fixtures/documents/golden/` and are never
+  regenerated merely to make a failing test pass (T4). Review an intentional
+  contract change and its golden diff together.
+- Existing logical pytest node identities remain stable even though their full
+  node paths move to the mapped ownership targets. New tests use descriptive
+  feature-oriented module and test names, never release-number filenames.
+- Retry, backoff, and rate-limit tests use `tests/support/clocks.py` to record
+  requested delays. Direct `time.sleep` is limited to the three explicitly
+  guarded concurrency-coordination modules.
+- The registered `platform` marker belongs at module level on every test module
+  under `tests/platform/` and nowhere else. Use
+  `python -m pytest -m "not platform"` on a restricted filesystem.
+
+`tests/meta/test_suite_architecture.py` enforces these rules structurally from
+paths and ASTs without importing collected test modules.
 
 ## Run lifecycle
 
