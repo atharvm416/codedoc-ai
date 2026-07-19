@@ -124,6 +124,10 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
         "Head fraction (0<r<1) of the head+tail truncation split.",
     ),
     (
+        "response_correction_enabled",
+        "Opt in to one targeted correction call per failed agent response.",
+    ),
+    (
         "prompt_profiles",
         "Inline single/triple instructions under the 'common' envelope.",
     ),

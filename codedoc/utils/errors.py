@@ -27,6 +27,15 @@ class ParseError(CodeDocError):
         super().__init__(f"ParseError in '{file_path}': {reason}")
 
 
+class InsufficientSourceError(CodeDocError):
+    """Raised when a source file contains no non-whitespace content."""
+
+    def __init__(self, file_path: str, reason: str):
+        self.file_path = file_path
+        self.reason = reason
+        super().__init__(f"InsufficientSourceError in '{file_path}': {reason}")
+
+
 class LLMError(CodeDocError):
     """Raised when an LLM call fails or returns invalid output."""
 
@@ -125,6 +134,35 @@ class AgentError(CodeDocError):
         self.file_path = file_path
         self.reason = reason
         super().__init__(f"AgentError [{agent_name}] on '{file_path}': {reason}")
+
+
+class ResponseContractError(AgentError):
+    """Raised when a provider response fails the deterministic response contract.
+
+    A ``ResponseContractError`` is a specialized :class:`AgentError` carrying a
+    bounded :class:`~codedoc.agents.response_diagnostics.ResponseDiagnostic` and a
+    flag recording whether a targeted correction call was attempted.  Every
+    ``ResponseContractError`` is *non-retryable*: a deterministic
+    response-contract rejection never silently becomes a duplicate whole-file
+    provider call, whether correction is disabled or has already been attempted.
+
+    ``diagnostic`` is bounded and carries no source, prompt, credential, or
+    full-response text.  Existing generic error reporting still receives the
+    concise :class:`AgentError` message string produced by ``super().__init__``.
+    """
+
+    def __init__(
+        self,
+        agent_name: str,
+        file_path: str,
+        reason: str,
+        *,
+        diagnostic,
+        correction_attempted: bool,
+    ):
+        self.diagnostic = diagnostic
+        self.correction_attempted = correction_attempted
+        super().__init__(agent_name, file_path, reason)
 
 
 class OutputError(CodeDocError):

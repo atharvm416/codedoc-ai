@@ -231,14 +231,17 @@ def build_recovery_identity(
     documentation_scope: str,
     analysis_mode: str,
     analysis_revision: str,
-    profile_digests_by_language: dict[str, str],
 ) -> dict:
     """Build the versioned ``_codedoc.recovery_identity`` object for this run.
 
-    Bounded and free of source/credential data.  ``profile_digests_by_language``
-    covers every language present in the run's documented/selected file set, in
-    sorted order, so an absent/default-equivalent profile yields
-    ``NO_PROMPT_PROFILE_DIGEST`` consistently via ``ResolvedProfile.file_digest``.
+    Bounded and free of source/credential data.  The identity binds run-wide
+    routing and output choices only; it does **not** bind a profile-wide digest.
+    Per-file ``_prompt_profile_digest`` values in ``CACHE_IDENTITY_KEYS`` already
+    re-validate every recovered record individually, so a language-keyed or
+    path-keyed run-level map would only reject otherwise-resumable recovery for
+    unrelated edits.  Narrowing the compared field set is backward-compatible and
+    keeps ``_RECOVERY_IDENTITY_VERSION`` at 1 (only widening it, or changing a
+    retained field's meaning, would require a version bump).
     """
     return {
         "version": _RECOVERY_IDENTITY_VERSION,
@@ -249,7 +252,6 @@ def build_recovery_identity(
         "documentation_scope": documentation_scope,
         "analysis_mode": analysis_mode,
         "analysis_revision": analysis_revision,
-        "profile_digests_by_language": dict(sorted(profile_digests_by_language.items())),
     }
 
 
@@ -261,7 +263,6 @@ _RECOVERY_IDENTITY_FIELDS = (
     "documentation_scope",
     "analysis_mode",
     "analysis_revision",
-    "profile_digests_by_language",
 )
 
 

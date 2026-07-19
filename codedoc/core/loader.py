@@ -197,6 +197,15 @@ DEFAULTS: dict[str, Any] = {
     # Must be a float strictly between 0.0 and 1.0 (exclusive).
     "truncation_head_ratio": 0.70,
     # -----------------------------------------------------------------------
+    # Targeted response correction (opt-in, disabled by default)
+    # -----------------------------------------------------------------------
+    # When true, a single targeted corrective provider call is made for an
+    # eligible response-contract failure (malformed shape, missing/empty required
+    # field, or a response that retains none of its requested fields).  Disabled
+    # by default so the standard path never adds a paid repair call.  A
+    # response-contract rejection is never converted into a whole-file retry.
+    "response_correction_enabled": False,
+    # -----------------------------------------------------------------------
     # Mode-based JSON prompt profiles
     # -----------------------------------------------------------------------
     # Inline profile object (single and/or triple sections) customizing the
@@ -851,6 +860,7 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
         "respect_retry_after",
         "dry_run",
         "allow_partial",
+        "response_correction_enabled",
     ):
         config[key] = _coerce_strict_bool(config[key], key)
 

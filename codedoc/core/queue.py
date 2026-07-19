@@ -20,6 +20,7 @@ STATUS_UNCHECKED = "unchecked"
 STATUS_IN_PROGRESS = "in_progress"
 STATUS_CHECKED = "checked"
 STATUS_FAILED = "failed"
+STATUS_SKIPPED_INSUFFICIENT_SOURCE = "skipped_insufficient_source"
 
 
 class ProcessingQueue:
@@ -101,6 +102,12 @@ class ProcessingQueue:
             self._state[rel_path]["error"] = reason
             logger.warning("Failed: %s — %s", rel_path, reason)
 
+    def mark_skipped_insufficient_source(self, rel_path: str, reason: str) -> None:
+        if rel_path in self._state:
+            self._state[rel_path]["status"] = STATUS_SKIPPED_INSUFFICIENT_SOURCE
+            self._state[rel_path]["error"] = reason
+            logger.debug("Skipped insufficient source: %s — %s", rel_path, reason)
+
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
@@ -110,13 +117,15 @@ class ProcessingQueue:
 
     def all_checked(self) -> bool:
         return all(
-            s["status"] in (STATUS_CHECKED, STATUS_FAILED)
+            s["status"]
+            in (STATUS_CHECKED, STATUS_FAILED, STATUS_SKIPPED_INSUFFICIENT_SOURCE)
             for s in self._state.values()
         )
 
     def stats(self) -> dict:
         counts = {STATUS_UNCHECKED: 0, STATUS_IN_PROGRESS: 0,
-                  STATUS_CHECKED: 0, STATUS_FAILED: 0}
+                  STATUS_CHECKED: 0, STATUS_FAILED: 0,
+                  STATUS_SKIPPED_INSUFFICIENT_SOURCE: 0}
         for s in self._state.values():
             counts[s["status"]] = counts.get(s["status"], 0) + 1
         return counts

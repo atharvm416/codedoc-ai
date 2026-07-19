@@ -147,6 +147,12 @@ files. If you switch between JSON and Markdown and the requested target does not
 yet exist, the exact opposite-format sibling is validated and used as the
 conversion source; unchanged files require no provider call.
 
+Empty and whitespace-only source files are skipped before parsing and before
+their per-file documentation calls. They are not failures and incur no per-file
+provider charge. The run reports them through
+`files_skipped_insufficient_source`; if a skipped path had documentation in an
+older output, that stale record is omitted from the new completed output.
+
 ## Using the output with AI assistants
 
 CodeDoc output is designed to be pasted into, indexed by, or attached to AI
@@ -295,9 +301,36 @@ Useful defaults include:
 | `follow_symlinks` | `false` |
 | `propagate_changes` | `true` |
 | `rate_limit_adaptive` | `true` |
+| `response_correction_enabled` | `false` |
 
 Run `codedoc --init-config` rather than copying a partial example when you need
 the complete current key set.
+
+### Response correction (opt-in)
+
+Provider responses must satisfy a deterministic JSON contract: the requested
+keys, the requested types, a non-empty value for every required field, and at
+least one usable requested field. A response that fails the contract is rejected
+with a bounded, structured diagnostic.
+
+Response correction is **disabled by default**. Set
+`"response_correction_enabled": true` to opt into at most **one** targeted
+correction call per failed agent response — a single extra paid provider call
+that asks the model to repair the response to the exact schema, preserving valid
+facts and inventing nothing.
+
+- With correction **off** (the default), a rejected response is **not** silently
+  converted into a whole-file retry; the file fails once, at its initial call.
+- With correction **on**, one repair call is made for that agent response; if the
+  repair also fails the contract, the file fails without a further retry.
+- Correction is **not** a factuality bypass. Malformed output or a missing or
+  empty required field can still fail a file whether correction is on or off.
+- `file_retry_attempts` remains the policy for transport, rate-limit, and other
+  recoverable failures; it is unaffected by response correction.
+- At `--verbose` (`log_level: DEBUG`), diagnostics add only bounded structural
+  metadata (removed field paths and reason codes, returned value types, a parse
+  position, a response character count). No raw provider-response text, source,
+  prompt, or credential is ever logged.
 
 ## Command-line options
 
@@ -370,7 +403,7 @@ The only runtime instruction source is `prompt_profiles` inside the exact
 versionless and use `requested_shape`.
 
 Every present mode uses a required `common` envelope and an optional
-`per_language` complete replacement:
+`per_extension` complete replacement, keyed by file extension:
 
 ```json
 {
@@ -382,28 +415,76 @@ Every present mode uses a required `common` envelope and an optional
           "role_in_system": "Explain its architectural role."
         }
       },
-      "per_language": {}
+      "per_extension": {
+        ".js": {
+          "requested_shape": {
+            "description": "Explain this JavaScript module for a reviewer."
+          }
+        }
+      }
     }
   }
 }
 ```
 
-Unsupported profile layouts are rejected with targeted guidance. Language-level
-customization uses `per_language` as a complete-block replacement rather than
-field merging.
+Triple mode carries all three agent keys inside each `per_extension` override
+(complete replacement), and a non-empty `triple.per_extension` requires
+`triple.common.documentation`:
+
+```json
+{
+  "prompt_profiles": {
+    "triple": {
+      "common": {
+        "structure": { "requested_shape": { } },
+        "dependency": { "requested_shape": { } },
+        "documentation": { "requested_shape": { } }
+      },
+      "per_extension": {
+        ".cs": {
+          "structure": { "requested_shape": { } },
+          "dependency": { "requested_shape": { } },
+          "documentation": { "requested_shape": { } }
+        }
+      }
+    }
+  }
+}
+```
+
+**Extension resolution.** For each file the effective block is chosen by
+`longest matching per_extension > common > built-in default`. Matching is on the
+file's lowercased **basename**, so multi-part suffixes work and the longest match
+wins: `.d.ts` beats `.ts` for `types.d.ts`, and matching is case-insensitive
+(`Types.D.TS` selects `.d.ts`). A file whose entire name is `.ts` is not treated
+as a `.ts`-suffixed file. An override is a **complete replacement** of the block,
+never a field-by-field merge. Each `per_extension` key must be a lowercase dotted
+suffix whose final segment is one of the project's configured extensions (from
+`extension_language_map`); `.pyy` is rejected when only `.py` is configured, which
+prevents silently dead overrides. An entry that matches no scanned file is
+validated but costs nothing — it renders no prompt, makes no review call, and
+invalidates no cache. Editing a used override reprocesses only the files whose
+basename resolves to it; files that fall back to an unchanged `common` stay
+reusable.
+
+Unsupported profile layouts are rejected with targeted guidance.
 
 `analysis_mode: single` exposes one combined editable instruction JSON at
 `single.common`. Triple mode exposes three independently editable instruction
 JSON blocks at `triple.common.structure`, `.dependency`, and `.documentation`.
 Supported field order, optional fields, and bounded instruction text are editable;
 fixed system, safety, factuality, scanning, retry, cache, and serialization rules
-are not. `per_language` remains a complete-block replacement.
+are not. `per_extension` remains a complete-block replacement.
 
 An effective non-default instruction is reviewed only when it will reach a planned
 LLM documentation call. `SAFE` continues, `RISKY` requires explicit per-run
 confirmation, and `TOO_RISKY` always stops. Initialization, unedited defaults,
 dry runs, cache-only work, and deterministic JSON↔Markdown conversion make no
 security-review call. There is no stored bypass.
+CodeDoc also computes deterministic, non-blocking feasibility advisories when a
+custom field appears to require cross-file context that a per-file pass cannot
+see. These advisories are provider-free, appear in dry-run and real-run summaries,
+never block a run, and never change the standards/safety review verdict.
 Fixed system roles, factuality/safety rules, parser facts, cleaners, provider
 selection, scanning, retry, cache, ownership, and artifact serialization are not
 customizable.
@@ -449,11 +530,14 @@ planning, paid caps, and any mandatory semantic review have succeeded. It is
 updated atomically after each completed file.
 
 The recovery file includes a versioned identity covering project root, exact
-selected targets, entry, documentation scope, analysis mode/revision, and sorted
-per-language profile digests. A compatible in-progress file is resumed. A
-foreign, malformed, completed, unsupported, or identity-mismatched file blocks
-without mutation. To start fresh, delete `crash_recovery.json` in the output
-directory; to resume, restore the prior run configuration.
+selected targets, entry, documentation scope, and analysis mode/revision. It no
+longer binds a profile-wide digest: each recovered completed record is instead
+re-validated individually against the current per-file `_prompt_profile_digest`,
+so an unrelated profile edit or a newly added file no longer discards a resumable
+run. A compatible in-progress file is resumed. A foreign, malformed, completed,
+unsupported, or identity-mismatched file blocks without mutation. To start fresh,
+delete `crash_recovery.json` in the output directory; to resume, restore the
+prior run configuration.
 
 On success, final output is atomically replaced first and recovery is removed
 second. Interruptions, provider failures, and final-output failures preserve the
@@ -463,8 +547,12 @@ path but never creates, changes, or deletes it.
 ## Planning and diagnostics
 
 `--dry-run` performs scanning and planning without persistent mutation, provider
-creation, or API calls. `--max-files N` counts only files that would make
-documentation calls. `--force-files PATH` bypasses reuse for a selected file.
+creation, or API calls. It reports empty/whitespace-only files separately and
+excludes their expected documentation calls and prompt tokens. `--max-files N`
+remains a conservative cap over pre-gate documentation-call candidates, while
+dry-run also shows how many candidates would actually reach documentation calls
+after its read-only source snapshot. `--force-files PATH` bypasses reuse for a
+selected file.
 
 Issues are bounded in memory, printed to the terminal, and included in permitted
 final/recovery metadata. CodeDoc does not write `error.log`.

@@ -2,6 +2,14 @@
 
 Describe what this pull request changes.
 
+## Test ownership
+
+- Test level(s) affected:
+- Feature area(s) affected:
+- New or changed fixtures or goldens:
+- Platform-specific behavior:
+- Targeted verification command run:
+
 ## Type of change
 
 - [ ] Bug fix
@@ -12,6 +20,7 @@ Describe what this pull request changes.
 
 ## Verification
 
+- [ ] Targeted test command completed
 - [ ] `python -m pytest`
 - [ ] `python -m build`
 - [ ] `python -m twine check dist/*`

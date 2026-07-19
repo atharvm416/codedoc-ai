@@ -1,5 +1,164 @@
 # Changelog
 
+## 0.12.4 - 2026-07-18
+
+### Ownership-based test architecture and review-local CI
+
+- **Ownership-based test tree.** The suite now lives under explicit `unit`,
+  `integration`, `contract`, `e2e`, `platform`, and `meta` levels. Test
+  directories are packages, fixtures have purpose-specific homes, and shared
+  helpers are behavior-named modules with at least two consumers.
+- **Expanded structural contract.** The single AST-based meta guard enforces
+  test-module placement and naming, package initializers, immutable golden
+  location, support-module consumer counts, sleep boundaries, and exact
+  platform-marker ownership without importing collected tests.
+- **Review-local CI.** Supported Python versions run the unit/meta, integration,
+  and contract/end-to-end selections independently; a dedicated Linux, Windows,
+  and macOS platform matrix covers OS-sensitive tests. Python 3.12 rows feed one
+  combined coverage report without re-running tests for coverage.
+
+## 0.12.3 - Unreleased
+
+### Test support, determinism, and configuration hygiene
+
+- **Shared test support package.** Fakes, prompt-profile constants, and the
+  fake-SDK provider installers that five test modules previously imported from
+  two other test modules now live in `tests/support/` (`providers.py`,
+  `profiles.py`), which pytest never collects. No collected test module
+  imports another collected test module.
+- **Deterministic retry and rate-limit tests.** `tests/support/clocks.py`
+  provides `capture_sleeps(monkeypatch, target)`, which stubs a named sleep
+  callable and records the requested delays instead of waiting for them. The
+  two tests that previously spent real time in provider backoff now assert
+  the exact requested delay sequence and complete in milliseconds; direct
+  `time.sleep` remains only at the three concurrency-coordination sites that
+  cannot be expressed deterministically.
+- **Pytest configuration cleanup.** Removed the dead `asyncio_mode = "auto"`
+  option and the unused `pytest-asyncio` dev dependency (no async test exists
+  in the suite). Registered a `platform` marker for filesystem/OS-sensitive
+  tests, enabled `strict_markers`, and added `--durations=20` to the default
+  run.
+- **Structural guard.** `tests/test_suite_architecture.py` enforces, without
+  importing any collected test module, that no test-to-test imports exist,
+  that `tests/support/` stays uncollectable, that direct `time.sleep` is
+  confined to the allowlisted modules, and that every registered marker is
+  documented in `CONTRIBUTING.md`.
+
+This is a test-infrastructure release. Production behavior, public APIs,
+prompt bytes, cache identity, output schemas, and provider behavior are
+unchanged.
+
+## 0.12.2 - Unreleased
+
+### Source sufficiency and prompt feasibility
+
+- Empty and whitespace-only source files are now skipped before parsing and
+  before any per-file documentation agent runs. They consume no per-file provider
+  call, are counted separately from failures through
+  `files_skipped_insufficient_source`, and cannot resurrect stale documentation
+  from completed output or crash recovery.
+- Dry-run reports insufficient-source skips separately and removes their expected
+  documentation calls and input-token contribution in both single and triple
+  modes. The conservative `max_files` guard continues to count pre-gate
+  documentation-call candidates and now labels them accordingly.
+- Active prompt-profile fields can produce bounded, deterministic feasibility
+  advisories when their instructions appear to require cross-file context. The
+  advisories add no provider calls, are available in dry-run and real-run/error
+  summaries, never block execution, and do not alter the mandatory
+  `SAFE`/`RISKY`/`TOO_RISKY` standards/safety review.
+- Dry-run input-token estimates now include mandatory prompt-customization review
+  batches when such review is planned. No CLI command, flag, environment variable,
+  config key, cache identity, prompt bytes, or per-file output schema was added.
+
+## 0.12.1 - Unreleased
+
+### Response diagnostics and targeted correction
+
+- **Structured response diagnostics.** Every rejected provider response now
+  produces a bounded, structured diagnostic with a stable top-level reason code
+  (`no_json_object`, `json_parse_error`, `top_level_not_object`,
+  `no_usable_fields`, `missing_required`) and bounded per-field removal reasons
+  (`unknown_field`, `wrong_type`, `empty_value`, `invalid_value`, `duplicate`,
+  `item_limit`, `response_cap`, `not_requested`). Normal logs emit one concise
+  rejection line; `--verbose` adds only bounded structural metadata. No raw
+  response, source, prompt, or credential text is ever logged or attached.
+- **Stronger exact-JSON prompt rules.** One shared clause block
+  (`EXACT_JSON_RESPONSE_RULES`) is interpolated into all four documentation
+  prompts so they cannot drift: return one JSON object only; no fences or prose;
+  exactly the requested keys; no renamed keys; preserve each field's type; every
+  required field non-empty and valid; omit optional data only as the schema
+  allows; invent no facts.
+- **Registry-driven acceptance.** A response is rejected when any effective
+  registry-required field is missing or empty, or when none of the effective
+  requested fields survive cleaning and profile filtering — enforced identically
+  in single and triple modes.
+- **Targeted response correction (opt-in, disabled by default).** New config key
+  `response_correction_enabled` (strict boolean, default `false`, config-only —
+  no CLI flag or environment variable). When enabled, an eligible response-contract
+  failure receives at most one targeted correction call through the shared
+  usage-counted provider path; the corrected text is revalidated through the
+  identical acceptance path. Correction is invoked per agent per file and never
+  reruns a successful sibling agent.
+- **No duplicate whole-file retry for contract failures.** A response-contract
+  rejection is classified `response_contract_final` and is non-retryable in both
+  the parallel and sequential paths, whether correction is disabled or has been
+  attempted. A correction call that fails on a rate-limit/transport fault ends
+  correction for that file; a billing/credential/model correction fault stays a
+  run-level abort with crash recovery left resumable.
+- **Run-level correction statistics.** A thread-safe correction ledger reports
+  `response_contract_failures` and correction call attempts/successes/failures in
+  run statistics and the console summary. Each correction call is one paid attempt
+  already counted in `attempted_calls`, so it stays a subset of
+  `documentation_calls_attempted`; the existing call-category invariant is
+  unchanged. `--dry-run` reports whether correction is enabled and a bounded
+  worst-case call ceiling. These stay internal run metadata, absent from completed
+  JSON/Markdown output.
+- **Cache identity advances to `file-doc-v3`.** The rendered requested-shape block
+  and its `_prompt_profile_digest` are unchanged, but the strengthened prompt
+  semantics and stricter acceptance change generation strategy, so matching
+  `file-doc-v2` records are reprocessed once.
+
+## 0.12.0 - 2026-07-11
+
+### Extension-scoped prompt profiles
+
+- **Added extension-scoped prompt profiles.** The per-file override scope is
+  `per_extension`, keyed by file extension.
+  This is the only user-visible surface change.
+- Each file's effective requested-shape block is resolved by
+  `longest matching per_extension > common > built-in default`. Matching is on the
+  file's lowercased basename, so multi-part suffixes work and the longest match
+  wins (`.d.ts` beats `.ts`), matching is case-insensitive, and a file named
+  exactly `.ts` is not treated as a `.ts`-suffixed file. An override is a complete
+  replacement of the block, never a field-by-field merge.
+- Each `per_extension` key must be a lowercase dotted suffix (at most 32
+  characters) whose final segment is one of the project's configured extensions
+  (`extension_language_map`); a silently dead override such as `.pyy` when only
+  `.py` is configured is rejected. At most 64 overrides per mode. In triple mode
+  each override carries all three agent keys, and a non-empty `triple.per_extension`
+  requires `triple.common.documentation`.
+- Cache invalidation is confined to files whose effective block changed: editing a
+  used override reprocesses only the files that resolve to it, an unused override
+  costs zero provider calls and invalidates nothing, and a profile with no
+  `per_extension` renders byte-identical prompts and the exact prior
+  `_prompt_profile_digest` (the digest scheme stays `pp-v1`). Identical-content
+  reuse honours the destination file's extension scope.
+- The mandatory standards/safety review now covers each profile block reachable
+  by a planned file (the common block and each reachable `per_extension` override),
+  deduplicating byte-identical blocks so equivalent scopes are reviewed once.
+  `SAFE`/`RISKY`/`TOO_RISKY` semantics and the confirmation contract are unchanged.
+- **`crash_recovery.json` keeps recovery identity version 1** while dropping its
+  profile-wide compared field. Narrowing the compared identity field set is
+  backward-compatible, so no existing recovery file is invalidated by the upgrade.
+  Each recovered completed record is instead re-validated individually against the
+  current per-file `_prompt_profile_digest`, so an unrelated profile edit or a
+  newly added file no longer discards a resumable run.
+- The generated config (`--init-config`) and the regenerated `codedoc.config.json`
+  now emit `per_extension: {}` in each mode section. No
+  new CLI flag, environment variable, or top-level config key. Completed JSON /
+  Markdown output shape and `schema_version` are unchanged. OpenAI, Anthropic, and
+  Gemini preserve equivalent prompt-profile and mandatory-review behaviour.
+
 ## 0.11.9 - 2026-07-09
 
 ### Completed JSON contract cleanup

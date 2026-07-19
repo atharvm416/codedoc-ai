@@ -73,6 +73,9 @@ _LAST_RUN_INTEGER_FIELDS = {
     "files_reused_identical_content",
     "files_resumed_from_recovery",
 }
+_LAST_RUN_OPTIONAL_INTEGER_FIELDS = {
+    "files_skipped_insufficient_source",
+}
 
 
 @dataclass(frozen=True)
@@ -615,6 +618,12 @@ def _validate_last_run(path: Path, last_run: object) -> None:
         value = last_run.get(field)
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ConfigError(f"'{path}' has a malformed last_run field '{field}'.")
+    for field in _LAST_RUN_OPTIONAL_INTEGER_FIELDS:
+        if field not in last_run:
+            continue
+        value = last_run[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ConfigError(f"'{path}' has a malformed last_run field '{field}'.")
 
     partition_total = (
         last_run["files_reused_unchanged"]
@@ -622,6 +631,7 @@ def _validate_last_run(path: Path, last_run: object) -> None:
         + last_run["files_documented_by_llm"]
         + last_run["files_failed"]
         + last_run["files_unattempted"]
+        + last_run.get("files_skipped_insufficient_source", 0)
     )
     if last_run["files_selected"] != partition_total:
         raise ConfigError(f"'{path}' has contradictory last_run file counts.")

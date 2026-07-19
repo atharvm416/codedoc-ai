@@ -96,7 +96,7 @@
           "usage_example": "One realistic single-line example showing how another file would import or call the main thing this file exposes. Use an empty string if nothing here is meant to be imported."
         }
       },
-      "per_language": {}
+      "per_extension": {}
     },
     "triple": {
       "common": {
@@ -157,7 +157,7 @@
           }
         }
       },
-      "per_language": {}
+      "per_extension": {}
     }
   }
 }

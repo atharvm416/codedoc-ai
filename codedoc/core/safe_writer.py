@@ -287,6 +287,23 @@ class SafeWriter:
                     self._recorded_this_run.discard(rel_path)
                 raise
 
+    def discard(self, rel_path: str) -> None:
+        """Transactionally remove a preloaded or newly recorded file result."""
+        with self._lock:
+            if rel_path not in self._clean_records:
+                return
+            prior_record = self._clean_records[rel_path]
+            was_recorded_this_run = rel_path in self._recorded_this_run
+            self._clean_records.pop(rel_path)
+            self._recorded_this_run.discard(rel_path)
+            try:
+                self._flush_locked()
+            except LiveBackupWriteError:
+                self._clean_records[rel_path] = prior_record
+                if was_recorded_this_run:
+                    self._recorded_this_run.add(rel_path)
+                raise
+
     def has_record(self, rel_path: str) -> bool:
         """Return True if *rel_path* is already recorded in memory.
 

@@ -44,6 +44,7 @@ from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
+from codedoc.agents.response_diagnostics import CorrectionLedger
 from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.discovery import (
     _build_graph,
@@ -56,6 +57,7 @@ from codedoc.core.execution import (
     ExecutionOptions,
     execute_agent_files,
 )
+from codedoc.core.feasibility import build_feasibility_notes
 from codedoc.core.loader import load_config
 from codedoc.core.output import (
     inspect_output_ownership,
@@ -70,6 +72,7 @@ from codedoc.core.planning import (
 )
 from codedoc.core.prompt_profiles import (
     ProfileResolution,
+    REVIEW_SYSTEM,
     ResolvedProfile,
     ReviewBatch,
     build_resolved_profile,
@@ -77,7 +80,7 @@ from codedoc.core.prompt_profiles import (
     classify_profile_action,
     resolve_profile_source,
 )
-from codedoc.core.queue import ProcessingQueue
+from codedoc.core.queue import ProcessingQueue, STATUS_SKIPPED_INSUFFICIENT_SOURCE
 from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
@@ -88,6 +91,7 @@ from codedoc.core.resume import (
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
+from codedoc.core.source_precheck import insufficient_source
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider, describe_provider_selection
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
@@ -167,7 +171,10 @@ def run_pipeline(
     dry_run = bool(config.get("dry_run", False))
 
     analysis_mode = config.get("analysis_mode", "single")
-    known_languages = frozenset(config["extension_language_map"].values())
+    # The configured extension keys (lowercased) gate ``per_extension`` overrides.
+    # The language tag no longer selects a profile scope, so the language set is no
+    # longer computed here.
+    known_extensions = frozenset(e.lower() for e in config["extension_language_map"])
     # Resolve and classify the prompt profile BEFORE entry resolution,
     # artifact/ownership inspection, existing-output reads, source scanning, graph
     # building, and planning.  Both calls are read-only and provider-free.  A
@@ -177,7 +184,7 @@ def run_pipeline(
     profile_resolution = resolve_profile_source(
         config,
         root,
-        known_languages=known_languages,
+        known_extensions=known_extensions,
         active_mode=analysis_mode,
     )
     profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
@@ -194,6 +201,8 @@ def run_pipeline(
         "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_feasibility_notes": 0,
+        "prompt_customization_feasibility_advisories": (),
         "documentation_calls_planned": 0,
         "documentation_calls_attempted": 0,
     }
@@ -301,6 +310,7 @@ def run_pipeline(
                 "disconnected_planned_calls": 0,
                 "would_process": 0,
                 "would_call_llm_for": 0,
+                "would_skip_insufficient_source": 0,
                 "unchanged": 0,
                 "would_reuse": 0,
                 "would_resume": 0,
@@ -309,6 +319,7 @@ def run_pipeline(
                 "estimated_input_tokens": 0,
                 "estimate_is_lower_bound": config.get("analysis_mode", "single") == "triple",
                 "max_files": int(config.get("max_files", 0) or 0),
+                "max_files_candidate_files": 0,
                 "max_files_exceeded": False,
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
@@ -320,6 +331,7 @@ def run_pipeline(
             "checked": 0,
             "failed": 0,
             "skipped": 0,
+            "skipped_insufficient_source": 0,
             "entry_excluded": 0,
             "analysis_mode": config.get("analysis_mode", "single"),
             "initial_calls_per_file": initial_calls_per_file(
@@ -356,11 +368,12 @@ def run_pipeline(
     forced_paths = normalize_force_files(config.get("force_files") or [], root)
 
     # Build the versioned recovery identity from the now-known project root,
-    # selected targets, entry, scope, analysis mode/revision, and sorted
-    # per-language profile digests for the selected file set.
-    selected_languages = sorted(
-        {file_map[rel].get("language", "generic") for rel in documented_rels}
-    )
+    # selected targets, entry, scope, and analysis mode/revision.  The run-level
+    # identity no longer binds a profile-wide digest: per-file
+    # ``_prompt_profile_digest`` values in CACHE_IDENTITY_KEYS already re-validate
+    # every recovered record individually, so narrowing this field set keeps
+    # version 1 (a backward-compatible narrowing) and never discards resumable
+    # work for an unrelated profile edit or a newly added file.
     recovery_identity = build_recovery_identity(
         project_root=root,
         json_target=json_target,
@@ -369,9 +382,6 @@ def run_pipeline(
         documentation_scope=config.get("documentation_scope", "entry"),
         analysis_mode=analysis_mode,
         analysis_revision=ANALYSIS_REVISION,
-        profile_digests_by_language={
-            lang: resolved_profile.file_digest(lang) for lang in selected_languages
-        },
     )
     # Inspect the single exact recovery file, read-only.  A real run blocks on an
     # incompatible / foreign / malformed / completed recovery file; a dry run
@@ -406,10 +416,14 @@ def run_pipeline(
         resolved_profile=resolved_profile,
     )
 
-    planned_languages = frozenset(
-        file_map[rel].get("language", "generic") for rel in plan.agent_rels
+    # The exact set of file scopes reachable by a planned agent file drives which
+    # profile components (common and per-extension) are reviewed.  An explicitly
+    # empty set means no planned agent file is reachable, so no review is built.
+    planned_scopes = frozenset(
+        resolved_profile.scope_for(file_map[rel]) for rel in plan.agent_rels
     )
-    review_batches = build_review_batches(resolved_profile, planned_languages)
+    review_batches = build_review_batches(resolved_profile, planned_scopes)
+    feasibility_notes = build_feasibility_notes(resolved_profile, planned_scopes)
 
     if dry_run:
         return _build_dry_run_stats(
@@ -423,6 +437,7 @@ def run_pipeline(
             profile_resolution,
             review_batches,
             recovery_resumed=len(recovery_records),
+            feasibility_notes=feasibility_notes,
         )
 
     scope_stats = _build_scope_stats(
@@ -433,16 +448,26 @@ def run_pipeline(
     # any mutation, writer initialization, or provider creation.
     if plan.max_files_exceeded:
         raise ConfigError(
-            f"This run would send {len(plan.agent_rels)} file(s) to the LLM, "
+            f"This run has {len(plan.agent_rels)} documentation-call candidate(s), "
             f"which exceeds the configured max_files limit of {plan.max_files}. "
             "Inspect the plan first with --dry-run, and raise --max-files only "
             "after reviewing it."
         )
 
     usage = UsageAccumulator()
+    # One run-level correction ledger, initialized with the resolved opt-in flag,
+    # constructed beside the usage accumulator and threaded through the
+    # orchestrator to the single shared correction component.
+    correction_enabled = bool(config.get("response_correction_enabled", False))
+    correction_ledger = CorrectionLedger(correction_enabled)
     llm = None
     review_stats = _base_profile_stats(
-        resolved_profile, profile_resolution, plan, file_map, review_batches
+        resolved_profile,
+        profile_resolution,
+        plan,
+        file_map,
+        review_batches,
+        feasibility_notes=feasibility_notes,
     )
     if review_batches:
         # This is a mandatory, non-overridable, probabilistic semantic
@@ -580,6 +605,7 @@ def run_pipeline(
         stats: dict = {
             "checked": 0,
             "failed": 0,
+            "skipped_insufficient_source": 0,
             "skipped": skipped,
             "reused": reused,
             "resumed": resumed,
@@ -615,7 +641,7 @@ def run_pipeline(
         stats["output_files"] = [str(path) for path in output_files if path]
         recorder.delete()
         _set_issue_stats(stats, error_reporter, recovery_path)
-        _set_usage_stats(stats, usage, plan, config)
+        _set_usage_stats(stats, usage, plan, config, correction_ledger)
         return stats
 
     # Build the agent-file queue in topological order.
@@ -651,10 +677,13 @@ def run_pipeline(
         analysis_mode=config.get("analysis_mode", "single"),
         truncation_head_ratio=config.get("truncation_head_ratio", 0.70),
         resolved_profile=resolved_profile,
+        response_correction_enabled=correction_enabled,
+        correction_ledger=correction_ledger,
     )
     stats = {
         "checked": 0,
         "failed": 0,
+        "skipped_insufficient_source": 0,
         "skipped": skipped,
         "reused": reused,
         "resumed": resumed,
@@ -742,9 +771,14 @@ def run_pipeline(
 
     stats["output_dir"] = str(output_dir)
     _set_plan_counters(stats, plan)
+    skipped_rels = {
+        rel
+        for rel, status in queue.snapshot().items()
+        if status == STATUS_SKIPPED_INSUFFICIENT_SOURCE
+    }
     output_files = write_project_outputs(
         _build_documentation_records(
-            documented_rels,
+            documented_rels - skipped_rels,
             file_map,
             graph.topological_order(),
             existing_docs,
@@ -767,7 +801,7 @@ def run_pipeline(
     # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
     _set_issue_stats(stats, error_reporter, recovery_path)
-    _set_usage_stats(stats, usage, plan, config)
+    _set_usage_stats(stats, usage, plan, config, correction_ledger)
 
     logger.info(
         "Done. checked=%d failed=%d skipped=%d output=%s",
@@ -809,7 +843,10 @@ def _set_plan_counters(stats: dict, plan: PipelinePlan) -> None:
     stats["files_selected"] = len(plan.documented_rels)
     stats["unattempted_files"] = max(
         0,
-        len(plan.agent_rels) - stats.get("checked", 0) - stats.get("failed", 0),
+        len(plan.agent_rels)
+        - stats.get("checked", 0)
+        - stats.get("failed", 0)
+        - stats.get("skipped_insufficient_source", 0),
     )
 
 
@@ -818,6 +855,7 @@ def _set_usage_stats(
     usage: UsageAccumulator,
     plan: PipelinePlan,
     config: dict,
+    correction_ledger: CorrectionLedger | None = None,
 ) -> None:
     """Populate planned/actual usage keys on *stats* in-place.
 
@@ -826,6 +864,13 @@ def _set_usage_stats(
     analysis_mode = config.get("analysis_mode", "single")
     per_file = initial_calls_per_file(analysis_mode)
     stats.update(usage.snapshot())
+    # Correction statistics are run-level metadata, snapshot beside the existing
+    # documentation-call counter.  Every correction provider call is one paid
+    # attempt already counted in ``attempted_calls`` and therefore a subset of
+    # ``documentation_calls_attempted``; these keys are reported additionally, not
+    # subtracted, so the call-category invariant below is preserved unchanged.
+    if correction_ledger is not None:
+        stats.update(correction_ledger.snapshot())
     stats["analysis_mode"] = analysis_mode
     stats["initial_calls_per_file"] = per_file
     stats["planned_calls"] = len(plan.agent_rels) * per_file
@@ -843,6 +888,38 @@ def _set_usage_stats(
     stats["allow_partial"] = bool(config.get("allow_partial", False))
 
 
+_SCOPE_PRECEDENCE = ("extension", "common", "built-in")
+
+
+def _prompt_profile_scope_counts(
+    plan: PipelinePlan,
+    file_map: dict[str, dict],
+    resolved_profile: ResolvedProfile | None,
+) -> dict[str, int]:
+    """Count planned agent files by the strongest scope their bundle resolved to.
+
+    Counted over ``plan.agent_rels`` with precedence ``extension > common >
+    built-in`` (a triple-mode file is counted once, under the strongest scope any
+    of its three agents resolved to), so the counts sum to ``len(agent_rels)``.
+    """
+    counts = {"extension": 0, "common": 0, "built-in": 0}
+    for rel in plan.agent_rels:
+        if resolved_profile is None:
+            counts["built-in"] += 1
+            continue
+        bundle = resolved_profile.resolve_bundle(
+            resolved_profile.scope_for(file_map[rel])
+        )
+        strongest = "built-in"
+        for selection in bundle.selections.values():
+            if _SCOPE_PRECEDENCE.index(selection.scope) < _SCOPE_PRECEDENCE.index(
+                strongest
+            ):
+                strongest = selection.scope
+        counts[strongest] += 1
+    return counts
+
+
 def _build_dry_run_stats(
     plan: PipelinePlan,
     file_map: dict[str, dict],
@@ -854,6 +931,8 @@ def _build_dry_run_stats(
     profile_resolution: ProfileResolution | None = None,
     review_batches: list[ReviewBatch] | None = None,
     recovery_resumed: int = 0,
+    *,
+    feasibility_notes: tuple[str, ...],
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -869,10 +948,34 @@ def _build_dry_run_stats(
     # single mode embeds only known inputs, so its input estimate is exact;
     # triple mode's documentation prompt estimate is a lower bound.
     estimate_is_lower_bound = analysis_mode == "triple"
+    # Correction is opt-in.  The worst case is one extra call per planned per-agent
+    # documentation call; it is 0 when correction is disabled.  The baseline
+    # estimate stays the expected charge; the ceiling below is a worst case.
+    correction_enabled = bool(config.get("response_correction_enabled", False))
+    skip_rels: set[str] = set()
+    for rel_path in plan.agent_rels:
+        descriptor = file_map[rel_path]
+        try:
+            content = descriptor["path"].read_text(
+                encoding="utf-8-sig", errors="replace"
+            )
+        except Exception:
+            continue
+        if insufficient_source(content)[0]:
+            skip_rels.add(rel_path)
+    frozen_skip_rels = frozenset(skip_rels)
+    remaining = len(plan.agent_rels) - len(frozen_skip_rels)
+    estimated_calls = remaining * per_file
+    correction_possible_max = estimated_calls if correction_enabled else 0
     review_batches = review_batches or []
     profile_stats = (
         _base_profile_stats(
-            resolved_profile, profile_resolution, plan, file_map, review_batches
+            resolved_profile,
+            profile_resolution,
+            plan,
+            file_map,
+            review_batches,
+            feasibility_notes=feasibility_notes,
         )
         if resolved_profile is not None and profile_resolution is not None
         else {}
@@ -881,7 +984,7 @@ def _build_dry_run_stats(
         profile_stats["prompt_customization_security_review"] = "pending"
     if profile_stats:
         # Dry-run projects the documentation plan without attempting any call.
-        profile_stats["documentation_calls_planned"] = len(plan.agent_rels) * per_file
+        profile_stats["documentation_calls_planned"] = estimated_calls
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
@@ -891,21 +994,34 @@ def _build_dry_run_stats(
         "initial_calls_per_file": per_file,
         **scope_stats,
         "would_process": len(plan.process_rels),
-        "would_call_llm_for": len(plan.agent_rels),
+        "would_call_llm_for": remaining,
+        "would_skip_insufficient_source": len(frozen_skip_rels),
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": recovery_resumed,
         "forced": len(plan.forced_rels),
-        "estimated_calls": len(plan.agent_rels) * per_file,
+        "estimated_calls": estimated_calls,
+        "response_correction_enabled": correction_enabled,
+        "response_correction_calls_possible_max": correction_possible_max,
+        "estimated_calls_max_with_correction": estimated_calls + correction_possible_max,
         "estimated_input_tokens": _estimate_planned_input_tokens(
-            plan, file_map, config, resolved_profile
+            plan,
+            file_map,
+            config,
+            resolved_profile,
+            skip_rels=frozen_skip_rels,
+            review_batches=review_batches,
         ),
         "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
+        "max_files_candidate_files": len(plan.agent_rels),
         "max_files_exceeded": plan.max_files_exceeded,
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
+        "prompt_profile_scope_counts": _prompt_profile_scope_counts(
+            plan, file_map, resolved_profile
+        ),
         **profile_stats,
     }
 
@@ -916,11 +1032,13 @@ def _base_profile_stats(
     plan: PipelinePlan,
     file_map: dict[str, dict],
     batches: list[ReviewBatch],
+    *,
+    feasibility_notes: tuple[str, ...],
 ) -> dict:
     affected_rels = {
         rel
         for rel in plan.documented_rels
-        if resolved.is_active_for(file_map[rel].get("language", "generic"))
+        if resolved.is_active_for(resolved.scope_for(file_map[rel]).basename)
     }
     affected = len(affected_rels)
     return {
@@ -935,6 +1053,8 @@ def _base_profile_stats(
         "prompt_customization_security_review_calls_attempted": 0,
         "prompt_customization_security_warnings": 0,
         "prompt_customization_security_blocking_reasons": 0,
+        "prompt_customization_feasibility_notes": len(feasibility_notes),
+        "prompt_customization_feasibility_advisories": feasibility_notes,
         "documentation_calls_planned": 0,
         "documentation_calls_attempted": 0,
     }
@@ -983,6 +1103,9 @@ def _estimate_planned_input_tokens(
     file_map: dict[str, dict],
     config: dict,
     resolved_profile: ResolvedProfile | None = None,
+    *,
+    skip_rels: frozenset[str] = frozenset(),
+    review_batches: list[ReviewBatch] | tuple[ReviewBatch, ...] = (),
 ) -> int:
     """Estimate input tokens for the planned LLM calls — a lower bound.
 
@@ -1003,6 +1126,8 @@ def _estimate_planned_input_tokens(
     max_chars = config.get("max_content_chars", 12000)
     total = 0
     for rel_path in plan.agent_rels:
+        if rel_path in skip_rels:
+            continue
         descriptor = file_map[rel_path]
         try:
             content = descriptor["path"].read_text(encoding="utf-8-sig", errors="replace")
@@ -1015,21 +1140,18 @@ def _estimate_planned_input_tokens(
         language = descriptor.get("language", "generic")
         head_fraction = config.get("truncation_head_ratio", 0.70)
         content = truncate_for_llm(content, max_chars, head_fraction=head_fraction)
+        # The profile block is selected by extension scope (basename), matching
+        # exactly what real execution will send for this file.
+        bundle = (
+            resolved_profile.resolve_bundle(resolved_profile.scope_for(descriptor))
+            if resolved_profile is not None
+            else None
+        )
         if analysis_mode == "triple":
-            structure_shape = (
-                resolved_profile.resolve_block("structure", language)
-                if resolved_profile is not None
-                else None
-            )
-            dependency_shape = (
-                resolved_profile.resolve_block("dependency", language)
-                if resolved_profile is not None
-                else None
-            )
+            structure_shape = bundle.selections["structure"].block if bundle else None
+            dependency_shape = bundle.selections["dependency"].block if bundle else None
             documentation_shape = (
-                resolved_profile.resolve_block("documentation", language)
-                if resolved_profile is not None
-                else None
+                bundle.selections["documentation"].block if bundle else None
             )
             prompts = (
                 structure_agent.build_prompt(
@@ -1043,11 +1165,7 @@ def _estimate_planned_input_tokens(
                 ),
             )
         else:
-            combined_shape = (
-                resolved_profile.resolve_block("combined", language)
-                if resolved_profile is not None
-                else None
-            )
+            combined_shape = bundle.selections["combined"].block if bundle else None
             prompts = (
                 file_documentation_agent.build_prompt(
                     rel_path, content, imports, language, combined_shape
@@ -1055,4 +1173,6 @@ def _estimate_planned_input_tokens(
             )
         for system, prompt in prompts:
             total += estimate_tokens(system) + estimate_tokens(prompt)
+    for batch in review_batches:
+        total += estimate_tokens(REVIEW_SYSTEM) + estimate_tokens(batch.text)
     return total
