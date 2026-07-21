@@ -8,6 +8,8 @@ from codedoc.agents.orchestrator import Orchestrator
 from codedoc.agents.response_diagnostics import (
     CorrectionLedger,
 )
+from codedoc.core.execution_model import FileExecutionRequest
+from tests.support.execution_requests import make_execution_request
 
 class RoutingProvider:
     """Routes scripted responses per agent; can fail an agent's initial call."""
@@ -79,10 +81,8 @@ def _agent_of(prompt: str) -> str:
         return "dependency"
     return "structure"
 
-def _descriptor(tmp_path: Path) -> dict:
-    p = tmp_path / "m.py"
-    p.write_text("x = 1\n", encoding="utf-8")
-    return {"path": p, "rel_path": "m.py", "language": "python", "extension": ".py"}
+def _request(tmp_path: Path, *, mode: str = "single") -> FileExecutionRequest:
+    return make_execution_request(tmp_path, "m.py", "x = 1\n", analysis_mode=mode)
 
 def _orch(provider, *, mode="single", enabled, parallel=False):
     return Orchestrator(

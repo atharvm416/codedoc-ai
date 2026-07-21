@@ -10,6 +10,7 @@ Analyses import relationships:
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.agents.response_cleaning import clean_dependency_report
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
@@ -88,8 +89,16 @@ class DependencyAgent(BaseAgent):
         imports: list[str],
         language: str,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
-        truncated = self._truncate(content, file_path)
+        if call_context is not None:
+            requested_shape = call_context.resolved_shape_bundle.selections[
+                "dependency"
+            ].block
+        truncated = self._truncate(content, file_path, call_context=call_context)
         system, prompt = build_prompt(
             file_path, truncated, imports, language, requested_shape,
         )
@@ -98,7 +107,12 @@ class DependencyAgent(BaseAgent):
             if requested_shape is not None
             else default_shape_block("triple", "dependency")
         )
-        raw = self._call_llm(prompt, system=system)
+        raw = self._call_llm(
+            prompt,
+            system=system,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
+        )
         cleaned = self._finalize_response(
             raw,
             mode="triple",
@@ -110,6 +124,7 @@ class DependencyAgent(BaseAgent):
             imports=imports,
             language=language,
             shape_block=shape_block,
+            planned_call=planned_call,
         )
 
         dep_analysis = cleaned.get("dependencies_analysis", {})

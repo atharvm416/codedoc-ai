@@ -13,7 +13,7 @@ from tests.support.providers import (
 )
 from codedoc.agents.orchestrator import Orchestrator
 from tests.support.prompt_delivery_cases import _profile
-from tests.support.prompt_delivery_cases import _descriptor
+from tests.support.prompt_delivery_cases import _request
 
 _JS_OVERRIDE = "Explain the JavaScript module for a reviewer, with concrete detail."
 
@@ -220,9 +220,7 @@ def test_provider_adapters_receive_identical_documentation_blocks(
     resolved = _profile({"single": {"fields": [
         {"key": "description", "type": "string", "instruction": "Custom desc"}]}})
     shape = resolved.resolve_block("combined", "a.py")
-    result = Orchestrator(provider, resolved_profile=resolved).process(
-        _descriptor(), "x=1", []
-    )
+    result = Orchestrator(provider).process(_request(resolved, "x=1"))
     assert result["description"] == "adapter result"
     if class_name == "OpenAIProvider":
         sent = rec["create_kwargs"]["messages"][-1]["content"]

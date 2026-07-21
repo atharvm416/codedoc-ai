@@ -15,7 +15,6 @@ from codedoc.cli.cli import (
 from tests.support.feasibility_cases import _cross_file_profile
 from tests.support.feasibility_cases import _ReviewFake
 from codedoc.core.loader import load_config
-import codedoc.core.execution as ex
 from codedoc.utils.errors import (
     UnrecoverableProviderError,
 )
@@ -363,10 +362,6 @@ def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert "crash-recovery file was created or confirmed" in err
     assert not list(tmp_path.glob("**/crash_recovery.json"))
-
-@pytest.fixture(autouse=True)
-def _no_parse(monkeypatch):
-    monkeypatch.setattr(ex, "parse_file", lambda descriptor: [])
 
 @pytest.mark.parametrize(
     "category, expected_code",

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import concurrent.futures
 import time
+from pathlib import PurePosixPath
 
 from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.file_documentation_agent import FileDocumentationAgent
@@ -25,11 +26,17 @@ from codedoc.agents.dependency_agent import DependencyAgent
 from codedoc.agents.documentation_agent import DocumentationAgent
 from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
 from codedoc.agents.response_diagnostics import CorrectionLedger
+from codedoc.core.execution_model import (
+    CallManifestTracker,
+    FileExecutionRequest,
+    PlannedCall,
+    documentation_call_id,
+)
 from codedoc.core.record_meta import (
     expected_analysis_identity,
     expected_max_context_revision,
 )
-from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST, ResolvedProfile
+from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.logger import get_logger
@@ -37,6 +44,16 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 VALID_ANALYSIS_MODES = ("single", "triple")
+
+
+def _extension_of(rel_path: str) -> str:
+    """Derive the scanner-equivalent lowercased extension from a rel_path.
+
+    Identical to the scanner's own ``file_path.suffix.lower()`` for the same
+    file: a project-relative path and its absolute counterpart share the same
+    suffix, so this never disagrees with the descriptor field it replaces.
+    """
+    return PurePosixPath(rel_path).suffix.lower()
 
 
 def initial_calls_per_file(analysis_mode: str) -> int:
@@ -81,9 +98,9 @@ class Orchestrator:
         usage: UsageAccumulator | None = None,
         analysis_mode: str = "single",
         truncation_head_ratio: float = 0.70,
-        resolved_profile: ResolvedProfile | None = None,
         response_correction_enabled: bool = False,
         correction_ledger: CorrectionLedger | None = None,
+        call_tracker: CallManifestTracker | None = None,
     ) -> None:
         if analysis_mode not in VALID_ANALYSIS_MODES:
             raise ValueError(
@@ -92,25 +109,39 @@ class Orchestrator:
             )
         self.llm = llm
         self.parallel = parallel
+        # Retained only to construct each agent's own defensive-truncation
+        # ceiling below; per-call decisions for an orchestrated file come from
+        # the immutable ``AgentCallContext`` passed into ``process()``.
         self.max_content_chars = max_content_chars
         self.analysis_mode = analysis_mode
         self.truncation_head_ratio = truncation_head_ratio
-        self.resolved_profile = resolved_profile
+        self._call_tracker = call_tracker
         # The combined agent powers the default single-call path.
         self._file_agent = FileDocumentationAgent(
-            llm, max_content_chars=max_content_chars, usage=usage
+            llm, max_content_chars=max_content_chars, usage=usage,
+            call_tracker=call_tracker,
         )
         # The three legacy agents remain instantiated and are used by triple mode.
-        self._structure_agent = StructureAgent(llm, max_content_chars=max_content_chars, usage=usage)
-        self._dependency_agent = DependencyAgent(llm, max_content_chars=max_content_chars, usage=usage)
-        self._doc_agent = DocumentationAgent(llm, max_content_chars=max_content_chars, usage=usage)
+        self._structure_agent = StructureAgent(
+            llm, max_content_chars=max_content_chars, usage=usage,
+            call_tracker=call_tracker,
+        )
+        self._dependency_agent = DependencyAgent(
+            llm, max_content_chars=max_content_chars, usage=usage,
+            call_tracker=call_tracker,
+        )
+        self._doc_agent = DocumentationAgent(
+            llm, max_content_chars=max_content_chars, usage=usage,
+            call_tracker=call_tracker,
+        )
         # Build exactly one shared correction component and inject it into all four
         # agents.  Only when a run-level ledger is supplied; a directly constructed
         # orchestrator (no ledger) leaves every agent's ``_correction`` as ``None``,
         # so an eligible response-contract failure is final with no correction call.
         if correction_ledger is not None:
             correction = ResponseCorrectionAgent(
-                llm, usage, correction_ledger, response_correction_enabled
+                llm, usage, correction_ledger, response_correction_enabled,
+                call_tracker=call_tracker,
             )
             for agent in (
                 self._file_agent,
@@ -120,35 +151,34 @@ class Orchestrator:
             ):
                 agent._correction = correction
 
-    def process(
-        self,
-        descriptor: dict,
-        content: str,
-        imports: list[str],
-    ) -> dict:
+    def process(self, request: FileExecutionRequest) -> dict:
         """
         Run all agents on one file and return the merged result.
 
         Args:
-            descriptor: file descriptor from scanner
-            content:    raw file content
-            imports:    import strings from parser
+            request: the frozen execution request for this file — content,
+                imports, and the immutable per-call context (mode, ceiling,
+                ratio, and this file's resolved prompt-profile bundle) all come
+                from *request*; nothing is re-read or recomputed here.
 
         Returns:
             Merged dict with structure and dependency analysis for this file.
         """
-        file_path = descriptor["rel_path"]
-        language = descriptor.get("language", "generic")
+        file_path = request.rel_path
+        language = request.language
+        content = request.content
+        imports = list(request.imports)
+        context = request.context
 
         # Truncate once here so all three agents receive the exact same
         # string and the marker stays inside the configured ceiling.  One
         # WARNING per processed file — the agents' own fallback is DEBUG.
         original_chars = len(content)
-        if original_chars > self.max_content_chars:
+        if original_chars > context.max_content_chars:
             content = truncate_for_llm(
                 content,
-                self.max_content_chars,
-                head_fraction=self.truncation_head_ratio,
+                context.max_content_chars,
+                head_fraction=context.truncation_head_ratio,
             )
             logger.warning(
                 "Content truncated: %s (%d chars -> %d chars sent; configured "
@@ -157,45 +187,52 @@ class Orchestrator:
                 file_path,
                 original_chars,
                 len(content),
-                self.max_content_chars,
+                context.max_content_chars,
             )
 
         logger.debug(
             "Running %s-mode analysis for %s with %s",
-            self.analysis_mode,
+            context.analysis_mode,
             file_path,
             self.llm.provider_name,
         )
 
-        # Resolve one bundle per file (extension scope) and thread it through every
-        # agent prompt and the stamped record digest.  ``None`` when no profile is
-        # active, exactly reproducing the developer-standard prompts.
-        bundle = (
-            self.resolved_profile.resolve_bundle(
-                self.resolved_profile.scope_for(descriptor)
+        # This file's already-resolved prompt-profile bundle (extension scope),
+        # threaded through every agent prompt and the stamped record digest.
+        bundle = context.resolved_shape_bundle
+        additional_attempt = bool(
+            self._call_tracker is not None
+            and self._call_tracker.owner_was_attempted(
+                "file-documentation", file_path
             )
-            if self.resolved_profile is not None
-            else None
         )
 
-        if self.analysis_mode == "triple":
-            result = self._process_triple(descriptor, content, imports, language, bundle)
+        if context.analysis_mode == "triple":
+            result = self._process_triple(
+                file_path, content, imports, language, bundle,
+                context=context,
+                additional_attempt=additional_attempt,
+            )
         else:
-            result = self._process_single(descriptor, content, imports, language, bundle)
+            result = self._process_single(
+                file_path, content, imports, language, bundle,
+                context=context,
+                additional_attempt=additional_attempt,
+            )
 
         # Attach cache-identity keys to every successful flat result before it is
         # recorded.  Failed results (an error on structure/dependencies/
         # documentation) are never recorded, so they must not carry the identity.
         if result.get("state") == "checked" and not _result_has_agent_error(result):
-            result.update(expected_analysis_identity(self.analysis_mode))
+            result.update(expected_analysis_identity(context.analysis_mode))
             # Stamp the truncation identity only for a file actually large
             # enough to be truncated (omit it otherwise so files that fit the
             # ceiling stay reusable across ceiling/ratio changes).  ``original_chars``
             # is the pre-truncation source length.
             mcr = expected_max_context_revision(
                 original_chars,
-                max_chars=self.max_content_chars,
-                head_ratio=self.truncation_head_ratio,
+                max_chars=context.max_content_chars,
+                head_ratio=context.truncation_head_ratio,
             )
             if mcr is not None:
                 result["_max_context_revision"] = mcr
@@ -208,15 +245,20 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _process_single(
-        self, descriptor: dict, content: str, imports: list[str], language: str,
+        self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None,
+        *, context=None, additional_attempt: bool = False,
     ) -> dict:
         """One combined provider call, merged into the flat record."""
-        file_path = descriptor["rel_path"]
         t_start = time.monotonic()
         shape = self._profile_block(bundle, "combined")
         cleaned = self._call_agent(
-            self._file_agent, file_path, content, imports, language, shape
+            self._file_agent, file_path, content, imports, language, shape,
+            context=context,
+            planned_call=self._planned_call(
+                file_path, "single", "combined", 1
+            ),
+            additional_attempt=additional_attempt,
         )
         elapsed = time.monotonic() - t_start
 
@@ -226,12 +268,14 @@ class Orchestrator:
                 file_path,
                 cleaned.get("error", "unknown"),
             )
-            return self._merge_single_failure(descriptor, imports, cleaned)
+            return self._merge_single_failure(file_path, language, imports, cleaned)
 
         logger.info("[FILE] %s | combined ok  %.1fs", file_path, elapsed)
-        return self._merge_single(descriptor, imports, cleaned)
+        return self._merge_single(file_path, language, imports, cleaned)
 
-    def _merge_single(self, descriptor: dict, imports: list[str], cleaned: dict) -> dict:
+    def _merge_single(
+        self, file_path: str, language: str, imports: list[str], cleaned: dict
+    ) -> dict:
         """Merge a cleaned combined response with deterministic identity fields."""
         description = cleaned.get("description", "")
         role = cleaned.get("role_in_system", "")
@@ -257,9 +301,9 @@ class Orchestrator:
         }
         return {
             # Identity / parser (deterministic — never from model output)
-            "file_path": descriptor["rel_path"],
-            "language": descriptor.get("language", ""),
-            "extension": descriptor.get("extension", ""),
+            "file_path": file_path,
+            "language": language,
+            "extension": _extension_of(file_path),
             "imports": imports,
             # Combined model enrichment
             "description": description,
@@ -276,7 +320,7 @@ class Orchestrator:
         }
 
     def _merge_single_failure(
-        self, descriptor: dict, imports: list[str], failure: dict
+        self, file_path: str, language: str, imports: list[str], failure: dict
     ) -> dict:
         """Flat record for a failed combined call: identity preserved, error on
         the ``documentation`` key so ``_agent_errors()`` detects one failure.
@@ -298,9 +342,9 @@ class Orchestrator:
             if marker_key in failure:
                 documentation[marker_key] = failure[marker_key]
         return {
-            "file_path": descriptor["rel_path"],
-            "language": descriptor.get("language", ""),
-            "extension": descriptor.get("extension", ""),
+            "file_path": file_path,
+            "language": language,
+            "extension": _extension_of(file_path),
             "imports": imports,
             "description": "",
             "role_in_system": "",
@@ -320,19 +364,23 @@ class Orchestrator:
     # ------------------------------------------------------------------
 
     def _process_triple(
-        self, descriptor: dict, content: str, imports: list[str], language: str,
+        self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None,
+        *, context=None, additional_attempt: bool = False,
     ) -> dict:
-        file_path = descriptor["rel_path"]
         t_start = time.monotonic()
 
         if self.parallel:
             structure, dependencies = self._run_parallel(
-                file_path, content, imports, language, bundle, t_start
+                file_path, content, imports, language, bundle, t_start,
+                context=context,
+                additional_attempt=additional_attempt,
             )
         else:
             structure, dependencies = self._run_sequential(
-                file_path, content, imports, language, bundle, t_start
+                file_path, content, imports, language, bundle, t_start,
+                context=context,
+                additional_attempt=additional_attempt,
             )
 
         # DocumentationAgent always gets the other agents' context
@@ -340,12 +388,22 @@ class Orchestrator:
         doc_shape = self._profile_block(bundle, "documentation")
         if doc_shape is None:
             documentation = self._doc_agent._safe_run_with_context(
-                file_path, content, imports, language, structure, dependencies
+                file_path, content, imports, language, structure, dependencies,
+                call_context=context,
+                planned_call=self._planned_call(
+                    file_path, "triple", "documentation", 3
+                ),
+                additional_attempt=additional_attempt,
             )
         else:
             documentation = self._doc_agent._safe_run_with_context(
                 file_path, content, imports, language, structure, dependencies,
                 doc_shape,
+                call_context=context,
+                planned_call=self._planned_call(
+                    file_path, "triple", "documentation", 3
+                ),
+                additional_attempt=additional_attempt,
             )
         elapsed_doc = time.monotonic() - t_doc_start
         if isinstance(documentation, dict) and documentation.get("error"):
@@ -357,7 +415,7 @@ class Orchestrator:
         else:
             logger.info("[FILE] %s | documentation ok  %.1fs", file_path, elapsed_doc)
 
-        return self._merge(descriptor, imports, structure, dependencies, documentation)
+        return self._merge(file_path, language, imports, structure, dependencies, documentation)
 
     # ------------------------------------------------------------------
     # Internal runners (triple mode)
@@ -366,6 +424,7 @@ class Orchestrator:
     def _run_parallel(
         self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None, t_start: float | None = None,
+        *, context=None, additional_attempt: bool = False,
     ) -> tuple[dict, dict]:
         if t_start is None:
             t_start = time.monotonic()
@@ -374,11 +433,21 @@ class Orchestrator:
                 self._call_agent, self._structure_agent,
                 file_path, content, imports, language,
                 self._profile_block(bundle, "structure"),
+                context=context,
+                planned_call=self._planned_call(
+                    file_path, "triple", "structure", 1
+                ),
+                additional_attempt=additional_attempt,
             )
             future_dep = pool.submit(
                 self._call_agent, self._dependency_agent,
                 file_path, content, imports, language,
                 self._profile_block(bundle, "dependency"),
+                context=context,
+                planned_call=self._planned_call(
+                    file_path, "triple", "dependency", 2
+                ),
+                additional_attempt=additional_attempt,
             )
             structure = future_struct.result()
             dependencies = future_dep.result()
@@ -391,12 +460,18 @@ class Orchestrator:
     def _run_sequential(
         self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None, t_start: float | None = None,
+        *, context=None, additional_attempt: bool = False,
     ) -> tuple[dict, dict]:
         if t_start is None:
             t_start = time.monotonic()
         structure = self._call_agent(
             self._structure_agent, file_path, content, imports, language,
             self._profile_block(bundle, "structure"),
+            context=context,
+            planned_call=self._planned_call(
+                file_path, "triple", "structure", 1
+            ),
+            additional_attempt=additional_attempt,
         )
         elapsed_struct = time.monotonic() - t_start
         self._log_agent_result("structure", file_path, structure, elapsed_struct)
@@ -405,6 +480,11 @@ class Orchestrator:
         dependencies = self._call_agent(
             self._dependency_agent, file_path, content, imports, language,
             self._profile_block(bundle, "dependency"),
+            context=context,
+            planned_call=self._planned_call(
+                file_path, "triple", "dependency", 2
+            ),
+            additional_attempt=additional_attempt,
         )
         elapsed_dep = time.monotonic() - t_dep
         self._log_agent_result("dependencies", file_path, dependencies, elapsed_dep)
@@ -418,10 +498,33 @@ class Orchestrator:
         return bundle.selections[agent].block
 
     @staticmethod
-    def _call_agent(agent, file_path, content, imports, language, shape):
-        if shape is None:
-            return agent._safe_run(file_path, content, imports, language)
-        return agent._safe_run(file_path, content, imports, language, shape)
+    def _call_agent(
+        agent, file_path, content, imports, language, shape, *,
+        context=None, planned_call=None, additional_attempt: bool = False,
+    ):
+        return agent._safe_run(
+            file_path,
+            content,
+            imports,
+            language,
+            shape,
+            call_context=context,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
+        )
+
+    @staticmethod
+    def _planned_call(
+        file_path: str, mode: str, agent: str, ordinal: int
+    ) -> PlannedCall:
+        return PlannedCall(
+            call_id=documentation_call_id(
+                file_path, mode, agent, ordinal
+            ),
+            category="file-documentation",
+            owner=file_path,
+            ordinal=ordinal,
+        )
 
     def _log_agent_result(self, agent_label: str, file_path: str, result: dict, elapsed: float) -> None:
         if isinstance(result, dict) and result.get("error"):
@@ -440,7 +543,8 @@ class Orchestrator:
 
     def _merge(
         self,
-        descriptor: dict,
+        file_path: str,
+        language: str,
         imports: list[str],
         structure: dict,
         dependencies: dict,
@@ -449,9 +553,9 @@ class Orchestrator:
         """Combine all agent outputs into one flat result dict."""
         return {
             # Identity
-            "file_path": descriptor["rel_path"],
-            "language": descriptor.get("language", ""),
-            "extension": descriptor.get("extension", ""),
+            "file_path": file_path,
+            "language": language,
+            "extension": _extension_of(file_path),
 
             # From parser (deterministic)
             "imports": imports,

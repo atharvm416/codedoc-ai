@@ -15,20 +15,19 @@ from codedoc.utils.logger import get_logger
 logger = get_logger(__name__)
 
 
-def parse(file_path: Path, language: str = "python") -> list[str]:
+def parse_text(source: str, language: str = "python", *, file_path: str = "<source>") -> list[str]:
     """
-    Extract import strings from a Python file using AST.
+    Extract import strings from already-decoded Python source using AST.
     Returns module names as strings, e.g. ["os", "pathlib", ".utils"].
+
+    ``file_path`` is used only for error text and logging (the AST filename),
+    so this and :func:`parse` produce literal-identical imports for the same
+    decoded text.
     """
     try:
-        source = file_path.read_text(encoding="utf-8-sig", errors="replace")
-    except OSError as exc:
-        raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
-
-    try:
-        tree = ast.parse(source, filename=str(file_path))
+        tree = ast.parse(source, filename=file_path)
     except SyntaxError as exc:
-        raise ParseError(str(file_path), f"Python SyntaxError: {exc}") from exc
+        raise ParseError(file_path, f"Python SyntaxError: {exc}") from exc
 
     imports: list[str] = []
     seen: set[str] = set()
@@ -50,5 +49,18 @@ def parse(file_path: Path, language: str = "python") -> list[str]:
                 seen.add(full)
                 imports.append(full)
 
-    logger.debug("PythonParser found %d imports in %s", len(imports), file_path.name)
+    logger.debug("PythonParser found %d imports in %s", len(imports), file_path)
     return imports
+
+
+def parse(file_path: Path, language: str = "python") -> list[str]:
+    """
+    Extract import strings from a Python file using AST.
+    Returns module names as strings, e.g. ["os", "pathlib", ".utils"].
+    """
+    try:
+        source = file_path.read_text(encoding="utf-8-sig", errors="replace")
+    except OSError as exc:
+        raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
+
+    return parse_text(source, language, file_path=str(file_path))

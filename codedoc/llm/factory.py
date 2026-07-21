@@ -9,10 +9,9 @@ Active providers
   anthropic — Anthropic Claude
   gemini    — Google Gemini
 
-Reserved compatibility provider
--------------------------------
-  ``codedoc.llm.local_provider`` remains importable for compatibility, but the
-  factory and CLI do not expose a local-provider choice.
+An OpenAI-compatible local or self-hosted endpoint (e.g. Ollama, LM Studio) is
+reached through ``OpenAIProvider`` plus ``api_base_url`` — there is no separate
+local-provider choice.
 """
 
 from __future__ import annotations

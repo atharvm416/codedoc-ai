@@ -211,6 +211,34 @@ def _parse_go(content: str) -> list[str]:
     return imports
 
 
+def parse_text(source: str, language: str, *, file_path: str = "<source>") -> list[str]:
+    """
+    Extract import strings from already-decoded source using regex.
+    Returns a list of raw import strings (not resolved to paths).
+
+    ``file_path`` is used only for logging, so this and :func:`parse` produce
+    literal-identical imports for the same decoded text.
+    """
+    if language == "go":
+        imports = _parse_go(source)
+        logger.debug("GenericParser [go] found %d imports in %s", len(imports), file_path)
+        return imports
+
+    patterns = _PATTERNS.get(language, _FALLBACK_PATTERNS)
+    imports: list[str] = []
+    seen: set[str] = set()
+
+    for pattern, group in patterns:
+        for match in pattern.finditer(source):
+            imp = match.group(group).strip()
+            if imp and imp not in seen:
+                seen.add(imp)
+                imports.append(imp)
+
+    logger.debug("GenericParser [%s] found %d imports in %s", language, len(imports), file_path)
+    return imports
+
+
 def parse(file_path: Path, language: str) -> list[str]:
     """
     Extract import strings from a file using regex.
@@ -221,21 +249,4 @@ def parse(file_path: Path, language: str) -> list[str]:
     except OSError as exc:
         raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
 
-    if language == "go":
-        imports = _parse_go(content)
-        logger.debug("GenericParser [go] found %d imports in %s", len(imports), file_path.name)
-        return imports
-
-    patterns = _PATTERNS.get(language, _FALLBACK_PATTERNS)
-    imports: list[str] = []
-    seen: set[str] = set()
-
-    for pattern, group in patterns:
-        for match in pattern.finditer(content):
-            imp = match.group(group).strip()
-            if imp and imp not in seen:
-                seen.add(imp)
-                imports.append(imp)
-
-    logger.debug("GenericParser [%s] found %d imports in %s", language, len(imports), file_path.name)
-    return imports
+    return parse_text(content, language, file_path=str(file_path))

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import pytest
 from codedoc.utils.errors import UnrecoverableProviderError
+from tests.support.execution_requests import make_execution_requests
 from tests.support.response_correction_cases import RoutingProvider
 import time
 import codedoc.core.execution as ex
@@ -59,7 +60,7 @@ class _RaisingOrch:
         self._exc = exc
         self.calls = 0
 
-    def process(self, descriptor, content, imports):
+    def process(self, request):
         self.calls += 1
         raise self._exc
 
@@ -74,19 +75,8 @@ class _FakeQueue:
     def mark_failed(self, rel_path, reason):
         self.failed.append((rel_path, reason))
 
-def _descriptors(tmp_path, count):
-    descriptors = []
-    for i in range(count):
-        f = tmp_path / f"f{i}.py"
-        f.write_text("x = 1\n", encoding="utf-8")
-        descriptors.append(
-            {"rel_path": f"f{i}.py", "path": f, "language": "python", "extension": ".py"}
-        )
-    return descriptors
-
-@pytest.fixture(autouse=True)
-def _no_parse(monkeypatch):
-    monkeypatch.setattr(ex, "parse_file", lambda descriptor: [])
+def _requests(tmp_path, count):
+    return make_execution_requests(tmp_path, [f"f{i}.py" for i in range(count)])
 
 def _terminal_provider():
     class _Provider:
@@ -114,7 +104,7 @@ def test_sequential_abort_without_retry(tmp_path, exc):
 
     with pytest.raises(UnrecoverableProviderError) as excinfo:
         ex._process_files_sequentially(
-            _descriptors(tmp_path, 3),
+            _requests(tmp_path, 3),
             orch,
             queue,
             stats,
@@ -133,18 +123,18 @@ def test_sequential_abort_without_retry(tmp_path, exc):
     assert queue.failed == []
 
 def test_sequential_input_permanent_marks_failed_without_retry_and_continues(tmp_path):
-    descriptors = _descriptors(tmp_path, 2)
+    requests = _requests(tmp_path, 2)
 
     class _Orch:
         def __init__(self):
             self.llm = _LLM("anthropic")
             self.calls = 0
 
-        def process(self, descriptor, content, imports):
+        def process(self, request):
             self.calls += 1
-            if descriptor["rel_path"] == "f0.py":
+            if request.rel_path == "f0.py":
                 raise INPUT_PERMANENT
-            return {"file_path": descriptor["rel_path"], "language": "python"}
+            return {"file_path": request.rel_path, "language": "python"}
 
     orch = _Orch()
     queue = _FakeQueue()
@@ -153,7 +143,7 @@ def test_sequential_input_permanent_marks_failed_without_retry_and_continues(tmp
     new_results: dict = {}
 
     outcome = ex._process_files_sequentially(
-        descriptors,
+        requests,
         orch,
         queue,
         stats,
@@ -179,11 +169,11 @@ def test_sequential_transient_error_still_retries_and_succeeds(tmp_path):
             self.llm = _LLM("openai")
             self.calls = 0
 
-        def process(self, descriptor, content, imports):
+        def process(self, request):
             self.calls += 1
             if self.calls == 1:
                 raise LLMError("openai", "temporary provider outage")
-            return {"file_path": descriptor["rel_path"], "language": "python"}
+            return {"file_path": request.rel_path, "language": "python"}
 
     orch = _FlakyOrch()
     queue = _FakeQueue()
@@ -191,7 +181,7 @@ def test_sequential_transient_error_still_retries_and_succeeds(tmp_path):
     reporter = ErrorReporter()
 
     ex._process_files_sequentially(
-        _descriptors(tmp_path, 1),
+        _requests(tmp_path, 1),
         orch,
         queue,
         stats,
@@ -220,7 +210,7 @@ def test_parallel_abort_without_retry(tmp_path, exc):
 
     with pytest.raises(UnrecoverableProviderError) as excinfo:
         ex._process_descriptor_batch(
-            _descriptors(tmp_path, 4),
+            _requests(tmp_path, 4),
             orch,
             queue,
             stats,
@@ -240,7 +230,7 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
     them all (mirrors the fatal-persistence cancellation contract)."""
 
     class _SlowAfterFirst(_RaisingOrch):
-        def process(self, descriptor, content, imports):
+        def process(self, request):
             self.calls += 1
             if self.calls > 1:
                 time.sleep(0.1)  # would-be later work; should be cancelled
@@ -254,7 +244,7 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
 
     with pytest.raises(UnrecoverableProviderError):
         ex._process_descriptor_batch(
-            _descriptors(tmp_path, 6),
+            _requests(tmp_path, 6),
             orch,
             queue,
             stats,
@@ -264,19 +254,19 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
         )
 
     # At most one extra task may already be running when the abort is observed;
-    # the remaining queued descriptors must be cancelled, not all started.
+    # the remaining queued requests must be cancelled, not all started.
     assert orch.calls <= 2
 
 def test_parallel_input_permanent_is_recorded_without_sequential_retry(tmp_path):
-    descriptors = _descriptors(tmp_path, 2)
+    requests = _requests(tmp_path, 2)
 
     class _Orch:
         def __init__(self):
             self.llm = _LLM("anthropic")
             self.calls: dict[str, int] = {}
 
-        def process(self, descriptor, content, imports):
-            rel_path = descriptor["rel_path"]
+        def process(self, request):
+            rel_path = request.rel_path
             self.calls[rel_path] = self.calls.get(rel_path, 0) + 1
             if rel_path == "f0.py":
                 raise INPUT_PERMANENT
@@ -289,7 +279,7 @@ def test_parallel_input_permanent_is_recorded_without_sequential_retry(tmp_path)
     recorder = SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {})
 
     succeeded, rate_limited, retryable = ex._process_descriptor_batch(
-        descriptors,
+        requests,
         orch,
         queue,
         stats,

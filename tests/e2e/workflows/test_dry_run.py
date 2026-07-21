@@ -104,6 +104,7 @@ class TestDryRunRatioEstimate:
         """_estimate_planned_input_tokens reflects the configured head ratio."""
         from unittest.mock import MagicMock
         from codedoc.pipeline import _estimate_planned_input_tokens
+        from tests.support.execution_requests import make_execution_request
 
         # Create a file larger than max_content_chars so truncation fires
         src = tmp_path / "big.py"
@@ -122,8 +123,32 @@ class TestDryRunRatioEstimate:
         config_default = {"analysis_mode": "single", "max_content_chars": 500, "truncation_head_ratio": 0.70}
         config_alt = {"analysis_mode": "single", "max_content_chars": 500, "truncation_head_ratio": 0.10}
 
-        est_default = _estimate_planned_input_tokens(plan, file_map, config_default)
-        est_alt = _estimate_planned_input_tokens(plan, file_map, config_alt)
+        default_request = make_execution_request(
+            tmp_path,
+            "big.py",
+            "x = 1\n" * 5000,
+            max_content_chars=500,
+            truncation_head_ratio=0.70,
+        )
+        alt_request = make_execution_request(
+            tmp_path,
+            "big.py",
+            "x = 1\n" * 5000,
+            max_content_chars=500,
+            truncation_head_ratio=0.10,
+        )
+        est_default = _estimate_planned_input_tokens(
+            plan,
+            file_map,
+            config_default,
+            execution_requests={"big.py": default_request},
+        )
+        est_alt = _estimate_planned_input_tokens(
+            plan,
+            file_map,
+            config_alt,
+            execution_requests={"big.py": alt_request},
+        )
 
         # Both are positive; the estimates may differ because the head/tail content differs.
         assert est_default > 0

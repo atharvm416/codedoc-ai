@@ -109,6 +109,20 @@ def test_execution_does_not_receive_configuration_dictionary():
 def test_modules_import_cleanly(modname):
     assert importlib.import_module(modname) is not None
 
+@pytest.mark.parametrize(
+    "modname",
+    ["codedoc.bootstrap", "codedoc.llm.local_provider"],
+)
+def test_dormant_runtime_modules_are_removed(modname):
+    """The self-install check and the reserved local provider are both gone."""
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module(modname)
+
+def test_pipeline_no_longer_imports_bootstrap():
+    src = _source(pipeline)
+    assert "bootstrap" not in src
+    assert "ensure_codedoc_installed" not in src
+
 def test_resume_and_discovery_do_not_import_pipeline():
     for module in (resume, discovery, execution):
         assert "import codedoc.pipeline" not in _source(module)
@@ -149,6 +163,7 @@ def test_execution_context_fields():
         "stats",
         "new_results",
         "options",
+        "execution_requests",
     }
 
 def test_execute_agent_files_is_public_entry():

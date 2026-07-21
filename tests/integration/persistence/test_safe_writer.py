@@ -90,21 +90,18 @@ def test_5_parallel_worker_records_before_main_collects(tmp_path):
 
     sw.record = patched_record
 
-    descriptor = {
-        "rel_path": "main.py",
-        "path": tmp_path / "main.py",
-        "language": "python",
-    }
-    (tmp_path / "main.py").write_text("x=1\n")
+    from tests.support.execution_requests import make_execution_request
+
+    request = make_execution_request(tmp_path, "main.py", "x=1\n")
 
     class FakeOrchestrator:
         class llm:
             provider_name = "fake"
         @staticmethod
-        def process(d, content, imports):
+        def process(request):
             return {"language": "python", "description": "test"}
 
-    _process_and_record(descriptor, FakeOrchestrator(), sw)
+    _process_and_record(request, FakeOrchestrator(), sw)
 
     assert "main.py" in recorded, "record() must be called inside worker"
     data = json.loads(backup.read_text(encoding="utf-8"))

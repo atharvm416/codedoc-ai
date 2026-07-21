@@ -185,6 +185,19 @@ examples:
         ),
     )
     parser.add_argument(
+        "--max-planned-calls",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="max_planned_calls",
+        help=(
+            "Safety cap on initially planned LLM calls, including "
+            "prompt-customization reviews and initial documentation calls "
+            "(0 = unlimited). Checked before provider creation; retries and "
+            "corrections are excluded. (default: 0)"
+        ),
+    )
+    parser.add_argument(
         "--force-files",
         action="append",
         default=[],
@@ -425,6 +438,18 @@ def _print_dry_run_summary(stats: dict) -> None:
             "writing anything or calling any provider."
         )
 
+    if stats.get("max_planned_calls_exceeded"):
+        print(
+            "\n  WARNING: the plan has "
+            f"{stats.get('total_calls_planned', 0)} initially planned LLM call(s) "
+            f"({stats.get('prompt_customization_security_review_calls_planned', 0)} "
+            "prompt-customization review, "
+            f"{stats.get('documentation_calls_planned', 0)} initial documentation), "
+            f"exceeding --max-planned-calls {stats.get('max_planned_calls', 0)}. "
+            "The corresponding real run would stop with exit code 2 before "
+            "writing anything or calling any provider."
+        )
+
     conflicts = stats.get("ownership_conflicts") or []
     if conflicts:
         print(f"\n  WARNING: {len(conflicts)} output ownership conflict(s) found:")
@@ -482,11 +507,20 @@ def _print_run_summary(stats: dict) -> None:
 
     # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
+        initially_planned = stats.get(
+            "total_calls_planned", stats.get("planned_calls", 0)
+        )
         print(
             f"  LLM calls        : {stats.get('attempted_calls', 0)} attempted "
             f"({stats.get('successful_calls', 0)} ok, "
             f"{stats.get('failed_calls', 0)} failed; "
-            f"{stats.get('planned_calls', 0)} planned)"
+            f"{initially_planned} initially planned)"
+        )
+        print(
+            "  Logical calls    : "
+            f"{stats.get('attempted_logical_calls', 0)} attempted, "
+            f"{stats.get('planned_calls_not_attempted', 0)} planned-not-attempted; "
+            f"{stats.get('additional_attempts', 0)} additional attempt(s)"
         )
         print(
             f"  Tokens (approx.) : ~{stats.get('estimated_input_tokens', 0)} in / "
@@ -584,6 +618,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 bool(args.remove_skip_dirs),
                 args.dry_run,
                 args.max_files is not None,
+                args.max_planned_calls is not None,
                 bool(args.force_files),
                 args.allow_partial,
                 args.no_parallel,
@@ -659,6 +694,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["dry_run"] = True
     if args.max_files is not None:
         overrides["max_files"] = args.max_files
+    if args.max_planned_calls is not None:
+        overrides["max_planned_calls"] = args.max_planned_calls
     if args.force_files:
         overrides["force_files"] = args.force_files
     if args.allow_partial:

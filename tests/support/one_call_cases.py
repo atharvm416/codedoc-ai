@@ -29,6 +29,3 @@ class _CountingProvider:
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt, system)
-
-def _descriptor():
-    return {"rel_path": "pkg/mod.py", "language": "python", "extension": ".py"}

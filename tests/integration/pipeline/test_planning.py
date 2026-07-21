@@ -10,6 +10,7 @@ from tests.support.pipeline_scenarios import _cache_identity
 from tests.support.pipeline_scenarios import write_existing_json
 from tests.support.pipeline_scenarios import write_existing_md
 import logging
+from pathlib import Path
 import pytest
 from codedoc.core.record_meta import ANALYSIS_REVISION
 from tests.support.pipeline_usage import write_py
@@ -423,6 +424,209 @@ def test_missing_and_unselected_forced_paths_warn_once(tmp_path, caplog):
     assert not plan.forced_rels
     assert caplog.text.count("missing.py") == 1
     assert caplog.text.count("other.py") == 1
+
+
+def test_source_snapshot_race_rebuilds_planning_once(tmp_path, monkeypatch):
+    source = tmp_path / "main.py"
+    write_py(source, "old = 1\n")
+    file_map = {
+        "main.py": {
+            "path": source,
+            "rel_path": "main.py",
+            "language": "python",
+            "extension": ".py",
+        }
+    }
+    graph = make_graph("main.py")
+    routing_hashes = iter(("route-v1", "route-v2"))
+    snapshots = iter(
+        (
+            ("snapshot-v2", "intermediate = 2\n"),
+            ("route-v2", "stable = 3\n"),
+        )
+    )
+    monkeypatch.setattr(
+        "codedoc.core.planning.compute_file_hash",
+        lambda _path: next(routing_hashes),
+    )
+    monkeypatch.setattr(
+        "codedoc.core.planning.read_source_snapshot",
+        lambda _path: next(snapshots),
+    )
+
+    plan, materials = build_pipeline_plan(
+        file_map,
+        graph,
+        {"main.py"},
+        "main.py",
+        {},
+        [],
+        {"propagate_changes": True, "max_files": 0},
+    )
+
+    assert plan.agent_rels == frozenset({"main.py"})
+    request = materials.execution_requests["main.py"]
+    assert request.content_hash == "route-v2"
+    assert request.content == "stable = 3\n"
+
+
+def test_source_snapshot_second_race_fails_deterministically(tmp_path, monkeypatch):
+    source = tmp_path / "main.py"
+    write_py(source, "old = 1\n")
+    file_map = {
+        "main.py": {
+            "path": source,
+            "rel_path": "main.py",
+            "language": "python",
+            "extension": ".py",
+        }
+    }
+    graph = make_graph("main.py")
+    routing_hashes = iter(("route-v1", "route-v3"))
+    snapshots = iter(
+        (
+            ("snapshot-v2", "intermediate = 2\n"),
+            ("snapshot-v4", "still_changing = 4\n"),
+        )
+    )
+    monkeypatch.setattr(
+        "codedoc.core.planning.compute_file_hash",
+        lambda _path: next(routing_hashes),
+    )
+    monkeypatch.setattr(
+        "codedoc.core.planning.read_source_snapshot",
+        lambda _path: next(snapshots),
+    )
+
+    with pytest.raises(ConfigError, match="changed again on the retry"):
+        build_pipeline_plan(
+            file_map,
+            graph,
+            {"main.py"},
+            "main.py",
+            {},
+            [],
+            {"propagate_changes": True, "max_files": 0},
+        )
+
+def test_stale_source_rebuilds_dependency_routing_not_only_snapshots(
+    tmp_path, monkeypatch
+):
+    """The dependency graph is parsed before routing hashes are taken, so a
+    detected stale revision means routing itself may have observed it. The
+    pipeline — which owns scanning and graph construction — must rebuild scan,
+    parse, graph, and entry selection once, not re-read snapshots against the
+    graph that already saw the stale revision."""
+    import codedoc.core.planning as planning_mod
+    import codedoc.pipeline as pipeline_mod
+
+    main = tmp_path / "main.py"
+    # Pre-edit revision: main.py imports nothing, so the first graph has no edge.
+    write_py(main, "VALUE = 1\n")
+    write_py(tmp_path / "helper.py", "HELPER = 2\n")
+
+    graphs_built: list[dict[str, list[str]]] = []
+    real_build_graph = pipeline_mod._build_graph
+
+    def _recording_build_graph(all_files, root, error_reporter):
+        graph, file_map, unresolved = real_build_graph(all_files, root, error_reporter)
+        graphs_built.append(
+            {rel: sorted(graph.dependencies_of(rel)) for rel in sorted(file_map)}
+        )
+        return graph, file_map, unresolved
+
+    monkeypatch.setattr(pipeline_mod, "_build_graph", _recording_build_graph)
+
+    # Introduce the concurrent edit inside planning, after main.py's routing
+    # hash has been taken but before its canonical snapshot is read — the exact
+    # window the stale-revision check exists to detect.
+    real_hash = planning_mod.compute_file_hash
+    edited = {"done": False}
+
+    def _hash_then_edit(path):
+        digest = real_hash(path)
+        if not edited["done"] and Path(path).name == "main.py":
+            edited["done"] = True
+            write_py(main, "import helper\nVALUE = 1\n")
+        return digest
+
+    monkeypatch.setattr(planning_mod, "compute_file_hash", _hash_then_edit)
+
+    class _Fake:
+        provider_name = "fake"
+
+        def complete_json(self, prompt, system=""):
+            return json.dumps({"description": "d"})
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    monkeypatch.setattr(pipeline_mod, "create_provider", lambda _cfg: _Fake())
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": None,
+            "auto_entry_candidates": [],
+            "documentation_scope": "all",
+            "max_parallel_files": 1,
+        },
+    )
+
+    # Exactly one rebuild: the graph was constructed twice, never more.
+    assert len(graphs_built) == 2
+    # The first graph observed the stale, import-free revision; the rebuilt one
+    # carries the edge the concurrent edit introduced.
+    assert graphs_built[0]["main.py"] == []
+    assert graphs_built[1]["main.py"] == ["helper.py"]
+    assert stats["checked"] == 2
+
+def test_second_stale_revision_fails_before_every_provider_side_effect(
+    tmp_path, monkeypatch
+):
+    """A source that changes again on the rebuild is a concurrent-modification
+    error, reported before usage accounting, provider creation, any
+    confirmation callback, or writer initialization."""
+    import codedoc.core.planning as planning_mod
+
+    main = tmp_path / "main.py"
+    write_py(main, "VALUE = 1\n")
+
+    real_hash = planning_mod.compute_file_hash
+    edits = {"count": 0}
+
+    def _hash_then_edit(path):
+        digest = real_hash(path)
+        if Path(path).name == "main.py":
+            edits["count"] += 1
+            write_py(main, f"VALUE = {edits['count'] + 1}\n")
+        return digest
+
+    monkeypatch.setattr(planning_mod, "compute_file_hash", _hash_then_edit)
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _cfg: pytest.fail("concurrent-modification error created a provider"),
+    )
+    monkeypatch.setattr(
+        "codedoc.pipeline.UsageAccumulator",
+        lambda *a, **k: pytest.fail("concurrent-modification error created usage"),
+    )
+    monkeypatch.setattr(
+        "codedoc.pipeline.SafeWriter",
+        lambda *a, **k: pytest.fail("concurrent-modification error initialized a writer"),
+    )
+    confirmations = []
+
+    with pytest.raises(ConfigError, match="changed again on the retry"):
+        run_pipeline(
+            tmp_path,
+            {"entry_file": "main.py", "output_dir": "never-created"},
+            confirm_risky=lambda warnings: confirmations.append(warnings) or True,
+        )
+
+    # Two detections: the initial pass and the post-rebuild pass.
+    assert edits["count"] == 2
+    assert confirmations == []
+    assert not (tmp_path / "never-created").exists()
 
 def test_real_cap_fails_before_mutation_writer_or_provider(tmp_path, monkeypatch):
     from codedoc.pipeline import run_pipeline

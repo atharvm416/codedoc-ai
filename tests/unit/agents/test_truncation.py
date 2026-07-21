@@ -6,15 +6,18 @@ from __future__ import annotations
 
 from tests.support.agent_fakes import mock_llm  # noqa: F401, F811
 
+import json
 import logging
 from pathlib import Path
 import pytest
+from tests.support.execution_requests import make_execution_request
 from tests.support.pipeline_usage import FakeProvider
 from codedoc.agents.base_agent import (
     TRUNCATION_HEAD_FRACTION,
     TRUNCATION_MARKER,
     truncate_for_llm,
 )
+from codedoc.agents.file_documentation_agent import FileDocumentationAgent
 from codedoc.llm.base import LLMProvider
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.core.db import source_char_count
@@ -122,7 +125,7 @@ class TestConfigurableContentTruncation:
         assert orch._dependency_agent._max_content_chars == 50000
         assert orch._doc_agent._max_content_chars == 50000
 
-def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
+def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog, tmp_path):
 
     # triple mode is the path that runs all three agents on the same text.
     orchestrator = Orchestrator(
@@ -130,15 +133,18 @@ def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
     )
     seen: list[str] = []
 
-    def structure(file_path, content, imports, language):
+    def structure(file_path, content, imports, language, shape=None, **_kwargs):
         seen.append(content)
         return {}
 
-    def dependency(file_path, content, imports, language):
+    def dependency(file_path, content, imports, language, shape=None, **_kwargs):
         seen.append(content)
         return {}
 
-    def documentation(file_path, content, imports, language, structure, dependencies):
+    def documentation(
+        file_path, content, imports, language, structure, dependencies,
+        shape=None, **_kwargs,
+    ):
         seen.append(content)
         return {}
 
@@ -146,12 +152,11 @@ def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
     orchestrator._dependency_agent._safe_run = dependency
     orchestrator._doc_agent._safe_run_with_context = documentation
 
+    request = make_execution_request(
+        tmp_path, "large.py", "x" * 2000, max_content_chars=1000, analysis_mode="triple"
+    )
     with caplog.at_level(logging.WARNING, logger="codedoc.agents.orchestrator"):
-        orchestrator.process(
-            {"rel_path": "large.py", "language": "python", "extension": ".py"},
-            "x" * 2000,
-            [],
-        )
+        orchestrator.process(request)
 
     assert len(seen) == 3
     assert seen[0] == seen[1] == seen[2]
@@ -161,6 +166,74 @@ def test_orchestrator_truncates_once_and_all_agents_receive_same_text(caplog):
     assert "[truncated]" in seen[0]
     assert seen[0].startswith("x") and seen[0].endswith("x")
     assert caplog.text.count("Content truncated") == 1
+
+def test_orchestrated_run_leaves_agent_defensive_truncation_a_noop(caplog, tmp_path):
+    """An oversized file through the real (non-stubbed) single-mode agent path:
+    the orchestrator's primary truncation reduces content to the ceiling, so
+    the agent's own defensive ``_truncate()`` conditional (``len(content) >
+    ceiling``) is False and never fires. Proven by log absence rather than by
+    output alone, since a no-op defensive truncation is byte-identical to no
+    truncation happening at all."""
+    captured = {}
+
+    class _CapturingProvider:
+        provider_name = "fake"
+
+        def complete_json(self, prompt, system=""):
+            captured["prompt"] = prompt
+            return json.dumps({"description": "d", "role_in_system": "r"})
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    orchestrator = Orchestrator(
+        _CapturingProvider(), analysis_mode="single", max_content_chars=1000
+    )
+    request = make_execution_request(
+        tmp_path, "large.py", "x" * 5000, max_content_chars=1000, analysis_mode="single"
+    )
+    with caplog.at_level(logging.DEBUG):
+        result = orchestrator.process(request)
+
+    assert result["state"] == "checked"
+    orchestrator_messages = [
+        r.message for r in caplog.records if r.name == "codedoc.agents.orchestrator"
+    ]
+    agent_messages = [
+        r.message for r in caplog.records if r.name == "codedoc.agents.base_agent"
+    ]
+    # Primary truncation happened exactly once, from the orchestrator.
+    assert sum("Content truncated" in m for m in orchestrator_messages) == 1
+    # The agent's defensive branch never logged — it received already-bounded
+    # content and its conditional was False.
+    assert not any("Content truncated" in m for m in agent_messages)
+    expected = truncate_for_llm("x" * 5000, 1000, head_fraction=TRUNCATION_HEAD_FRACTION)
+    assert expected in captured["prompt"]
+
+def test_direct_agent_call_triggers_defensive_truncation(caplog):
+    """A direct agent caller (bypassing the orchestrator entirely) is the path
+    where the defensive ``_truncate()`` branch actually fires, producing
+    byte-identical output to the canonical ``truncate_for_llm()``."""
+    captured = {}
+
+    class _CapturingProvider:
+        provider_name = "fake"
+
+        def complete_json(self, prompt, system=""):
+            captured["prompt"] = prompt
+            return json.dumps({"description": "d", "role_in_system": "r"})
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    agent = FileDocumentationAgent(_CapturingProvider(), max_content_chars=1000)
+    with caplog.at_level(logging.DEBUG, logger="codedoc.agents.base_agent"):
+        result = agent.run("large.py", "x" * 5000, [], "python")
+
+    assert result["description"] == "d"
+    assert caplog.text.count("Content truncated") == 1
+    expected = truncate_for_llm("x" * 5000, 1000, head_fraction=TRUNCATION_HEAD_FRACTION)
+    assert expected in captured["prompt"]
 
 class TestTruncateForLlm:
     def test_A1_default_ratio_matches_hardcoded(self):
@@ -285,13 +358,13 @@ class TestOrchestratorRatio:
         orc = self._make_orchestrator(0.30)
         assert orc.truncation_head_ratio == 0.30
 
-    def test_A8_orchestrator_content_bounded_by_max(self):
+    def test_A8_orchestrator_content_bounded_by_max(self, tmp_path):
         """After truncation the content passed to the agent is ≤ max_content_chars."""
         from unittest.mock import MagicMock
 
         received = {}
 
-        def fake_safe_run(fp, content, imports, language):
+        def fake_safe_run(fp, content, imports, language, shape=None, **_kwargs):
             received["content"] = content
             return {
                 "description": "x", "role_in_system": "y",
@@ -305,8 +378,10 @@ class TestOrchestratorRatio:
         orc = Orchestrator(llm, max_content_chars=200, truncation_head_ratio=0.80)
         orc._file_agent._safe_run = fake_safe_run
 
-        descriptor = {"rel_path": "a.py", "language": "python"}
-        orc.process(descriptor, "X" * 10_000, [])
+        request = make_execution_request(
+            tmp_path, "a.py", "X" * 10_000, max_content_chars=200, truncation_head_ratio=0.80
+        )
+        orc.process(request)
         assert len(received["content"]) <= 200
 
 class TestBaseAgent:

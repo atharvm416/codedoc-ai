@@ -9,67 +9,40 @@ from codedoc.utils.errors import InsufficientSourceError
 import json
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ParseError
+from tests.support.execution_requests import make_execution_request
 
 @pytest.mark.parametrize("content", ["", " \n\t"])
-def test_process_one_file_skips_before_parser_and_orchestrator(
+def test_process_one_file_skips_before_orchestrator(
     tmp_path, monkeypatch, content
 ):
-    path = tmp_path / "empty.py"
-    path.write_text(content, encoding="utf-8")
-    calls = {"parse": 0, "process": 0}
-
-    def fake_parse(_descriptor):
-        calls["parse"] += 1
-        return []
+    request = make_execution_request(tmp_path, "empty.py", content)
+    calls = {"process": 0}
 
     class FakeOrchestrator:
         llm = SimpleNamespace(provider_name="fake")
 
-        def process(self, descriptor, source, imports):
+        def process(self, request):
             calls["process"] += 1
             return {}
 
-    monkeypatch.setattr(execution, "parse_file", fake_parse)
     with pytest.raises(InsufficientSourceError):
-        execution._process_one_file(
-            {
-                "path": path,
-                "rel_path": "empty.py",
-                "language": "python",
-                "extension": ".py",
-            },
-            FakeOrchestrator(),
-        )
-    assert calls == {"parse": 0, "process": 0}
+        execution._process_one_file(request, FakeOrchestrator())
+    assert calls == {"process": 0}
 
 def test_process_one_file_allows_minimal_non_whitespace_source(tmp_path, monkeypatch):
-    path = tmp_path / "minimal.py"
-    path.write_text("x", encoding="utf-8")
-    calls = {"parse": 0, "process": 0}
-
-    def fake_parse(_descriptor):
-        calls["parse"] += 1
-        return []
+    request = make_execution_request(tmp_path, "minimal.py", "x")
+    calls = {"process": 0}
 
     class FakeOrchestrator:
         llm = SimpleNamespace(provider_name="fake")
 
-        def process(self, descriptor, source, imports):
+        def process(self, request):
             calls["process"] += 1
             return {"description": "minimal"}
 
-    monkeypatch.setattr(execution, "parse_file", fake_parse)
-    result = execution._process_one_file(
-        {
-            "path": path,
-            "rel_path": "minimal.py",
-            "language": "python",
-            "extension": ".py",
-        },
-        FakeOrchestrator(),
-    )
+    result = execution._process_one_file(request, FakeOrchestrator())
     assert result == {"description": "minimal"}
-    assert calls == {"parse": 1, "process": 1}
+    assert calls == {"process": 1}
 
 class _DocFake:
     provider_name = "fake"
@@ -136,6 +109,10 @@ def test_empty_file_skips_without_agent_calls_and_reconciles_last_run(
     assert stats["failed"] == 0
     assert stats["skipped_insufficient_source"] == 1
     assert stats["documentation_calls_attempted"] == 0
+    assert stats["documentation_calls_planned"] == 0
+    assert stats["total_calls_planned"] == 0
+    assert stats["attempted_logical_calls"] == 0
+    assert stats["planned_calls_not_attempted"] == 0
     assert stats["unattempted_files"] == 0
     assert "insufficient source: empty_or_whitespace_only" in caplog.text
 
@@ -187,8 +164,8 @@ def test_mixed_batch_counts_skip_success_and_failure_independently(
     for name in ("empty.py", "normal.py", "failing.py"):
         (tmp_path / name).write_text("fixture\n", encoding="utf-8")
 
-    def process_one(descriptor, _orchestrator):
-        rel_path = descriptor["rel_path"]
+    def process_one(request, _orchestrator):
+        rel_path = request.rel_path
         if rel_path == "empty.py":
             raise InsufficientSourceError(rel_path, "empty_or_whitespace_only")
         if rel_path == "failing.py":
@@ -218,6 +195,66 @@ def test_mixed_batch_counts_skip_success_and_failure_independently(
     assert {record["path"] for record in _document(tmp_path)["files"]} == {
         "normal.py"
     }
+
+def test_partition_reconciles_when_a_run_stops_before_every_file_is_attempted(
+    tmp_path, monkeypatch
+):
+    """A provider-free rejection is already outside ``agent_rels``, so it must
+    not be subtracted from that population again when deriving the unattempted
+    count.  The consecutive-failure health check stops the run with files still
+    unattempted; the selected-file completion partition must still be exact."""
+    (tmp_path / "empty.py").write_text("   \n\t\n", encoding="utf-8")
+    for index in range(6):
+        (tmp_path / f"f{index}.py").write_text(f"VALUE_{index} = {index}\n", encoding="utf-8")
+
+    class _AlwaysMalformed:
+        provider_name = "fake"
+        doc_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            type(self).doc_calls += 1
+            return "not json at all"
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt, system)
+
+    stats, _fake = _run(
+        monkeypatch,
+        tmp_path,
+        {
+            "documentation_scope": "all",
+            "propagate_changes": False,
+            "max_parallel_files": 1,
+            "file_retry_attempts": 0,
+            "max_consecutive_failures": 2,
+            "allow_partial": True,
+        },
+        fake=_AlwaysMalformed(),
+    )
+
+    assert stats["skipped_insufficient_source"] == 1
+    assert stats["planned_files"] == 6
+    assert stats["checked"] == 0
+    assert stats["failed"] == 2
+    # Four provider-bound files were never attempted; the whitespace file was
+    # never a provider-bound file at all.
+    assert stats["unattempted_files"] == 4
+
+    last_run = _document(tmp_path)["last_run"]
+    assert last_run["files_unattempted"] == 4
+    assert last_run["files_skipped_insufficient_source"] == 1
+    assert last_run["files_selected"] == 7
+    assert last_run["files_selected"] == sum(
+        last_run[key]
+        for key in (
+            "files_documented_by_llm",
+            "files_failed",
+            "files_reused_unchanged",
+            "files_reused_identical_content",
+            "files_unattempted",
+            "files_skipped_insufficient_source",
+        )
+    )
 
 def test_stale_documentation_is_removed_when_source_becomes_whitespace(
     tmp_path, monkeypatch
