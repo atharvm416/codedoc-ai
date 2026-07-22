@@ -296,6 +296,7 @@ Useful defaults include:
 | `output_format` | `json` |
 | `max_parallel_files` | `5` |
 | `file_retry_attempts` | `1` |
+| `max_planned_calls` | `0` (unlimited) |
 | `max_file_size_kb` | `500` |
 | `max_content_chars` | `12000` |
 | `follow_symlinks` | `false` |
@@ -348,6 +349,7 @@ facts and inventing nothing.
 | `--remove-skip-dir DIR` | Remove a default skipped directory name; repeatable. |
 | `--dry-run` | Plan without writes or provider calls. |
 | `--max-files N` | Cap files allowed to make documentation calls (`0` is unlimited). |
+| `--max-planned-calls N` | Safety cap on initially planned LLM calls, including prompt-customization reviews and initial documentation calls (`0` = unlimited). Checked before provider creation; retries and corrections are excluded. |
 | `--force-files FILE` | Reprocess a selected path even when unchanged; repeatable. |
 | `--allow-partial` | Exit zero after a completed run with file failures. |
 | `--no-parallel` | Disable within-file parallel agents in triple mode. |
@@ -387,6 +389,7 @@ environment variables. CodeDoc does not read `.env` files.
 | `CODEDOC_MAX_CONTENT_CHARS` | Per-file prompt content ceiling. |
 | `CODEDOC_DRY_RUN` | Planning-only mode. |
 | `CODEDOC_MAX_FILES` | Paid-file cap (`0` means unlimited). |
+| `CODEDOC_MAX_PLANNED_CALLS` | Safety cap on initially planned LLM calls, including prompt-customization reviews and initial documentation calls (`0` = unlimited). Checked before provider creation; retries and corrections are excluded. |
 | `CODEDOC_FORCE_FILES` | Semicolon-separated project-relative paths. |
 | `CODEDOC_ALLOW_PARTIAL` | Allow a completed partial run to exit zero. |
 | `CODEDOC_ANALYSIS_MODE` | `single` or `triple`. |

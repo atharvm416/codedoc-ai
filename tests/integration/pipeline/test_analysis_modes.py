@@ -6,9 +6,9 @@ import json
 import re
 import pytest
 from codedoc.agents.orchestrator import Orchestrator
+from tests.support.execution_requests import make_execution_request
 from tests.support.one_call_cases import _COMBINED_JSON
 from tests.support.one_call_cases import _CountingProvider
-from tests.support.one_call_cases import _descriptor
 
 _FLAT_KEYS = {
     "file_path", "language", "extension", "imports", "description",
@@ -17,31 +17,38 @@ _FLAT_KEYS = {
     "state",
 }
 
-def test_single_mode_makes_exactly_one_call():
+def test_single_mode_makes_exactly_one_call(tmp_path):
     provider = _CountingProvider()
     orch = Orchestrator(provider, analysis_mode="single")
-    orch.process(_descriptor(), "x = 1\n", ["os"])
+    orch.process(make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",)))
     assert provider.calls == 1
 
-def test_triple_mode_makes_exactly_three_calls():
+def test_triple_mode_makes_exactly_three_calls(tmp_path):
     provider = _CountingProvider()
     orch = Orchestrator(provider, parallel=False, analysis_mode="triple")
-    orch.process(_descriptor(), "x = 1\n", ["os"])
+    request = make_execution_request(
+        tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",), analysis_mode="triple"
+    )
+    orch.process(request)
     assert provider.calls == 3
 
-def test_both_modes_produce_identical_top_level_keys():
+def test_both_modes_produce_identical_top_level_keys(tmp_path):
     single = Orchestrator(_CountingProvider(), analysis_mode="single").process(
-        _descriptor(), "x = 1\n", ["os"]
+        make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
     )
     triple = Orchestrator(
         _CountingProvider(), parallel=False, analysis_mode="triple"
-    ).process(_descriptor(), "x = 1\n", ["os"])
+    ).process(
+        make_execution_request(
+            tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",), analysis_mode="triple"
+        )
+    )
     assert set(single) - {"_analysis_revision", "_analysis_mode"} == _FLAT_KEYS
     assert set(triple) - {"_analysis_revision", "_analysis_mode"} == _FLAT_KEYS
 
-def test_single_mode_compatibility_views():
+def test_single_mode_compatibility_views(tmp_path):
     result = Orchestrator(_CountingProvider(), analysis_mode="single").process(
-        _descriptor(), "x = 1\n", ["os"]
+        make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
     )
     assert result["structure"] == {
         "description": "A documented module.",

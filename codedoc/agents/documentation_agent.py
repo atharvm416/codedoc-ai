@@ -11,6 +11,7 @@ generates the final polished documentation for a file:
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.agents.response_cleaning import clean_documentation_report
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
@@ -100,11 +101,18 @@ class DocumentationAgent(BaseAgent):
         imports: list[str],
         language: str,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
         # This agent also receives pre-computed structure/dependency results
         # passed via content slot as structured context — see orchestrator
         return self._run_with_context(
-            file_path, content, imports, language, {}, {}, requested_shape
+            file_path, content, imports, language, {}, {}, requested_shape,
+            call_context=call_context,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
         )
 
     def run_with_context(
@@ -116,10 +124,17 @@ class DocumentationAgent(BaseAgent):
         structure: dict,
         dependencies: dict,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
         return self._run_with_context(
             file_path, content, imports, language, structure, dependencies,
             requested_shape,
+            call_context=call_context,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
         )
 
     def _safe_run_with_context(
@@ -131,6 +146,10 @@ class DocumentationAgent(BaseAgent):
         structure: dict,
         dependencies: dict,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
         """Run with upstream agent context and return the standard fallback."""
         try:
@@ -142,6 +161,9 @@ class DocumentationAgent(BaseAgent):
                 structure,
                 dependencies,
                 requested_shape,
+                call_context=call_context,
+                planned_call=planned_call,
+                additional_attempt=additional_attempt,
             )
         except Exception as exc:
             logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
@@ -156,8 +178,16 @@ class DocumentationAgent(BaseAgent):
         structure: dict,
         dependencies: dict,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
-        truncated = self._truncate(content, file_path)
+        if call_context is not None:
+            requested_shape = call_context.resolved_shape_bundle.selections[
+                "documentation"
+            ].block
+        truncated = self._truncate(content, file_path, call_context=call_context)
         system, prompt = build_prompt(
             file_path,
             truncated,
@@ -171,7 +201,12 @@ class DocumentationAgent(BaseAgent):
             if requested_shape is not None
             else default_shape_block("triple", "documentation")
         )
-        raw = self._call_llm(prompt, system=system)
+        raw = self._call_llm(
+            prompt,
+            system=system,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
+        )
         cleaned = self._finalize_response(
             raw,
             mode="triple",
@@ -183,6 +218,7 @@ class DocumentationAgent(BaseAgent):
             imports=imports,
             language=language,
             shape_block=shape_block,
+            planned_call=planned_call,
         )
 
         logger.debug("DocumentationAgent: completed %s", file_path)

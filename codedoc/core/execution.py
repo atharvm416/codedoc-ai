@@ -23,6 +23,7 @@ for compatibility.
 from __future__ import annotations
 
 import concurrent.futures
+import logging
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -37,12 +38,16 @@ from codedoc.core.error_classifier import (
     _parse_retry_after,
     _raise_rate_limit_exhausted,
 )
+from codedoc.core.execution_model import (
+    DOC_AGENTS_BY_MODE,
+    FileExecutionRequest,
+    documentation_call_id,
+)
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import _public_record_to_doc
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.source_precheck import insufficient_source
 from codedoc.llm.rate_limit_profile import RateLimitProfile
-from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import (
     AgentError,
     ErrorReporter,
@@ -83,7 +88,7 @@ from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-expo
 @dataclass(frozen=True)
 class _SequentialOutcome:
     """Minimal progress signal threaded back from a sequential pass so the
-    The zero-progress bound can be evaluated without parsing logs.
+    zero-progress bound can be evaluated without parsing logs.
 
     ``succeeded_any``
         True if at least one file was recorded successfully during the pass.
@@ -158,6 +163,10 @@ class ExecutionContext:
     stats: dict
     new_results: dict[str, dict]
     options: ExecutionOptions
+    # rel_path -> the frozen request PipelinePlan already built for every
+    # provider-bound file. The coordinator looks these up; it never rescans
+    # source, recomputes a hash, or resolves a prompt scope itself.
+    execution_requests: dict[str, FileExecutionRequest]
 
 
 # ---------------------------------------------------------------------------
@@ -165,7 +174,7 @@ class ExecutionContext:
 # ---------------------------------------------------------------------------
 
 def _process_and_record(
-    descriptor: dict,
+    request: FileExecutionRequest,
     orchestrator: Orchestrator,
     recorder: SafeWriter,
 ) -> dict:
@@ -180,12 +189,8 @@ def _process_and_record(
     ``recorder.record()`` is NOT called.  The batch-level code catches the
     future's exception and classifies it as rate-limit or non-rate-limit.
     """
-    result = _process_one_file(descriptor, orchestrator)
-    recorder.record(
-        descriptor["rel_path"],
-        result,
-        _safe_file_hash(descriptor.get("path")),
-    )
+    result = _process_one_file(request, orchestrator)
+    recorder.record(request.rel_path, result, request.content_hash)
     return result
 
 
@@ -213,18 +218,22 @@ def execute_agent_files(context: ExecutionContext) -> None:
     respect_retry_after = options.respect_retry_after
     retry_after_cap = options.retry_after_cap_s
 
-    descriptors: list[dict] = []
+    # The coordinator's one lookup step: every queued descriptor already has a
+    # frozen request PipelinePlan built (reused/unchanged files never reach the
+    # queue). Everything below consumes requests only — no worker rescans
+    # source, recomputes a hash, or resolves a prompt scope.
+    requests: list[FileExecutionRequest] = []
     while True:
         descriptor = queue.next()
         if descriptor is None:
             break
-        descriptors.append(descriptor)
+        requests.append(context.execution_requests[descriptor["rel_path"]])
 
-    if max_workers <= 1 or len(descriptors) <= 1:
+    if max_workers <= 1 or len(requests) <= 1:
         # This single sequential pass IS the lowest-concurrency pass, so the
-        # The zero-progress bound applies directly to it.
+        # zero-progress bound applies directly to it.
         outcome = _process_files_sequentially(
-            descriptors,
+            requests,
             orchestrator,
             queue,
             stats,
@@ -253,7 +262,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
 
     provider_name = orchestrator.llm.provider_name
     original_max_workers = max_workers
-    remaining = list(descriptors)
+    remaining = list(requests)
     event_number = 0  # cumulative step-down event count across all rungs
 
     for level_index, level in enumerate(ladder):
@@ -300,9 +309,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
             # No rate-limited files remain, or adaptive mode is off.
             if retry_rate_limited and not rate_limit_adaptive:
                 # Treat remaining rate-limited files as sequential retry.
-                remaining_descs = [d for d, _e in retry_rate_limited]
+                remaining_requests = [d for d, _e in retry_rate_limited]
                 outcome = _process_files_sequentially(
-                    remaining_descs,
+                    remaining_requests,
                     orchestrator,
                     queue,
                     stats,
@@ -323,7 +332,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
         next_level = ladder[level_index + 1] if level_index + 1 < len(ladder) else 1
 
         # Unpack descriptors and exceptions from the rate-limited list.
-        remaining_descs = [d for d, _e in retry_rate_limited]
+        remaining_requests = [d for d, _e in retry_rate_limited]
         exceptions = [e for _d, e in retry_rate_limited]
 
         # Compute inter-rung sleep duration.
@@ -353,7 +362,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
             "original_max_parallel": original_max_workers,
             "current_level": level,
             "new_level": next_level,
-            "retried_count": len(remaining_descs),
+            "retried_count": len(remaining_requests),
             "retry_after_s": retry_after_s,
             "sleep_s": sleep_s,
             "error_sample": error_sample,
@@ -366,7 +375,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
         warn_msg = (
             f"[{provider_name}] Rate limit detected - your configured "
             f"max_parallel_files ({original_max_workers}) has been reduced to "
-            f"{next_level}. Retrying {len(remaining_descs)} remaining file(s) "
+            f"{next_level}. Retrying {len(remaining_requests)} remaining file(s) "
             f"at lower concurrency."
         )
         if sleep_s > 0:
@@ -383,7 +392,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
             )
             time.sleep(sleep_s)
 
-        remaining = remaining_descs
+        remaining = remaining_requests
 
         # If we have exhausted the ladder, fall through to sequential.
         if level_index + 1 >= len(ladder):
@@ -420,7 +429,7 @@ def execute_agent_files(context: ExecutionContext) -> None:
 
 
 def _process_descriptor_batch(
-    descriptors: list[dict],
+    requests: list[FileExecutionRequest],
     orchestrator: Orchestrator,
     queue: ProcessingQueue,
     stats: dict,
@@ -429,28 +438,28 @@ def _process_descriptor_batch(
     recorder: SafeWriter,
     max_consecutive_failures: int = 5,
     profile: RateLimitProfile | None = None,
-) -> tuple[dict[str, dict], list[tuple[dict, Exception]], list[dict]]:
-    """Process a batch of descriptors in parallel at *max_workers* concurrency.
+) -> tuple[dict[str, dict], list[tuple[FileExecutionRequest, Exception]], list[FileExecutionRequest]]:
+    """Process a batch of requests in parallel at *max_workers* concurrency.
 
     Returns
     -------
     succeeded : dict[str, dict]
         rel_path → result for files that completed without error.  These have
         already been recorded in crash recovery by the worker thread.
-    retry_rate_limited : list[tuple[dict, Exception]]
-        (descriptor, causing_exception) pairs for files that hit a rate-limit
+    retry_rate_limited : list[tuple[FileExecutionRequest, Exception]]
+        (request, causing_exception) pairs for files that hit a rate-limit
         signal.  The exception is preserved so the caller can parse
         ``Retry-After`` hints and compute appropriate inter-rung backoff.
-    failed_non_rate_limited : list[dict]
-        Descriptors that failed for non-rate-limit reasons.
+    failed_non_rate_limited : list[FileExecutionRequest]
+        Requests that failed for non-rate-limit reasons.
     """
     succeeded: dict[str, dict] = {}
-    retry_rate_limited: list[tuple[dict, Exception]] = []
-    failed_non_rate_limited: list[dict] = []
+    retry_rate_limited: list[tuple[FileExecutionRequest, Exception]] = []
+    failed_non_rate_limited: list[FileExecutionRequest] = []
 
     consecutive_failures = 0
     health_reported = False
-    total = len(descriptors)
+    total = len(requests)
     completed = 0
     fatal_error: LiveBackupWriteError | None = None
     abort_error: UnrecoverableProviderError | None = None
@@ -463,14 +472,14 @@ def _process_descriptor_batch(
     )
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map: dict[concurrent.futures.Future, dict] = {
-            pool.submit(_process_and_record, descriptor, orchestrator, recorder): descriptor
-            for descriptor in descriptors
+        future_map: dict[concurrent.futures.Future, FileExecutionRequest] = {
+            pool.submit(_process_and_record, request, orchestrator, recorder): request
+            for request in requests
         }
 
         for future in concurrent.futures.as_completed(future_map):
-            descriptor = future_map[future]
-            rel_path = descriptor["rel_path"]
+            request = future_map[future]
+            rel_path = request.rel_path
             try:
                 result = future.result()
                 # Already recorded in the worker — just update new_results and stats.
@@ -512,8 +521,8 @@ def _process_descriptor_batch(
                     # retried, never restored from old documentation (A4).
                     if not recorder.recorded_this_run(rel_path):
                         # Preserve the causing exception alongside the
-                        # descriptor so the caller can parse Retry-After hints.
-                        retry_rate_limited.append((descriptor, exc))
+                        # request so the caller can parse Retry-After hints.
+                        retry_rate_limited.append((request, exc))
                         _log_file_progress("RATE-LIMIT", rel_path, completed, total, str(exc))
                     else:
                         # Already recorded — treat as succeeded.  Recover the
@@ -558,7 +567,7 @@ def _process_descriptor_batch(
                 else:
                     # Transient non-rate-limit failures retain the existing
                     # sequential retry path for clearer diagnostics.
-                    failed_non_rate_limited.append(descriptor)
+                    failed_non_rate_limited.append(request)
                     consecutive_failures += 1
                     _log_file_progress("RETRY", rel_path, completed, total, str(exc))
 
@@ -593,7 +602,7 @@ def _process_descriptor_batch(
 
 
 def _process_files_sequentially(
-    descriptors: list[dict],
+    requests: list[FileExecutionRequest],
     orchestrator: Orchestrator,
     queue: ProcessingQueue,
     stats: dict,
@@ -606,14 +615,14 @@ def _process_files_sequentially(
     retry_after_cap: int = 30,
     profile: RateLimitProfile | None = None,
 ) -> _SequentialOutcome:
-    """Process *descriptors* one at a time with per-file retries.
+    """Process *requests* one at a time with per-file retries.
 
     Returns a :class:`_SequentialOutcome` so that, when this is the
     lowest-concurrency pass, ``execute_agent_files`` can apply the zero-progress
     rate-limit bound.  Existing callers may ignore the return value.
     """
     consecutive_failures = 0
-    total = len(descriptors)
+    total = len(requests)
     succeeded_any = False
     failures = 0
     all_failures_rate_limited = True
@@ -624,11 +633,11 @@ def _process_files_sequentially(
         orchestrator.llm.provider_name,
     )
 
-    for index, descriptor in enumerate(descriptors, start=1):
-        rel_path = descriptor["rel_path"]
+    for index, request in enumerate(requests, start=1):
+        rel_path = request.rel_path
         try:
             result = _process_one_file_with_retries(
-                descriptor,
+                request,
                 orchestrator,
                 retry_attempts,
                 respect_retry_after=respect_retry_after,
@@ -636,7 +645,7 @@ def _process_files_sequentially(
                 profile=profile,
             )
             new_results[rel_path] = result
-            recorder.record(rel_path, result, _safe_file_hash(descriptor.get("path")))
+            recorder.record(rel_path, result, request.content_hash)
             queue.mark_checked(rel_path)
             stats["checked"] += 1
             consecutive_failures = 0
@@ -708,7 +717,7 @@ def _process_files_sequentially(
 
 
 def _process_one_file_with_retries(
-    descriptor: dict,
+    request: FileExecutionRequest,
     orchestrator: Orchestrator,
     retry_attempts: int,
     respect_retry_after: bool = True,
@@ -718,7 +727,7 @@ def _process_one_file_with_retries(
     last_error: Exception | None = None
     for attempt in range(retry_attempts + 1):
         try:
-            return _process_one_file(descriptor, orchestrator)
+            return _process_one_file(request, orchestrator)
         except Exception as exc:
             last_error = exc
             # Apply the fixed failure precedence before consuming the next
@@ -745,12 +754,12 @@ def _process_one_file_with_retries(
                         logger.info(
                             "Retry-After: sleeping %.1fs before retrying %s",
                             sleep_s,
-                            descriptor["rel_path"],
+                            request.rel_path,
                         )
                         time.sleep(sleep_s)
                 logger.info(
                     "Retrying %s (%d/%d): %s",
-                    descriptor["rel_path"],
+                    request.rel_path,
                     attempt + 1,
                     retry_attempts,
                     exc,
@@ -777,22 +786,32 @@ def _log_file_progress(
         logger.info(message, status, rel_path, completed, total, percent, remaining)
 
 
-def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
-    rel_path = descriptor["rel_path"]
+def _process_one_file(request: FileExecutionRequest, orchestrator: Orchestrator) -> dict:
+    rel_path = request.rel_path
     logger.info("[START] %s | provider=%s", rel_path, orchestrator.llm.provider_name)
-    file_path: Path = descriptor["path"]
-    content = file_path.read_text(encoding="utf-8-sig", errors="replace")
-    insufficient, reason = insufficient_source(content)
+    mode = request.context.analysis_mode
+    if logger.isEnabledFor(logging.DEBUG):
+        # Bounded: rel_path, mode, and domain-separated call-id hashes only —
+        # never raw source, prompts, custom instructions, credentials, or
+        # provider responses.
+        logger.debug(
+            "Planned call(s) for owner=%s category=file-documentation mode=%s call_ids=%s",
+            rel_path,
+            mode,
+            [
+                documentation_call_id(rel_path, mode, agent, ordinal)
+                for ordinal, agent in enumerate(DOC_AGENTS_BY_MODE[mode], start=1)
+            ],
+        )
+    insufficient, reason = insufficient_source(request.content)
     if insufficient:
         raise InsufficientSourceError(rel_path, reason)
-    imports = parse_file(descriptor)
-    result = orchestrator.process(descriptor, content, imports)
+    result = orchestrator.process(request)
+    logger.debug("Outcome for owner=%s: state=%s", rel_path, result.get("state", "unknown"))
     errors = _agent_errors(result)
     if errors:
         message = "; ".join(errors)
-        terminal_error = _terminal_sibling_error(
-            result, descriptor["rel_path"]
-        )
+        terminal_error = _terminal_sibling_error(result, rel_path)
         if terminal_error is not None:
             # A contract failure in one triple-mode sibling must not mask a
             # simultaneous billing/credential/model failure in another. Preserve
@@ -806,12 +825,12 @@ def _process_one_file(descriptor: dict, orchestrator: Orchestrator) -> dict:
             # distinction so the classifier keeps it off every retry ladder.
             raise ResponseContractError(
                 orchestrator.__class__.__name__,
-                descriptor["rel_path"],
+                rel_path,
                 message,
                 diagnostic=diagnostic,
                 correction_attempted=correction_attempted,
             )
-        raise AgentError(orchestrator.__class__.__name__, descriptor["rel_path"], message)
+        raise AgentError(orchestrator.__class__.__name__, rel_path, message)
     return result
 
 
@@ -877,3 +896,26 @@ def _cancel_pending(future_map: dict) -> None:
     for future in future_map:
         if not future.done():
             future.cancel()
+
+
+def reconcile_planned_calls(
+    *,
+    total_calls_planned: int,
+    attempted_logical_calls: int,
+    attempted_calls: int,
+) -> dict[str, int]:
+    """Reconcile planned vs. attempted logical calls into the final stats.
+
+    ``attempted_logical_calls`` comes from canonical manifest-ID consumption,
+    never from queue/file status. This remains valid after a terminal abort:
+    unconsumed manifest entries are reported as planned-but-not-attempted, while
+    retries and corrections increase ``additional_attempts`` without consuming
+    another logical ID.
+    """
+    if attempted_logical_calls < 0 or attempted_logical_calls > total_calls_planned:
+        raise ValueError("attempted logical calls must be within the manifest bounds.")
+    return {
+        "attempted_logical_calls": attempted_logical_calls,
+        "planned_calls_not_attempted": total_calls_planned - attempted_logical_calls,
+        "additional_attempts": max(0, attempted_calls - attempted_logical_calls),
+    }

@@ -90,8 +90,8 @@ class TestConfigurableContentTruncation:
         """max_content_chars from config reaches the agents via the pipeline."""
         received = []
 
-        def capturing_truncate(self, content, file_path=""):
-            received.append(self._max_content_chars)
+        def capturing_truncate(self, content, file_path="", *, call_context=None):
+            received.append(call_context.max_content_chars)
             return content
 
         from codedoc.agents import base_agent

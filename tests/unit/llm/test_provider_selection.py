@@ -165,3 +165,35 @@ class TestProviderFactory:
 
         assert isinstance(provider, FakeGeminiProvider)
         assert provider.model == "gemini-2.5-flash"
+
+    def test_openai_compatible_endpoint_reaches_openai_provider_with_base_url(
+        self, monkeypatch
+    ):
+        """An OpenAI-compatible local/self-hosted endpoint stays reachable only
+        through OpenAIProvider plus api_base_url — there is no separate
+        local-provider choice."""
+        from codedoc.llm.factory import create_provider
+
+        captured = {}
+
+        class FakeOpenAIProvider:
+            def __init__(self, api_key, model, base_url=None):
+                captured.update(
+                    {"api_key": api_key, "model": model, "base_url": base_url}
+                )
+
+        monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)
+
+        provider = create_provider(
+            {
+                "llm_mode": "api",
+                "llm_provider": "openai",
+                "model_name": "qwen2.5-coder:7b",
+                "api_key": "ollama",
+                "api_base_url": "http://localhost:11434/v1",
+            }
+        )
+
+        assert isinstance(provider, FakeOpenAIProvider)
+        assert captured["base_url"] == "http://localhost:11434/v1"
+        assert captured["model"] == "qwen2.5-coder:7b"

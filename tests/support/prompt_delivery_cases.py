@@ -1,5 +1,8 @@
 """Shared test support extracted from mapped source modules."""
 
+import hashlib
+
+from codedoc.core.execution_model import AgentCallContext, FileExecutionRequest
 from codedoc.core.prompt_profiles import (
     ResolvedProfile,
     validate_profile,
@@ -7,8 +10,37 @@ from codedoc.core.prompt_profiles import (
 
 EXTS = frozenset({".py", ".java"})
 
-def _descriptor(path="a.py", language="python"):
-    return {"rel_path": path, "language": language, "extension": ".py"}
+def _request(
+    resolved,
+    content="x = 1",
+    *,
+    path="a.py",
+    language="python",
+    imports=(),
+    mode="single",
+    max_content_chars=12000,
+    truncation_head_ratio=0.70,
+) -> FileExecutionRequest:
+    """Build a FileExecutionRequest carrying *resolved*'s bundle for *path*.
+
+    ``resolved=None`` means no profile — mirrors how planning.py falls back to
+    ``ResolvedProfile(mode, None)`` when no profile was resolved for the run.
+    """
+    effective = resolved if resolved is not None else ResolvedProfile(mode, None)
+    bundle = effective.resolve_bundle(effective.scope_for({"rel_path": path}))
+    return FileExecutionRequest(
+        rel_path=path,
+        language=language,
+        imports=tuple(imports),
+        content=content,
+        content_hash=hashlib.sha256(content.encode("utf-8")).hexdigest(),
+        context=AgentCallContext(
+            analysis_mode=mode,
+            max_content_chars=max_content_chars,
+            truncation_head_ratio=truncation_head_ratio,
+            resolved_shape_bundle=bundle,
+        ),
+    )
 
 def _profile(raw, mode="single"):
     return ResolvedProfile(

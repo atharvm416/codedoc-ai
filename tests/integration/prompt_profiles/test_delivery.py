@@ -13,7 +13,7 @@ from codedoc.core.prompt_profiles import (
     NO_PROMPT_PROFILE_DIGEST,
 )
 from tests.support.prompt_delivery_cases import _profile
-from tests.support.prompt_delivery_cases import _descriptor
+from tests.support.prompt_delivery_cases import _request
 
 def test_no_profile_makes_no_review_and_no_digest(monkeypatch, project):
     fake = SmartFake()
@@ -78,9 +78,7 @@ def test_single_filters_omitted_top_level_and_nested_fields_and_stamps_digest():
         {"key": "description", "type": "string", "instruction": "Custom"},
         {"key": "dependencies_analysis.internal", "type": "string_list", "instruction": "i"},
     ]}})
-    result = Orchestrator(CombinedProvider(), resolved_profile=resolved).process(
-        _descriptor(), "x = 1", []
-    )
+    result = Orchestrator(CombinedProvider()).process(_request(resolved, "x = 1"))
     assert result["description"] == "kept"
     # Omitted known top-level fields removed by the shared filter before merge.
     assert result["role_in_system"] == ""
@@ -93,9 +91,7 @@ def test_single_filters_omitted_top_level_and_nested_fields_and_stamps_digest():
     assert result["_prompt_profile_digest"] == resolved.file_digest("a.py")
 
 def test_no_profile_delivery_is_identity_and_unstamped():
-    result = Orchestrator(CombinedProvider(), resolved_profile=None).process(
-        _descriptor(), "x = 1", []
-    )
+    result = Orchestrator(CombinedProvider()).process(_request(None, "x = 1"))
     assert result["role_in_system"] == "drop-role"
     assert result["functions"] == [{"name": "f", "description": "drop"}]
     assert "_prompt_profile_digest" not in result
@@ -104,9 +100,7 @@ def test_default_equivalent_profile_is_inactive_and_unstamped():
     from codedoc.core.prompt_profiles import default_prompt_profiles
 
     resolved = _profile(default_prompt_profiles("single", schema_version=1))
-    result = Orchestrator(CombinedProvider(), resolved_profile=resolved).process(
-        _descriptor(), "x = 1", []
-    )
+    result = Orchestrator(CombinedProvider()).process(_request(resolved, "x = 1"))
     # developer-standard-equivalent -> no field dropped, no digest stamped.
     assert result["role_in_system"] == "drop-role"
     assert "_prompt_profile_digest" not in result
@@ -138,8 +132,7 @@ def test_triple_filters_each_subagent_before_merge():
     }}, mode="triple")
     result = Orchestrator(
         TripleProvider(), parallel=False, analysis_mode="triple",
-        resolved_profile=resolved,
-    ).process(_descriptor(), "x = 1", [])
+    ).process(_request(resolved, "x = 1", mode="triple"))
 
     # structure kept functions, dropped classes/exports/role.
     assert result["functions"] == [{"name": "f", "description": "d"}]

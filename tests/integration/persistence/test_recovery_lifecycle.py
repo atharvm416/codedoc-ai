@@ -36,13 +36,14 @@ from tests.support.recovery_cache_cases import _Fake
 from codedoc.core.resume import (
     load_recovery_records_if_compatible,
 )
+from tests.support.execution_requests import make_execution_request
 
 class _RateLimitOrch:
     class _LLM:
         provider_name = "fake"
     llm = _LLM()
 
-    def process(self, descriptor, content, imports):
+    def process(self, request):
         raise RuntimeError("429 rate limit exceeded")
 
 def test_A4_recorded_this_run_recovers_real_record(tmp_path):
@@ -56,6 +57,7 @@ def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     src = tmp_path / "x.py"
     src.write_text("import os\n", encoding="utf-8")
     descriptor = {"rel_path": "x.py", "path": src, "language": "python", "extension": ".py"}
+    request = make_execution_request(tmp_path, "x.py", "import os\n", write=False)
 
     recorder = SafeWriter(tmp_path / "codedoc.json", "json", "x.py", {"x.py": descriptor})
     # A worker recorded it during THIS run.
@@ -69,7 +71,7 @@ def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     reporter = ErrorReporter()
 
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
-        [descriptor], _RateLimitOrch(), queue, stats, reporter,
+        [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
     )
 
@@ -89,6 +91,7 @@ def test_A4_preloaded_stale_record_is_retried_not_restored(tmp_path):
     src = tmp_path / "x.py"
     src.write_text("import os  # changed\n", encoding="utf-8")
     descriptor = {"rel_path": "x.py", "path": src, "language": "python", "extension": ".py"}
+    request = make_execution_request(tmp_path, "x.py", "import os  # changed\n", write=False)
 
     backup = tmp_path / "codedoc.json"
     backup.write_text(_json.dumps({
@@ -108,11 +111,11 @@ def test_A4_preloaded_stale_record_is_retried_not_restored(tmp_path):
     reporter = ErrorReporter()
 
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
-        [descriptor], _RateLimitOrch(), queue, stats, reporter,
+        [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
     )
 
-    retried_paths = [d["rel_path"] for d, _exc in retry_rate_limited]
+    retried_paths = [r.rel_path for r, _exc in retry_rate_limited]
     assert "x.py" in retried_paths, "stale preloaded file must be retried"
     assert "x.py" not in succeeded
     assert stats["checked"] == 0

@@ -23,6 +23,7 @@ from codedoc.agents.response_diagnostics import (
     ResponseDiagnostic,
 )
 from codedoc.core.error_classifier import _classify_failure
+from codedoc.core.execution_model import CallManifestTracker, PlannedCall
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.errors import ResponseContractError
 from codedoc.utils.logger import get_logger
@@ -71,11 +72,13 @@ class ResponseCorrectionAgent:
         usage,
         ledger: CorrectionLedger,
         enabled: bool,
+        call_tracker: CallManifestTracker | None = None,
     ) -> None:
         self._llm = llm
         self._usage = usage
         self._ledger = ledger
         self._enabled = bool(enabled)
+        self._call_tracker = call_tracker
 
     def repair(
         self,
@@ -85,6 +88,7 @@ class ResponseCorrectionAgent:
         diagnostic: ResponseDiagnostic,
         correction_input: dict,
         revalidate,
+        planned_call: PlannedCall | None = None,
     ) -> dict:
         """Attempt one targeted correction of a rejected response.
 
@@ -112,6 +116,9 @@ class ResponseCorrectionAgent:
             corrected_raw = _call_llm_counted(
                 self._llm, self._usage,
                 agent_name=_CORRECTION_AGENT_NAME, prompt=prompt, system=system,
+                call_tracker=self._call_tracker,
+                planned_call=planned_call,
+                additional_attempt=True,
             )
         except Exception as exc:
             verdict = _classify_failure(exc, None)

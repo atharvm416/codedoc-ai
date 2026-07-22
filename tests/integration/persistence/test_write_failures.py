@@ -17,6 +17,7 @@ from codedoc.utils.errors import (
 import errno
 from pathlib import Path
 from codedoc.core.output import preflight_output_accessibility
+from tests.support.execution_requests import make_execution_requests
 from tests.support.io_failures import _oserror
 from codedoc.pipeline import run_pipeline
 from tests.support.cross_format_runs import _config
@@ -38,8 +39,8 @@ class _FakeLLM:
 class _FakeOrchestrator:
     llm = _FakeLLM()
 
-    def process(self, descriptor, content, imports):
-        return {"file_path": descriptor["rel_path"], "language": "python"}
+    def process(self, request):
+        return {"file_path": request.rel_path, "language": "python"}
 
 class _FakeQueue:
     def __init__(self):
@@ -94,13 +95,8 @@ class _DiscardFailRecorder:
     def get_record(self, rel_path):
         return None
 
-def _descriptors(tmp_path, count):
-    descriptors = []
-    for i in range(count):
-        f = tmp_path / f"f{i}.py"
-        f.write_text("x = 1\n", encoding="utf-8")
-        descriptors.append({"rel_path": f"f{i}.py", "path": f, "language": "python"})
-    return descriptors
+def _requests(tmp_path, count):
+    return make_execution_requests(tmp_path, [f"f{i}.py" for i in range(count)])
 
 def test_live_backup_write_error_is_output_error():
     assert issubclass(LiveBackupWriteError, OutputError)
@@ -243,7 +239,6 @@ def test_discard_failure_restores_record_and_marker(tmp_path, monkeypatch):
     assert sw.get_record("a.py") is not None
 
 def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeypatch):
-    monkeypatch.setattr(ex, "parse_file", lambda descriptor: [])
     recorder = _CountingFailRecorder()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
@@ -251,7 +246,7 @@ def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeyp
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_files_sequentially(
-            _descriptors(tmp_path, 1),
+            _requests(tmp_path, 1),
             _FakeOrchestrator(),
             queue,
             stats,
@@ -269,7 +264,6 @@ def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeyp
     assert queue.failed == []
 
 def test_parallel_persistence_failure_is_fatal_without_retry(tmp_path, monkeypatch):
-    monkeypatch.setattr(ex, "parse_file", lambda descriptor: [])
     recorder = _CountingFailRecorder()
     queue = _FakeQueue()
     stats = {"checked": 0, "failed": 0}
@@ -277,7 +271,7 @@ def test_parallel_persistence_failure_is_fatal_without_retry(tmp_path, monkeypat
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_descriptor_batch(
-            _descriptors(tmp_path, 4),
+            _requests(tmp_path, 4),
             _FakeOrchestrator(),
             queue,
             stats,
@@ -294,17 +288,15 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
     tmp_path,
     monkeypatch,
 ):
-    monkeypatch.setattr(ex, "parse_file", lambda descriptor: [])
-
     class SlowAfterFirstOrchestrator(_FakeOrchestrator):
         def __init__(self):
             self.process_calls = 0
 
-        def process(self, descriptor, content, imports):
+        def process(self, request):
             self.process_calls += 1
             if self.process_calls > 1:
                 time.sleep(0.1)
-            return super().process(descriptor, content, imports)
+            return super().process(request)
 
     orchestrator = SlowAfterFirstOrchestrator()
     recorder = _CountingFailRecorder()
@@ -314,7 +306,7 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_descriptor_batch(
-            _descriptors(tmp_path, 6),
+            _requests(tmp_path, 6),
             orchestrator,
             queue,
             stats,
@@ -331,13 +323,13 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
 def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
     tmp_path, monkeypatch
 ):
-    descriptor = _descriptors(tmp_path, 1)[0]
+    request = _requests(tmp_path, 1)[0]
     monkeypatch.setattr(
         ex,
         "_process_one_file",
-        lambda _descriptor, _orchestrator: (_ for _ in ()).throw(
+        lambda _request, _orchestrator: (_ for _ in ()).throw(
             InsufficientSourceError(
-                descriptor["rel_path"], "empty_or_whitespace_only"
+                request.rel_path, "empty_or_whitespace_only"
             )
         ),
     )
@@ -347,7 +339,7 @@ def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_files_sequentially(
-            [descriptor],
+            [request],
             _FakeOrchestrator(),
             queue,
             stats,
@@ -366,13 +358,13 @@ def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
 def test_parallel_skip_discard_failure_uses_fatal_abort_protocol(
     tmp_path, monkeypatch
 ):
-    descriptor = _descriptors(tmp_path, 1)[0]
+    request = _requests(tmp_path, 1)[0]
     monkeypatch.setattr(
         ex,
         "_process_one_file",
-        lambda _descriptor, _orchestrator: (_ for _ in ()).throw(
+        lambda _request, _orchestrator: (_ for _ in ()).throw(
             InsufficientSourceError(
-                descriptor["rel_path"], "empty_or_whitespace_only"
+                request.rel_path, "empty_or_whitespace_only"
             )
         ),
     )
@@ -382,7 +374,7 @@ def test_parallel_skip_discard_failure_uses_fatal_abort_protocol(
 
     with pytest.raises(LiveBackupWriteError):
         ex._process_descriptor_batch(
-            [descriptor],
+            [request],
             _FakeOrchestrator(),
             queue,
             stats,

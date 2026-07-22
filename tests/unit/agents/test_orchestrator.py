@@ -10,29 +10,29 @@ import json
 import pytest
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.core.execution import _agent_errors
+from tests.support.execution_requests import make_execution_request
 from tests.support.one_call_cases import _COMBINED
 from tests.support.one_call_cases import _COMBINED_JSON as ONE_CALL_COMBINED_JSON
 from tests.support.one_call_cases import _CountingProvider
-from tests.support.one_call_cases import _descriptor
 from tests.support.fixture_paths import PROJECT_FIXTURES
 
-def test_deterministic_fields_cannot_be_replaced_by_model_output():
+def test_deterministic_fields_cannot_be_replaced_by_model_output(tmp_path):
     raw = json.dumps({
         **_COMBINED,
         "file_path": "EVIL.py", "language": "evil", "imports": ["malware"],
         "extension": ".evil",
     })
-    result = Orchestrator(_CountingProvider(raw), analysis_mode="single").process(
-        _descriptor(), "x = 1\n", ["os"]
-    )
+    request = make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
+    result = Orchestrator(_CountingProvider(raw), analysis_mode="single").process(request)
     assert result["file_path"] == "pkg/mod.py"
     assert result["language"] == "python"
     assert result["extension"] == ".py"
     assert result["imports"] == ["os"]
 
-def test_combined_failure_produces_one_agent_error_via_documentation():
+def test_combined_failure_produces_one_agent_error_via_documentation(tmp_path):
+    request = make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
     result = Orchestrator(_CountingProvider("not json"), analysis_mode="single").process(
-        _descriptor(), "x = 1\n", ["os"]
+        request
     )
     assert result["structure"] == {}
     assert result["dependencies_analysis"] == {}
@@ -78,16 +78,16 @@ def test_response_contract_failure_does_not_repeat_full_call_set(
     assert provider.calls == expected_calls
 
 class TestOrchestratorIntegration:
-    def test_all_fixtures(self):
+    def test_all_fixtures(self, tmp_path):
         """Run orchestrator across all fixture codebases."""
         from codedoc.agents.orchestrator import Orchestrator
         import json as _json
 
         fixtures = [
-            (PROJECT_FIXTURES / "python_app" / "main.py", "python", ".py"),
-            (PROJECT_FIXTURES / "react_app" / "App.tsx", "tsx", ".tsx"),
-            (PROJECT_FIXTURES / "java_app" / "Main.java", "java", ".java"),
-            (PROJECT_FIXTURES / "flutter_app" / "main.dart", "dart", ".dart"),
+            (PROJECT_FIXTURES / "python_app" / "main.py", "python"),
+            (PROJECT_FIXTURES / "react_app" / "App.tsx", "tsx"),
+            (PROJECT_FIXTURES / "java_app" / "Main.java", "java"),
+            (PROJECT_FIXTURES / "flutter_app" / "main.dart", "dart"),
         ]
 
         class CombinedMock:
@@ -107,65 +107,43 @@ class TestOrchestratorIntegration:
 
         orch = Orchestrator(CombinedMock(), parallel=False)
 
-        for path, language, ext in fixtures:
-            descriptor = {
-                "path": path,
-                "rel_path": path.name,
-                "language": language,
-                "extension": ext,
-            }
-            content = path.read_text()
-            result = orch.process(descriptor, content, [])
+        for path, language in fixtures:
+            request = make_execution_request(
+                tmp_path, path.name, path.read_text(), language=language, write=False
+            )
+            result = orch.process(request)
             assert result["state"] == "checked", f"Failed for {path.name}"
             assert result["file_path"] == path.name
 
 class TestOrchestrator:
-    def test_process_returns_merged_result(self, mock_llm):
+    def test_process_returns_merged_result(self, mock_llm, tmp_path):
         from codedoc.agents.orchestrator import Orchestrator
-        from pathlib import Path
-        import tempfile
-        import os
 
-        with tempfile.NamedTemporaryFile(suffix=".tsx", delete=False, mode="w") as f:
-            f.write("import React from 'react';\nconst App = () => <div/>;\nexport default App;\n")
-            tmp = f.name
-
-        descriptor = {
-            "path": Path(tmp),
-            "rel_path": "App.tsx",
-            "language": "tsx",
-            "extension": ".tsx",
-        }
+        request = make_execution_request(
+            tmp_path,
+            "App.tsx",
+            "import React from 'react';\nconst App = () => <div/>;\nexport default App;\n",
+            language="tsx",
+            imports=("react",),
+        )
 
         orch = Orchestrator(mock_llm, parallel=False)
-        result = orch.process(descriptor, open(tmp).read(), ["react"])
+        result = orch.process(request)
 
         assert result["file_path"] == "App.tsx"
         assert result["state"] == "checked"
         assert "imports" in result
         assert "description" in result
-        os.unlink(tmp)
 
-    def test_parallel_mode(self, mock_llm):
+    def test_parallel_mode(self, mock_llm, tmp_path):
         from codedoc.agents.orchestrator import Orchestrator
-        from pathlib import Path
-        import tempfile
-        import os
 
-        with tempfile.NamedTemporaryFile(suffix=".py", delete=False, mode="w") as f:
-            f.write("import os\ndef main(): pass\n")
-            tmp = f.name
-
-        descriptor = {
-            "path": Path(tmp),
-            "rel_path": "main.py",
-            "language": "python",
-            "extension": ".py",
-        }
+        request = make_execution_request(
+            tmp_path, "main.py", "import os\ndef main(): pass\n", imports=("os",)
+        )
         orch = Orchestrator(mock_llm, parallel=True)
-        result = orch.process(descriptor, open(tmp).read(), ["os"])
+        result = orch.process(request)
         assert result["state"] == "checked"
-        os.unlink(tmp)
 
 _COMBINED_JSON = json.dumps({
     "description": "A documented module.",
@@ -187,22 +165,23 @@ class _FakeProvider:
     def complete(self, prompt, system="", temperature=0.1):
         return _COMBINED_JSON
 
-def _process(content, *, max_chars=1000, head_ratio=0.70):
+def _process(tmp_path, content, *, max_chars=1000, head_ratio=0.70):
     orch = Orchestrator(
         _FakeProvider(), analysis_mode="single",
         max_content_chars=max_chars, truncation_head_ratio=head_ratio,
     )
-    return orch.process(
-        {"rel_path": "pkg/mod.py", "language": "python", "extension": ".py"},
-        content, ["os"],
+    request = make_execution_request(
+        tmp_path, "pkg/mod.py", content, imports=("os",),
+        max_content_chars=max_chars, truncation_head_ratio=head_ratio,
     )
+    return orch.process(request)
 
-def test_orchestrator_stamps_revision_for_oversized_file():
-    result = _process("x" * 5000)
+def test_orchestrator_stamps_revision_for_oversized_file(tmp_path):
+    result = _process(tmp_path, "x" * 5000)
     assert result["state"] == "checked"
     assert result["_max_context_revision"] == "truncate-v1:max=1000:head=0.7000"
 
-def test_orchestrator_omits_revision_for_small_file():
-    result = _process("x = 1\n")
+def test_orchestrator_omits_revision_for_small_file(tmp_path):
+    result = _process(tmp_path, "x = 1\n")
     assert result["state"] == "checked"
     assert "_max_context_revision" not in result

@@ -1,5 +1,78 @@
 # Changelog
 
+## 0.13.1 - 2026-07-22
+
+### Deterministic private metadata and verified dead-state cleanup
+
+- **Deterministic private-metadata serialization.** The private per-file
+  metadata keys (`_analysis_revision`, `_analysis_mode`,
+  `_max_context_revision`, `_prompt_profile_digest`) are now copied into a
+  record in one explicit canonical order instead of an order derived from
+  iterating a set. Because neither serializer sorts keys, insertion order was
+  output order, so two runs of the same codebase in separate Python processes
+  could previously emit byte-different JSON and Markdown purely because their
+  hash seeds differed. Byte-level output comparisons and golden-file checks are
+  now reliable for records carrying private metadata. The keys and their values
+  are unchanged; only their order is now fixed, and cache identity, reuse
+  decisions, and both output schemas are unaffected.
+- **Removed two verified-dead internal fields.**
+  `FileExecutionRequest.absolute_path` was populated during planning but had no
+  execution consumer beyond its own validation and one test-only read.
+  `PlanMaterials.content_hashes` was written during planning and had no readers.
+  Removing the request's source path also strengthens the guarantee that a
+  worker never reopens a source file: the frozen request no longer exposes a
+  path to reopen, and remains valid after its file is edited or deleted. Both
+  are internal types, so no public API, CLI option, configuration key, output
+  field, or provider behavior changes.
+
+## 0.13.0 - 2026-07-22
+
+### Execution kernel refactor with dormant-runtime cleanup
+
+- **Immutable execution kernel.** Every provider-bound file now carries one
+  frozen execution request — content, raw-byte hash, and imports all derived
+  from a single canonical source snapshot taken during planning — through one
+  execution coordinator and into an immutable per-call agent context. Workers
+  no longer rescan source, recompute a hash, or resolve a prompt scope; shared
+  orchestrator/agent instances carry no mutable per-call state. A source file
+  edited while codedoc is planning now triggers exactly one complete rebuild of
+  scanning, parsing, the dependency graph, selection, and planning, so no
+  provider call can ever see content, imports, a hash, and dependency routing
+  from different file revisions; a file that changes again on that rebuild
+  stops the run with a concurrent-modification error before any provider is
+  created.
+- **One canonical call manifest.** Dry-run and a real run now consume the same
+  deterministic manifest of initially planned logical calls (prompt-
+  customization reviews, then per-file initial documentation calls), never
+  independently derived. Retries and corrections are actual usage attached to
+  their originating planned call; they are never counted as additional
+  initially planned calls.
+- **`max_planned_calls` safety cap.** A new opt-in, whole-run cap (`0` =
+  unlimited, the default) on the manifest's total initially planned calls,
+  checked once before provider creation and independent of `max_files`. New
+  CLI flag `--max-planned-calls`, environment variable
+  `CODEDOC_MAX_PLANNED_CALLS`, and config key `max_planned_calls`.
+- **Planned/attempted reconciliation.** Dry-run and completed-run stats retain
+  `documentation_calls_planned` and gain manifest fields
+  (`total_calls_planned`, `max_planned_calls`, `max_planned_calls_exceeded`,
+  `call_manifest_digest`) plus, for a real run, `attempted_logical_calls`,
+  `planned_calls_not_attempted`, and `additional_attempts` — reconciling
+  planned calls against what was genuinely attempted, including after a
+  terminal abort.
+- **Dormant-runtime cleanup.** Removed the redundant pipeline self-install
+  check (`codedoc/bootstrap.py` and its `ensure_codedoc_installed()` branch)
+  and the dormant, unexposed `LocalProvider` module and its isolated contract
+  test. Ordinary Python import failure remains the authoritative installation
+  check. No active or documented provider, CLI flag, config value, or public
+  package export is removed; OpenAI-compatible local and self-hosted endpoints
+  remain reachable through `OpenAIProvider` plus `api_base_url`.
+
+This is a behavior-preserving stability release for existing configurations:
+with `max_planned_calls` at its default of `0`, prompts, results, cache and
+recovery identity, and completed output bytes are unchanged. Direct imports of
+the undocumented `codedoc.llm.local_provider` and
+`codedoc.bootstrap.ensure_codedoc_installed` cease to work.
+
 ## 0.12.4 - 2026-07-18
 
 ### Ownership-based test architecture and review-local CI
@@ -17,7 +90,7 @@
   and macOS platform matrix covers OS-sensitive tests. Python 3.12 rows feed one
   combined coverage report without re-running tests for coverage.
 
-## 0.12.3 - Unreleased
+## 0.12.3 - 2026-07-17
 
 ### Test support, determinism, and configuration hygiene
 
@@ -48,7 +121,7 @@ This is a test-infrastructure release. Production behavior, public APIs,
 prompt bytes, cache identity, output schemas, and provider behavior are
 unchanged.
 
-## 0.12.2 - Unreleased
+## 0.12.2 - 2026-07-16
 
 ### Source sufficiency and prompt feasibility
 
@@ -70,7 +143,7 @@ unchanged.
   batches when such review is planned. No CLI command, flag, environment variable,
   config key, cache identity, prompt bytes, or per-file output schema was added.
 
-## 0.12.1 - Unreleased
+## 0.12.1 - 2026-07-15
 
 ### Response diagnostics and targeted correction
 

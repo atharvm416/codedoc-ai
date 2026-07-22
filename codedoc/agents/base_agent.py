@@ -10,6 +10,11 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 from codedoc.agents.response_diagnostics import extract_json_candidate, process_response
+from codedoc.core.execution_model import (
+    AgentCallContext,
+    CallManifestTracker,
+    PlannedCall,
+)
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.errors import AgentError, ResponseContractError
@@ -90,6 +95,9 @@ def _call_llm_counted(
     agent_name: str,
     prompt: str,
     system: str = "",
+    call_tracker: CallManifestTracker | None = None,
+    planned_call: PlannedCall | None = None,
+    additional_attempt: bool = False,
 ) -> str:
     """The single provider-call accounting path for initial and correction calls.
 
@@ -100,6 +108,14 @@ def _call_llm_counted(
     and ``ResponseCorrectionAgent`` delegate here so provider/usage accounting is
     never duplicated.
     """
+    if call_tracker is not None and planned_call is None:
+        raise RuntimeError(
+            "call manifest tracking requires a planned call."
+        )
+    if call_tracker is not None and planned_call is not None:
+        call_tracker.authorize(
+            planned_call, additional_attempt=additional_attempt
+        )
     if usage is not None:
         try:
             usage.record_input(system, prompt)
@@ -137,10 +153,12 @@ class BaseAgent(ABC):
         llm: LLMProvider,
         max_content_chars: int = 12000,
         usage: UsageAccumulator | None = None,
+        call_tracker: CallManifestTracker | None = None,
     ) -> None:
         self.llm = llm
         self._max_content_chars = max_content_chars
         self._usage = usage
+        self._call_tracker = call_tracker
         # Shared correction component, injected by the orchestrator after the four
         # agents are constructed.  ``None`` (the default for a directly constructed
         # agent, or an orchestrator built without a correction ledger) means an
@@ -155,6 +173,10 @@ class BaseAgent(ABC):
         imports: list[str],
         language: str,
         requested_shape: "object | None" = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
         """
         Analyse one file and return a result dict.
@@ -175,7 +197,13 @@ class BaseAgent(ABC):
     # Shared helpers
     # ------------------------------------------------------------------
 
-    def _truncate(self, content: str, file_path: str = "") -> str:
+    def _truncate(
+        self,
+        content: str,
+        file_path: str = "",
+        *,
+        call_context: AgentCallContext | None = None,
+    ) -> str:
         """Defensive truncation fallback for direct agent callers.
 
         Orchestrated runs truncate once in ``Orchestrator.process()`` before
@@ -183,18 +211,37 @@ class BaseAgent(ABC):
         is DEBUG so a normal orchestrated run never emits three warnings for
         one file.  The marker fits inside the ceiling.
         """
-        if len(content) > self._max_content_chars:
+        max_chars = (
+            call_context.max_content_chars
+            if call_context is not None
+            else self._max_content_chars
+        )
+        head_fraction = (
+            call_context.truncation_head_ratio
+            if call_context is not None
+            else TRUNCATION_HEAD_FRACTION
+        )
+        if len(content) > max_chars:
             logger.debug(
                 "Content truncated: %s (%d chars -> %d chars). "
                 "Raise max_content_chars in config to include more content.",
                 file_path or "file",
                 len(content),
-                self._max_content_chars,
+                max_chars,
             )
-            return truncate_for_llm(content, self._max_content_chars)
+            return truncate_for_llm(
+                content, max_chars, head_fraction=head_fraction
+            )
         return content
 
-    def _call_llm(self, prompt: str, system: str = "") -> str:
+    def _call_llm(
+        self,
+        prompt: str,
+        system: str = "",
+        *,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
+    ) -> str:
         """Call the LLM and return raw text. Wraps errors as AgentError.
 
         Delegates to the shared :func:`_call_llm_counted` accounting path so
@@ -203,6 +250,9 @@ class BaseAgent(ABC):
         return _call_llm_counted(
             self.llm, self._usage,
             agent_name=self.agent_name, prompt=prompt, system=system,
+            call_tracker=self._call_tracker,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
         )
 
     def _parse_json(self, raw: str, file_path: str) -> dict:
@@ -244,6 +294,7 @@ class BaseAgent(ABC):
         imports: list[str],
         language: str,
         shape_block: str,
+        planned_call: PlannedCall | None = None,
     ) -> dict:
         """Validate *raw* through the canonical path, correcting once if eligible.
 
@@ -290,6 +341,7 @@ class BaseAgent(ABC):
             diagnostic=contract_error.diagnostic,
             correction_input=correction_input,
             revalidate=_revalidate,
+            planned_call=planned_call,
         )
 
     def _agent_error_result(self, exc: Exception) -> dict:
@@ -320,15 +372,33 @@ class BaseAgent(ABC):
         imports: list[str],
         language: str,
         requested_shape: "object | None" = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
         """
         Wrapper that catches all errors and returns a fallback dict
         instead of crashing the pipeline.
         """
         try:
-            if requested_shape is None:
+            if (
+                requested_shape is None
+                and call_context is None
+                and planned_call is None
+                and not additional_attempt
+            ):
                 return self.run(file_path, content, imports, language)
-            return self.run(file_path, content, imports, language, requested_shape)
+            return self.run(
+                file_path,
+                content,
+                imports,
+                language,
+                requested_shape,
+                call_context=call_context,
+                planned_call=planned_call,
+                additional_attempt=additional_attempt,
+            )
         except AgentError as exc:
             logger.warning("%s failed on %s: %s", self.agent_name, file_path, exc)
             return self._agent_error_result(exc)

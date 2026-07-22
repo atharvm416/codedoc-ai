@@ -10,8 +10,8 @@ from tests.support.pipeline_scenarios import _cache_identity
 import pytest
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.core.record_meta import ANALYSIS_REVISION
+from tests.support.execution_requests import make_execution_request
 from tests.support.one_call_cases import _CountingProvider
-from tests.support.one_call_cases import _descriptor
 from tests.support.response_correction_cases import RoutingProvider
 from codedoc.core.document import read_codedoc_document, records_by_path
 from codedoc.pipeline import run_pipeline
@@ -158,9 +158,9 @@ def _pipeline_provider(monkeypatch):
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda c: provider)
     return provider
 
-def test_generated_record_carries_cache_identity():
+def test_generated_record_carries_cache_identity(tmp_path):
     result = Orchestrator(_CountingProvider(), analysis_mode="single").process(
-        _descriptor(), "x = 1\n", ["os"]
+        make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
     )
     assert result["_analysis_revision"] == ANALYSIS_REVISION
     assert result["_analysis_mode"] == "single"

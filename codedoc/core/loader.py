@@ -178,6 +178,10 @@ DEFAULTS: dict[str, Any] = {
     "dry_run": False,
     # Maximum number of files allowed to make LLM calls. 0 means unlimited.
     "max_files": 0,
+    # Safety cap on initially planned LLM calls, including prompt-customization
+    # reviews and initial documentation calls (0 = unlimited). Checked before
+    # provider creation; retries and corrections are excluded.
+    "max_planned_calls": 0,
     # Project-relative paths to reprocess even when their hash is unchanged.
     "force_files": [],
     # Exit 0 even when some files failed (completed runs only).
@@ -270,6 +274,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
     "CODEDOC_DRY_RUN": "dry_run",
     "CODEDOC_MAX_FILES": "max_files",
+    "CODEDOC_MAX_PLANNED_CALLS": "max_planned_calls",
     "CODEDOC_FORCE_FILES": "force_files",
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
     "CODEDOC_ANALYSIS_MODE": "analysis_mode",
@@ -1013,6 +1018,15 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
     config["max_files"] = _coerce_strict_int(config.get("max_files", 0), "max_files")
     if config["max_files"] < 0:
         raise ConfigError("max_files must be an integer greater than or equal to 0.")
+
+    # max_planned_calls — integer >= 0; 0 means unlimited; booleans rejected.
+    config["max_planned_calls"] = _coerce_strict_int(
+        config.get("max_planned_calls", 0), "max_planned_calls"
+    )
+    if config["max_planned_calls"] < 0:
+        raise ConfigError(
+            "max_planned_calls must be an integer greater than or equal to 0."
+        )
 
     # force_files — a list of non-empty path strings.
     force_files = config.get("force_files", [])

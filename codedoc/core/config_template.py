@@ -18,8 +18,9 @@ Public-default ownership
 ``DEFAULTS`` keys (with brief descriptions for README/help generation).
 :data:`GENERATOR_EXCLUDED_KEYS` is the set never emitted (derived or removed
 keys).  Together they must classify every ``DEFAULTS`` key; the drift test in
-``tests/test_0113_config_generation.py`` fails if a newly added public default
-lacks generator ownership or if an internal/removed key leaks into generated JSON.
+``tests/contract/configuration/test_generated_config.py`` fails if a newly added
+public default lacks generator ownership or if an internal/removed key leaks into
+generated JSON.
 """
 
 from __future__ import annotations
@@ -116,6 +117,13 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("max_content_chars", "Maximum source characters sent to the LLM per file."),
     ("dry_run", "Plan only: no writes and no provider calls."),
     ("max_files", "Safety cap on files that may make LLM calls (0 = unlimited)."),
+    (
+        "max_planned_calls",
+        "Safety cap on initially planned LLM calls, including "
+        "prompt-customization reviews and initial documentation calls "
+        "(0 = unlimited). Checked before provider creation; retries and "
+        "corrections are excluded.",
+    ),
     ("force_files", "Project-relative paths to reprocess even when unchanged."),
     ("allow_partial", "Exit 0 even when some files failed (completed runs only)."),
     ("analysis_mode", "'single' (one combined call) or 'triple' (three agents)."),

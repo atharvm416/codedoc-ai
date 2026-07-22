@@ -44,7 +44,20 @@ for a named output; no directory walk or unrelated sibling is permitted.
 4. **Scan and plan.** Scan source, construct the dependency graph, select entry
    reachability/documentation scope, compute per-file profile digests by
    extension scope, and build the versioned recovery identity (which no longer
-   binds a profile-wide digest).
+   binds a profile-wide digest). For every file routed to a documentation call,
+   planning also builds one frozen execution request from a single canonical
+   source snapshot: raw bytes are read once, hashed, and decoded with the
+   canonical text policy, so the request's content, byte hash, and derived
+   imports always describe the same file revision. A file that changes between
+   its routing hash and that snapshot triggers exactly one complete rebuild of
+   the source-dependent inputs — scanning, parsing, dependency-graph
+   construction, entry selection, and planning — because the graph was parsed
+   before the routing hash and may itself have observed the stale revision.
+   A second detected change is reported as a concurrent-source-change error
+   before usage accounting, provider creation, any confirmation callback, or
+   writer initialization. Execution later consumes these requests without
+   rescanning source, recomputing a hash, resolving a prompt scope, or mutating
+   plan materials; reused and unchanged records never receive one.
 
 5. **Exact recovery inspection.** Inspect only
    `<output_dir>/crash_recovery.json`. Missing means fresh state. A compatible
@@ -54,12 +67,25 @@ for a named output; no directory walk or unrelated sibling is permitted.
    exact recovery file.
 
 6. **Final read-only gates.** Build the final plan from stable plus compatible
-   recovery records, enforce `max_files`, and perform mandatory semantic review
-   only for active customization that will reach documentation calls. SAFE
-   continues, RISKY warns, TOO_RISKY blocks. Separately, derive deterministic
-   non-blocking feasibility advisories for customized fields that appear to need
-   cross-file context; these add no provider call and never alter the safety
-   verdict. Dry-run returns here and mutates nothing.
+   recovery records, then build the exact prompt-customization review batches
+   (provider-free) and the one canonical call manifest they share with
+   documentation requests: review calls first in batch order, then
+   documentation calls sorted by relative path and canonical per-mode agent
+   order. Attach the manifest's counts, cap outcome, and digest to the
+   immutable plan. Dry-run returns here and mutates nothing, surfacing the same
+   counts a real run would use.
+
+   For a real run, enforce `max_files` over documentation-call candidates, then
+   independently enforce `max_planned_calls` — a safety cap on the manifest's
+   total initially planned calls (prompt-customization reviews plus initial
+   documentation calls; retries and corrections are excluded). Equality with
+   either cap passes; either failure stops before usage accounting, provider
+   creation, any confirmation callback, or writer initialization, and leaves
+   prior output untouched. Only then perform mandatory semantic review for
+   active customization that will reach documentation calls: SAFE continues,
+   RISKY warns, TOO_RISKY blocks. Separately, derive deterministic non-blocking
+   feasibility advisories for customized fields that appear to need cross-file
+   context; these add no provider call and never alter the safety verdict.
 
 7. **Mutation boundary.** Create the output directory and run the provider-free
    create/write/fsync/atomic-rename/delete accessibility probe. Initialize
@@ -69,10 +95,11 @@ for a named output; no directory walk or unrelated sibling is permitted.
 
 8. **Execution.** Process dependencies before dependents where possible. Single
    mode makes one combined documentation call per file; triple mode runs
-   structure, dependency, and documentation agents. Immediately after a source
-   file is read, a deterministic pre-check skips empty or whitespace-only content
-   before parsing or any per-file agent call. The skip is not a failure, persists
-   no placeholder record, and transactionally removes any stale preloaded record.
+   structure, dependency, and documentation agents. Planning has already derived
+   imports from the frozen decoded snapshot. Before any per-file provider call, a
+   deterministic pre-check skips empty or whitespace-only content. The skip is not
+   a failure, persists no placeholder record, consumes no manifest ID, and
+   transactionally removes any stale preloaded record.
    Each non-skipped agent response passes one canonical validation path: JSON
    candidate extraction, parse, top-level object check, strict cleaning, profile
    filtering, a check that at least one requested field survives, and
@@ -120,6 +147,33 @@ backward-compatible and keeps recovery identity version 1. The run identity gate
 whether recovery may be overlaid; each overlaid record is still re-validated by
 the per-file reuse checks above, so `_prompt_profile_digest` selectively filters
 recovered records by extension scope.
+
+## Call manifest and planned-call authorization
+
+Dry-run and a real run consume one canonical call manifest and never
+independently derive planned counts. Each entry is a domain-separated,
+deterministic identifier for one initially planned logical call — a
+prompt-customization review batch or one agent's initial documentation call
+for one file — never for a retry or a correction. `max_planned_calls` (`0` =
+unlimited; the default preserves unlimited authorization) is a safety cap on
+that manifest's total, checked once, before provider creation; it is
+independent of `max_files` and is never a hard ceiling on actual provider
+attempts or a stop-after-N-calls limit.
+
+Dry-run and a completed real run both report the manifest's `total_calls_planned`,
+`max_planned_calls`, `max_planned_calls_exceeded`, and `call_manifest_digest`.
+The established `documentation_calls_planned` and
+`prompt_customization_security_review_calls_planned` fields keep their
+existing meaning; the manifest introduces no second alias for either.
+
+A real run additionally reconciles planned against attempted logical calls:
+`attempted_logical_calls` counts unique planned call IDs reached at least once;
+`planned_calls_not_attempted` is the remainder left by an early stop (a valid
+outcome, not a defect); and `additional_attempts` is the actual attempted-call
+count in excess of `attempted_logical_calls`, i.e. retries and corrections.
+This reconciliation holds for a clean completion, an `allow_partial`
+completion, and a terminal abort alike, without requiring execution to
+continue past the abort.
 
 ## Failure invariants
 

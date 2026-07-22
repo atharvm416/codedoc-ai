@@ -134,18 +134,22 @@ def test_config_defaults_env_and_validation(tmp_path, monkeypatch):
 
     monkeypatch.setenv("CODEDOC_DRY_RUN", "yes")
     monkeypatch.setenv("CODEDOC_MAX_FILES", "7")
+    monkeypatch.setenv("CODEDOC_MAX_PLANNED_CALLS", "9")
     monkeypatch.setenv("CODEDOC_FORCE_FILES", "a.py; src/b.py ;")
     monkeypatch.setenv("CODEDOC_ALLOW_PARTIAL", "true")
     config = load_config(tmp_path)
 
     assert config["dry_run"] is True
     assert config["max_files"] == 7
+    assert config["max_planned_calls"] == 9
     assert config["force_files"] == ["a.py", "src/b.py"]
     assert config["allow_partial"] is True
 
     for invalid in (-1, True, 1.5, "1.5", "+-5", "-+5", object()):
         with pytest.raises(ConfigError):
             load_config(tmp_path, {"max_files": invalid})
+        with pytest.raises(ConfigError):
+            load_config(tmp_path, {"max_planned_calls": invalid})
     with pytest.raises(ConfigError):
         load_config(tmp_path, {"force_files": [""]})
 
@@ -254,6 +258,7 @@ def test_all_boolean_settings_are_strict(tmp_path, key, value):
         "retry_after_cap_s",
         "max_content_chars",
         "max_files",
+        "max_planned_calls",
     ],
 )
 @pytest.mark.parametrize("value", [True, 1.0])

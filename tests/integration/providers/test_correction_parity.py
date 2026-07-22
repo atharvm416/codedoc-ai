@@ -7,6 +7,7 @@ import pytest
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.agents.response_diagnostics import CorrectionLedger
 from codedoc.core.execution import _process_one_file
+from tests.support.execution_requests import make_execution_request
 
 _INVALID_COMBINED = json.dumps({"role_in_system": "r"})           # missing description
 
@@ -36,10 +37,8 @@ class FakeGemini(_FakeBase):
 
 _FAKES = [FakeOpenAI, FakeAnthropic, FakeGemini]
 
-def _descriptor(tmp_path):
-    p = tmp_path / "m.py"
-    p.write_text("x = 1\n", encoding="utf-8")
-    return {"path": p, "rel_path": "m.py", "language": "python", "extension": ".py"}
+def _request(tmp_path):
+    return make_execution_request(tmp_path, "m.py", "x = 1\n")
 
 @pytest.mark.parametrize("fake_cls", _FAKES)
 def test_correction_eligibility_and_counts_are_identical(tmp_path, fake_cls):
@@ -48,7 +47,7 @@ def test_correction_eligibility_and_counts_are_identical(tmp_path, fake_cls):
         prov, analysis_mode="single",
         correction_ledger=CorrectionLedger(True), response_correction_enabled=True,
     )
-    res = _process_one_file(_descriptor(tmp_path), orch)
+    res = _process_one_file(_request(tmp_path), orch)
     assert prov.calls == 2
     assert res["description"] == "A file."
 
@@ -62,7 +61,7 @@ def test_disabled_reason_code_is_identical(tmp_path, fake_cls):
         correction_ledger=CorrectionLedger(False), response_correction_enabled=False,
     )
     with pytest.raises(ResponseContractError) as caught:
-        _process_one_file(_descriptor(tmp_path), orch)
+        _process_one_file(_request(tmp_path), orch)
     # At the execution boundary the carried diagnostic is the bounded summary dict.
     assert caught.value.diagnostic["reason_code"] == "missing_required"
     assert prov.calls == 1

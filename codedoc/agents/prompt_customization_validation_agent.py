@@ -5,6 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from codedoc.agents.base_agent import BaseAgent
+from codedoc.core.execution_model import (
+    REVIEW_OWNER,
+    CallManifestTracker,
+    PlannedCall,
+    review_call_id,
+)
 from codedoc.core.prompt_profiles import (
     MAX_PROFILE_SECURITY_REASONS,
     MAX_PROFILE_SECURITY_WARNINGS,
@@ -29,12 +35,28 @@ class PromptCustomizationValidationAgent(BaseAgent):
 
     agent_name = "PromptCustomizationValidationAgent"
 
+    def __init__(self, *args, call_tracker: CallManifestTracker | None = None, **kwargs):
+        super().__init__(*args, call_tracker=call_tracker, **kwargs)
+
     def run(self, *args, **kwargs) -> dict:  # pragma: no cover - use review_batch
         raise NotImplementedError("use review_batch()")
 
     def review_batch(self, batch: ReviewBatch) -> dict:
         try:
-            raw = self._call_llm(batch.text, system=REVIEW_SYSTEM)
+            component_ids = tuple(component.component for component in batch.components)
+            planned_call = PlannedCall(
+                call_id=review_call_id(
+                    batch.stream_digest, component_ids, batch.ordinal
+                ),
+                category="prompt-review",
+                owner=REVIEW_OWNER,
+                ordinal=batch.ordinal,
+            )
+            raw = self._call_llm(
+                batch.text,
+                system=REVIEW_SYSTEM,
+                planned_call=planned_call,
+            )
             # Unlike documentation responses, a safety verdict is fail-closed:
             # markdown fences, preambles, trailing text, and multiple objects are
             # malformed rather than being repaired or extracted.

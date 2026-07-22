@@ -33,6 +33,31 @@ _IS_RELATIVE = re.compile(r'^\.{1,2}[/\\]|^\.{1,2}$')
 _IS_PATH_ALIAS = re.compile(r'^@|^~')  # @components/... or ~/...
 
 
+def parse_text(source: str, language: str = "tsx", *, file_path: str = "<source>") -> list[str]:
+    """
+    Extract import paths from already-decoded TS/TSX/JS/JSX source.
+    Returns local/relative imports and path aliases; skips bare npm packages.
+
+    ``file_path`` is used only for logging, so this and :func:`parse` produce
+    literal-identical imports for the same decoded text.
+    """
+    imports: list[str] = []
+    seen: set[str] = set()
+
+    for pattern in _PATTERNS:
+        for match in pattern.finditer(source):
+            imp = match.group(1).strip()
+            if not imp or imp in seen:
+                continue
+            seen.add(imp)
+            # Include relative paths and path aliases; skip npm packages
+            if _IS_RELATIVE.match(imp) or _IS_PATH_ALIAS.match(imp):
+                imports.append(imp)
+
+    logger.debug("ReactParser found %d imports in %s", len(imports), file_path)
+    return imports
+
+
 def parse(file_path: Path, language: str = "tsx") -> list[str]:
     """
     Extract import paths from a TS/TSX/JS/JSX file.
@@ -43,18 +68,4 @@ def parse(file_path: Path, language: str = "tsx") -> list[str]:
     except OSError as exc:
         raise ParseError(str(file_path), f"Cannot read file: {exc}") from exc
 
-    imports: list[str] = []
-    seen: set[str] = set()
-
-    for pattern in _PATTERNS:
-        for match in pattern.finditer(content):
-            imp = match.group(1).strip()
-            if not imp or imp in seen:
-                continue
-            seen.add(imp)
-            # Include relative paths and path aliases; skip npm packages
-            if _IS_RELATIVE.match(imp) or _IS_PATH_ALIAS.match(imp):
-                imports.append(imp)
-
-    logger.debug("ReactParser found %d imports in %s", len(imports), file_path.name)
-    return imports
+    return parse_text(content, language, file_path=str(file_path))

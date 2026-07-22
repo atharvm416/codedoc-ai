@@ -25,6 +25,7 @@ one strict contract.  They are re-exported here for backward compatibility.
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
@@ -148,8 +149,16 @@ class FileDocumentationAgent(BaseAgent):
         imports: list[str],
         language: str,
         requested_shape: ResolvedShapeBlock | None = None,
+        *,
+        call_context: AgentCallContext | None = None,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
     ) -> dict:
-        truncated = self._truncate(content, file_path)
+        if call_context is not None:
+            requested_shape = call_context.resolved_shape_bundle.selections[
+                "combined"
+            ].block
+        truncated = self._truncate(content, file_path, call_context=call_context)
         system, prompt = build_prompt(
             file_path, truncated, imports, language, requested_shape,
         )
@@ -158,7 +167,12 @@ class FileDocumentationAgent(BaseAgent):
             if requested_shape is not None
             else default_shape_block("single", "combined")
         )
-        raw = self._call_llm(prompt, system=system)
+        raw = self._call_llm(
+            prompt,
+            system=system,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
+        )
         cleaned = self._finalize_response(
             raw,
             mode="single",
@@ -170,6 +184,7 @@ class FileDocumentationAgent(BaseAgent):
             imports=imports,
             language=language,
             shape_block=shape_block,
+            planned_call=planned_call,
         )
         logger.debug(
             "FileDocumentationAgent: %s → %d functions, %d classes",

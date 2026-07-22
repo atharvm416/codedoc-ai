@@ -45,7 +45,6 @@ from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
 )
 from codedoc.agents.response_diagnostics import CorrectionLedger
-from codedoc.bootstrap import ensure_codedoc_installed
 from codedoc.core.discovery import (
     _build_graph,
     _graph_edges,
@@ -56,7 +55,9 @@ from codedoc.core.execution import (
     ExecutionContext,
     ExecutionOptions,
     execute_agent_files,
+    reconcile_planned_calls,
 )
+from codedoc.core.execution_model import REVIEW_OWNER, CallManifestTracker, build_call_manifest
 from codedoc.core.feasibility import build_feasibility_notes
 from codedoc.core.loader import load_config
 from codedoc.core.output import (
@@ -67,6 +68,7 @@ from codedoc.core.output import (
 )
 from codedoc.core.planning import (
     PipelinePlan,
+    PlanSourceInputs,
     build_pipeline_plan,
     normalize_force_files,
 )
@@ -91,11 +93,9 @@ from codedoc.core.resume import (
 )
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.core.scanner import scan_files
-from codedoc.core.source_precheck import insufficient_source
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider, describe_provider_selection
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-from codedoc.parser.factory import parse_file
 from codedoc.utils.errors import (
     ConfigError,
     ErrorReporter,
@@ -158,9 +158,6 @@ def run_pipeline(
     if not root.exists():
         raise FileNotFoundError(f"Project root does not exist: {root}")
 
-    if not ensure_codedoc_installed(root):
-        raise RuntimeError("codedoc is not importable in the current Python environment.")
-
     if config_overrides is None:
         config_overrides = {}
 
@@ -191,6 +188,9 @@ def run_pipeline(
 
     entry_resolution_source = _resolve_entry_and_docs(root, config)
     resolved_profile = build_resolved_profile(profile_action, analysis_mode)
+    # Empty/no-scanned-file paths use the same manifest helper as every other
+    # path and report zero calls throughout.
+    _empty_manifest = build_call_manifest([], [], analysis_mode)
     no_work_profile_stats = {
         "prompt_profile_source": profile_resolution.source,
         "prompt_profile_active": False,
@@ -205,6 +205,13 @@ def run_pipeline(
         "prompt_customization_feasibility_advisories": (),
         "documentation_calls_planned": 0,
         "documentation_calls_attempted": 0,
+        "total_calls_planned": 0,
+        "max_planned_calls": int(config.get("max_planned_calls", 0) or 0),
+        "max_planned_calls_exceeded": False,
+        "call_manifest_digest": _empty_manifest.digest,
+        "attempted_logical_calls": 0,
+        "planned_calls_not_attempted": 0,
+        "additional_attempts": 0,
     }
 
     output_format = config.get("output_format", "json")
@@ -274,14 +281,17 @@ def run_pipeline(
         if _output_dir_name and _output_dir_name not in _scan_skip_dirs:
             _scan_skip_dirs.append(_output_dir_name)
 
-    all_files = scan_files(
-        root,
-        extension_language_map=config["extension_language_map"],
-        max_file_size_kb=config["max_file_size_kb"],
-        skip_dirs=_scan_skip_dirs,
-        ignore_paths=config.get("ignore_paths"),
-        follow_symlinks=config.get("follow_symlinks", False),
-    )
+    def _scan_source_files() -> list[dict]:
+        return scan_files(
+            root,
+            extension_language_map=config["extension_language_map"],
+            max_file_size_kb=config["max_file_size_kb"],
+            skip_dirs=_scan_skip_dirs,
+            ignore_paths=config.get("ignore_paths"),
+            follow_symlinks=config.get("follow_symlinks", False),
+        )
+
+    all_files = _scan_source_files()
     if not all_files:
         # A2: an explicitly specified entry cannot be honoured if nothing was
         # scanned — fail loudly rather than exit successfully having documented
@@ -353,15 +363,35 @@ def run_pipeline(
     reachable_rels, documented_rels, entry_rel = _select_files(
         root, config, graph, file_map
     )
-    entry_source = _final_entry_source(entry_resolution_source, entry_rel)
 
-    # Count of scanned files excluded by entry-reachability selection (A1).
-    # Zero when no entry is in effect (selected_rels == all scanned files).
-    # Surfaced in stats so the CLI can report it at the run summary.
-    entry_excluded = len(file_map) - len(documented_rels)
+    def _rebuild_source_inputs() -> PlanSourceInputs:
+        """Re-run scanning, parsing, graph construction, and entry selection.
 
-    # Queue/topological order for the selected file set (all selected, not just agent files).
-    ordered_selected = [p for p in graph.topological_order() if p in documented_rels]
+        Planning detects a file whose content changed between its routing hash
+        and its canonical snapshot, but the dependency graph was parsed earlier
+        still — so routing may itself have been derived from the revision that
+        is now stale.  Re-reading snapshots against that old graph would leave
+        content and dependency routing describing different revisions, so the
+        pipeline (which owns scanning and graph construction) rebuilds them
+        here.  Invoked at most once per run, only on a detected stale revision.
+
+        The rebuild is triggered only by a content change, so the entry/scope
+        identity the recovery file was already bound to above is unaffected.
+        """
+        nonlocal graph, file_map, unresolved_imports_by_path
+        nonlocal reachable_rels, documented_rels, entry_rel
+        graph, file_map, unresolved_imports_by_path = _build_graph(
+            _scan_source_files(), root, error_reporter
+        )
+        reachable_rels, documented_rels, entry_rel = _select_files(
+            root, config, graph, file_map
+        )
+        return PlanSourceInputs(
+            file_map=file_map,
+            graph=graph,
+            selected_rels=documented_rels,
+            entry_rel=entry_rel,
+        )
 
     # Normalize forced paths against the project root (raises
     # ConfigError for paths outside the root).
@@ -404,7 +434,9 @@ def run_pipeline(
     # Overlay compatible recovery records onto the stable baseline before planning.
     existing_docs = {**existing_docs, **recovery_records}
 
-    # One shared plan drives both dry-run and real execution.
+    # One shared plan drives both dry-run and real execution.  A stale source
+    # revision rebuilds the complete source-dependent inputs once through
+    # ``_rebuild_source_inputs`` before a second change fails deterministically.
     plan, materials = build_pipeline_plan(
         file_map=file_map,
         graph=graph,
@@ -414,7 +446,19 @@ def run_pipeline(
         forced_paths=forced_paths,
         config=config,
         resolved_profile=resolved_profile,
+        rebuild_source_inputs=_rebuild_source_inputs,
     )
+
+    # Derived from the file set/graph/selection the plan was actually built
+    # from, so a stale-revision rebuild above is reflected here rather than
+    # leaving pre-rebuild counts and queue order in place.
+    entry_source = _final_entry_source(entry_resolution_source, entry_rel)
+    # Count of scanned files excluded by entry-reachability selection (A1).
+    # Zero when no entry is in effect (selected_rels == all scanned files).
+    # Surfaced in stats so the CLI can report it at the run summary.
+    entry_excluded = len(file_map) - len(documented_rels)
+    # Queue/topological order for the selected file set (all selected, not just agent files).
+    ordered_selected = [p for p in graph.topological_order() if p in documented_rels]
 
     # The exact set of file scopes reachable by a planned agent file drives which
     # profile components (common and per-extension) are reviewed.  An explicitly
@@ -424,6 +468,28 @@ def run_pipeline(
     )
     review_batches = build_review_batches(resolved_profile, planned_scopes)
     feasibility_notes = build_feasibility_notes(resolved_profile, planned_scopes)
+
+    # One canonical call manifest, shared by dry-run and real execution alike.
+    # Built and attached before any cap is enforced or any provider-side effect
+    # can occur.
+    call_manifest = build_call_manifest(review_batches, plan.agent_rels, analysis_mode)
+    plan = plan.with_call_manifest(
+        call_manifest, int(config.get("max_planned_calls", 0) or 0)
+    )
+    insufficient_source_rels = frozenset(materials.insufficient_source_reasons)
+    max_files_candidate_count = len(plan.agent_rels) + len(insufficient_source_rels)
+    call_tracker = CallManifestTracker(call_manifest)
+    # Bounded: digest and counts only — never raw source, prompts, custom
+    # instructions, credentials, or provider responses.
+    logger.debug(
+        "Call manifest built: digest=%s total=%d review=%d documentation=%d "
+        "max_planned_calls=%d",
+        plan.call_manifest_digest,
+        plan.total_calls_planned,
+        plan.review_calls_planned,
+        plan.documentation_calls_planned,
+        plan.max_planned_calls,
+    )
 
     if dry_run:
         return _build_dry_run_stats(
@@ -437,6 +503,7 @@ def run_pipeline(
             profile_resolution,
             review_batches,
             recovery_resumed=len(recovery_records),
+            materials=materials,
             feasibility_notes=feasibility_notes,
         )
 
@@ -448,10 +515,23 @@ def run_pipeline(
     # any mutation, writer initialization, or provider creation.
     if plan.max_files_exceeded:
         raise ConfigError(
-            f"This run has {len(plan.agent_rels)} documentation-call candidate(s), "
+            f"This run has {max_files_candidate_count} documentation-call candidate(s), "
             f"which exceeds the configured max_files limit of {plan.max_files}. "
             "Inspect the plan first with --dry-run, and raise --max-files only "
             "after reviewing it."
+        )
+
+    # Whole-run call-authorization cap: independent of max_files, checked before
+    # usage accounting, provider creation, or any confirmation callback.
+    if plan.max_planned_calls_exceeded:
+        raise ConfigError(
+            f"This run has {plan.total_calls_planned} initially planned LLM "
+            f"call(s) ({plan.review_calls_planned} prompt-customization review, "
+            f"{plan.documentation_calls_planned} initial documentation at "
+            f"{initial_calls_per_file(analysis_mode)} call(s) per file), which "
+            f"exceeds the configured max_planned_calls limit of "
+            f"{plan.max_planned_calls}. Inspect the plan first with --dry-run, "
+            "and raise --max-planned-calls only after reviewing it."
         )
 
     usage = UsageAccumulator()
@@ -483,8 +563,15 @@ def run_pipeline(
             "is persisted in run statistics.",
             flush=True,
         )
+        logger.debug(
+            "Planned call(s) for owner=%s category=prompt-review call_ids=%s",
+            REVIEW_OWNER,
+            [c.call_id for c in call_manifest.calls if c.category == "prompt-review"],
+        )
         llm = create_provider(config)
-        reviewer = PromptCustomizationValidationAgent(llm, usage=usage)
+        reviewer = PromptCustomizationValidationAgent(
+            llm, usage=usage, call_tracker=call_tracker
+        )
         try:
             outcome = reviewer.review(review_batches)
         except PromptCustomizationValidationError as exc:
@@ -497,6 +584,9 @@ def run_pipeline(
                 usage.attempted_calls
             )
             review_stats.update(usage.snapshot())
+            _set_manifest_reconciliation(
+                review_stats, usage, plan, call_tracker
+            )
             raise PromptCustomizationValidationError(str(exc), stats=review_stats) from exc
         review_stats["prompt_customization_security_review_calls_completed"] = (
             outcome.calls_completed
@@ -507,6 +597,7 @@ def run_pipeline(
             outcome.calls_completed
         )
         review_stats.update(usage.snapshot())
+        _set_manifest_reconciliation(review_stats, usage, plan, call_tracker)
         review_stats["prompt_customization_security_warnings"] = len(outcome.warnings)
         review_stats["prompt_customization_security_blocking_reasons"] = len(
             outcome.reasons
@@ -598,6 +689,12 @@ def run_pipeline(
     resumed = len(recovery_records)
 
     agent_rels = set(plan.agent_rels)
+    for rel_path, reason in materials.insufficient_source_reasons.items():
+        logger.info(
+            "[SKIP] %s | insufficient source: %s — not sent to provider",
+            rel_path,
+            reason,
+        )
     rate_limit_warnings: list[dict] = []
 
     if not agent_rels:
@@ -605,7 +702,7 @@ def run_pipeline(
         stats: dict = {
             "checked": 0,
             "failed": 0,
-            "skipped_insufficient_source": 0,
+            "skipped_insufficient_source": len(insufficient_source_rels),
             "skipped": skipped,
             "reused": reused,
             "resumed": resumed,
@@ -618,10 +715,12 @@ def run_pipeline(
             **no_work_profile_stats,
             **review_stats,
         }
-        _set_plan_counters(stats, plan)
+        _set_plan_counters(
+            stats, plan, provider_free_skips=len(insufficient_source_rels)
+        )
         output_files = write_project_outputs(
             _build_documentation_records(
-                documented_rels,
+                documented_rels - insufficient_source_rels,
                 file_map,
                 graph.topological_order(),
                 existing_docs,
@@ -641,7 +740,14 @@ def run_pipeline(
         stats["output_files"] = [str(path) for path in output_files if path]
         recorder.delete()
         _set_issue_stats(stats, error_reporter, recovery_path)
-        _set_usage_stats(stats, usage, plan, config, correction_ledger)
+        _set_usage_stats(
+            stats,
+            usage,
+            plan,
+            config,
+            correction_ledger,
+            call_tracker=call_tracker,
+        )
         return stats
 
     # Build the agent-file queue in topological order.
@@ -676,14 +782,14 @@ def run_pipeline(
         usage=usage,
         analysis_mode=config.get("analysis_mode", "single"),
         truncation_head_ratio=config.get("truncation_head_ratio", 0.70),
-        resolved_profile=resolved_profile,
         response_correction_enabled=correction_enabled,
         correction_ledger=correction_ledger,
+        call_tracker=call_tracker,
     )
     stats = {
         "checked": 0,
         "failed": 0,
-        "skipped_insufficient_source": 0,
+        "skipped_insufficient_source": len(insufficient_source_rels),
         "skipped": skipped,
         "reused": reused,
         "resumed": resumed,
@@ -730,6 +836,7 @@ def run_pipeline(
         stats=stats,
         new_results=new_results,
         options=options,
+        execution_requests=materials.execution_requests,
     )
     try:
         execute_agent_files(context)
@@ -740,6 +847,15 @@ def run_pipeline(
         # Deliberately do NOT call write_project_outputs(...) or recorder.delete()
         # on this path: the recovery file must stay intact and resumable.
         error_reporter.record(exc, context="provider abort")
+        _set_usage_stats(
+            stats,
+            usage,
+            plan,
+            config,
+            correction_ledger,
+            call_tracker=call_tracker,
+        )
+        exc.stats = dict(stats)
         raise
     except LiveBackupWriteError as exc:
         # The dedicated recovery file could not be persisted, so crash-safety no
@@ -770,8 +886,10 @@ def run_pipeline(
         raise
 
     stats["output_dir"] = str(output_dir)
-    _set_plan_counters(stats, plan)
-    skipped_rels = {
+    _set_plan_counters(
+        stats, plan, provider_free_skips=len(insufficient_source_rels)
+    )
+    skipped_rels = set(insufficient_source_rels) | {
         rel
         for rel, status in queue.snapshot().items()
         if status == STATUS_SKIPPED_INSUFFICIENT_SOURCE
@@ -801,7 +919,10 @@ def run_pipeline(
     # OutputError and leaves both the stable output and the recovery file intact.
     recorder.delete()
     _set_issue_stats(stats, error_reporter, recovery_path)
-    _set_usage_stats(stats, usage, plan, config, correction_ledger)
+    _set_usage_stats(
+        stats, usage, plan, config, correction_ledger,
+        call_tracker=call_tracker,
+    )
 
     logger.info(
         "Done. checked=%d failed=%d skipped=%d output=%s",
@@ -837,16 +958,30 @@ def _final_entry_source(resolution_source: str, entry_rel: str | None) -> str:
     return "auto-detected" if entry_rel else "none"
 
 
-def _set_plan_counters(stats: dict, plan: PipelinePlan) -> None:
-    """Populate provider-free plan counters needed by the public view."""
+def _set_plan_counters(
+    stats: dict, plan: PipelinePlan, *, provider_free_skips: int = 0
+) -> None:
+    """Populate provider-free plan counters needed by the public view.
+
+    ``unattempted_files`` is a state of ``plan.agent_rels`` only.  A file
+    rejected by the provider-free source precheck was removed from
+    ``agent_rels`` during planning, so it never had an ``agent_rels`` state and
+    must not be subtracted from that population a second time — only the
+    execution-time defensive guard's skips are.  Both skip populations still
+    report through the one ``skipped_insufficient_source`` statistic, so the
+    selected-file completion partition reconciles exactly.
+    """
     stats["files_scanned"] = len(plan.scanned_rels)
     stats["files_selected"] = len(plan.documented_rels)
+    execution_skips = max(
+        0, stats.get("skipped_insufficient_source", 0) - provider_free_skips
+    )
     stats["unattempted_files"] = max(
         0,
         len(plan.agent_rels)
         - stats.get("checked", 0)
         - stats.get("failed", 0)
-        - stats.get("skipped_insufficient_source", 0),
+        - execution_skips,
     )
 
 
@@ -856,6 +991,8 @@ def _set_usage_stats(
     plan: PipelinePlan,
     config: dict,
     correction_ledger: CorrectionLedger | None = None,
+    *,
+    call_tracker: CallManifestTracker,
 ) -> None:
     """Populate planned/actual usage keys on *stats* in-place.
 
@@ -873,19 +1010,59 @@ def _set_usage_stats(
         stats.update(correction_ledger.snapshot())
     stats["analysis_mode"] = analysis_mode
     stats["initial_calls_per_file"] = per_file
-    stats["planned_calls"] = len(plan.agent_rels) * per_file
+    stats["planned_calls"] = plan.documentation_calls_planned
     stats["planned_files"] = len(plan.agent_rels)
     # Documentation-call category accounting.  Every provider attempt is exactly
     # one of two categories (documentation or mandatory customization review).
     # Review tracks its own attempts; documentation is the remainder so the two
     # categories reconcile to ``attempted_calls`` exactly.
-    stats["documentation_calls_planned"] = stats["planned_calls"]
+    stats["documentation_calls_planned"] = plan.documentation_calls_planned
     review_attempted = stats.get("prompt_customization_security_review_calls_attempted", 0)
     stats["documentation_calls_attempted"] = max(
         0, stats.get("attempted_calls", 0) - review_attempted
     )
     # Resolved from config so env/config-enabled partial mode reaches the CLI.
     stats["allow_partial"] = bool(config.get("allow_partial", False))
+
+    # The canonical call manifest's own counts/cap/digest — identical fields to
+    # the dry-run surface, from the same immutable plan.
+    stats["total_calls_planned"] = plan.total_calls_planned
+    stats["max_planned_calls"] = plan.max_planned_calls
+    stats["max_planned_calls_exceeded"] = plan.max_planned_calls_exceeded
+    stats["call_manifest_digest"] = plan.call_manifest_digest
+
+    # Planned-vs-attempted-logical reconciliation. Valid for a clean completion,
+    # an allow_partial completion, or (independently, via direct queue snapshot
+    # inspection) a terminal abort — never requires execution to continue.
+    _set_manifest_reconciliation(stats, usage, plan, call_tracker)
+
+
+def _set_manifest_reconciliation(
+    stats: dict,
+    usage: UsageAccumulator,
+    plan: PipelinePlan,
+    call_tracker: CallManifestTracker,
+) -> None:
+    """Attach canonical planned-versus-attempted logical-call statistics.
+
+    The counts come from manifest-ID consumption, never from queue or file
+    status, so this is equally valid after a clean completion, an
+    ``allow_partial`` completion, and a terminal abort.  The reconciliation
+    equation itself is owned by
+    :func:`~codedoc.core.execution.reconcile_planned_calls`; this only supplies
+    the plan's manifest fields and the tracker's attempted count.
+    """
+    stats["total_calls_planned"] = plan.total_calls_planned
+    stats["max_planned_calls"] = plan.max_planned_calls
+    stats["max_planned_calls_exceeded"] = plan.max_planned_calls_exceeded
+    stats["call_manifest_digest"] = plan.call_manifest_digest
+    stats.update(
+        reconcile_planned_calls(
+            total_calls_planned=plan.total_calls_planned,
+            attempted_logical_calls=call_tracker.snapshot()["attempted_logical_calls"],
+            attempted_calls=usage.attempted_calls,
+        )
+    )
 
 
 _SCOPE_PRECEDENCE = ("extension", "common", "built-in")
@@ -931,6 +1108,7 @@ def _build_dry_run_stats(
     profile_resolution: ProfileResolution | None = None,
     review_batches: list[ReviewBatch] | None = None,
     recovery_resumed: int = 0,
+    materials=None,
     *,
     feasibility_notes: tuple[str, ...],
 ) -> dict:
@@ -952,20 +1130,17 @@ def _build_dry_run_stats(
     # documentation call; it is 0 when correction is disabled.  The baseline
     # estimate stays the expected charge; the ceiling below is a worst case.
     correction_enabled = bool(config.get("response_correction_enabled", False))
-    skip_rels: set[str] = set()
-    for rel_path in plan.agent_rels:
-        descriptor = file_map[rel_path]
-        try:
-            content = descriptor["path"].read_text(
-                encoding="utf-8-sig", errors="replace"
-            )
-        except Exception:
-            continue
-        if insufficient_source(content)[0]:
-            skip_rels.add(rel_path)
+    skip_rels: set[str] = set(
+        materials.insufficient_source_reasons if materials is not None else ()
+    )
+    execution_requests = (
+        materials.execution_requests if materials is not None else {}
+    )
     frozen_skip_rels = frozenset(skip_rels)
-    remaining = len(plan.agent_rels) - len(frozen_skip_rels)
-    estimated_calls = remaining * per_file
+    remaining = len(plan.agent_rels)
+    # From the one canonical manifest, never re-derived here — the plan already
+    # verified it equals len(agent_rels) * initial_calls_per_file(mode).
+    estimated_calls = plan.documentation_calls_planned
     correction_possible_max = estimated_calls if correction_enabled else 0
     review_batches = review_batches or []
     profile_stats = (
@@ -984,7 +1159,9 @@ def _build_dry_run_stats(
         profile_stats["prompt_customization_security_review"] = "pending"
     if profile_stats:
         # Dry-run projects the documentation plan without attempting any call.
-        profile_stats["documentation_calls_planned"] = estimated_calls
+        profile_stats["documentation_calls_planned"] = (
+            plan.documentation_calls_planned
+        )
     return {
         "dry_run": True,
         "scanned": len(plan.scanned_rels),
@@ -1011,11 +1188,19 @@ def _build_dry_run_stats(
             resolved_profile,
             skip_rels=frozen_skip_rels,
             review_batches=review_batches,
+            execution_requests=execution_requests,
         ),
         "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
-        "max_files_candidate_files": len(plan.agent_rels),
+        "max_files_candidate_files": len(plan.agent_rels) + len(frozen_skip_rels),
         "max_files_exceeded": plan.max_files_exceeded,
+        # The canonical call manifest's own counts/cap/digest. Provider-free and
+        # identical whether returned here or (after attempts) from a real run.
+        "total_calls_planned": plan.total_calls_planned,
+        "max_planned_calls": plan.max_planned_calls,
+        "max_planned_calls_exceeded": plan.max_planned_calls_exceeded,
+        "call_manifest_digest": plan.call_manifest_digest,
+        "documentation_calls_planned": plan.documentation_calls_planned,
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
@@ -1106,6 +1291,7 @@ def _estimate_planned_input_tokens(
     *,
     skip_rels: frozenset[str] = frozenset(),
     review_batches: list[ReviewBatch] | tuple[ReviewBatch, ...] = (),
+    execution_requests: dict | None = None,
 ) -> int:
     """Estimate input tokens for the planned LLM calls — a lower bound.
 
@@ -1123,30 +1309,24 @@ def _estimate_planned_input_tokens(
     )
 
     analysis_mode = config.get("analysis_mode", "single")
-    max_chars = config.get("max_content_chars", 12000)
     total = 0
+    execution_requests = execution_requests or {}
     for rel_path in plan.agent_rels:
         if rel_path in skip_rels:
             continue
-        descriptor = file_map[rel_path]
-        try:
-            content = descriptor["path"].read_text(encoding="utf-8-sig", errors="replace")
-        except Exception:
-            content = ""
-        try:
-            imports = parse_file(descriptor)
-        except Exception:
-            imports = []
-        language = descriptor.get("language", "generic")
-        head_fraction = config.get("truncation_head_ratio", 0.70)
-        content = truncate_for_llm(content, max_chars, head_fraction=head_fraction)
+        request = execution_requests.get(rel_path)
+        if request is None:
+            continue
+        imports = list(request.imports)
+        language = request.language
+        content = truncate_for_llm(
+            request.content,
+            request.context.max_content_chars,
+            head_fraction=request.context.truncation_head_ratio,
+        )
         # The profile block is selected by extension scope (basename), matching
         # exactly what real execution will send for this file.
-        bundle = (
-            resolved_profile.resolve_bundle(resolved_profile.scope_for(descriptor))
-            if resolved_profile is not None
-            else None
-        )
+        bundle = request.context.resolved_shape_bundle
         if analysis_mode == "triple":
             structure_shape = bundle.selections["structure"].block if bundle else None
             dependency_shape = bundle.selections["dependency"].block if bundle else None
