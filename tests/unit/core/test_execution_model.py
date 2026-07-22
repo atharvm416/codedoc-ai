@@ -53,7 +53,6 @@ def _request(tmp_path: Path, rel_path: str = "mod.py", content: str = "x = 1\n")
     content_hash, decoded = read_source_snapshot(absolute)
     return FileExecutionRequest(
         rel_path=rel_path,
-        absolute_path=absolute,
         language="python",
         imports=tuple(parse_source({"path": absolute, "language": "python"}, decoded)),
         content=decoded,
@@ -157,7 +156,6 @@ class TestConstructorContracts:
         with pytest.raises(ValueError, match="rel_path must"):
             FileExecutionRequest(
                 rel_path=rel_path,
-                absolute_path=(tmp_path / "mod.py").resolve(),
                 language="python",
                 imports=(),
                 content="x = 1\n",
@@ -165,23 +163,15 @@ class TestConstructorContracts:
                 context=_context(),
             )
 
-    def test_file_execution_request_requires_an_absolute_path(self):
-        with pytest.raises(ValueError, match="absolute_path must be absolute"):
-            FileExecutionRequest(
-                rel_path="mod.py",
-                absolute_path=Path("mod.py"),
-                language="python",
-                imports=(),
-                content="x = 1\n",
-                content_hash="hash",
-                context=_context(),
-            )
+    def test_file_execution_request_does_not_carry_a_source_path(self):
+        assert "absolute_path" not in {
+            field.name for field in dataclasses.fields(FileExecutionRequest)
+        }
 
     def test_file_execution_request_copies_imports_into_a_tuple(self, tmp_path):
         supplied = ["os", "sys"]
         request = FileExecutionRequest(
             rel_path="mod.py",
-            absolute_path=(tmp_path / "mod.py").resolve(),
             language="python",
             imports=supplied,
             content="x = 1\n",
@@ -296,7 +286,8 @@ class TestRequestConstruction:
 
     def test_request_does_not_require_the_source_file_to_still_exist(self, tmp_path):
         request = _request(tmp_path, content="import os\n")
-        request.absolute_path.unlink()
+        # The request stores no path, so the test holds the backing file itself.
+        (tmp_path / "mod.py").unlink()
 
         assert request.content == "import os\n"
         assert request.imports == ("os",)
@@ -307,11 +298,9 @@ class TestRequestConstruction:
         assert request.rel_path == "pkg/mod.py"
 
     def test_request_rejects_parent_traversal(self, tmp_path):
-        absolute = (tmp_path / "mod.py").resolve()
         with pytest.raises(ValueError, match="project-relative"):
             FileExecutionRequest(
                 rel_path="../mod.py",
-                absolute_path=absolute,
                 language="python",
                 imports=(),
                 content="x = 1\n",

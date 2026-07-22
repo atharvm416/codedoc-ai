@@ -20,7 +20,7 @@ from __future__ import annotations
 import hashlib
 import threading
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from types import MappingProxyType
 from typing import Literal, Sequence
 
@@ -70,13 +70,16 @@ class FileExecutionRequest:
     same bytes decoded with the canonical ``utf-8-sig`` / ``errors="replace"``
     policy — see :func:`codedoc.core.db.read_source_snapshot`, which produces
     both from one read. ``imports`` is derived from that identical decoded
-    snapshot via :func:`codedoc.parser.factory.parse_source`. A worker consumes
-    this object only; it never reopens the source file or recomputes any of
-    these fields.
+    snapshot via :func:`codedoc.parser.factory.parse_source`.
+
+    Every field here is data execution actually consumes. The request carries no
+    source path: planning has already read, decoded, hashed, and parsed the file
+    by the time it builds one, so a worker consumes this object only — it cannot
+    reopen the source file, and remains valid after that file is edited or
+    deleted.
     """
 
     rel_path: str
-    absolute_path: Path
     language: str
     imports: tuple[str, ...]
     content: str
@@ -86,10 +89,6 @@ class FileExecutionRequest:
     def __post_init__(self) -> None:
         normalized = _normalize_rel_path(self.rel_path)
         object.__setattr__(self, "rel_path", normalized)
-        absolute_path = Path(self.absolute_path)
-        if not absolute_path.is_absolute():
-            raise ValueError("absolute_path must be absolute.")
-        object.__setattr__(self, "absolute_path", absolute_path)
         object.__setattr__(self, "imports", tuple(self.imports))
 
 

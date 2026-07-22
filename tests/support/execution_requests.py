@@ -38,7 +38,6 @@ def make_execution_request(
     )
     return FileExecutionRequest(
         rel_path=rel_path,
-        absolute_path=absolute,
         language=language,
         imports=tuple(imports),
         content=content,

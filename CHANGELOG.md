@@ -1,6 +1,31 @@
 # Changelog
 
-## 0.13.0 - Unreleased
+## 0.13.1 - 2026-07-22
+
+### Deterministic private metadata and verified dead-state cleanup
+
+- **Deterministic private-metadata serialization.** The private per-file
+  metadata keys (`_analysis_revision`, `_analysis_mode`,
+  `_max_context_revision`, `_prompt_profile_digest`) are now copied into a
+  record in one explicit canonical order instead of an order derived from
+  iterating a set. Because neither serializer sorts keys, insertion order was
+  output order, so two runs of the same codebase in separate Python processes
+  could previously emit byte-different JSON and Markdown purely because their
+  hash seeds differed. Byte-level output comparisons and golden-file checks are
+  now reliable for records carrying private metadata. The keys and their values
+  are unchanged; only their order is now fixed, and cache identity, reuse
+  decisions, and both output schemas are unaffected.
+- **Removed two verified-dead internal fields.**
+  `FileExecutionRequest.absolute_path` was populated during planning but had no
+  execution consumer beyond its own validation and one test-only read.
+  `PlanMaterials.content_hashes` was written during planning and had no readers.
+  Removing the request's source path also strengthens the guarantee that a
+  worker never reopens a source file: the frozen request no longer exposes a
+  path to reopen, and remains valid after its file is edited or deleted. Both
+  are internal types, so no public API, CLI option, configuration key, output
+  field, or provider behavior changes.
+
+## 0.13.0 - 2026-07-22
 
 ### Execution kernel refactor with dormant-runtime cleanup
 
@@ -65,7 +90,7 @@ the undocumented `codedoc.llm.local_provider` and
   and macOS platform matrix covers OS-sensitive tests. Python 3.12 rows feed one
   combined coverage report without re-running tests for coverage.
 
-## 0.12.3 - Unreleased
+## 0.12.3 - 2026-07-17
 
 ### Test support, determinism, and configuration hygiene
 
@@ -96,7 +121,7 @@ This is a test-infrastructure release. Production behavior, public APIs,
 prompt bytes, cache identity, output schemas, and provider behavior are
 unchanged.
 
-## 0.12.2 - Unreleased
+## 0.12.2 - 2026-07-16
 
 ### Source sufficiency and prompt feasibility
 
@@ -118,7 +143,7 @@ unchanged.
   batches when such review is planned. No CLI command, flag, environment variable,
   config key, cache identity, prompt bytes, or per-file output schema was added.
 
-## 0.12.1 - Unreleased
+## 0.12.1 - 2026-07-15
 
 ### Response diagnostics and targeted correction
 

@@ -47,7 +47,8 @@ def test_carry_is_idempotent(private_key):
     assert target == {"_secret": "v"}
 
 def test_empty_registry_carries_nothing():
-    # Production default: registry is empty.
+    # The production registry holds the four private keys; neither "_secret" nor
+    # "_anything" is registered, so nothing is carried.
     target: dict = {}
     record_meta.carry_private_keys({"_secret": "v", "_anything": 1}, target)
     assert target == {}
@@ -102,3 +103,78 @@ def test_underscore_file_keys_are_limited_to_registered_private_keys_and_deps():
     }
 
     assert underscored == set(PRIVATE_RECORD_KEYS) | {"_deps"}
+
+def test_carry_orders_production_keys_canonically_from_reversed_source():
+    target: dict = {}
+    record_meta.carry_private_keys(
+        {
+            "_prompt_profile_digest": "profile-digest",
+            "_max_context_revision": "truncate-v1:max=10:head=0.7000",
+            "_analysis_mode": "single",
+            "_analysis_revision": "file-doc-v3",
+        },
+        target,
+    )
+    assert list(target) == [
+        "_analysis_revision",
+        "_analysis_mode",
+        "_max_context_revision",
+        "_prompt_profile_digest",
+    ]
+
+def test_carry_orders_production_keys_canonically_from_shuffled_source():
+    target: dict = {}
+    record_meta.carry_private_keys(
+        {
+            "_analysis_mode": "single",
+            "_prompt_profile_digest": "profile-digest",
+            "_analysis_revision": "file-doc-v3",
+            "_max_context_revision": "truncate-v1:max=10:head=0.7000",
+        },
+        target,
+    )
+    assert list(target) == [
+        "_analysis_revision",
+        "_analysis_mode",
+        "_max_context_revision",
+        "_prompt_profile_digest",
+    ]
+
+def test_partial_key_set_preserves_canonical_relative_order():
+    target: dict = {}
+    record_meta.carry_private_keys(
+        {
+            "_max_context_revision": "truncate-v1:max=10:head=0.7000",
+            "_analysis_revision": "file-doc-v3",
+        },
+        target,
+    )
+    assert list(target) == ["_analysis_revision", "_max_context_revision"]
+
+def test_cache_identity_keys_are_a_subset_of_registered_private_keys():
+    assert record_meta.CACHE_IDENTITY_KEYS <= record_meta.PRIVATE_RECORD_KEYS
+    assert set(record_meta.PRIVATE_RECORD_KEYS) == set(record_meta.PRIVATE_KEY_ORDER)
+
+def test_registered_synthetic_keys_are_carried_in_sorted_order(monkeypatch):
+    monkeypatch.setattr(
+        record_meta, "PRIVATE_RECORD_KEYS", frozenset({"_b_syn", "_a_syn"})
+    )
+    target: dict = {}
+    record_meta.carry_private_keys({"_b_syn": "b", "_a_syn": "a"}, target)
+    assert list(target) == ["_a_syn", "_b_syn"]
+
+def test_patched_registry_excludes_unregistered_production_keys(private_key):
+    # Ordering must never widen membership: the canonical production keys are
+    # unregistered here and must not be carried.
+    target: dict = {}
+    record_meta.carry_private_keys(
+        {
+            "_analysis_revision": "file-doc-v3",
+            "_analysis_mode": "single",
+            "_max_context_revision": "truncate-v1:max=10:head=0.7000",
+            "_prompt_profile_digest": "profile-digest",
+            "_secret": "keep",
+        },
+        target,
+    )
+    assert target == {"_secret": "keep"}

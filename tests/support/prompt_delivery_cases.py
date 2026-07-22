@@ -1,7 +1,6 @@
 """Shared test support extracted from mapped source modules."""
 
 import hashlib
-from pathlib import Path
 
 from codedoc.core.execution_model import AgentCallContext, FileExecutionRequest
 from codedoc.core.prompt_profiles import (
@@ -31,7 +30,6 @@ def _request(
     bundle = effective.resolve_bundle(effective.scope_for({"rel_path": path}))
     return FileExecutionRequest(
         rel_path=path,
-        absolute_path=Path(path).resolve(),
         language=language,
         imports=tuple(imports),
         content=content,

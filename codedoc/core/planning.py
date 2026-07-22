@@ -195,8 +195,6 @@ class PlanMaterials:
     already chose.
     """
 
-    # rel_path -> content hash for every file in process_rels.
-    content_hashes: dict[str, str] = field(default_factory=dict)
     # rel_path -> existing doc record reused via identical content.
     identical_reuse_docs: dict[str, dict] = field(default_factory=dict)
     # rel_path -> the frozen execution request, keyed by plan.agent_rels.
@@ -283,7 +281,6 @@ def _build_execution_request(
     bundle = resolved_profile.resolve_bundle(resolved_profile.scope_for(descriptor))
     return FileExecutionRequest(
         rel_path=rel_path,
-        absolute_path=descriptor["path"],
         language=descriptor.get("language", "generic"),
         imports=imports,
         content=content,
@@ -572,7 +569,6 @@ def _build_pipeline_plan_once(
             continue
         descriptor = file_map[rel_path]
         content_hash = routing_hashes[rel_path]
-        materials.content_hashes[rel_path] = content_hash
 
         if rel_path in effective_forced:
             # Forcing bypasses identical-content reuse for the explicitly forced
