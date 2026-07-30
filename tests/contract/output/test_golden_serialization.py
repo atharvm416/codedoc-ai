@@ -88,15 +88,24 @@ print(json.dumps({"keys": keys, "json": text, "markdown": markdown}))
 """
 
 def _emit_under_seed(seed: str) -> dict:
-    completed = subprocess.run(
-        [sys.executable, "-c", _DETERMINISM_CHILD],
-        cwd=str(_REPO_ROOT),
-        env={**os.environ, "PYTHONHASHSEED": seed},
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        check=True,
-    )
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-c", _DETERMINISM_CHILD],
+            cwd=str(_REPO_ROOT),
+            env={**os.environ, "PYTHONHASHSEED": seed},
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            check=True,
+            timeout=30,
+        )
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+        stdout = getattr(exc, "stdout", None) or getattr(exc, "output", None)
+        stderr = getattr(exc, "stderr", None)
+        raise AssertionError(
+            f"determinism child failed for PYTHONHASHSEED={seed!r}; "
+            f"stdout={stdout!r}; stderr={stderr!r}"
+        ) from exc
     return json.loads(completed.stdout)
 
 def _read_golden(name: str) -> str:
@@ -132,6 +141,18 @@ def test_markdown_serialization_byte_identical():
     assert _without_visible_reachability(rendered) == _read_golden(
         "completed_output.md"
     )
+
+
+def test_legacy_golden_bytes_remain_free_of_optional_split_fields():
+    for name in (
+        "project_view.json",
+        "completed_output.json",
+        "completed_output.md",
+    ):
+        golden = _read_golden(name)
+        assert "documentation_units" not in golden
+        assert '"division"' not in golden
+        assert "_large_file_identity" not in golden
 
 def test_empty_view_json_byte_identical():
     empty = build_project_view([], {"checked": 0}, entry_file=None, graph_edges=[])

@@ -8,8 +8,13 @@ Provides shared prompt building, JSON extraction, and error handling.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from concurrent.futures import CancelledError
 
-from codedoc.agents.response_diagnostics import extract_json_candidate, process_response
+from codedoc.agents.response_diagnostics import (
+    extract_json_candidate,
+    process_fixed_capsule_response,
+    process_response,
+)
 from codedoc.core.execution_model import (
     AgentCallContext,
     CallManifestTracker,
@@ -108,6 +113,8 @@ def _call_llm_counted(
     and ``ResponseCorrectionAgent`` delegate here so provider/usage accounting is
     never duplicated.
     """
+    if call_tracker is not None:
+        call_tracker.raise_if_cancelled()
     if call_tracker is not None and planned_call is None:
         raise RuntimeError(
             "call manifest tracking requires a planned call."
@@ -121,8 +128,16 @@ def _call_llm_counted(
             usage.record_input(system, prompt)
         except Exception:
             logger.debug("Usage accounting failed for input estimate", exc_info=True)
+    if call_tracker is not None:
+        call_tracker.raise_if_cancelled()
     try:
         raw = llm.complete_json(prompt, system=system)
+    except CancelledError:
+        raise
+    except (KeyboardInterrupt, SystemExit):
+        if call_tracker is not None:
+            call_tracker.signal_stop()
+        raise
     except Exception as exc:
         if usage is not None:
             try:
@@ -344,6 +359,67 @@ class BaseAgent(ABC):
             planned_call=planned_call,
         )
 
+    def _finalize_fixed_response(
+        self,
+        raw: str,
+        *,
+        label: str,
+        agent: str,
+        file_path: str,
+        clean_reporter,
+        requested_paths: tuple[str, ...],
+        required_paths: tuple[str, ...],
+        content: str,
+        shape_block: str,
+        planned_call: PlannedCall | None = None,
+    ) -> dict:
+        """Validate *raw* against a fixed (non-profile) capsule contract.
+
+        Split leaf and reduction capsules are developer-owned and never
+        prompt-profile driven (D5/D6): this mirrors :meth:`_finalize_response`
+        exactly, but runs :func:`~codedoc.agents.response_diagnostics.
+        process_fixed_capsule_response` (no profile-filter stage) and passes
+        empty ``imports`` to the shared correction prompt, since a fixed
+        capsule correction never needs parser imports.
+        """
+        def _revalidate(text: str) -> dict:
+            return process_fixed_capsule_response(
+                text,
+                label=label,
+                agent=agent,
+                file_path=file_path,
+                clean_reporter=clean_reporter,
+                requested_paths=requested_paths,
+                required_paths=required_paths,
+            )
+
+        contract_error: ResponseContractError | None = None
+        try:
+            return _revalidate(raw)
+        except ResponseContractError as exc:
+            if self._correction is None:
+                raise
+            contract_error = exc
+
+        correction_input = {
+            "agent": agent,
+            "mode": label,
+            "file_path": file_path,
+            "language": "",
+            "content": content,
+            "imports": [],
+            "shape_block": shape_block,
+            "original_response": raw,
+        }
+        return self._correction.repair(
+            agent=agent,
+            file_path=file_path,
+            diagnostic=contract_error.diagnostic,
+            correction_input=correction_input,
+            revalidate=_revalidate,
+            planned_call=planned_call,
+        )
+
     def _agent_error_result(self, exc: Exception) -> dict:
         """Build the error-dict fallback for a failed agent run.
 
@@ -402,6 +478,8 @@ class BaseAgent(ABC):
         except AgentError as exc:
             logger.warning("%s failed on %s: %s", self.agent_name, file_path, exc)
             return self._agent_error_result(exc)
+        except CancelledError:
+            raise
         except Exception as exc:
             logger.warning("%s unexpected error on %s: %s", self.agent_name, file_path, exc)
             return self._agent_error_result(exc)

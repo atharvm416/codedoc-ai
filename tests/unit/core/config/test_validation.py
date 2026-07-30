@@ -303,6 +303,23 @@ def test_unknown_mode_rejected(tmp_path):
     with pytest.raises(ConfigError):
         load_config(tmp_path, overrides={"analysis_mode": "quadruple"})
 
+
+@pytest.mark.parametrize("value", ["truncate", "split"])
+def test_large_file_strategy_accepts_only_exact_public_values(tmp_path, value):
+    overrides = {"large_file_strategy": value}
+    if value == "split":
+        overrides["dry_run"] = True
+    assert load_config(tmp_path, overrides)["large_file_strategy"] == value
+
+
+@pytest.mark.parametrize(
+    "value",
+    ["Split", " split", "split ", "fallback", "", True, None],
+)
+def test_large_file_strategy_rejects_aliases_and_coercions(tmp_path, value):
+    with pytest.raises(ConfigError, match="large_file_strategy"):
+        load_config(tmp_path, {"large_file_strategy": value})
+
 def test_json_config_value_used(tmp_path):
     (tmp_path / "codedoc.config.json").write_text(
         json.dumps({"analysis_mode": "triple"}), encoding="utf-8"

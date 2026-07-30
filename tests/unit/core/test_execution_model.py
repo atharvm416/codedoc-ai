@@ -21,6 +21,13 @@ from codedoc.core.execution_model import (
     documentation_call_id,
     review_call_id,
 )
+from codedoc.core.file_division import (
+    SplitTreeState,
+    build_division_plan,
+    build_reduction_tree,
+    leaf_execution_identity,
+    tree_node_state,
+)
 from codedoc.core.prompt_profiles import (
     FileScope,
     ResolvedFileShapeBundle,
@@ -58,6 +65,57 @@ def _request(tmp_path: Path, rel_path: str = "mod.py", content: str = "x = 1\n")
         content=decoded,
         content_hash=content_hash,
         context=_context(),
+    )
+
+
+_PROVIDER_IDENTITY = "provider-execution:" + "a" * 64
+
+
+def _split_plan():
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    plan = build_division_plan(
+        rel_path="large.py",
+        language="python",
+        content=source,
+        source_budget_chars=1000,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=12000)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    return plan, tree, content_hash
+
+
+def _leaf_node_state(plan, tree, content_hash, chunk) -> SplitTreeState:
+    identity = leaf_execution_identity(
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        provider_identity=_PROVIDER_IDENTITY,
+        chunk=chunk,
+    )
+    return tree_node_state(
+        node_id=chunk.chunk_id,
+        node_type="leaf",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        execution_identity_digest=identity,
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=(chunk.chunk_id,),
+        result={"description": "restored"},
+    )
+
+
+def _tree_state(plan, tree, content_hash, nodes) -> SplitTreeState:
+    return SplitTreeState(
+        schema_version=2,
+        owner="codedoc-ai",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=tuple(nodes),
     )
 
 
@@ -370,6 +428,72 @@ class TestCallManifest:
         assert len(manifest.calls) == 1
         assert manifest.calls[0].ordinal == 1
 
+    def test_split_calls_are_globally_ordered_by_execution_phase(self):
+        unit_source = "x" * 3500
+        general_source = "".join(
+            f"def function_{index}():\n    return {index}\n\n"
+            for index in range(120)
+        )
+        unit_plan = build_division_plan(
+            rel_path="a_unit.py",
+            language="python",
+            content=unit_source,
+            source_budget_chars=1000,
+        )
+        general_plan = build_division_plan(
+            rel_path="b_general.py",
+            language="python",
+            content=general_source,
+            source_budget_chars=1000,
+        )
+        unit_tree = build_reduction_tree(unit_plan, max_content_chars=2000)
+        general_tree = build_reduction_tree(general_plan, max_content_chars=2000)
+        plans = {
+            unit_plan.rel_path: unit_plan,
+            general_plan.rel_path: general_plan,
+        }
+        trees = {
+            unit_plan.rel_path: unit_tree,
+            general_plan.rel_path: general_tree,
+        }
+
+        manifest = build_call_manifest(
+            [],
+            [general_plan.rel_path, unit_plan.rel_path],
+            "single",
+            plans,
+            trees,
+        )
+        leaves = {
+            chunk.chunk_id
+            for plan in plans.values()
+            for chunk in plan.chunks
+        }
+        unit_reducers = {
+            node.node_id
+            for tree in trees.values()
+            for node in tree.unit_consolidation_nodes
+        }
+        general_reducers = {
+            node.node_id
+            for tree in trees.values()
+            for node in tree.general_nodes
+        }
+
+        def phase(call):
+            if call.owner in leaves:
+                return 0
+            if call.owner in unit_reducers:
+                return 1
+            if call.owner in general_reducers:
+                return 2
+            assert call.category == "file-synthesis"
+            return 3
+
+        phases = [phase(call) for call in manifest.calls]
+        assert set(phases) == {0, 1, 2, 3}
+        assert phases == sorted(phases)
+
     def test_manifest_digest_is_deterministic_and_order_sensitive(self):
         manifest_a = build_call_manifest([], ["a.py", "b.py"], "single")
         manifest_b = build_call_manifest([], ["a.py", "b.py"], "single")
@@ -411,6 +535,53 @@ class TestCallManifest:
         calls = [PlannedCall(call_id="a", category="file-documentation", owner="f.py", ordinal=1)]
         with pytest.raises(ValueError, match="expected"):
             _validate_manifest(calls, expected_total=2)
+
+    def test_restored_split_leaves_and_final_are_excluded_exactly(self):
+        """Split is valid only in single mode (D2); there is no triple-mode
+        multiplier for any split call category."""
+        plan, tree, content_hash = _split_plan()
+        assert len(plan.chunks) >= 2
+        initial = build_call_manifest(
+            [],
+            [plan.rel_path],
+            "single",
+            {plan.rel_path: plan},
+            {plan.rel_path: tree},
+        )
+        expected_total = (
+            len(plan.chunks)
+            + len(tree.unit_consolidation_nodes)
+            + len(tree.general_nodes)
+            + 1
+        )
+        assert len(initial.calls) == expected_total
+
+        one_leaf_done = _tree_state(
+            plan, tree, content_hash, [_leaf_node_state(plan, tree, content_hash, plan.chunks[0])]
+        )
+        remaining = build_call_manifest(
+            [],
+            [plan.rel_path],
+            "single",
+            {plan.rel_path: plan},
+            {plan.rel_path: tree},
+            {plan.rel_path: one_leaf_done},
+        )
+        assert len(remaining.calls) == expected_total - 1
+        assert plan.chunks[0].chunk_id not in {call.owner for call in remaining.calls}
+
+    def test_tree_state_paths_must_be_effective_split_paths(self):
+        plan, tree, content_hash = _split_plan()
+        state = _tree_state(
+            plan, tree, content_hash, [_leaf_node_state(plan, tree, content_hash, plan.chunks[0])]
+        )
+        with pytest.raises(ValueError, match="effective split plans"):
+            build_call_manifest(
+                [],
+                [plan.rel_path],
+                "single",
+                tree_states={plan.rel_path: state},
+            )
 
 
 class TestCallManifestTracker:
@@ -454,3 +625,13 @@ class TestCallManifestTracker:
             tracker.authorize(unknown, additional_attempt=False)
         with pytest.raises(RuntimeError, match="metadata"):
             tracker.authorize(mismatch, additional_attempt=False)
+
+    def test_retry_state_is_isolated_to_the_exact_triple_mode_call(self):
+        manifest = build_call_manifest([], ["a.py"], "triple")
+        tracker = CallManifestTracker(manifest)
+
+        tracker.authorize(manifest.calls[0], additional_attempt=False)
+
+        assert tracker.call_was_attempted(manifest.calls[0].call_id) is True
+        assert tracker.call_was_attempted(manifest.calls[1].call_id) is False
+        assert tracker.call_was_attempted(manifest.calls[2].call_id) is False

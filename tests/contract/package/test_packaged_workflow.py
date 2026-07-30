@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tarfile
+import tomllib
 import zipfile
 from pathlib import Path
 import pytest
@@ -38,8 +39,12 @@ def test_built_distributions_contain_workflow_template():
     """Inspect release artifacts when present; the release check builds them."""
     repo = Path(__file__).resolve().parents[3]
     dist = repo / "dist"
-    wheels = sorted(dist.glob("codedoc_ai-0.9.2-*.whl"))
-    sdists = sorted(dist.glob("codedoc_ai-0.9.2.tar.gz"))
+    project = tomllib.loads((repo / "pyproject.toml").read_text(encoding="utf-8"))[
+        "project"
+    ]
+    stem = f"{project['name'].replace('-', '_')}-{project['version']}"
+    wheels = sorted(dist.glob(f"{stem}-*.whl"))
+    sdists = sorted(dist.glob(f"{stem}.tar.gz"))
     if not wheels or not sdists:
         pytest.skip("release artifacts have not been built")
 

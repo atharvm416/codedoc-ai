@@ -52,6 +52,7 @@ def _descriptor(path, rel):
 def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
+        "language": "generic",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
@@ -133,14 +134,16 @@ def test_reuse_predicate_rejects_digest_mismatch():
     # _record_is_reusable / _identity_matches remain digest-sensitive.
     base = {
         "hash": "h", "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "language": "generic",
         "_prompt_profile_digest": "pp-v1:aaa",
     }
     expected_same = dict(base)
     expected_diff = {**base, "_prompt_profile_digest": "pp-v1:bbb"}
     assert _identity_matches(base, expected_same)
     assert not _identity_matches(base, expected_diff)
-    assert _record_is_reusable(base, "h", expected_same)
-    assert not _record_is_reusable(base, "h", expected_diff)
+    assert _record_is_reusable(base, "h", expected_same, "generic")
+    assert not _record_is_reusable(base, "h", expected_diff, "generic")
+    assert not _record_is_reusable(base, "h", expected_same, "python")
 
 def test_common_only_profile_matches_prior_no_extension_digest(tmp_path):
     # A profile with no per_extension yields the same digest for every file,

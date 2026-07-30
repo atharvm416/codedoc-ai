@@ -12,6 +12,7 @@ from codedoc.core.prompt_profiles import (
 )
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
+    RecoveryState,
     _RECOVERY_IDENTITY_FIELDS,
     _RECOVERY_IDENTITY_VERSION,
     build_recovery_identity,
@@ -62,6 +63,7 @@ def _resolved(common_desc, per_extension):
 def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
+        "language": "generic",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
@@ -86,7 +88,7 @@ def test_legacy_recovery_with_profile_digests_is_accepted(tmp_path):
     recovery = _write_recovery(tmp_path, legacy)
     # The current reader ignores the extra field and accepts on the retained set.
     current = _identity(tmp_path)
-    assert load_recovery_records_if_compatible(recovery, current) == {}
+    assert load_recovery_records_if_compatible(recovery, current) == RecoveryState()
 
 def test_unknown_identity_version_still_rejected(tmp_path):
     identity = _identity(tmp_path)
@@ -101,7 +103,10 @@ def test_adding_new_language_file_does_not_invalidate_recovery(tmp_path):
     recovery = _write_recovery(tmp_path, _identity(tmp_path))
     # Same run, now with (hypothetically) a new-language file added: the identity
     # arguments are unchanged, so the file remains resumable.
-    assert load_recovery_records_if_compatible(recovery, _identity(tmp_path)) == {}
+    assert (
+        load_recovery_records_if_compatible(recovery, _identity(tmp_path))
+        == RecoveryState()
+    )
 
 def test_editing_any_override_does_not_change_recovery_identity(tmp_path):
     # The recovery identity is profile-independent; editing an override (used or

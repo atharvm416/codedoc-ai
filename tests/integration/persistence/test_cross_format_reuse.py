@@ -21,6 +21,62 @@ from tests.support.cross_format_runs import _config
 from tests.support.cross_format_runs import _first_run
 from tests.support.cross_format_runs import _forbid_provider
 
+pytestmark = pytest.mark.future_split_execution
+
+
+@pytest.mark.parametrize(
+    ("first_format", "second_format", "first_name", "second_name"),
+    [
+        ("json", "md", "codedoc.json", "codedoc.md"),
+        ("md", "json", "codedoc.md", "codedoc.json"),
+    ],
+)
+def test_split_fields_survive_provider_free_cross_format_conversion(
+    tmp_path, monkeypatch, first_format, second_format, first_name, second_name
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    first_config = {
+        **_config(first_format),
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+    }
+    provider = SmartFake()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+    first_stats = run_pipeline(tmp_path, first_config)
+    assert first_stats["checked"] == 1
+
+    _forbid_provider(monkeypatch)
+    second_stats = run_pipeline(
+        tmp_path,
+        {
+            **_config(second_format),
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+        },
+    )
+
+    output_dir = tmp_path / "docs"
+    first_record = records_by_path(
+        read_codedoc_document(output_dir / first_name)
+    )["main.py"]
+    second_record = records_by_path(
+        read_codedoc_document(output_dir / second_name)
+    )["main.py"]
+    assert second_stats["checked"] == 0
+    # Internal division/reduction content is never public (D9/D14); only the
+    # final documentation and its provider-free large-file identity round-trip.
+    assert "division" not in first_record
+    assert "division" not in second_record
+    assert "documentation_units" not in first_record
+    assert "documentation_units" not in second_record
+    assert first_record["description"] == second_record["description"]
+    assert first_record["_large_file_identity"] == second_record[
+        "_large_file_identity"
+    ]
+    assert not (output_dir / RECOVERY_FILENAME).exists()
+
+
 def test_cross_format_sibling_is_used_for_zero_call_conversion(tmp_path, monkeypatch):
     """--output docs/claude.json after a previous --format md run that wrote
     docs/claude.md must read the entry from claude.md and resume without error."""

@@ -279,7 +279,7 @@ def test_single_prompt_estimate_does_not_exceed_triple_lower_bound(tmp_path):
     ("analysis_mode", "per_file"),
     [("single", 1), ("triple", 3)],
 )
-def test_dry_run_subtracts_empty_file_calls_but_preserves_candidate_cap(
+def test_dry_run_excludes_empty_files_from_calls_and_candidate_cap(
     tmp_path, analysis_mode, per_file
 ):
     (tmp_path / "empty.py").write_text("\n", encoding="utf-8")
@@ -300,8 +300,8 @@ def test_dry_run_subtracts_empty_file_calls_but_preserves_candidate_cap(
     assert stats["estimated_calls"] == per_file
     assert stats["documentation_calls_planned"] == per_file
     assert stats["response_correction_calls_possible_max"] == 0
-    assert stats["max_files_candidate_files"] == 2
-    assert stats["max_files_exceeded"] is True
+    assert stats["max_files_candidate_files"] == 1
+    assert stats["max_files_exceeded"] is False
 
     (tmp_path / "empty.py").write_text("OTHER = 2\n", encoding="utf-8")
     without_skip = run_pipeline(

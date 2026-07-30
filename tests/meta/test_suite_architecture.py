@@ -22,6 +22,10 @@ _EXPECTED_GOLDENS = {
     "empty_output.json",
     "empty_output.md",
 }
+# The one authorized exemption: this fixture's intentionally incomplete Python
+# syntax is the inert malformed-parser input the split release requires, so it
+# cannot be parsed by the AST scan.  Every other fixture stays in scope.
+_UNPARSEABLE_FIXTURES = {"fixtures/large_file_division/malformed.py"}
 
 
 def _python_files() -> list[Path]:
@@ -29,6 +33,7 @@ def _python_files() -> list[Path]:
         path
         for path in _TESTS_DIR.rglob("*.py")
         if "__pycache__" not in path.parts
+        and path.relative_to(_TESTS_DIR).as_posix() not in _UNPARSEABLE_FIXTURES
     )
 
 

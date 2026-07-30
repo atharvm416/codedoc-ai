@@ -16,7 +16,11 @@ local-provider choice.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.errors import ConfigError, ProviderInitError
@@ -43,6 +47,65 @@ _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
 }
 
+_ENDPOINT_DEFAULT_SENTINEL = "provider-default"
+_EXECUTION_DESCRIPTOR_ATTRIBUTE = "_codedoc_provider_execution_descriptor"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderExecutionDescriptor:
+    """Non-secret identity inputs for one concrete provider construction."""
+
+    provider_kind: str
+    model: str
+    endpoint_identity: str
+
+
+def effective_endpoint_identity(api_base_url: object) -> str:
+    """Return a non-secret identity for one effective OpenAI endpoint."""
+    if not isinstance(api_base_url, str) or not api_base_url.strip():
+        return _ENDPOINT_DEFAULT_SENTINEL
+    try:
+        parts = urlsplit(api_base_url.strip())
+        scheme = (parts.scheme or "").lower()
+        host = parts.hostname
+        port = parts.port
+    except ValueError:
+        raise ConfigError(
+            "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
+        ) from None
+    authority = parts.netloc.rsplit("@", 1)[-1]
+    if (
+        scheme not in ("http", "https")
+        or not host
+        or any(character.isspace() for character in host)
+        or authority.endswith(":")
+    ):
+        raise ConfigError(
+            "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
+        )
+    if port is None:
+        if scheme == "https":
+            port = 443
+        elif scheme == "http":
+            port = 80
+    normalized = {
+        "scheme": scheme,
+        "host": host.lower(),
+        "port": port,
+        # OpenAI's client treats a trailing slash as the same base endpoint:
+        # it ensures exactly that separator before resolving resource paths.
+        # Bind recovery to effective routing, not superficial URL spelling.
+        "path": (parts.path or "").rstrip("/"),
+    }
+    canonical = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
 
 def describe_provider_selection(config: dict) -> tuple[str, str]:
     """Return the provider/model pair that :func:`create_provider` will use."""
@@ -53,6 +116,43 @@ def describe_provider_selection(config: dict) -> tuple[str, str]:
         config.get("provider_prefixes") or {},
     )
     return selected, model or _DEFAULT_MODELS[selected]
+
+
+def describe_provider_execution(config: dict) -> ProviderExecutionDescriptor:
+    """Describe exactly what :func:`create_provider` must construct."""
+    selected, model = describe_provider_selection(config)
+    endpoint = (
+        effective_endpoint_identity(config.get("api_base_url"))
+        if selected == "openai"
+        else _ENDPOINT_DEFAULT_SENTINEL
+    )
+    return ProviderExecutionDescriptor(selected, model, endpoint)
+
+
+def constructed_provider_execution(
+    provider: LLMProvider,
+) -> ProviderExecutionDescriptor | None:
+    """Return the factory's construction attestation, if present."""
+    descriptor = getattr(provider, _EXECUTION_DESCRIPTOR_ATTRIBUTE, None)
+    return descriptor if isinstance(descriptor, ProviderExecutionDescriptor) else None
+
+
+def attest_provider_execution(
+    provider: object,
+    config: dict,
+) -> object:
+    """Attach an explicit non-secret execution descriptor to an injected provider.
+
+    The production factory attests its own concrete branch automatically.
+    Alternate provider factories and network-free test doubles must call this
+    helper explicitly; verification never infers an attestation from config.
+    """
+    setattr(
+        provider,
+        _EXECUTION_DESCRIPTOR_ATTRIBUTE,
+        describe_provider_execution(config),
+    )
+    return provider
 
 
 def create_provider(config: dict) -> LLMProvider:
@@ -79,7 +179,17 @@ def create_provider(config: dict) -> LLMProvider:
         # and auth-configuration failures from provider SDKs are classified as
         # ProviderInitError (a ConfigError subclass → CLI exit code 2).
         try:
-            return _make_api(provider, model, api_key, base_url, provider_prefixes)
+            expected = describe_provider_execution(config)
+            result = _make_api(
+                provider, model, api_key, base_url, provider_prefixes
+            )
+            actual = constructed_provider_execution(result)
+            if actual != expected:
+                raise ProviderInitError(
+                    "LLM provider construction identity did not match the "
+                    "resolved provider/model/effective-endpoint plan."
+                )
+            return result
         except ConfigError:
             raise
         except Exception as exc:
@@ -109,28 +219,39 @@ def _make_api(
 
     model_lower = model.lower()
     selected = _resolve_api_provider(provider, model_lower, provider_prefixes)
+    effective_model = model or _DEFAULT_MODELS[selected]
 
     if selected == "anthropic":
         from codedoc.llm.api_provider import AnthropicProvider
-        return AnthropicProvider(
-            api_key=api_key,
-            model=model or _DEFAULT_MODELS["anthropic"],
-        )
 
-    if selected == "gemini":
+        result = AnthropicProvider(api_key=api_key, model=effective_model)
+        endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
+    elif selected == "gemini":
         from codedoc.llm.api_provider import GeminiProvider
-        return GeminiProvider(
-            api_key=api_key,
-            model=model or _DEFAULT_MODELS["gemini"],
-        )
 
-    # OpenAI or compatible endpoint (default)
-    from codedoc.llm.api_provider import OpenAIProvider
-    return OpenAIProvider(
-        api_key=api_key,
-        model=model or _DEFAULT_MODELS["openai"],
-        base_url=base_url,
+        result = GeminiProvider(api_key=api_key, model=effective_model)
+        endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
+    else:
+        # OpenAI or compatible endpoint (default)
+        from codedoc.llm.api_provider import OpenAIProvider
+
+        result = OpenAIProvider(
+            api_key=api_key,
+            model=effective_model,
+            base_url=base_url,
+        )
+        endpoint_identity = effective_endpoint_identity(base_url)
+
+    setattr(
+        result,
+        _EXECUTION_DESCRIPTOR_ATTRIBUTE,
+        ProviderExecutionDescriptor(
+            provider_kind=selected,
+            model=effective_model,
+            endpoint_identity=endpoint_identity,
+        ),
     )
+    return result
 
 
 def _resolve_api_provider(

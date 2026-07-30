@@ -7,6 +7,10 @@ planning decisions into execution:
   self-contained request per provider-bound file. ``codedoc.core.planning``
   constructs these on the provider-free path (see
   :func:`codedoc.core.db.read_source_snapshot`); workers only read them.
+- :class:`UnitChunkExecutionRequest` — one immutable bounded leaf-chunk
+  request for split large-file documentation.
+- :class:`FileReductionExecutionRequest` — one immutable unit-consolidation or
+  general reduction node request.
 - :class:`PlannedCall` / :class:`CallManifest` — the canonical, ordered set of
   initially planned logical calls shared by dry-run and real execution.
 
@@ -18,15 +22,27 @@ planned calls, and never consume or add a manifest entry.
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
+from concurrent.futures import CancelledError
 from dataclasses import dataclass
 from pathlib import PurePosixPath
 from types import MappingProxyType
-from typing import Literal, Sequence
+from typing import Literal, Mapping, Sequence
 
+from codedoc.core.file_division import (
+    DivisionPlan,
+    MAX_LEAF_PROMPT_METADATA_CHARS,
+    ReductionTreePlan,
+    SemanticUnitIdentity,
+    SplitTreeState,
+    render_leaf_prompt_metadata,
+)
+from codedoc.parser.source_structure import SourceRange
 from codedoc.core.prompt_profiles import ResolvedFileShapeBundle, ReviewBatch
 
 _ID_SEP = "\x1f"
+_HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,7 +108,180 @@ class FileExecutionRequest:
         object.__setattr__(self, "imports", tuple(self.imports))
 
 
-PlannedCallCategory = Literal["prompt-review", "file-documentation"]
+@dataclass(frozen=True, slots=True)
+class UnitChunkExecutionRequest:
+    """One immutable bounded leaf-chunk request for split large-file documentation.
+
+    Carries complete fragment metadata (D4/section 7) so the fixed fragment prompt
+    builder never needs to recompute topology or reopen source. There is no
+    separately parsed whole-file ``imports`` field: an import statement
+    physically present in ``payload`` is ordinary visible source, but
+    parser-derived file imports reach only final synthesis (D5/section 7).
+    """
+
+    rel_path: str
+    language: str
+    full_content_hash: str
+    division_plan_digest: str
+    chunk_id: str
+    unit_id: str
+    semantic_units: tuple[SemanticUnitIdentity, ...]
+    unit_indexes: tuple[int, ...]
+    unit_count: int
+    unit_chunk_index: int
+    unit_chunk_count: int
+    global_index: int
+    global_count: int
+    owning_ranges: tuple[SourceRange, ...]
+    continuation_before: bool
+    continuation_after: bool
+    known_symbols: tuple[str, ...]
+    payload: str
+    context: AgentCallContext
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rel_path", _normalize_rel_path(self.rel_path))
+        if not self.language or not isinstance(self.language, str):
+            raise ValueError("chunk requests require a language tag.")
+        if not _HEX_64_RE.fullmatch(self.full_content_hash):
+            raise ValueError("chunk request content hash must be a SHA-256 digest.")
+        if (
+            not self.division_plan_digest.startswith("division-plan:")
+            or not _HEX_64_RE.fullmatch(
+                self.division_plan_digest.removeprefix("division-plan:")
+            )
+        ):
+            raise ValueError("chunk requests require a division-plan digest.")
+        if not self.unit_id.startswith("unit_") or not _HEX_64_RE.fullmatch(
+            self.unit_id.removeprefix("unit_")
+        ):
+            raise ValueError("chunk requests require a unit ID.")
+        if not self.chunk_id.startswith("chunk_") or not _HEX_64_RE.fullmatch(
+            self.chunk_id.removeprefix("chunk_")
+        ):
+            raise ValueError("chunk requests require a chunk ID.")
+        semantic_units = tuple(self.semantic_units)
+        if not semantic_units or any(
+            not isinstance(unit, SemanticUnitIdentity)
+            for unit in semantic_units
+        ):
+            raise ValueError("chunk requests require ordered semantic units.")
+        if len({unit.unit_id for unit in semantic_units}) != len(semantic_units):
+            raise ValueError("chunk request semantic units must be distinct.")
+        unit_indexes = tuple(self.unit_indexes)
+        if len(unit_indexes) != len(semantic_units):
+            raise ValueError("chunk request unit indexes must align with semantic units.")
+        for name in ("unit_count", "unit_chunk_count", "global_count"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be one or greater.")
+        for name in ("unit_chunk_index", "global_index"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be zero or greater.")
+        if any(
+            isinstance(index, bool)
+            or not isinstance(index, int)
+            or index < 0
+            or index >= self.unit_count
+            for index in unit_indexes
+        ):
+            raise ValueError("chunk request unit indexes must be within unit_count.")
+        if tuple(sorted(set(unit_indexes))) != unit_indexes:
+            raise ValueError("chunk request unit indexes must be ordered and distinct.")
+        if self.unit_chunk_index >= self.unit_chunk_count:
+            raise ValueError("unit_chunk_index must be within unit_chunk_count.")
+        if self.global_index >= self.global_count:
+            raise ValueError("global_index must be within global_count.")
+        if self.unit_chunk_count > 1 and len(semantic_units) != 1:
+            raise ValueError("continuation chunks must own exactly one semantic unit.")
+        if len(semantic_units) == 1 and self.unit_id != semantic_units[0].unit_id:
+            raise ValueError("single-unit chunk request has a mismatched unit ID.")
+        owning_ranges = tuple(self.owning_ranges)
+        if not owning_ranges or any(
+            not isinstance(source_range, SourceRange)
+            for source_range in owning_ranges
+        ):
+            raise ValueError("chunk requests require ordered owning source ranges.")
+        if any(
+            current.end_byte > following.start_byte
+            for current, following in zip(owning_ranges, owning_ranges[1:])
+        ):
+            raise ValueError("chunk request owning ranges must be ordered and non-overlapping.")
+        known_symbols = tuple(self.known_symbols)
+        if any(not isinstance(item, str) for item in known_symbols):
+            raise ValueError("known_symbols must contain text.")
+        object.__setattr__(self, "semantic_units", semantic_units)
+        object.__setattr__(self, "unit_indexes", unit_indexes)
+        object.__setattr__(self, "owning_ranges", owning_ranges)
+        object.__setattr__(self, "known_symbols", known_symbols)
+        if not isinstance(self.payload, str) or not self.payload:
+            raise ValueError("chunk requests require a non-empty payload.")
+        if len(self.payload) > self.context.max_content_chars:
+            raise ValueError("chunk payload exceeds max_content_chars.")
+        if len(self.payload.encode("utf-8")) != sum(
+            source_range.end_byte - source_range.start_byte
+            for source_range in owning_ranges
+        ):
+            raise ValueError("chunk payload bytes must match its owning source ranges.")
+        metadata = render_leaf_prompt_metadata(
+            group_unit_id=self.unit_id,
+            semantic_units=semantic_units,
+            unit_indexes=unit_indexes,
+            unit_count=self.unit_count,
+            owning_ranges=owning_ranges,
+        )
+        if len(metadata) > MAX_LEAF_PROMPT_METADATA_CHARS:
+            raise ValueError("chunk request metadata exceeds its fixed bound.")
+
+
+@dataclass(frozen=True, slots=True)
+class FileReductionExecutionRequest:
+    """One immutable unit-consolidation or general file-reduction node request.
+
+    Carries the ordered child result capsules directly (D6/section 9): execution
+    never re-reads source or recomputes reduction-tree topology to build a
+    reducer prompt.
+    """
+
+    rel_path: str
+    division_plan_digest: str
+    reduction_tree_digest: str
+    node_id: str
+    phase: Literal["unit-consolidation", "general"]
+    unit_id: str | None
+    level: int
+    ordinal: int
+    child_ids: tuple[str, ...]
+    child_capsules: tuple[Mapping[str, object], ...]
+    reducer_revision: str
+    context: AgentCallContext
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "rel_path", _normalize_rel_path(self.rel_path))
+        if self.phase not in ("unit-consolidation", "general"):
+            raise ValueError("reduction request phase must be unit-consolidation or general.")
+        if not self.node_id.startswith("node_") or not _HEX_64_RE.fullmatch(
+            self.node_id.removeprefix("node_")
+        ):
+            raise ValueError("reduction requests require a node ID.")
+        child_ids = tuple(self.child_ids)
+        child_capsules = tuple(self.child_capsules)
+        if len(child_ids) < 2:
+            raise ValueError("a reduction node needs at least two children.")
+        if len(child_ids) != len(child_capsules):
+            raise ValueError("reduction request child IDs and capsules must align.")
+        object.__setattr__(self, "child_ids", child_ids)
+        object.__setattr__(self, "child_capsules", child_capsules)
+
+
+PlannedCallCategory = Literal[
+    "prompt-review",
+    "file-documentation",
+    "unit-documentation",
+    "file-reduction",
+    "file-synthesis",
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +290,9 @@ class PlannedCall:
 
     ``call_id`` identifies an initially planned logical call, not retries or
     corrections. ``owner`` groups calls that share a consecutive ordinal
-    sequence — a file's relative path for documentation calls, or the fixed
-    review-owner sentinel for prompt-review calls.
+    sequence — a file's relative path for documentation calls, a chunk ID for
+    a leaf call, a node ID for a reduction call, or the fixed review-owner
+    sentinel for prompt-review calls.
     """
 
     call_id: str
@@ -168,6 +358,64 @@ def documentation_call_id(
     )
 
 
+def unit_documentation_call_id(
+    rel_path: str,
+    unit_id: str,
+    chunk_id: str,
+    unit_chunk_index: int,
+    division_plan_digest: str,
+    analysis_mode: str,
+    agent: str,
+    ordinal: int,
+) -> str:
+    """The call id for one initial bounded leaf-chunk documentation call."""
+    return _domain_call_id(
+        "unit-documentation",
+        _normalize_rel_path(rel_path),
+        unit_id,
+        chunk_id,
+        str(unit_chunk_index),
+        division_plan_digest,
+        analysis_mode,
+        agent,
+        str(ordinal),
+    )
+
+
+def file_reduction_call_id(
+    rel_path: str,
+    node_id: str,
+    reduction_tree_digest: str,
+    reducer_revision: str,
+    ordinal: int,
+) -> str:
+    """The call id for one unit-consolidation or general reduction node call."""
+    return _domain_call_id(
+        "file-reduction",
+        _normalize_rel_path(rel_path),
+        node_id,
+        reduction_tree_digest,
+        reducer_revision,
+        str(ordinal),
+    )
+
+
+def file_synthesis_call_id(
+    rel_path: str,
+    division_plan_digest: str,
+    prompt_revision: str,
+    ordinal: int,
+) -> str:
+    """The call id for one final divided-file synthesis call."""
+    return _domain_call_id(
+        "file-synthesis",
+        _normalize_rel_path(rel_path),
+        division_plan_digest,
+        prompt_revision,
+        str(ordinal),
+    )
+
+
 def review_call_id(
     stream_digest: str, component_ids: Sequence[str], ordinal: int
 ) -> str:
@@ -193,21 +441,56 @@ DOC_AGENTS_BY_MODE: dict[str, tuple[str, ...]] = {
     "triple": ("structure", "dependency", "documentation"),
 }
 
+# Split is valid only in single-mode (D2); every split call therefore uses
+# exactly this one-agent sequence regardless of the run's own analysis_mode
+# value (which loader/planning already guarantee is "single" whenever any
+# division plan exists).
+_SPLIT_AGENTS: tuple[str, ...] = DOC_AGENTS_BY_MODE["single"]
+
+
+def _synthesis_prompt_revision() -> str:
+    from codedoc.core.file_division import FINAL_SYNTHESIS_REVISION
+
+    return FINAL_SYNTHESIS_REVISION
+
+
+def _reducer_prompt_revision() -> str:
+    from codedoc.core.file_division import REDUCER_PROMPT_REVISION
+
+    return REDUCER_PROMPT_REVISION
+
 
 def build_call_manifest(
     review_batches: Sequence[ReviewBatch],
     agent_rels: Sequence[str],
     analysis_mode: str,
+    division_plans: Mapping[str, DivisionPlan] | None = None,
+    reduction_trees: Mapping[str, ReductionTreePlan] | None = None,
+    tree_states: Mapping[str, SplitTreeState] | None = None,
 ) -> CallManifest:
     """Build and validate the one canonical call manifest for a run.
 
     Review calls come first, in canonical review-batch order; documentation
-    calls follow, sorted by relative path and then by the canonical per-mode
-    agent order. Every initially planned logical call maps to exactly one
-    manifest entry; retries and corrections are excluded and never consume or
-    add a manifest slot.
+    calls follow in global phase passes: all ordinary-file/leaf calls in
+    canonical path/source order, then every unit-consolidation node, every
+    general-reduction node, and every final synthesis. Within each reduction
+    phase paths and the tree's canonical level/source order are stable. Each
+    restored (already-completed and validated) node is excluded. Every
+    initially planned logical call maps to exactly one manifest entry; retries
+    and corrections are excluded and never consume or add a manifest slot.
     """
     agents = DOC_AGENTS_BY_MODE[analysis_mode]
+    divided = dict(division_plans or {})
+    trees = dict(reduction_trees or {})
+    states = dict(tree_states or {})
+    agent_rel_set = set(agent_rels)
+    if set(divided) - agent_rel_set:
+        raise ValueError("division-plan paths must be a subset of agent_rels.")
+    if set(trees) != set(divided):
+        raise ValueError("every division plan requires exactly one reduction tree.")
+    if set(states) - set(divided):
+        raise ValueError("tree-state paths must be a subset of effective split plans.")
+
     calls: list[PlannedCall] = []
 
     for batch in review_batches:
@@ -221,7 +504,48 @@ def build_call_manifest(
             )
         )
 
+    reducer_revision = _reducer_prompt_revision()
+    synthesis_revision = _synthesis_prompt_revision()
+
+    completed_by_path = {
+        rel_path: (
+            frozenset(states[rel_path].by_id())
+            if rel_path in states
+            else frozenset()
+        )
+        for rel_path in divided
+    }
+
+    # Phase 1: ordinary file documentation and split leaves.
     for rel_path in sorted(agent_rels):
+        plan = divided.get(rel_path)
+        if plan is not None:
+            if plan.rel_path != rel_path:
+                raise ValueError("division-plan key does not match its relative path.")
+            completed_ids = completed_by_path[rel_path]
+
+            for chunk in plan.chunks:
+                if chunk.chunk_id in completed_ids:
+                    continue
+                calls.append(
+                    PlannedCall(
+                        call_id=unit_documentation_call_id(
+                            rel_path,
+                            chunk.unit_id,
+                            chunk.chunk_id,
+                            chunk.unit_chunk_index,
+                            plan.plan_digest,
+                            "single",
+                            _SPLIT_AGENTS[0],
+                            1,
+                        ),
+                        category="unit-documentation",
+                        owner=chunk.chunk_id,
+                        ordinal=1,
+                    )
+                )
+            continue
+
         for ordinal, agent in enumerate(agents, start=1):
             calls.append(
                 PlannedCall(
@@ -232,7 +556,77 @@ def build_call_manifest(
                 )
             )
 
-    expected_total = len(review_batches) + len(agent_rels) * len(agents)
+    # Phase 2: unit-continuation consolidation across every file.
+    for rel_path in sorted(divided):
+        tree = trees[rel_path]
+        completed_ids = completed_by_path[rel_path]
+        for node in tree.unit_consolidation_nodes:
+            if node.node_id in completed_ids:
+                continue
+            calls.append(
+                PlannedCall(
+                    call_id=file_reduction_call_id(
+                        rel_path, node.node_id, tree.tree_digest, reducer_revision, 1
+                    ),
+                    category="file-reduction",
+                    owner=node.node_id,
+                    ordinal=1,
+                )
+            )
+
+    # Phase 3: general reductions across every file.
+    for rel_path in sorted(divided):
+        tree = trees[rel_path]
+        completed_ids = completed_by_path[rel_path]
+        for node in tree.general_nodes:
+            if node.node_id in completed_ids:
+                continue
+            calls.append(
+                PlannedCall(
+                    call_id=file_reduction_call_id(
+                        rel_path, node.node_id, tree.tree_digest, reducer_revision, 1
+                    ),
+                    category="file-reduction",
+                    owner=node.node_id,
+                    ordinal=1,
+                )
+            )
+
+    # Phase 4: final synthesis across every file.
+    for rel_path in sorted(divided):
+        plan = divided[rel_path]
+        tree = trees[rel_path]
+        completed_ids = completed_by_path[rel_path]
+        if tree.final_node.node_id not in completed_ids:
+            calls.append(
+                PlannedCall(
+                    call_id=file_synthesis_call_id(
+                        rel_path, plan.plan_digest, synthesis_revision, 1
+                    ),
+                    category="file-synthesis",
+                    owner=rel_path,
+                    ordinal=1,
+                )
+            )
+
+    ordinary_rels = [rel for rel in agent_rels if rel not in divided]
+    expected_ordinary = len(ordinary_rels) * len(agents)
+    expected_split = 0
+    for rel_path, plan in divided.items():
+        if rel_path not in agent_rel_set:
+            continue
+        tree = trees[rel_path]
+        state = states.get(rel_path)
+        completed_ids = frozenset(state.by_id()) if state is not None else frozenset()
+        expected_split += sum(1 for c in plan.chunks if c.chunk_id not in completed_ids)
+        expected_split += sum(
+            1
+            for node in tree.unit_consolidation_nodes + tree.general_nodes
+            if node.node_id not in completed_ids
+        )
+        if tree.final_node.node_id not in completed_ids:
+            expected_split += 1
+    expected_total = len(review_batches) + expected_ordinary + expected_split
     _validate_manifest(calls, expected_total=expected_total)
 
     digest = hashlib.sha256(
@@ -255,7 +649,13 @@ def _validate_manifest(calls: list[PlannedCall], *, expected_total: int) -> None
         if call.call_id in seen_ids:
             raise ValueError(f"duplicate planned call id: {call.call_id}")
         seen_ids.add(call.call_id)
-        if call.category not in ("prompt-review", "file-documentation"):
+        if call.category not in (
+            "prompt-review",
+            "file-documentation",
+            "unit-documentation",
+            "file-reduction",
+            "file-synthesis",
+        ):
             raise ValueError(f"unknown planned-call category: {call.category!r}")
         per_owner_ordinals.setdefault((call.category, call.owner), []).append(
             call.ordinal
@@ -284,7 +684,24 @@ class CallManifestTracker:
         if len(self._calls) != len(manifest.calls):
             raise ValueError("call manifest contains duplicate call IDs.")
         self._attempted: set[str] = set()
+        self._stop_event: threading.Event | None = None
         self._lock = threading.Lock()
+
+    def bind_stop_event(self, stop_event: threading.Event | None) -> None:
+        with self._lock:
+            self._stop_event = stop_event
+
+    def raise_if_cancelled(self) -> None:
+        with self._lock:
+            stop_event = self._stop_event
+        if stop_event is not None and stop_event.is_set():
+            raise CancelledError()
+
+    def signal_stop(self) -> None:
+        with self._lock:
+            stop_event = self._stop_event
+        if stop_event is not None:
+            stop_event.set()
 
     def authorize(self, call: PlannedCall, *, additional_attempt: bool) -> None:
         """Authorize one provider attempt for *call*.
@@ -327,6 +744,15 @@ class CallManifestTracker:
                 and call.owner == owner
                 for call_id, call in self._calls.items()
             )
+
+    def call_was_attempted(self, call_id: str) -> bool:
+        """Whether the exact initially planned logical call has been attempted."""
+        with self._lock:
+            if call_id not in self._calls:
+                raise RuntimeError(
+                    f"attempt lookup referenced unknown planned call ID {call_id}."
+                )
+            return call_id in self._attempted
 
     def snapshot(self) -> dict[str, int]:
         """Return provider-free planned/attempted reconciliation counts."""

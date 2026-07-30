@@ -80,6 +80,38 @@ def test_in_progress_json_missing_schema_accepted(tmp_path):
     assert doc.in_progress is True
     assert doc.schema_version is None
 
+
+def test_partial_recovery_map_rejects_embedded_path_mismatch(tmp_path):
+    payload = {
+        "_crash_safety": "INCOMPLETE",
+        "_codedoc": {
+            "entry_file": "main.py",
+            "status": "in_progress",
+            "live_backup": True,
+            "schema_version": "1.4",
+            "partial_files": {
+                "main.py": {
+                    "schema_version": 1,
+                    "owner": "codedoc-ai",
+                    "rel_path": "other.py",
+                    "content_hash": "a" * 64,
+                    "execution_identity_digest": "division-execution:" + "b" * 64,
+                    "division_plan_digest": "division-plan:" + "c" * 64,
+                    "stage": "documenting",
+                    "completed_chunks": [],
+                    "synthesis_json": None,
+                }
+            },
+        },
+        "files": [],
+    }
+    path = tmp_path / "codedoc.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    document = read_codedoc_document(path)
+
+    assert document.partial_files == ()
+
 def test_legacy_13_json_fixture(tmp_path):
     doc = read_codedoc_document(LEGACY_DOCUMENT_FIXTURES / "codedoc_13.json")
     assert doc.schema_version == "1.3"
@@ -230,6 +262,44 @@ def test_malformed_metadata_is_rejected_even_with_valid_embedded_view(tmp_path):
     )
     with pytest.raises(ConfigError):
         read_codedoc_document(p)
+
+
+def test_conflicting_markdown_embedded_schema_is_rejected(tmp_path):
+    embedded = {
+        "schema_version": "1.3",
+        "last_run": {},
+        "files": [],
+    }
+    encoded = base64.b64encode(json.dumps(embedded).encode("utf-8")).decode("ascii")
+    path = tmp_path / "codedoc.md"
+    path.write_text(
+        '<!-- codedoc-ai: {"entry_file": null, "schema_version": "1.4", '
+        '"file_hashes": {}} -->\n'
+        f"<!-- codedoc-ai-view-base64\n{encoded}\n-->\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="conflicting schema versions"):
+        read_codedoc_document(path)
+
+
+def test_unsupported_markdown_embedded_schema_is_rejected(tmp_path):
+    embedded = {
+        "schema_version": "2.0",
+        "last_run": {},
+        "files": [],
+    }
+    encoded = base64.b64encode(json.dumps(embedded).encode("utf-8")).decode("ascii")
+    path = tmp_path / "codedoc.md"
+    path.write_text(
+        '<!-- codedoc-ai: {"entry_file": null, "file_hashes": {}} -->\n'
+        f"<!-- codedoc-ai-view-base64\n{encoded}\n-->\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="unsupported CodeDoc schema version"):
+        read_codedoc_document(path)
+
 
 def test_markdown_missing_schema_rejected(tmp_path):
     p = tmp_path / "codedoc.md"
@@ -583,8 +653,11 @@ def test_legacy_json_without_last_run_is_accepted_and_owned(tmp_path):
 
     assert _is_codedoc_owned(path)
     doc = read_codedoc_document(path)
-    assert "last_run" not in doc.view
-    assert doc.view["run"]["files_documented"] == 2
+    assert doc.view["last_run"]["entry_file"] == "main.py"
+    assert "run" not in doc.view
+    # The canonical counter maps from the legacy run's provider-work counter,
+    # not its output file-count field.
+    assert doc.view["last_run"]["files_documented_by_llm"] == 1
 
 def test_current_json_without_envelope_is_owned(tmp_path):
     data = json.loads(json_from_view(run_metadata_view()))
@@ -627,7 +700,8 @@ def test_legacy_completed_json_remains_owned_and_readable(tmp_path):
     assert _is_codedoc_owned(path)
     doc = read_codedoc_document(path)
     assert doc.entry_file == "main.py"
-    assert doc.view["run"]["files_documented"] == 2
+    assert "run" not in doc.view
+    assert doc.view["last_run"]["files_documented_by_llm"] == 2
 
 def test_foreign_json_without_codedoc_shape_still_fails_closed(tmp_path):
     path = tmp_path / "codedoc.json"

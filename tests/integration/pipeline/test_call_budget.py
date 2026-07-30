@@ -5,7 +5,6 @@ from __future__ import annotations
 import json
 
 import pytest
-
 from codedoc.cli.cli import run_cli
 from codedoc.core.loader import load_config
 from codedoc.pipeline import run_pipeline
@@ -13,10 +12,42 @@ from codedoc.utils.errors import ConfigError
 from tests.support.pipeline_scenarios import no_llm
 from tests.support.pipeline_usage import write_py
 
+pytestmark = pytest.mark.future_split_execution
+
 
 def _write_files(root, count):
     for i in range(count):
         write_py(root / f"f{i}.py")
+
+
+def test_split_call_cap_counts_every_chunk_and_synthesis_before_side_effects(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "main.py").write_text(
+        "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n",
+        encoding="utf-8",
+        newline="",
+    )
+    no_llm(monkeypatch)
+    confirm_calls = []
+
+    with pytest.raises(
+        ConfigError, match="leaf documentation.*file reduction.*file synthesis"
+    ):
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "main.py",
+                "large_file_strategy": "split",
+                "max_content_chars": 2000,
+                "max_planned_calls": 1,
+                "output_dir": "docs",
+            },
+            confirm_risky=lambda warnings: confirm_calls.append(warnings) or True,
+        )
+
+    assert confirm_calls == []
+    assert not (tmp_path / "docs").exists()
 
 
 def test_cap_failure_touches_no_provider_usage_writer_or_callback(tmp_path, monkeypatch):

@@ -28,12 +28,93 @@ from codedoc.core.dependency_kind import (
     classify_non_project_dependency,
 )
 from codedoc.core.record_meta import carry_private_keys
+from codedoc.core.result_assembly import (
+    project_public_exports,
+    project_public_symbols,
+)
 from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
 SCHEMA_VERSION = "1.4"
+
+# Run-level split observability fields.  These are transparency counts/costs
+# only — no internal chunk/unit/reduction content (D9/D14).
+_SPLIT_LAST_RUN_INTEGER_FIELDS = (
+    "split_ordinary_files",
+    "split_syntax_files",
+    "split_lexical_files",
+    "split_blocked_files",
+    "split_divided_files",
+    "split_units",
+    "split_chunks",
+    "split_continuation_groups",
+    "split_unit_consolidation_levels",
+    "split_unit_consolidation_calls_planned",
+    "split_general_reduction_levels",
+    "split_general_reduction_calls_planned",
+    "split_final_synthesis_calls_planned",
+    "split_restored_complete_chunks",
+    "split_restored_unit_consolidation_calls",
+    "split_restored_general_reduction_calls",
+    "split_restored_final_synthesis_calls",
+    "file_documentation_calls_planned",
+    "unit_documentation_calls_planned",
+    "file_reduction_calls_planned",
+    "synthesis_calls_planned",
+)
+_BLOCKED_REASONS = (
+    "atom-cap",
+    "symbol-cap",
+    "unit-cap",
+    "chunk-cap",
+    "reduction-envelope-cap",
+    "reduction-fan-in-cap",
+    "reduction-depth-cap",
+    "final-synthesis-envelope-cap",
+)
+
+_BASE_LAST_RUN_FIELDS = (
+    "entry_file",
+    "entry_source",
+    "documentation_scope",
+    "analysis_mode",
+    "files_scanned",
+    "files_selected",
+    "files_documented_by_llm",
+    "files_failed",
+    "files_unattempted",
+    "files_skipped_insufficient_source",
+    "files_reused_unchanged",
+    "files_reused_identical_content",
+    "files_resumed_from_recovery",
+)
+_PUBLIC_FILE_FIELDS = (
+    "hash",
+    "path",
+    "language",
+    "description",
+    "role_in_system",
+    "imports",
+    "functions",
+    "classes",
+    "exports",
+    "key_concepts",
+    "usage_example",
+    "_deps",
+    "reachable_from_entry",
+    "links",
+)
+_PUBLIC_TOP_LEVEL_FIELDS = (
+    "last_run",
+    "tree",
+    "folders",
+    "dependency_catalog",
+    "dependency_graph",
+    "files",
+    "errors",
+)
 
 
 def without_schema_version(value: Any) -> Any:
@@ -145,7 +226,7 @@ def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dic
             + skipped_insufficient,
         )
 
-    return {
+    last_run = {
         "entry_file": entry_file,
         "entry_source": stats.get("entry_source")
         or ("auto-detected" if entry_file else "none"),
@@ -162,6 +243,21 @@ def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dic
         "files_reused_identical_content": identical,
         "files_resumed_from_recovery": _nonnegative_int(stats.get("resumed", 0)),
     }
+    if stats.get("large_file_strategy") == "split":
+        last_run["large_file_strategy"] = "split"
+        last_run.update(
+            {
+                key: _nonnegative_int(stats.get(key, 0))
+                for key in _SPLIT_LAST_RUN_INTEGER_FIELDS
+            }
+        )
+        raw_reasons = stats.get("split_blocked_by_reason", {})
+        last_run["split_blocked_by_reason"] = {
+            reason: _nonnegative_int(raw_reasons.get(reason, 0))
+            for reason in _BLOCKED_REASONS
+            if isinstance(raw_reasons, dict) and raw_reasons.get(reason, 0)
+        }
+    return last_run
 
 
 def _nonnegative_int(value: object) -> int:
@@ -174,13 +270,321 @@ def _nonnegative_int(value: object) -> int:
         return 0
 
 
+def _legacy_last_run(view: dict) -> dict:
+    """Project predecessor ``project``/``run`` wrappers to current metadata."""
+    project = view.get("project") if isinstance(view.get("project"), dict) else {}
+    run = view.get("run") if isinstance(view.get("run"), dict) else {}
+    file_count = _nonnegative_int(project.get("file_count", 0))
+    checked = _nonnegative_int(run.get("files_checked", 0))
+    failed = _nonnegative_int(run.get("files_failed", 0))
+    skipped = _nonnegative_int(run.get("files_skipped", 0))
+    reused = _nonnegative_int(run.get("files_reused", 0))
+    selected = max(file_count, checked + failed + skipped + reused)
+    entry_file = project.get("entry_file")
+    return {
+        "entry_file": entry_file,
+        "entry_source": "auto-detected" if entry_file else "none",
+        "documentation_scope": "entry" if entry_file else "all",
+        "analysis_mode": "single",
+        "files_scanned": selected,
+        "files_selected": selected,
+        "files_documented_by_llm": checked,
+        "files_failed": failed,
+        "files_unattempted": 0,
+        "files_skipped_insufficient_source": 0,
+        "files_reused_unchanged": skipped,
+        "files_reused_identical_content": reused,
+        "files_resumed_from_recovery": 0,
+    }
+
+
+def _string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _project_record(
+    value: object,
+    *,
+    string_fields: frozenset[str] = frozenset(),
+    integer_fields: frozenset[str] = frozenset(),
+    string_list_fields: frozenset[str] = frozenset(),
+) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    projected: dict = {}
+    for key, item in value.items():
+        if key in string_fields and isinstance(item, str):
+            projected[key] = item
+        elif (
+            key in integer_fields
+            and isinstance(item, int)
+            and not isinstance(item, bool)
+        ):
+            projected[key] = item
+        elif key in string_list_fields and isinstance(item, list):
+            projected[key] = _string_list(item)
+    return projected
+
+
+def _project_record_list(
+    value: object,
+    *,
+    string_fields: frozenset[str] = frozenset(),
+    integer_fields: frozenset[str] = frozenset(),
+    string_list_fields: frozenset[str] = frozenset(),
+    required_fields: frozenset[str] = frozenset(),
+) -> list[dict]:
+    if not isinstance(value, list):
+        return []
+    projected: list[dict] = []
+    for item in value:
+        record = _project_record(
+            item,
+            string_fields=string_fields,
+            integer_fields=integer_fields,
+            string_list_fields=string_list_fields,
+        )
+        if record is not None and required_fields <= set(record):
+            projected.append(record)
+    return projected
+
+
+def _project_dependencies(value: object) -> dict:
+    if not isinstance(value, dict):
+        return {}
+    projected: dict = {}
+    string_lists = frozenset(
+        {"internal", "external", "dependency_refs", "warnings"}
+    )
+    for key, item in value.items():
+        if key in string_lists and isinstance(item, list):
+            projected[key] = _string_list(item)
+        elif key == "catalog_updates":
+            projected[key] = _project_record_list(
+                item,
+                string_fields=frozenset({"name", "type", "used_for"}),
+                required_fields=frozenset({"name"}),
+            )
+        elif key == "usage_notes":
+            projected[key] = _project_record_list(
+                item,
+                string_fields=frozenset({"import", "used_for"}),
+                required_fields=frozenset({"import"}),
+            )
+    return projected
+
+
+def _project_links(value: object) -> dict:
+    record = _project_record(
+        value,
+        string_list_fields=frozenset(
+            {
+                "internal_dependencies",
+                "imported_by",
+                "external_dependencies",
+                "sdk_dependencies",
+            }
+        ),
+    )
+    return record or {}
+
+
+def _project_tree_node(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    if value.get("type") == "file":
+        path = value.get("path")
+        if not isinstance(path, str):
+            return None
+        return {"type": "file", "path": path}
+    projected: dict = {}
+    for key, item in value.items():
+        if not isinstance(key, str):
+            continue
+        child = _project_tree_node(item)
+        if child:
+            projected[key] = child
+    return projected or None
+
+
+def _project_tree(value: object) -> dict:
+    return _project_tree_node(value) or {}
+
+
+def _project_folders(value: object) -> list[dict]:
+    return _project_record_list(
+        value,
+        string_fields=frozenset({"path", "summary"}),
+        integer_fields=frozenset({"file_count"}),
+        string_list_fields=frozenset({"languages", "files", "key_concepts"}),
+        required_fields=frozenset({"path", "summary", "file_count"}),
+    )
+
+
+def _project_dependency_catalog(value: object) -> list[dict]:
+    return _project_record_list(
+        value,
+        string_fields=frozenset({"name", "type", "used_for"}),
+        integer_fields=frozenset({"file_count"}),
+        string_list_fields=frozenset({"files"}),
+        required_fields=frozenset({"name"}),
+    )
+
+
+def _project_dependency_graph(value: object) -> list[dict]:
+    return _project_record_list(
+        value,
+        string_fields=frozenset({"from", "to", "type"}),
+        required_fields=frozenset({"from", "to"}),
+    )
+
+
+def _sanitize_public_file(value: object) -> dict | None:
+    if not isinstance(value, dict):
+        return None
+    from codedoc.core import record_meta
+
+    allowed = set(_PUBLIC_FILE_FIELDS) | set(record_meta.PRIVATE_RECORD_KEYS)
+    string_fields = frozenset(
+        {
+            "hash",
+            "path",
+            "language",
+            "description",
+            "role_in_system",
+            "usage_example",
+        }
+    )
+    string_list_fields = frozenset({"imports", "key_concepts"})
+    sanitized: dict = {}
+    for key, item in value.items():
+        if key not in allowed:
+            continue
+        if key in string_fields and isinstance(item, str):
+            sanitized[key] = (
+                _sanitize_usage_example(item) if key == "usage_example" else item
+            )
+        elif key in string_list_fields and isinstance(item, list):
+            sanitized[key] = _string_list(item)
+        elif key in ("functions", "classes"):
+            sanitized[key] = project_public_symbols(item)
+        elif key == "exports":
+            sanitized[key] = project_public_exports(item)
+        elif key == "_deps":
+            sanitized[key] = _project_dependencies(item)
+        elif key == "links":
+            sanitized[key] = _project_links(item)
+        elif key == "reachable_from_entry" and isinstance(item, bool):
+            sanitized[key] = item
+        elif key in record_meta.PRIVATE_RECORD_KEYS and (
+            item is None or isinstance(item, (str, int, float, bool))
+        ):
+            sanitized[key] = item
+    if not isinstance(sanitized.get("path"), str):
+        return None
+    return sanitized
+
+
+def sanitize_public_view(view: dict) -> dict:
+    """Return the canonical allowlisted completed-output view.
+
+    This is the single publication/conversion boundary for completed JSON,
+    Markdown embedding, embedded-view reads, and reverse conversion. It strips
+    recovery wrappers, predecessor split internals, unknown run counters, and
+    unregistered file metadata while retaining the documented public view and
+    registered private cache identities.
+    """
+    if not isinstance(view, dict):
+        raise TypeError("CodeDoc public view must be a dict.")
+
+    raw_last_run = (
+        view.get("last_run")
+        if isinstance(view.get("last_run"), dict)
+        else _legacy_last_run(view)
+    )
+    raw_last_run = dict(raw_last_run)
+    if (
+        "entry_file" not in raw_last_run
+        and isinstance(view.get("project"), dict)
+    ):
+        raw_last_run["entry_file"] = view["project"].get("entry_file")
+    allowed_last_run = set(_BASE_LAST_RUN_FIELDS)
+    if raw_last_run.get("large_file_strategy") == "split":
+        allowed_last_run.add("large_file_strategy")
+        allowed_last_run.update(_SPLIT_LAST_RUN_INTEGER_FIELDS)
+        allowed_last_run.add("split_blocked_by_reason")
+    last_run: dict = {}
+    last_run_strings = frozenset(
+        {"entry_source", "documentation_scope", "analysis_mode"}
+    )
+    last_run_integers = frozenset(_BASE_LAST_RUN_FIELDS) - frozenset(
+        {"entry_file", *last_run_strings}
+    )
+    last_run_integers |= frozenset(_SPLIT_LAST_RUN_INTEGER_FIELDS)
+    for key, value in raw_last_run.items():
+        if key not in allowed_last_run:
+            continue
+        if key == "entry_file" and (value is None or isinstance(value, str)):
+            last_run[key] = value
+        elif key in last_run_strings and isinstance(value, str):
+            last_run[key] = value
+        elif (
+            key in last_run_integers
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+        ):
+            last_run[key] = value
+        elif key == "large_file_strategy" and value == "split":
+            last_run[key] = value
+        elif key == "split_blocked_by_reason" and isinstance(value, dict):
+            last_run[key] = {
+                reason: count
+                for reason, count in value.items()
+                if reason in _BLOCKED_REASONS
+                and isinstance(count, int)
+                and not isinstance(count, bool)
+            }
+
+    public: dict = {}
+    if last_run:
+        public["last_run"] = last_run
+    if "tree" in view:
+        public["tree"] = _project_tree(view["tree"])
+    if "folders" in view:
+        public["folders"] = _project_folders(view["folders"])
+    if "dependency_catalog" in view:
+        public["dependency_catalog"] = _project_dependency_catalog(
+            view["dependency_catalog"]
+        )
+    if "dependency_graph" in view:
+        public["dependency_graph"] = _project_dependency_graph(
+            view["dependency_graph"]
+        )
+    if isinstance(view.get("files"), list):
+        public["files"] = [
+            sanitized
+            for value in view["files"]
+            if (sanitized := _sanitize_public_file(value)) is not None
+        ]
+    if isinstance(view.get("errors"), str):
+        public["errors"] = view["errors"]
+
+    # Keep this assertion adjacent to construction so adding a public top-level
+    # field requires an explicit allowlist decision.
+    if set(public) - set(_PUBLIC_TOP_LEVEL_FIELDS):
+        raise AssertionError("public-view sanitizer emitted an unknown field.")
+    return without_schema_version(public)
+
+
 # ---------------------------------------------------------------------------
 # JSON serialisation
 # ---------------------------------------------------------------------------
 
 def json_from_view(view: dict, error_summary: str = "") -> str:
     """Render a public project view as formatted JSON."""
-    payload = without_schema_version(view)
+    payload = sanitize_public_view(view)
     if error_summary and error_summary != "No errors.":
         payload["errors"] = error_summary
     # Determinism: completed output carries no run-varying timestamp.
@@ -288,9 +692,9 @@ def _clean_file(record: dict) -> dict:
         "description": result.get("description", ""),
         "role_in_system": result.get("role_in_system", ""),
         "imports": result.get("imports", []),
-        "functions": result.get("functions", []),
-        "classes": result.get("classes", []),
-        "exports": result.get("exports", []),
+        "functions": project_public_symbols(result.get("functions", [])),
+        "classes": project_public_symbols(result.get("classes", [])),
+        "exports": project_public_exports(result.get("exports", [])),
         "key_concepts": result.get("key_concepts", []),
         "usage_example": _sanitize_usage_example(result.get("usage_example", "")),
         "_deps": {k: v for k, v in dependencies.items() if v not in (None, "", [], {})} if isinstance(dependencies, dict) else {},
@@ -298,6 +702,10 @@ def _clean_file(record: dict) -> dict:
         "dependency_usage": _dependency_usage_map(usage_notes),
         "dependency_catalog_updates": _clean_catalog_updates(catalog_updates),
     }
+    # No public `division` or `documentation_units` field is ever emitted
+    # (D9/D14): a predecessor record carrying either is silently discarded on
+    # read rather than round-tripped (D11) — split/reduction internals are
+    # never part of the published file-level shape.
     cleaned = {key: value for key, value in file.items() if value not in (None, "", [], {})}
 
     # Registered private keys survive empty-value pruning.  Carry from the

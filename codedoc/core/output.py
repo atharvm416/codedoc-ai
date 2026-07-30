@@ -92,7 +92,9 @@ def preflight_output_targets(
         raise ConfigError(conflicts[0]["message"])
 
 
-def preflight_output_accessibility(output_dir: Path) -> None:
+def preflight_output_accessibility(
+    output_dir: Path, *, provider_contacted: bool = False
+) -> None:
     """Verify *output_dir* can actually be written before any provider is created.
 
     This is a non-destructive, provider-free probe run
@@ -130,10 +132,20 @@ def preflight_output_accessibility(output_dir: Path) -> None:
         category = classify_os_error(exc)
         cause = describe_cause(exc)
         detail = f"{category_reason(category)} ({cause})" if cause else category_reason(category)
+        # Only claim a provider-free abort when that is actually true. A
+        # prompt-customization review is paid work that legitimately runs
+        # before this probe, so asserting "no provider was contacted" there
+        # would deny a call the user was billed for.
+        contact_note = (
+            "No documentation call was made, but the prompt-customization "
+            "review already ran and was billed"
+            if provider_contacted
+            else "No provider was contacted"
+        )
         raise OutputError(
             str(output_dir),
             f"output directory '{output_dir}' is not writable: {detail}. "
-            "No provider was contacted — choose a writable output directory or "
+            f"{contact_note} — choose a writable output directory or "
             "correct local permissions, then rerun.",
         ) from exc
     finally:

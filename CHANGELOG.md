@@ -1,5 +1,238 @@
 # Changelog
 
+## 0.14.0 - 2026-07-30
+
+### Large-file planning preview
+
+- Added provider-free large-file split planning for
+  `large_file_strategy: split` together with `dry_run: true` and
+  `analysis_mode: single`. Planning reads the canonical source snapshot,
+  constructs deterministic semantic or lexical chunks and reduction topology,
+  verifies complete source coverage and serialized capacity, and reports exact
+  initial call categories without contacting a provider or writing output.
+- Real split execution and `triple + split` now fail configuration validation
+  before scanning, recovery inspection, output creation, prompt review, or
+  provider construction. The request never silently falls back to truncate.
+  Split completed output, reuse, checkpoints, and partial recovery are not
+  available from the planning preview.
+- Corrected worst-case split planning to account for canonical JSON escaping of
+  quotes, backslashes, control characters, newlines, and Unicode. Unsafe plans
+  now block locally with `final-synthesis-envelope-cap`; the topology contract
+  advanced to `reduction-packing-v4`. Final-input estimates reserve the full
+  3,000-character canonical ledger-synopsis allowance instead of relying on
+  one concrete maximum-field ledger whose whole-item trimming can underfill it.
+- Kept the default `truncate` route and ordinary `file-doc-v3` identity
+  unchanged. The dormant, test-gated later-patch implementation currently uses
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v4`, `fact-ledger-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v1`, `file-synthesis-v3`,
+  `division-execution-v5`, and `large-file-v2`.
+- Documented the runtime-offline optional structure package and the 4,096
+  lexical-atom ceiling without presenting the package as a remedy for malformed
+  or error-dominated source.
+
+### Ordinary-path and conversion corrections
+
+- Required effective-language equality for ordinary same-path and
+  identical-content reuse while preserving the established ordinary identity
+  bytes.
+- Removed the CLI's unconditional provider-free claim after an output preflight
+  failure when mandatory prompt review may already have been billed.
+- Routed zero-supported-file output-directory creation through the classified
+  output-accessibility boundary.
+- Recursively projected nested records and run metadata through the public
+  schema across JSON, Markdown, embedded-view, read, and reverse-conversion
+  paths, without deleting legitimate user values merely because a path or value
+  resembles an internal field name.
+- Kept preserve-first recovery guidance, strict generated JSON configuration,
+  bounded Windows atomic-replace retry, secret-free endpoint validation, and
+  base-install lexical fallback.
+
+<details>
+<summary>Dormant later-patch split implementation history (not public)</summary>
+
+The implementation notes below remain for later `0.14.x` review. Their
+execution, completed reuse, and recovery paths are test-gated and unreachable
+through public configuration, environment, CLI, or pipeline entry points in
+`0.14.0`.
+
+### Prior release-audit implementation notes
+
+- Prevented silent split-leaf fact loss. Fixed leaf capsules now use practical,
+  prompt-visible symbol/export bounds aligned with established file-level
+  limits and a 300-character reducer-compatible description bound. Any
+  over-limit fact or item count is rejected through the existing
+  correction/failure contract instead of being truncated or omitted from the
+  authoritative local ledger.
+- Corrected reduction fan-in planning to measure the exact rendered
+  child-narrative manifest (`"- "` prefixes and newline separators), rather
+  than using canonical leaf-capsule JSON size as a proxy. Execution now
+  rechecks that invariant before a reducer provider call, and worst-case
+  synopsis trimming uses the same deterministic priority in logarithmic rather
+  than quadratic serialization work.
+- Normalized trailing slashes in OpenAI-compatible endpoint recovery identity,
+  matching the effective base-endpoint behavior while continuing to exclude
+  credentials, query strings, and fragments.
+- Documented the 4,096 lexical-atom split ceiling and the conditional
+  syntax-aware-extra remedy in README, CLI help, generated config guidance, and
+  public-documentation contract tests.
+- Removed dormant ordinary-file call-ID override parameters and centralized
+  flat combined-result assembly in a neutral core helper, eliminating duplicate
+  record construction and the recovery validator's core-to-agent dependency.
+- Extended the bounded Windows atomic-replace retry to transient WinError 5
+  (`ERROR_ACCESS_DENIED`) at that exact boundary. If retries are exhausted it
+  remains classified and reported as a permission failure, with the original
+  exception preserved.
+- Made split fact identity declaration-aware. Parser symbol IDs and source
+  ranges distinguish same-named nested declarations and overloads; ambiguous
+  packed facts receive deterministic occurrence scopes, while continuation
+  reports for one source unit still consolidate. Private provenance remains
+  internal, and all publication/conversion paths recursively apply the
+  ordinary file-level symbol/export schema and limits.
+- Made packed leaf metadata truthful and bounded. Requests carry every ordered
+  semantic unit, unit index, and owning range, while the source packer closes a
+  call group before the exact rendered metadata reaches its fixed ceiling.
+  Planning, validation, and prompt rendering share the same accounting.
+- Hardened schema-2 split recovery parsing. Invalid node entries are rejected
+  independently so valid paid siblings survive; malformed containers and
+  duplicate normalized path aliases fail closed without replacing recovery or
+  stable output.
+- Moved empty and whitespace-only source rejection into provider-free planning,
+  before split extraction, import parsing, manifest construction, `max_files`,
+  or provider creation. A skipped path removes stale documentation
+  transactionally and produces no placeholder.
+- Added cooperative interruption across parallel split execution and the
+  centralized provider-call boundary. Already-running calls may finish and a
+  valid returned node is checkpointed, but queued work and every later leaf,
+  reducer, synthesis, retry, or correction call are canceled before provider
+  contact.
+- Enforced the reduction-depth ceiling across the complete
+  unit-consolidation-plus-general path, rather than applying the limit
+  independently to each phase.
+- Rejected malformed OpenAI-compatible URL schemes, hosts, and ports as
+  value-free configuration errors before provider creation, without echoing
+  credentials or endpoint details even in verbose diagnostics.
+- Sanitized public views before deriving Markdown-visible, embedded, or
+  lightweight metadata while retaining the raw embedded schema separately for
+  ownership/version conflict validation.
+- Expanded Python decorated declarations to include every decorator in their
+  owned source span, including async functions, classes, CRLF, and Unicode
+  cases. Structural extraction and validation now use bounded iterative and
+  indexed algorithms for large sibling/declaration populations.
+
+### Hierarchical large-file division
+
+- Added opt-in `large_file_strategy: split` support for oversized readable
+  source files, currently single-mode only — `triple` plus `split` fails with
+  "currently unavailable" guidance before scanning or any other side effect.
+  The default remains `truncate`, byte-compatible and unchanged.
+- Added semantic-first division: an oversized file is divided at semantic
+  boundaries (functions, classes, top-level declarations) into complete leaf
+  chunks; a unit that fits stays whole, an oversized unit uses explicit
+  continuation chunks, and `max_content_chars` is the hard ceiling per chunk.
+  Split never truncates or drops source — every byte is covered by exactly one
+  analyzed leaf chunk.
+- Added a deterministic hierarchical reduction tree above the leaf chunks:
+  same-unit continuation chunks are consolidated first, in source order, then
+  bounded general-reduction levels combine sibling narratives only until the
+  complete final manifest fits. Final synthesis may accept several ordered
+  roots, and singleton remainders are promoted rather than placed behind a
+  unary reducer.
+- Added fixed, non-configurable internal prompt contracts for leaf and
+  reduction calls: a leaf capsule requires a description and allows bounded
+  optional function/class/export facts; a reduction capsule carries only a
+  refined narrative. Neither ever receives separately parsed whole-file
+  imports or the final customizable shape. Only the final synthesis call uses
+  the resolved (possibly user-customized) file-level shape.
+- Added a local, deterministic, lossless internal fact ledger: every distinct
+  accepted structured fact from every leaf is retained by semantic key,
+  independent of narrative reduction, and never touched by an AI call.
+- Added eight named, provider-free capacity-blocked reasons, checked in a fixed
+  order (`atom-cap`, `symbol-cap`, `unit-cap`, `chunk-cap`,
+  `reduction-envelope-cap`, `reduction-fan-in-cap`,
+  `reduction-depth-cap`, `final-synthesis-envelope-cap`). A blocked file makes
+  no provider call and is excluded from `max_files`; dry-run reports every
+  blocked path and reason with exit 0, and a real run stops with a
+  `ConfigError` (exit 2) before any write or provider contact. There is no
+  silent capacity fallback to truncation.
+- Fixed oversized multiline semantic-unit packing so adjacent complete lines
+  fill each chunk up to the character budget instead of producing one paid
+  chunk per physical line. Removed the invalid `chunk-envelope-cap`, which
+  compared total parser symbols with a per-kind response limit and rejected
+  ordinary classes; parser-derived name hints are now independently bounded.
+- Added a distinct, rarer internal division-plan defect outcome: a genuine
+  invariant failure propagates uncaught and aborts the whole run — dry or
+  real — before any provider or writer side effect, leaving prior stable
+  output untouched. It is never a per-file failure statistic.
+- Added a `file-reduction` planned-call category alongside `unit-documentation`
+  (one leaf chunk call) and `file-synthesis` (one final call per divided
+  file). The exact initial-call plan is
+  `P = R + O + (C - Hc) + (U - Hu) + (G - Hg) + (F - Hf)`, known completely
+  before provider creation and enforced by `max_planned_calls`; retries and
+  corrections are additional attempts, never new entries in `P`. Dry-run and a
+  real run report leaf/reduction/synthesis calls as separate categories and
+  label the synthesis input token estimate as a deterministic worst-case
+  envelope.
+- Added a non-blocking, deterministic, provider-free dry-run advisory that
+  suggests reviewing model capability for an unusually complex plan (many
+  chunks or deep reduction), without changing model selection.
+- Added node-keyed split-partial recovery (schema version 2): every leaf,
+  unit-consolidation, general-reduction, and final-synthesis node is
+  checkpointed independently by its own node ID under
+  `_codedoc.partial_files`, each carrying a provider/model/effective-endpoint
+  execution identity (never the literal `auto` selector, an endpoint
+  credential, or a raw API key). A node from a different provider, model,
+  endpoint, content revision, division plan, or reduction tree is rejected on
+  resume. Exact node type, ordered children, coverage, node-specific execution
+  identity, and the live stage cleaner/required-field schema are revalidated;
+  recovery retention is dependency-closed, so an invalid descendant prunes all
+  affected ancestors. Resuming re-executes only the resulting unpaid nodes,
+  never a whole file. A predecessor build's completed split output migrates as
+  an ordinary stable record; a predecessor prefix-based split partial (schema
+  version 1) is detected and fails closed: finish with the predecessor build or
+  move `crash_recovery.json` aside first. Deletion is described only as an
+  explicit discard of those checkpoints, and stable output remains untouched.
+- Added a construction-time provider identity attestation: the concrete
+  provider, effective model, and normalized non-secret endpoint selected by the
+  factory must match the provider-free plan before prompt review or
+  documentation calls. Missing/malformed attestation fails closed; implicit
+  HTTP/HTTPS ports normalize identically to explicit `:80`/`:443`.
+- Corrected final-capacity planning and dry estimates to use the actual path,
+  language, and parser imports, distinct maximum-size reduction narratives,
+  and the complete fixed ledger-synopsis character allowance. Only the lossy
+  ledger synopsis may shrink; authoritative imports, narratives, and coverage
+  never do.
+- Preserved source semantic-unit identity independently from packed leaf call
+  groups and strengthened every recoverable node identity with its exact
+  planned node/stage metadata. The contracts at that implementation checkpoint
+  were
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v4`, `fact-ledger-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v3`, `file-reduction-v1`, `file-synthesis-v3`,
+  `division-execution-v5`, `large-file-v2`, and ordinary `file-doc-v3`.
+- Made `max_files`, prompt-profile review scopes, and the call manifest operate
+  on the exact unpaid plan after recovery. Fully restored files contribute no
+  candidate or review call, and calls are globally phased across all files:
+  reviews, ordinary/leaves, unit consolidation, general reduction, then final
+  synthesis.
+- Centralized a completed-output allowlist across direct JSON, Markdown,
+  embedded-view, reverse-conversion, and document-read boundaries, preventing
+  predecessor chunk/unit/reduction state or unregistered private fields from
+  leaking through public converters.
+- Added `_large_file_identity` cache invalidation (revision `large-file-v2`)
+  bound to a record's exact division plan and reduction tree together.
+- Added optional bundled grammar extraction with complete lexical fallback and
+  no runtime grammar download.
+- Only the final, synthesized file-level documentation is ever published for a
+  split file — no chunk, unit, or reduction content, and no `division` or
+  `documentation_units` object, appears in JSON or Markdown output, visible or
+  embedded. Customizing the final documentation shape never changes the fixed
+  internal chunk/reduction contracts.
+- Preserved the default truncate path: it imports no optional grammar package
+  and emits no split-specific output or statistics.
+
+</details>
+
 ## 0.13.1 - 2026-07-22
 
 ### Deterministic private metadata and verified dead-state cleanup

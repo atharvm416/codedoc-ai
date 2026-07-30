@@ -10,6 +10,8 @@ generates the final polished documentation for a file:
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
 from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.agents.response_cleaning import clean_documentation_report
@@ -165,6 +167,8 @@ class DocumentationAgent(BaseAgent):
                 planned_call=planned_call,
                 additional_attempt=additional_attempt,
             )
+        except CancelledError:
+            raise
         except Exception as exc:
             logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
             return self._agent_error_result(exc)

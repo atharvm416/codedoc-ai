@@ -69,3 +69,15 @@ def test_generated_and_forced_config_are_versionless_and_round_trip(tmp_path):
 def test_generated_config_round_trips(tmp_path):
     init_config(tmp_path)
     assert "schema_version" not in load_config(tmp_path)["prompt_profiles"]
+
+
+def test_generated_config_exposes_the_compatible_large_file_default(tmp_path):
+    generated = build_default_config()
+
+    assert generated["large_file_strategy"] == "truncate"
+    init_config(tmp_path)
+    persisted = json.loads(
+        (tmp_path / "codedoc.config.json").read_text(encoding="utf-8")
+    )
+    assert persisted["large_file_strategy"] == "truncate"
+    assert load_config(tmp_path)["large_file_strategy"] == "truncate"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.13.1"
+version = "0.14.0"
 description = "Generate structured, incremental documentation for any codebase using OpenAI, Anthropic, or Gemini"
 readme = "README.md"
 license = "MIT"
@@ -45,6 +45,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+structure = [
+    "tree-sitter-language-pack==0.13.0",
+]
 dev = [
     "pytest>=7.0",
     "pytest-cov>=7.0",
@@ -52,6 +55,7 @@ dev = [
     "ruff>=0.1",
     "build>=1.0",
     "twine>=5.0",
+    "tree-sitter-language-pack==0.13.0",
 ]
 
 [project.scripts]
@@ -72,11 +76,18 @@ include = ["codedoc*"]
 [tool.setuptools.package-data]
 codedoc = ["templates/*.yml"]
 
+[tool.ruff]
+exclude = ["tests/fixtures/large_file_division/malformed.py"]
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 3
 markers = [
+    "future_split_execution: validates unreleased split execution internals behind the public release gate",
     "platform: filesystem or OS-sensitive behavior; may skip on restricted filesystems",
 ]
 # tests/conftest.py redirects the temp ROOT into the repo (.pyt_tmp) so a

@@ -2,9 +2,20 @@
 
 from __future__ import annotations
 
+import hashlib
+
 import pytest
 
 from codedoc.core.execution_model import CallManifest, PlannedCall, build_call_manifest
+from codedoc.core.file_division import (
+    build_division_plan,
+    build_reduction_tree,
+    leaf_execution_identity,
+    reduction_execution_identity,
+    final_execution_identity,
+    tree_node_state,
+    SplitTreeState,
+)
 from codedoc.core.planning import PipelinePlan
 from codedoc.core.prompt_profiles import ReviewBatch, ReviewComponent
 
@@ -86,6 +97,126 @@ class TestEmptyAndAllReusedRuns:
         assert plan.total_calls_planned == 0
         assert plan.max_planned_calls == 5
         assert plan.max_planned_calls_exceeded is False
+
+    def test_fully_synthesized_split_partial_has_a_valid_empty_manifest(self):
+        source = "\n".join(
+            f"value_{index} = {index}" for index in range(220)
+        ) + "\n"
+        division = build_division_plan(
+            rel_path="large.py",
+            language="python",
+            content=source,
+            source_budget_chars=1000,
+        )
+        tree = build_reduction_tree(division, max_content_chars=12000)
+        content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        provider_identity = "provider-execution:" + "a" * 64
+
+        nodes = []
+        for chunk in division.chunks:
+            identity = leaf_execution_identity(
+                rel_path=division.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=division.plan_digest,
+                provider_identity=provider_identity,
+                chunk=chunk,
+            )
+            nodes.append(
+                tree_node_state(
+                    node_id=chunk.chunk_id,
+                    node_type="leaf",
+                    rel_path=division.rel_path,
+                    content_hash=content_hash,
+                    division_plan_digest=division.plan_digest,
+                    reduction_tree_digest=tree.tree_digest,
+                    execution_identity_digest=identity,
+                    unit_id=None,
+                    child_ids=(),
+                    coverage_leaf_ids=(chunk.chunk_id,),
+                    result={"description": "restored"},
+                )
+            )
+        for node in tree.unit_consolidation_nodes + tree.general_nodes:
+            identity = reduction_execution_identity(
+                rel_path=division.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=division.plan_digest,
+                reduction_tree_digest=tree.tree_digest,
+                provider_identity=provider_identity,
+                node=node,
+            )
+            nodes.append(
+                tree_node_state(
+                    node_id=node.node_id,
+                    node_type=node.phase,
+                    rel_path=division.rel_path,
+                    content_hash=content_hash,
+                    division_plan_digest=division.plan_digest,
+                    reduction_tree_digest=tree.tree_digest,
+                    execution_identity_digest=identity,
+                    unit_id=node.unit_id,
+                    child_ids=node.child_ids,
+                    coverage_leaf_ids=node.leaf_ids,
+                    result={"narrative": "restored"},
+                )
+            )
+        final_identity = final_execution_identity(
+            rel_path=division.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=division.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            provider_identity=provider_identity,
+            prompt_profile_digest="test-profile",
+            node=tree.final_node,
+        )
+        nodes.append(
+            tree_node_state(
+                node_id=tree.final_node.node_id,
+                node_type="final",
+                rel_path=division.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=division.plan_digest,
+                reduction_tree_digest=tree.tree_digest,
+                execution_identity_digest=final_identity,
+                unit_id=None,
+                child_ids=tree.final_node.child_ids,
+                coverage_leaf_ids=tree.final_node.leaf_ids,
+                result={"description": "restored synthesis"},
+            )
+        )
+        restored = SplitTreeState(
+            schema_version=2,
+            owner="codedoc-ai",
+            rel_path=division.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=division.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            nodes=tuple(nodes),
+        )
+        manifest = build_call_manifest(
+            [],
+            [division.rel_path],
+            "single",
+            {division.rel_path: division},
+            {division.rel_path: tree},
+            {division.rel_path: restored},
+        )
+
+        plan = _plan(
+            [division.rel_path],
+            division_plan_rels=frozenset({division.rel_path}),
+        ).with_call_manifest(
+            manifest,
+            0,
+            {division.rel_path: division},
+            {division.rel_path: tree},
+            {division.rel_path: restored},
+        )
+
+        assert plan.total_calls_planned == 0
+        assert plan.unit_documentation_calls_planned == 0
+        assert plan.file_reduction_calls_planned == 0
+        assert plan.synthesis_calls_planned == 0
 
 
 class TestCapEnforcement:

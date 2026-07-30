@@ -101,6 +101,10 @@ python -m pytest tests/platform
 - The registered `platform` marker belongs at module level on every test module
   under `tests/platform/` and nowhere else. Use
   `python -m pytest -m "not platform"` on a restricted filesystem.
+- The registered `future_split_execution` marker identifies internal execution
+  tests for a later patch. Its shared fixture opens the developer-owned split
+  gate only for those tests; public configuration and dry-run planning tests
+  must remain unmarked.
 
 `tests/meta/test_suite_architecture.py` enforces these rules structurally from
 paths and ASTs without importing collected test modules.

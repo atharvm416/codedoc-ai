@@ -24,11 +24,150 @@ from tests.support.selection_projects import _project
 from tests.support.selection_projects import _graph_and_map
 from tests.support.markdown_cases import _fake_provider as markdown_fake_provider
 from tests.support.configuration_cases import _fake_provider as configuration_fake_provider
+import codedoc.core.file_division as file_division
 from codedoc.core.discovery import _resolve_entry_and_docs
 from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.pipeline import _final_entry_source
 from tests.support.run_metadata_cases import _records
 from tests.support.run_metadata_cases import _stats
+
+
+def test_split_dry_run_plans_chunks_and_synthesis_without_provider_or_output(
+    tmp_path, monkeypatch
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "dry_run": True,
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert stats["split_divided_files"] == 1
+    assert stats["unit_documentation_calls_planned"] == stats["split_chunks"]
+    assert stats["synthesis_calls_planned"] == 1
+    assert stats["split_final_synthesis_calls_planned"] == 1
+    # Hierarchical reduction: file_reduction_calls_planned covers every
+    # unit-consolidation + general-reduction node below the final synthesis.
+    assert stats["file_reduction_calls_planned"] == (
+        stats["split_unit_consolidation_calls_planned"]
+        + stats["split_general_reduction_calls_planned"]
+    )
+    assert stats["file_reduction_calls_planned"] > 0
+    assert stats["total_calls_planned"] == (
+        stats["unit_documentation_calls_planned"]
+        + stats["file_reduction_calls_planned"]
+        + stats["synthesis_calls_planned"]
+    )
+    assert not (tmp_path / "docs").exists()
+
+
+def test_split_dry_run_final_estimate_uses_reserved_synopsis_bound(
+    tmp_path,
+    monkeypatch,
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(1200)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+    config = {
+        "dry_run": True,
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 12000,
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    baseline = run_pipeline(tmp_path, config)
+    original = file_division.worst_case_final_synthesis_chars
+
+    def expanded_bound(**kwargs):
+        return original(**kwargs) + 4
+
+    monkeypatch.setattr(
+        file_division,
+        "worst_case_final_synthesis_chars",
+        expanded_bound,
+    )
+    expanded = run_pipeline(tmp_path, config)
+
+    assert expanded["estimated_input_tokens"] == (
+        baseline["estimated_input_tokens"] + 1
+    )
+    assert not (tmp_path / "docs").exists()
+
+
+def test_complex_split_plan_reports_a_provider_free_non_blocking_advisory(
+    tmp_path, monkeypatch
+):
+    """D6a: a plan whose chunk count or reduction depth exceeds its frozen
+    threshold carries a deterministic, provider-free advisory. It never
+    creates a provider, blocks the run, or changes the resolved model/provider
+    selection — it is purely an informational dry-run/CLI surface.
+
+    A single oversized statement (rather than many small top-level
+    statements) keeps the exact chunk count independent of whether the
+    optional structural grammar extra is available: with a real parser,
+    adjacent bare statements can merge into one shared "gap" unit, while a
+    lone oversized statement is always its own unit under both lexical
+    fallback and syntax-mode parsing."""
+    source = "x = " + ("1" * 78001) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+    config = {
+        "dry_run": True,
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "llm_provider": "auto",
+        "model_name": "",
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+
+    stats = run_pipeline(tmp_path, config)
+
+    assert stats["split_chunks"] > 24
+    advisory = stats["split_complexity_advisory"]
+    assert advisory is not None
+    assert "higher-capability model" in advisory
+    assert "max_content_chars" in advisory
+    # Purely informational: the config this run actually used is unchanged.
+    assert config["llm_provider"] == "auto"
+    assert config["model_name"] == ""
+    assert not (tmp_path / "docs").exists()
+
+
+def test_simple_split_plan_reports_no_complexity_advisory(tmp_path, monkeypatch):
+    # See test_complex_split_plan_reports_a_provider_free_non_blocking_advisory
+    # for why this uses a single oversized statement rather than many small
+    # top-level statements.
+    source = "x = " + ("1" * 7001) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "dry_run": True,
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert stats["split_chunks"] <= 24
+    assert stats["split_complexity_advisory"] is None
+
 
 def test_pipeline_no_entry_no_docs_uses_auto_detection(tmp_path):
     """0.8.1: pipeline with no --entry and no existing docs must NOT raise 'No entry point
@@ -370,10 +509,11 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
     graph = make_graph("dep.py", "main.py", edges=(("main.py", "dep.py"),))
     existing = {
         rel: {
-            "path": rel,
-            "hash": compute_file_hash(tmp_path / rel),
-            "description": "cached",
-            "_analysis_revision": ANALYSIS_REVISION,
+                "path": rel,
+                "hash": compute_file_hash(tmp_path / rel),
+                "description": "cached",
+                "language": "python",
+                "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
         }
         for rel in file_map

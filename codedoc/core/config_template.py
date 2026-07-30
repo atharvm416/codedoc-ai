@@ -114,7 +114,22 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("rate_limit_signals_add", "Extra rate-limit signal strings to add."),
     ("rate_limit_signals_remove", "Rate-limit signal strings to remove."),
     ("ignore_paths", "Project-relative paths to ignore."),
-    ("max_content_chars", "Maximum source characters sent to the LLM per file."),
+    (
+        "max_content_chars",
+        "Hard character ceiling for ordinary source input and each planned "
+        "split leaf, reduction manifest, and final-synthesis manifest.",
+    ),
+    (
+        "large_file_strategy",
+        "Large-file handling. 'truncate' (default) keeps the byte-compatible "
+        "legacy head/tail path. 'split' is a provider-free planning preview "
+        "accepted only with dry_run true and analysis_mode 'single'. It "
+        "divides oversized source at deterministic semantic or lexical "
+        "boundaries, proves complete coverage, builds the reduction topology, "
+        "and reports call and capacity estimates without provider calls, "
+        "output, reuse, checkpoints, or recovery. Real split execution and "
+        "triple plus split are rejected before scanning or other side effects.",
+    ),
     ("dry_run", "Plan only: no writes and no provider calls."),
     ("max_files", "Safety cap on files that may make LLM calls (0 = unlimited)."),
     (
@@ -197,6 +212,12 @@ def init_config(project_root: Path | str, force: bool = False) -> InitResult:
             message=(
                 f"Created {target} with every public default and editable "
                 "single/triple prompt instructions. Edit it, then run codedoc.\n"
+                # The generated file is strict JSON, so it cannot carry inline
+                # comments explaining each key. Point config-first users at the
+                # per-key guidance instead of leaving them with bare values.
+                "Every key is documented in the README configuration section; "
+                "'codedoc --help' additionally describes the provider-free "
+                "large-file split planning preview and its capacity reasons.\n"
                 + _CREDENTIAL_NOTE
             ),
         )

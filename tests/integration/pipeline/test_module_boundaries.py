@@ -164,6 +164,9 @@ def test_execution_context_fields():
         "new_results",
         "options",
         "execution_requests",
+        "division_plans",
+        "reduction_trees",
+        "provider_identity",
     }
 
 def test_execute_agent_files_is_public_entry():

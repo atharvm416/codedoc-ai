@@ -21,6 +21,7 @@ from tests.support.versionless_documents import _assert_versionless
 from codedoc.core.document import records_by_path
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
+    RecoveryState,
     build_recovery_identity,
 )
 from codedoc.pipeline import run_pipeline
@@ -580,7 +581,7 @@ def test_fixed_recovery_name_and_identity_mismatch_blocks(tmp_path):
     writer = SafeWriter(path, "json", "main.py", {}, identity)
     writer.initialize_empty()
     assert path.name == "crash_recovery.json"
-    assert load_recovery_records_if_compatible(path, identity) == {}
+    assert load_recovery_records_if_compatible(path, identity) == RecoveryState()
     with pytest.raises(ConfigError, match="analysis_mode expected.*triple.*single"):
         load_recovery_records_if_compatible(
             path, _identity(tmp_path, analysis_mode="triple")

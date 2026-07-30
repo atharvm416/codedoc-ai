@@ -29,19 +29,27 @@ from pathlib import Path
 
 from codedoc.core.io_diagnostics import (
     WINDOWS_TRANSIENT_LOCK_ERRORS,
-    is_transient_lock,
 )
 from codedoc.utils.errors import ConfigError
 
 # Bounded transient-lock retry budget for the final atomic replacement step.
-# The first attempt is immediate; these are the sleeps *between*
-# subsequent retries, so the total added wait is deliberately below one second.
-# Only a Windows sharing/lock violation (see ``WINDOWS_TRANSIENT_LOCK_ERRORS``)
-# is retried; every other failure raises immediately.
-ATOMIC_REPLACE_RETRY_DELAYS_S: tuple[float, ...] = (0.05, 0.15, 0.30)
+# The first attempt is immediate; these are the sleeps *between* subsequent
+# retries. Only the context-specific Windows codes in
+# ``ATOMIC_REPLACE_RETRYABLE_WINERRORS`` are retried; every other failure
+# raises immediately.
+ATOMIC_REPLACE_RETRY_DELAYS_S: tuple[float, ...] = (0.05, 0.1, 0.2, 0.4, 0.8)
+# WinError 5 (ERROR_ACCESS_DENIED) can be a short-lived replace collision on
+# Windows even though it is not globally a lock diagnostic. Retry it only at
+# this atomic-replacement boundary; if it persists, the original exception
+# escapes and downstream diagnostics correctly classify it as permission
+# denied. Codes 32/33 are the ordinary sharing/lock violations.
+ATOMIC_REPLACE_RETRYABLE_WINERRORS: frozenset[int] = frozenset(
+    {5, *WINDOWS_TRANSIENT_LOCK_ERRORS}
+)
 
 __all__ = [
     "ATOMIC_REPLACE_RETRY_DELAYS_S",
+    "ATOMIC_REPLACE_RETRYABLE_WINERRORS",
     "WINDOWS_TRANSIENT_LOCK_ERRORS",
     "BlockError",
     "atomic_write_text",
@@ -169,11 +177,15 @@ def _replace_with_lock_retry(tmp: Path, path: Path) -> None:
     """Atomically rename *tmp* over *path*, retrying only a transient Windows lock.
 
     The first ``replace`` attempt is immediate.  When — and only when — the
-    failure is a Windows sharing/lock violation (``winerror`` 32/33) the same
-    already-written, flushed, fsynced, and closed temporary file is reused after
-    a bounded sleep and the rename is retried.  Every other failure (permission
-    denial without a lock code, ``ENOSPC``, read-only media, missing parent,
+    failure is a Windows sharing/lock code (``winerror`` 32/33), or a
+    potentially transient ``ERROR_ACCESS_DENIED`` from this exact replace
+    operation (``winerror`` 5), the same already-written, flushed, fsynced, and
+    closed temporary file is reused after a bounded sleep and the rename is
+    retried. Every other failure (``ENOSPC``, read-only media, missing parent,
     directory collision, generic I/O) raises immediately with its cause intact.
+    A persistent retryable failure still raises once the bounded budget is
+    exhausted; a persistent winerror 5 is then diagnosed as permission denied,
+    not as a lock.
     The provider is never re-contacted; this is a pure local filesystem retry.
 
     ``time.sleep`` is the only wait; tests monkeypatch it (and ``Path.replace``)
@@ -185,7 +197,8 @@ def _replace_with_lock_retry(tmp: Path, path: Path) -> None:
             tmp.replace(path)
             return
         except OSError as exc:
-            if attempt >= len(ATOMIC_REPLACE_RETRY_DELAYS_S) or not is_transient_lock(exc):
+            retryable = getattr(exc, "winerror", None) in ATOMIC_REPLACE_RETRYABLE_WINERRORS
+            if attempt >= len(ATOMIC_REPLACE_RETRY_DELAYS_S) or not retryable:
                 raise
             time.sleep(ATOMIC_REPLACE_RETRY_DELAYS_S[attempt])
             attempt += 1

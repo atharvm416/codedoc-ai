@@ -157,8 +157,7 @@
       ],
       "functions": [
         {
-          "name": "load",
-          "description": ""
+          "name": "load"
         }
       ],
       "key_concepts": [

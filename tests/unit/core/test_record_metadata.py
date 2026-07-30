@@ -108,6 +108,7 @@ def test_carry_orders_production_keys_canonically_from_reversed_source():
     target: dict = {}
     record_meta.carry_private_keys(
         {
+            "_large_file_identity": "large-file-v1:test",
             "_prompt_profile_digest": "profile-digest",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_analysis_mode": "single",
@@ -120,6 +121,7 @@ def test_carry_orders_production_keys_canonically_from_reversed_source():
         "_analysis_mode",
         "_max_context_revision",
         "_prompt_profile_digest",
+        "_large_file_identity",
     ]
 
 def test_carry_orders_production_keys_canonically_from_shuffled_source():
@@ -128,6 +130,7 @@ def test_carry_orders_production_keys_canonically_from_shuffled_source():
         {
             "_analysis_mode": "single",
             "_prompt_profile_digest": "profile-digest",
+            "_large_file_identity": "large-file-v1:test",
             "_analysis_revision": "file-doc-v3",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
         },
@@ -138,6 +141,7 @@ def test_carry_orders_production_keys_canonically_from_shuffled_source():
         "_analysis_mode",
         "_max_context_revision",
         "_prompt_profile_digest",
+        "_large_file_identity",
     ]
 
 def test_partial_key_set_preserves_canonical_relative_order():

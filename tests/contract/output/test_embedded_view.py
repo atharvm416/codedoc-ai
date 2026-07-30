@@ -24,6 +24,19 @@ from tests.support.run_metadata_cases import _records as run_metadata_records
 from tests.support.run_metadata_cases import _stats as run_metadata_stats
 from tests.support.run_metadata_cases import _partition_sum
 from tests.support.json_document_cases import _view
+from tests.support.run_metadata_cases import _split_record, _split_stats
+
+
+def test_embedded_view_losslessly_carries_split_identity_without_internal_content():
+    view = build_project_view([_split_record()], _split_stats())
+
+    embedded = read_embedded_view(markdown_from_view(view))
+
+    assert embedded is not None
+    assert "division" not in embedded["files"][0]
+    assert "documentation_units" not in embedded["files"][0]
+    assert embedded["files"][0]["_large_file_identity"] == "large-file-v2:test"
+    assert embedded["files"][0]["description"] == "Large module."
 
 def test_embedded_view_round_trip_lossless():
     view = _build_view()

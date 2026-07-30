@@ -16,6 +16,8 @@ parallel structure/dependency correction through the one shared instance is safe
 
 from __future__ import annotations
 
+from concurrent.futures import CancelledError
+
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, _call_llm_counted
 from codedoc.agents.response_diagnostics import (
     MAX_CORRECTION_RESPONSE_CHARS,
@@ -102,6 +104,8 @@ class ResponseCorrectionAgent:
         corrected response fails the correction with ``correction_attempted=True``.
         """
         self._ledger.record_contract_failure()
+        if self._call_tracker is not None:
+            self._call_tracker.raise_if_cancelled()
 
         if not self._enabled:
             raise ResponseContractError(
@@ -120,6 +124,8 @@ class ResponseCorrectionAgent:
                 planned_call=planned_call,
                 additional_attempt=True,
             )
+        except CancelledError:
+            raise
         except Exception as exc:
             verdict = _classify_failure(exc, None)
             if verdict in ("terminal_billing", "global"):

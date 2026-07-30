@@ -56,6 +56,21 @@ examples:
   codedoc --provider gemini --entry src/main.py
   codedoc --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
   codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
+
+large-file split planning preview:
+  split is accepted only with --dry-run and analysis-mode single. A real split
+  run and triple plus split are rejected during configuration validation before
+  scanning or other side effects. Planning divides oversized files at local
+  semantic or lexical boundaries, verifies complete source coverage, constructs
+  the bounded reduction topology, and reports exact initial call categories.
+
+  max_content_chars bounds each planned leaf, reducer manifest, and complete
+  final manifest. Planning never truncates split source or silently falls back
+  to truncate. It reports the first named provider-free capacity reason:
+  atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
+  reduction-fan-in-cap, reduction-depth-cap, or
+  final-synthesis-envelope-cap. No split provider call, completed output,
+  checkpoint, reuse, or recovery is available from this preview.
         """,
     )
 
@@ -97,7 +112,8 @@ examples:
         default=None,
         help=(
             "Model name to use — e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
-            "gemini-2.5-flash. When set, provider is auto-detected from the model name."
+            "gemini-2.5-flash. The provider is auto-detected from this name only "
+            "when --provider is auto (the default); an explicit --provider always wins."
         ),
     )
     parser.add_argument(
@@ -273,6 +289,18 @@ examples:
         ),
     )
     parser.add_argument(
+        "--large-file-strategy",
+        choices=["truncate", "split"],
+        default=None,
+        dest="large_file_strategy",
+        help=(
+            "Oversized readable source handling: 'truncate' keeps the legacy "
+            "head/tail behavior (default); 'split' enables provider-free "
+            "division and call planning only with --dry-run in single mode. "
+            "Real split execution is unavailable."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -356,6 +384,67 @@ def _print_prompt_profile_run(stats: dict) -> None:
     _print_feasibility_advisories(stats)
 
 
+def _print_split_observability(
+    stats: dict, *, include_synthesis_estimate: bool = False
+) -> None:
+    """Print split-only counts without changing default truncate output."""
+    if stats.get("large_file_strategy") != "split":
+        return
+    print("\n  Large-file split plan:")
+    print(f"    Ordinary files          : {stats.get('split_ordinary_files', 0)}")
+    print(f"    Syntax-divided files    : {stats.get('split_syntax_files', 0)}")
+    print(f"    Lexical-divided files   : {stats.get('split_lexical_files', 0)}")
+    print(f"    Blocked files           : {stats.get('split_blocked_files', 0)}")
+    reasons = stats.get("split_blocked_by_reason", {})
+    if isinstance(reasons, dict) and reasons:
+        print(
+            "    Blocked reasons         : "
+            + ", ".join(
+                f"{reason}={count}" for reason, count in sorted(reasons.items())
+            )
+        )
+    pairs = stats.get("split_blocked_pairs", ())
+    if isinstance(pairs, (list, tuple)) and pairs:
+        print("    Blocked path/reason pairs:")
+        for pair in pairs:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                print(f"      {pair[0]} ({pair[1]})")
+    print(
+        f"    Semantic units / chunks : {stats.get('split_units', 0)} / "
+        f"{stats.get('split_chunks', 0)}"
+    )
+    print(f"    Continuation groups     : {stats.get('split_continuation_groups', 0)}")
+    print(
+        "    Unit-consolidation levels/calls: "
+        f"{stats.get('split_unit_consolidation_levels', 0)} / "
+        f"{stats.get('split_unit_consolidation_calls_planned', 0)}"
+    )
+    print(
+        "    General reduction levels/calls : "
+        f"{stats.get('split_general_reduction_levels', 0)} / "
+        f"{stats.get('split_general_reduction_calls_planned', 0)}"
+    )
+    print(
+        "    Final synthesis calls   : "
+        f"{stats.get('split_final_synthesis_calls_planned', 0)}"
+    )
+    print(
+        "    Planned call categories: "
+        f"{stats.get('file_documentation_calls_planned', 0)} file / "
+        f"{stats.get('unit_documentation_calls_planned', 0)} leaf / "
+        f"{stats.get('file_reduction_calls_planned', 0)} reduction / "
+        f"{stats.get('synthesis_calls_planned', 0)} synthesis"
+    )
+    if include_synthesis_estimate and stats.get("split_synthesis_input_estimate"):
+        print(
+            "    Synthesis input estimate: "
+            f"{stats['split_synthesis_input_estimate']} from configured ceiling"
+        )
+    advisory = stats.get("split_complexity_advisory")
+    if include_synthesis_estimate and advisory:
+        print(f"\n  Advisory (non-blocking): {advisory}")
+
+
 def _print_dry_run_summary(stats: dict) -> None:
     """Print the planning summary for a --dry-run invocation."""
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
@@ -364,7 +453,13 @@ def _print_dry_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
     print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
-    print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
+    if stats.get("large_file_strategy") == "split":
+        print(
+            "  Calls per under-threshold file: "
+            f"{stats.get('initial_calls_per_file', 1)}"
+        )
+    else:
+        print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -414,16 +509,22 @@ def _print_dry_run_summary(stats: dict) -> None:
             f"{stats['disconnected_paid_files']} "
             f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
         )
-    estimate_qualifier = (
-        "approximate lower bound"
-        if stats.get("estimate_is_lower_bound", False)
-        else "approximate"
-    )
+    if stats.get("large_file_strategy") == "split":
+        estimate_qualifier = (
+            "approximate mixed bound; synthesis uses the configured ceiling"
+        )
+    else:
+        estimate_qualifier = (
+            "approximate lower bound"
+            if stats.get("estimate_is_lower_bound", False)
+            else "approximate"
+        )
     print(
         f"  Estimated input tokens : ~{stats.get('estimated_input_tokens', 0)} "
         f"({estimate_qualifier} — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
+    _print_split_observability(stats, include_synthesis_estimate=True)
     _print_prompt_profile_dry_run(stats)
 
     if stats.get("max_files_exceeded"):
@@ -439,12 +540,27 @@ def _print_dry_run_summary(stats: dict) -> None:
         )
 
     if stats.get("max_planned_calls_exceeded"):
+        if stats.get("large_file_strategy") == "split":
+            category_detail = (
+                f"{stats.get('file_documentation_calls_planned', 0)} "
+                "file documentation, "
+                f"{stats.get('unit_documentation_calls_planned', 0)} "
+                "leaf documentation, "
+                f"{stats.get('file_reduction_calls_planned', 0)} "
+                "file reduction, "
+                f"{stats.get('synthesis_calls_planned', 0)} file synthesis"
+            )
+        else:
+            category_detail = (
+                f"{stats.get('documentation_calls_planned', 0)} "
+                "file documentation"
+            )
         print(
             "\n  WARNING: the plan has "
             f"{stats.get('total_calls_planned', 0)} initially planned LLM call(s) "
             f"({stats.get('prompt_customization_security_review_calls_planned', 0)} "
             "prompt-customization review, "
-            f"{stats.get('documentation_calls_planned', 0)} initial documentation), "
+            f"{category_detail}), "
             f"exceeding --max-planned-calls {stats.get('max_planned_calls', 0)}. "
             "The corresponding real run would stop with exit code 2 before "
             "writing anything or calling any provider."
@@ -479,7 +595,13 @@ def _print_run_summary(stats: dict) -> None:
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
     print(f"  Analysis mode    : {stats.get('analysis_mode', 'single')}")
-    print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
+    if stats.get("large_file_strategy") == "split":
+        print(
+            "  Calls/under-threshold file: "
+            f"{stats.get('initial_calls_per_file', 1)}"
+        )
+    else:
+        print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -504,6 +626,7 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
+    _print_split_observability(stats)
 
     # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
@@ -623,6 +746,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.allow_partial,
                 args.no_parallel,
                 args.analysis_mode is not None,
+                args.large_file_strategy is not None,
                 args.max_parallel_files is not None,
                 args.truncation_head_ratio is not None,
                 args.verbose,
@@ -684,6 +808,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["parallel_agents"] = False
     if args.analysis_mode is not None:
         overrides["analysis_mode"] = args.analysis_mode
+    if args.large_file_strategy is not None:
+        overrides["large_file_strategy"] = args.large_file_strategy
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.truncation_head_ratio is not None:
@@ -838,9 +964,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             else:
                 print(
                     "\nChoose a writable output directory or correct local "
-                    "permissions, then rerun the same command. When the failure "
-                    "occurred during preflight or recovery initialization, no "
-                    "provider was contacted.",
+                    "permissions, then rerun the same command.",
                     file=sys.stderr,
                 )
             if args.verbose:

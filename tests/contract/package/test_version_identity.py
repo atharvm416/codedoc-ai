@@ -30,3 +30,7 @@ def test_version_flag_reports_canonical_identity(capsys):
         run_cli(["--version"])
     assert caught.value.code == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_release_identity_is_0_14_0():
+    assert __version__ == "0.14.0"

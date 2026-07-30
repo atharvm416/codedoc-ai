@@ -23,6 +23,7 @@ def _records() -> list[dict]:
             "_analysis_mode": "single",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_prompt_profile_digest": "no-profile",
+            "_large_file_identity": "large-file-v1:test",
             "documentation": {
                 "description": "Entry point.",
                 "dependencies_analysis": {"external": ["requests"]},
@@ -53,3 +54,51 @@ def _stats() -> dict:
 
 def _view() -> dict:
     return build_project_view(_records(), _stats(), entry_file="main.py")
+
+
+def _split_record() -> dict:
+    """A completed effective-split record: only the ordinary supported
+    file-level shape plus private identity — no division/documentation_units
+    or any other internal split content (D9/D14)."""
+    return {
+        "hash": "h-large",
+        "file_path": "large.py",
+        "language": "python",
+        "_large_file_identity": "large-file-v2:test",
+        "documentation": {
+            "description": "Large module.",
+            "functions": [{"name": "alpha"}],
+        },
+    }
+
+
+def _split_stats() -> dict:
+    return {
+        "checked": 1,
+        "files_scanned": 1,
+        "files_selected": 1,
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "split_ordinary_files": 0,
+        "split_syntax_files": 1,
+        "split_lexical_files": 0,
+        "split_blocked_files": 0,
+        "split_blocked_by_reason": {},
+        "split_divided_files": 1,
+        "split_units": 1,
+        "split_chunks": 2,
+        "split_continuation_groups": 0,
+        "split_unit_consolidation_levels": 0,
+        "split_unit_consolidation_calls_planned": 0,
+        "split_general_reduction_levels": 0,
+        "split_general_reduction_calls_planned": 0,
+        "split_final_synthesis_calls_planned": 1,
+        "split_restored_complete_chunks": 0,
+        "split_restored_unit_consolidation_calls": 0,
+        "split_restored_general_reduction_calls": 0,
+        "split_restored_final_synthesis_calls": 0,
+        "file_documentation_calls_planned": 0,
+        "unit_documentation_calls_planned": 2,
+        "file_reduction_calls_planned": 0,
+        "synthesis_calls_planned": 1,
+    }

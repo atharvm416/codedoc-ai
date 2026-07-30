@@ -31,7 +31,34 @@ The registry carries the per-file cache-identity keys
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
+from codedoc.core.file_division import (
+    FINAL_SYNTHESIS_REVISION,
+    LEAF_CAPSULE_SCHEMA_REVISION,
+    LEDGER_SCHEMA_REVISION,
+    MAX_ATOMS_PER_FILE,
+    MAX_CHUNKS_PER_FILE,
+    MAX_KNOWN_SYMBOLS_PER_CHUNK,
+    MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+    MAX_LEAF_PROMPT_METADATA_CHARS,
+    MAX_LEDGER_SYNOPSIS_CHARS,
+    MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+    MAX_REDUCTION_NARRATIVE_CHARS,
+    MAX_REDUCTION_TREE_DEPTH,
+    MAX_SYMBOLS_PER_FILE,
+    MAX_UNITS_PER_FILE,
+    PACKER_SCHEMA_REVISION,
+    REDUCER_PROMPT_REVISION,
+    REDUCTION_CAPSULE_SCHEMA_REVISION,
+    REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+    REDUCTION_PACKING_REVISION,
+    STRUCTURE_SCHEMA_REVISION,
+    UNIT_SCHEMA_REVISION,
+)
+from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 
 # Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
 # changes in a way that should invalidate previously cached records.
@@ -74,6 +101,7 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
         "_analysis_mode",
         "_max_context_revision",
         "_prompt_profile_digest",
+        "_large_file_identity",
     }
 )
 
@@ -98,6 +126,7 @@ PRIVATE_KEY_ORDER: tuple[str, ...] = (
     "_analysis_mode",
     "_max_context_revision",
     "_prompt_profile_digest",
+    "_large_file_identity",
 )
 
 # Registered private record keys: persisted through JSON / Markdown / live
@@ -154,8 +183,87 @@ def expected_max_context_revision(
     plus the ceiling and ratio, matter.
     """
     if source_chars > max_chars:
-        return f"{MAX_CONTEXT_REVISION}:max={int(max_chars)}:head={float(head_ratio):.4f}"
+        ratio = float(head_ratio)
+        rendered = f"{ratio:.4f}"
+        identity = f"{MAX_CONTEXT_REVISION}:max={int(max_chars)}:head={rendered}"
+        # The 4-place rendering aliases ratios that differ beyond the fourth
+        # decimal (e.g. 0.7000501 and 0.7001499 both render "0.7001") even
+        # though they produce different head/tail splits and therefore
+        # different prompts. Append the exact round-trippable value only when
+        # rounding actually lost information, so every ratio representable at
+        # four decimals — including the 0.70 default — keeps its existing
+        # identity bytes and stays reusable.
+        if float(rendered) != ratio:
+            identity = f"{identity}:exact={ratio!r}"
+        return identity
     return None
+
+
+def expected_large_file_identity(
+    *,
+    source_chars: int,
+    max_chars: int,
+    rel_path: str,
+    division_plan_digest: str,
+    reduction_tree_digest: str,
+    structural_mode: str,
+) -> str | None:
+    """Return the effective-split cache-identity value, or ``None``.
+
+    ``None`` for a record whose source fits `max_chars` (never split) or that
+    was never a completed effective split.  There is no capacity-fallback or
+    effective-truncate identity case: a completed record carrying this key
+    always describes a complete effective split (D8/D11/section 13).  The revision
+    prefix (``large-file-v2``) is distinct from the predecessor's so an
+    unreleased predecessor split identity can never satisfy this comparison.
+    """
+    if source_chars <= max_chars:
+        return None
+    payload = {
+        "revision": "large-file-identity-v2",
+        "requested_strategy": "split",
+        "effective_strategy": "split",
+        "source_budget": int(max_chars),
+        "path": rel_path,
+        "division_plan_digest": division_plan_digest,
+        "reduction_tree_digest": reduction_tree_digest,
+        "structural_mode": structural_mode,
+        "parser_package_version": PARSER_PACKAGE_VERSION,
+        "grammar_availability_mode": (
+            "bundled-grammar-or-complete-lexical-fallback-v1"
+        ),
+        "bounds": {
+            "atoms": MAX_ATOMS_PER_FILE,
+            "symbols": MAX_SYMBOLS_PER_FILE,
+            "units": MAX_UNITS_PER_FILE,
+            "chunks": MAX_CHUNKS_PER_FILE,
+            "known_symbols_per_chunk": MAX_KNOWN_SYMBOLS_PER_CHUNK,
+            "leaf_prompt_metadata_chars": MAX_LEAF_PROMPT_METADATA_CHARS,
+        },
+        "reduction_bounds": {
+            "leaf_capsule_chars": MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+            "reduction_capsule_chars": MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+            "reduction_envelope_overhead": REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+            "final_narrative_chars": MAX_REDUCTION_NARRATIVE_CHARS,
+            "final_ledger_synopsis_chars": MAX_LEDGER_SYNOPSIS_CHARS,
+            "final_envelope": "exact-worst-case-v2",
+            "max_tree_depth": MAX_REDUCTION_TREE_DEPTH,
+        },
+        "revisions": {
+            "structure": STRUCTURE_SCHEMA_REVISION,
+            "units": UNIT_SCHEMA_REVISION,
+            "packer": PACKER_SCHEMA_REVISION,
+            "leaf_capsule": LEAF_CAPSULE_SCHEMA_REVISION,
+            "ledger": LEDGER_SCHEMA_REVISION,
+            "reduction_capsule": REDUCTION_CAPSULE_SCHEMA_REVISION,
+            "reduction_packing": REDUCTION_PACKING_REVISION,
+            "reducer_prompt": REDUCER_PROMPT_REVISION,
+            "final_synthesis": FINAL_SYNTHESIS_REVISION,
+        },
+    }
+    return "large-file-v2:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _ordered_private_keys(registered: frozenset[str]) -> list[str]:

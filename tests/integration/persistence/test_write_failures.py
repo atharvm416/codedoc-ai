@@ -417,6 +417,35 @@ def test_preflight_classifies_failure_and_cleans_probes(tmp_path, monkeypatch):
     assert str(out) in excinfo.value.file_path
     assert list(out.glob(".codedoc_preflight_*")) == []
 
+
+def test_zero_source_directory_creation_failure_is_classified(tmp_path, monkeypatch):
+    import codedoc.core.output as output_mod
+
+    out = tmp_path / "docs"
+    original_mkdir = output_mod.Path.mkdir
+
+    def guarded_mkdir(path, *args, **kwargs):
+        if path == out:
+            raise _oserror(PermissionError, errno_=errno.EACCES)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(output_mod.Path, "mkdir", guarded_mkdir)
+
+    with pytest.raises(OutputError) as excinfo:
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": None,
+                "auto_entry_candidates": [],
+                "output_dir": "docs",
+            },
+        )
+
+    assert "No provider was contacted" in str(excinfo.value)
+    assert excinfo.value.file_path == str(out)
+    assert not out.exists()
+
+
 def test_zero_call_conversion_write_failure_preserves_sibling_and_recovery(
     tmp_path, monkeypatch
 ):

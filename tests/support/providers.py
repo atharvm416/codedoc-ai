@@ -179,6 +179,17 @@ class SmartFake:
                     "warnings": [],
                 }
             })
+        if "This is one bounded fragment of a larger" in prompt:
+            # Fixed internal leaf-capsule shape (split-mode fragment call) —
+            # never the final file-level shape.
+            return json.dumps({
+                "description": "A fragment.",
+                "functions": [{"name": "f", "description": "does f"}],
+            })
+        if "Refine one combined narrative from" in prompt:
+            # Fixed internal reduction-capsule shape (unit-consolidation or
+            # general reduction node) — narrative only.
+            return json.dumps({"narrative": "A refined narrative."})
         return json.dumps({
             "description": "A file.", "role_in_system": "core",
             "functions": [{"name": "f", "description": "does f"}],

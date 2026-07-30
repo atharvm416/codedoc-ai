@@ -52,6 +52,7 @@ import json
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Mapping
 
 from codedoc.core.block_manager import atomic_write_text
 from codedoc.core.db import compute_file_hash
@@ -61,6 +62,7 @@ from codedoc.core.io_diagnostics import (
     describe_cause,
 )
 from codedoc.core.project_view import clean_file_record
+from codedoc.core.file_division import SPLIT_PARTIAL_SCHEMA_VERSION, ReductionNodeState, SplitTreeState
 from codedoc.utils.errors import LiveBackupWriteError, OutputError
 from codedoc.utils.logger import get_logger
 
@@ -118,6 +120,7 @@ class SafeWriter:
         self._recovery_identity: dict | None = recovery_identity
         self._lock: threading.Lock = threading.Lock()
         self._clean_records: dict[str, dict] = {}
+        self._tree_states: dict[str, SplitTreeState] = {}
         # rel_paths actually written via record() during THIS run, as opposed to
         # records preloaded from a prior output by load().  Used to decide whether
         # a rate-limited file may be treated as "already done" (only if a worker
@@ -141,7 +144,13 @@ class SafeWriter:
         with self._lock:
             self._queue_order = list(ordered_paths)
 
-    def load(self, preloaded: dict[str, dict] | None = None) -> dict[str, dict]:
+    def load(
+        self,
+        preloaded: dict[str, dict] | None = None,
+        *,
+        include_partial_files: bool = False,
+        preloaded_partials: Mapping[str, SplitTreeState] | None = None,
+    ) -> dict[str, dict]:
         """
         Pre-populate in-memory state from an existing recovery file or output.
 
@@ -156,6 +165,20 @@ class SafeWriter:
             even if the prior stable output later changes or disappears. This
             replaces the older behaviour where recovery state *was* the stable
             output and ``load()`` re-read it directly.
+        include_partial_files:
+            Whether split-only checkpoints may be re-read from the document at
+            this boundary.  Disabled by default, so an existing split recovery
+            cannot be re-flushed by a truncate run.  Production code leaves this
+            off and supplies ``preloaded_partials`` instead; every partial that
+            the document contains is *parseable*, but only the pipeline knows
+            which are *retainable*.
+        preloaded_partials:
+            The exact pipeline-authorized retention set, keyed by normalized
+            ``rel_path``.  Copied into writer state without flushing, so loading
+            never writes an empty checkpoint.  Seeding from this set rather than
+            from every parsed partial is what keeps rejected, stale-hash,
+            unselected, and unrelated checkpoints from becoming deletion
+            authority in :meth:`has_partial_state`.
 
         Ownership guard
         ---------------
@@ -176,6 +199,16 @@ class SafeWriter:
                 if isinstance(record, dict) and record.get("path"):
                     self._clean_records[rel_path] = dict(record)
 
+        # Seed the authorized retention set before the existence check so the
+        # mapping is honoured verbatim; nothing is flushed here.
+        for rel_path, state in (preloaded_partials or {}).items():
+            if rel_path != state.rel_path:
+                raise ValueError(
+                    "preloaded partial key does not match its normalized "
+                    f"rel_path: {rel_path!r} != {state.rel_path!r}"
+                )
+            self._tree_states[rel_path] = state
+
         if not self._path.exists():
             return {}
 
@@ -195,7 +228,10 @@ class SafeWriter:
         # Ownership + parsing via the centralized reader.  A foreign or
         # malformed file raises before any LLM work begins.
         try:
-            document = read_codedoc_document(self._path)
+            document = read_codedoc_document(
+                self._path,
+                include_partial_files=include_partial_files,
+            )
         except (ConfigError, FileNotFoundError):
             raise _foreign_file_error()
 
@@ -209,6 +245,8 @@ class SafeWriter:
         for f in document.files:
             if isinstance(f, dict) and f.get("path"):
                 self._clean_records[f["path"]] = dict(f)
+        for partial in document.partial_files:
+            self._tree_states[partial.rel_path] = partial
 
         if self._clean_records:
             logger.info(
@@ -275,6 +313,7 @@ class SafeWriter:
             was_recorded_this_run = rel_path in self._recorded_this_run
 
             self._clean_records[rel_path] = clean
+            prior_partial = self._tree_states.pop(rel_path, None)
             self._recorded_this_run.add(rel_path)
             try:
                 self._flush_locked()
@@ -283,6 +322,8 @@ class SafeWriter:
                     self._clean_records[rel_path] = prior_record
                 else:
                     self._clean_records.pop(rel_path, None)
+                if prior_partial is not None:
+                    self._tree_states[rel_path] = prior_partial
                 if not was_recorded_this_run:
                     self._recorded_this_run.discard(rel_path)
                 raise
@@ -302,6 +343,78 @@ class SafeWriter:
                 self._clean_records[rel_path] = prior_record
                 if was_recorded_this_run:
                     self._recorded_this_run.add(rel_path)
+                raise
+
+    def record_tree_node(self, rel_path: str, node: ReductionNodeState) -> None:
+        """Transactionally append one dependency-validated split-tree node
+        checkpoint (split-partial schema version 2; see D11/D12/section 12).
+
+        Every node for one file shares that file's `SplitTreeState` container;
+        this appends *node* to the existing container (creating one if this is
+        the file's first checkpointed node) and re-persists the whole
+        container atomically.  Re-checkpointing an already-present node ID
+        replaces it in place rather than duplicating it.
+        """
+        with self._lock:
+            if rel_path in self._recorded_this_run:
+                raise LiveBackupWriteError(
+                    str(self._path),
+                    "refusing to store a split node for a file completed in this run "
+                    f"('{rel_path}').",
+                )
+            prior = self._tree_states.get(rel_path)
+            existing_nodes = tuple(prior.nodes) if prior is not None else ()
+            if any(existing.node_id == node.node_id for existing in existing_nodes):
+                updated_nodes = tuple(
+                    node if existing.node_id == node.node_id else existing
+                    for existing in existing_nodes
+                )
+            else:
+                updated_nodes = existing_nodes + (node,)
+            self._tree_states[rel_path] = SplitTreeState(
+                schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+                owner="codedoc-ai",
+                rel_path=rel_path,
+                content_hash=node.content_hash,
+                division_plan_digest=node.division_plan_digest,
+                reduction_tree_digest=node.reduction_tree_digest,
+                nodes=updated_nodes,
+            )
+            try:
+                self._flush_locked()
+            except LiveBackupWriteError:
+                if prior is None:
+                    self._tree_states.pop(rel_path, None)
+                else:
+                    self._tree_states[rel_path] = prior
+                raise
+
+    def get_tree_state(self, rel_path: str) -> SplitTreeState | None:
+        """Return the validated split-tree state for *rel_path*, if any."""
+        with self._lock:
+            return self._tree_states.get(rel_path)
+
+    def has_partial_state(self) -> bool:
+        """Whether any pipeline-authorized split checkpoint remains retained.
+
+        This is the recovery-deletion authority.  It is meaningful only because
+        writer partial state is seeded from the pipeline's retention set: it
+        answers "is there checkpointed work still worth resuming?", not "did the
+        recovery file happen to contain a parseable partial?".
+        """
+        with self._lock:
+            return bool(self._tree_states)
+
+    def clear_tree_state(self, rel_path: str) -> None:
+        """Transactionally remove one file's split-tree checkpoint."""
+        with self._lock:
+            prior = self._tree_states.pop(rel_path, None)
+            if prior is None:
+                return
+            try:
+                self._flush_locked()
+            except LiveBackupWriteError:
+                self._tree_states[rel_path] = prior
                 raise
 
     def has_record(self, rel_path: str) -> bool:
@@ -412,7 +525,22 @@ class SafeWriter:
         ``set_queue_order()`` has been called.  Completed records whose
         rel_path is not yet in the queue order (should not happen in practice)
         are appended at the end in path-sorted order.
+
+        A path completed in *this* run may never also be serialized as a split
+        partial: the completed record supersedes it, so emitting both would
+        publish a checkpoint that is already obsolete.  The collision is refused
+        here, before serialization, so the prior recovery file is left intact
+        and ``record()``/``record_tree_node()`` roll their in-memory state back.
+        A preloaded stable record plus a current partial for the same path is
+        legitimate and is not rejected.
         """
+        collisions = sorted(self._recorded_this_run & set(self._tree_states))
+        if collisions:
+            raise LiveBackupWriteError(
+                str(self._path),
+                "refusing to serialize split partial state for file(s) already "
+                f"completed in this run: {', '.join(collisions)}.",
+            )
         if self._queue_order:
             ordered = []
             unsorted_keys = set(self._clean_records.keys())
@@ -440,6 +568,11 @@ class SafeWriter:
         }
         if self._recovery_identity is not None:
             codedoc_block["recovery_identity"] = self._recovery_identity
+        if self._tree_states:
+            codedoc_block["partial_files"] = {
+                rel_path: _tree_state_to_json(self._tree_states[rel_path])
+                for rel_path in sorted(self._tree_states)
+            }
         payload: dict = {
             "_crash_safety": _CRASH_SAFETY_BANNER,
             "_codedoc": codedoc_block,
@@ -466,3 +599,29 @@ class SafeWriter:
                 "Close any program viewing the file and rerun the same command; "
                 "completed work is preserved.",
             ) from exc
+
+
+def _tree_state_to_json(state: SplitTreeState) -> dict:
+    """Serialize one node-keyed split-partial container (schema version 2)."""
+    return {
+        "schema_version": state.schema_version,
+        "owner": state.owner,
+        "rel_path": state.rel_path,
+        "content_hash": state.content_hash,
+        "division_plan_digest": state.division_plan_digest,
+        "reduction_tree_digest": state.reduction_tree_digest,
+        "nodes": {
+            node.node_id: {
+                "node_type": node.node_type,
+                "content_hash": node.content_hash,
+                "division_plan_digest": node.division_plan_digest,
+                "reduction_tree_digest": node.reduction_tree_digest,
+                "execution_identity_digest": node.execution_identity_digest,
+                "unit_id": node.unit_id,
+                "child_ids": list(node.child_ids),
+                "coverage_leaf_ids": list(node.coverage_leaf_ids),
+                "result_json": node.result_json,
+            }
+            for node in state.nodes
+        },
+    }

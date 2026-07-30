@@ -20,6 +20,55 @@ from tests.support.pipeline_usage import write_py
 from tests.support.providers import SmartFake
 
 
+def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
+    from codedoc.core.execution import _process_divided_file
+    from codedoc.core.file_division import build_division_plan, build_reduction_tree
+    from tests.support.execution_requests import make_execution_request
+
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    request = make_execution_request(
+        tmp_path,
+        "large.py",
+        source,
+        max_content_chars=2000,
+    )
+    plan = build_division_plan(
+        rel_path=request.rel_path,
+        language=request.language,
+        content=request.content,
+        source_budget_chars=2000,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000)
+    (tmp_path / "large.py").unlink()
+    writer = SafeWriter(
+        tmp_path / "docs" / "crash_recovery.json",
+        "json",
+        None,
+        {"large.py": {}},
+    )
+
+    class FrozenOrchestrator:
+        def process_leaf_chunk(self, _request):
+            return {"description": "chunk"}
+
+        def process_reduction_node(self, _request):
+            return {"narrative": "combined"}
+
+        def synthesize_divided_file(self, _request, _digest, _manifest):
+            return {"description": "frozen"}
+
+    result = _process_divided_file(
+        request, plan, tree, "test-provider", FrozenOrchestrator(), writer
+    )
+
+    assert result["description"] == "frozen"
+    assert "division" not in result
+    assert "documentation_units" not in result
+    assert result["_large_file_identity"].startswith("large-file-v2:")
+    tree_state = writer.get_tree_state("large.py")
+    assert tree.final_node.node_id in tree_state.by_id()
+
+
 class _LLM:
     def __init__(self, name="openai"):
         self.provider_name = name
@@ -220,7 +269,7 @@ class TestConcurrencyIsolation:
                 "auto_entry_candidates": [],
                 "documentation_scope": "all",
                 "max_parallel_files": 2,
-                "max_content_chars": 1000,
+                "max_content_chars": 2000,
                 "file_retry_attempts": 0,
                 "propagate_changes": False,
                 "prompt_profiles": {

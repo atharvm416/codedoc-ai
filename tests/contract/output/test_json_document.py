@@ -19,6 +19,21 @@ from codedoc.core.output import write_project_outputs
 from tests.support.reachability_cases import _record as reachability_record
 from codedoc.core.document import read_codedoc_document
 from tests.support.json_document_cases import _view
+from tests.support.run_metadata_cases import _split_record, _split_stats
+
+
+def test_completed_json_publishes_only_final_file_shape_for_split_records():
+    payload = json.loads(
+        json_from_view(build_project_view([_split_record()], _split_stats()))
+    )
+    record = payload["files"][0]
+
+    assert "division" not in record
+    assert "documentation_units" not in record
+    assert record["_large_file_identity"] == "large-file-v2:test"
+    assert record["description"] == "Large module."
+    assert payload["last_run"]["unit_documentation_calls_planned"] == 2
+    assert payload["last_run"]["split_blocked_files"] == 0
 
 def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
     import json

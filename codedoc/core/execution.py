@@ -24,12 +24,13 @@ from __future__ import annotations
 
 import concurrent.futures
 import logging
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from codedoc.agents.orchestrator import Orchestrator
+from codedoc.agents.orchestrator import Orchestrator, assemble_final_result
 from codedoc.core.db import compute_file_hash
 from codedoc.core.error_classifier import (
     _classify_failure,
@@ -41,8 +42,26 @@ from codedoc.core.error_classifier import (
 from codedoc.core.execution_model import (
     DOC_AGENTS_BY_MODE,
     FileExecutionRequest,
+    FileReductionExecutionRequest,
+    UnitChunkExecutionRequest,
     documentation_call_id,
 )
+from codedoc.core.file_division import (
+    REDUCER_PROMPT_REVISION,
+    DivisionPlan,
+    ReductionTreePlan,
+    SplitTreeState,
+    build_fact_ledger,
+    final_execution_identity,
+    final_synthesis_input,
+    leaf_execution_identity,
+    load_canonical_json_object,
+    reduction_execution_identity,
+    refine_narrative_inputs,
+    tree_node_state,
+)
+from codedoc.core.prompt_profiles import resolved_synthesis_shape
+from codedoc.core.record_meta import expected_large_file_identity
 from codedoc.core.queue import ProcessingQueue
 from codedoc.core.resume import _public_record_to_doc
 from codedoc.core.safe_writer import SafeWriter
@@ -167,6 +186,14 @@ class ExecutionContext:
     # provider-bound file. The coordinator looks these up; it never rescans
     # source, recomputes a hash, or resolves a prompt scope itself.
     execution_requests: dict[str, FileExecutionRequest]
+    division_plans: dict[str, DivisionPlan] | None = None
+    # rel_path -> the matching provider-free reduction tree for every division
+    # plan above. Always present together (planning builds both or neither).
+    reduction_trees: dict[str, ReductionTreePlan] | None = None
+    # The provider-free provider/model/effective-endpoint execution identity
+    # for this run (see codedoc.core.file_division.provider_execution_identity),
+    # computed once by the pipeline from resolved configuration.
+    provider_identity: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -177,6 +204,10 @@ def _process_and_record(
     request: FileExecutionRequest,
     orchestrator: Orchestrator,
     recorder: SafeWriter,
+    division_plan: DivisionPlan | None = None,
+    reduction_tree: ReductionTreePlan | None = None,
+    provider_identity: str = "",
+    stop_event: threading.Event | None = None,
 ) -> dict:
     """Process one file and record it in crash recovery from the worker thread.
 
@@ -184,14 +215,302 @@ def _process_and_record(
     interrupts the main ``as_completed`` collection loop never discards a
     file whose AI work already completed.
 
-    If ``_process_one_file`` raises for any reason (rate-limit, parse failure,
-    model error), the exception propagates out of this function unchanged and
+    If processing raises for any reason (rate-limit, parse failure, model
+    error), the exception propagates out of this function unchanged and
     ``recorder.record()`` is NOT called.  The batch-level code catches the
     future's exception and classifies it as rate-limit or non-rate-limit.
+
+    A `DivisionPlan` always describes a complete effective split (D8): there
+    is no capacity-fallback/truncate outcome to special-case here.
     """
-    result = _process_one_file(request, orchestrator)
+    try:
+        _raise_if_stopping(stop_event)
+        if division_plan is not None:
+            if reduction_tree is None:
+                raise ValueError("a division plan requires its matching reduction tree.")
+            result = _process_divided_file(
+                request,
+                division_plan,
+                reduction_tree,
+                provider_identity,
+                orchestrator,
+                recorder,
+                stop_event,
+            )
+        else:
+            result = _process_one_file(request, orchestrator)
+    except (KeyboardInterrupt, SystemExit):
+        if stop_event is not None:
+            stop_event.set()
+        raise
     recorder.record(request.rel_path, result, request.content_hash)
     return result
+
+
+def _raise_if_stopping(stop_event: threading.Event | None) -> None:
+    if stop_event is not None and stop_event.is_set():
+        raise concurrent.futures.CancelledError()
+
+
+def _checkpoint_node(
+    recorder: SafeWriter,
+    *,
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+    node_id: str,
+    node_type: str,
+    unit_id: str | None,
+    child_ids: tuple[str, ...],
+    coverage_leaf_ids: tuple[str, ...],
+    execution_identity: str,
+    result: dict,
+) -> None:
+    """Persist one dependency-validated node-keyed checkpoint (split-partial
+    schema version 2; see D11/D12/section 12)."""
+    node = tree_node_state(
+        node_id=node_id,
+        node_type=node_type,
+        rel_path=request.rel_path,
+        content_hash=request.content_hash,
+        division_plan_digest=division_plan.plan_digest,
+        reduction_tree_digest=reduction_tree.tree_digest,
+        execution_identity_digest=execution_identity,
+        unit_id=unit_id,
+        child_ids=child_ids,
+        coverage_leaf_ids=coverage_leaf_ids,
+        result=result,
+    )
+    recorder.record_tree_node(request.rel_path, node)
+
+
+def _process_divided_file(
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+    provider_identity: str,
+    orchestrator: Orchestrator,
+    recorder: SafeWriter,
+    stop_event: threading.Event | None = None,
+) -> dict:
+    """Run (or reuse) every leaf, unit-consolidation, general-reduction, and
+    final node in canonical dependency order and assemble the published
+    file-level record.
+
+    ``recorder.get_tree_state(...)`` already carries only nodes the pipeline
+    validated as exact, current, and dependency-consistent for this plan/tree
+    (see ``codedoc.core.file_division.validate_node_for_tree``); this never
+    re-derives that judgement, only whether a given node ID is present.
+    """
+    rel_path = request.rel_path
+    allowed_paths = resolved_synthesis_shape(
+        request.context.resolved_shape_bundle
+    ).requested_field_paths
+    recovered = recorder.get_tree_state(rel_path)
+    completed = recovered.by_id() if recovered is not None else {}
+
+    results_by_id: dict[str, dict] = {}
+    leaf_capsules_ordered: list[dict] = []
+    for chunk in division_plan.chunks:
+        stored = completed.get(chunk.chunk_id)
+        if stored is not None:
+            result = load_canonical_json_object(stored.result_json)
+        else:
+            _raise_if_stopping(stop_event)
+            leaf_request = UnitChunkExecutionRequest(
+                rel_path=rel_path,
+                language=request.language,
+                full_content_hash=request.content_hash,
+                division_plan_digest=division_plan.plan_digest,
+                chunk_id=chunk.chunk_id,
+                unit_id=chunk.unit_id,
+                semantic_units=chunk.semantic_units,
+                unit_indexes=division_plan.unit_positions(chunk),
+                unit_count=len(division_plan.units),
+                unit_chunk_index=chunk.unit_chunk_index,
+                unit_chunk_count=chunk.unit_chunk_count,
+                global_index=chunk.global_index,
+                global_count=chunk.global_count,
+                owning_ranges=chunk.owning_ranges,
+                continuation_before=chunk.continuation_before,
+                continuation_after=chunk.continuation_after,
+                known_symbols=chunk.known_symbols,
+                payload=chunk.payload,
+                context=request.context,
+            )
+            result = orchestrator.process_leaf_chunk(leaf_request)
+            _checkpoint_node(
+                recorder,
+                request=request,
+                division_plan=division_plan,
+                reduction_tree=reduction_tree,
+                node_id=chunk.chunk_id,
+                node_type="leaf",
+                unit_id=None,
+                child_ids=(),
+                coverage_leaf_ids=(chunk.chunk_id,),
+                execution_identity=leaf_execution_identity(
+                    rel_path=rel_path,
+                    content_hash=request.content_hash,
+                    division_plan_digest=division_plan.plan_digest,
+                    provider_identity=provider_identity,
+                    chunk=chunk,
+                ),
+                result=result,
+            )
+        results_by_id[chunk.chunk_id] = result
+        leaf_capsules_ordered.append(result)
+
+    ledger = build_fact_ledger(
+        leaf_capsules_ordered,
+        language=request.language,
+        chunks=division_plan.chunks,
+        symbols=division_plan.symbols,
+    )
+
+    for node in reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes:
+        stored = completed.get(node.node_id)
+        if stored is not None:
+            result = load_canonical_json_object(stored.result_json)
+        else:
+            _raise_if_stopping(stop_event)
+            child_capsules = tuple(results_by_id[child_id] for child_id in node.child_ids)
+            reduction_request = FileReductionExecutionRequest(
+                rel_path=rel_path,
+                division_plan_digest=division_plan.plan_digest,
+                reduction_tree_digest=reduction_tree.tree_digest,
+                node_id=node.node_id,
+                phase=node.phase,
+                unit_id=node.unit_id,
+                level=node.level,
+                ordinal=node.ordinal,
+                child_ids=node.child_ids,
+                child_capsules=child_capsules,
+                reducer_revision=REDUCER_PROMPT_REVISION,
+                context=request.context,
+            )
+            result = orchestrator.process_reduction_node(reduction_request)
+            _checkpoint_node(
+                recorder,
+                request=request,
+                division_plan=division_plan,
+                reduction_tree=reduction_tree,
+                node_id=node.node_id,
+                node_type=node.phase,
+                unit_id=node.unit_id,
+                child_ids=node.child_ids,
+                coverage_leaf_ids=node.leaf_ids,
+                execution_identity=reduction_execution_identity(
+                    rel_path=rel_path,
+                    content_hash=request.content_hash,
+                    division_plan_digest=division_plan.plan_digest,
+                    reduction_tree_digest=reduction_tree.tree_digest,
+                    provider_identity=provider_identity,
+                    node=node,
+                ),
+                result=result,
+            )
+        results_by_id[node.node_id] = result
+
+    final_node = reduction_tree.final_node
+    stored = completed.get(final_node.node_id)
+    if stored is not None:
+        final_result = load_canonical_json_object(stored.result_json)
+    else:
+        _raise_if_stopping(stop_event)
+        child_results = [results_by_id[child_id] for child_id in final_node.child_ids]
+        raw_narratives = tuple(
+            child.get("narrative", child.get("description", "")) for child in child_results
+        )
+        root_narratives = refine_narrative_inputs(raw_narratives)
+        manifest_json = final_synthesis_input(
+            rel_path=rel_path,
+            language=request.language,
+            imports=request.imports,
+            root_narratives=root_narratives,
+            root_coverage_leaf_ids=final_node.leaf_ids,
+            ledger=ledger,
+            max_chars=request.context.max_content_chars,
+        )
+        final_result = orchestrator.synthesize_divided_file(
+            request, division_plan.plan_digest, manifest_json
+        )
+        _checkpoint_node(
+            recorder,
+            request=request,
+            division_plan=division_plan,
+            reduction_tree=reduction_tree,
+            node_id=final_node.node_id,
+            node_type="final",
+            unit_id=None,
+            child_ids=final_node.child_ids,
+            coverage_leaf_ids=final_node.leaf_ids,
+            execution_identity=final_execution_identity(
+                rel_path=rel_path,
+                content_hash=request.content_hash,
+                division_plan_digest=division_plan.plan_digest,
+                reduction_tree_digest=reduction_tree.tree_digest,
+                provider_identity=provider_identity,
+                prompt_profile_digest=request.context.resolved_shape_bundle.digest,
+                node=final_node,
+            ),
+            result=final_result,
+        )
+
+    large_identity = _large_identity(request, division_plan, reduction_tree)
+    return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
+
+
+def _large_identity(
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+) -> str:
+    value = expected_large_file_identity(
+        source_chars=division_plan.source_chars,
+        max_chars=division_plan.source_budget_chars,
+        rel_path=request.rel_path,
+        division_plan_digest=division_plan.plan_digest,
+        reduction_tree_digest=reduction_tree.tree_digest,
+        structural_mode=division_plan.structural_mode,
+    )
+    if value is None:
+        raise ValueError("oversized split record is missing its cache identity.")
+    return value
+
+
+def restore_completed_tree_result(
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+    recovered: SplitTreeState,
+) -> dict:
+    """Finalize one exact, fully computed recovered tree locally, without a
+    provider.  Callers must supply a tree state whose every node already
+    passed ``validate_node_for_tree`` (the pipeline retains only such nodes).
+    """
+    completed = recovered.by_id()
+    final_node = reduction_tree.final_node
+    if final_node.node_id not in completed:
+        raise ValueError("recovered tree state is not fully synthesized for this file.")
+    allowed_paths = resolved_synthesis_shape(
+        request.context.resolved_shape_bundle
+    ).requested_field_paths
+    leaf_capsules_ordered: list[dict] = []
+    for chunk in division_plan.chunks:
+        stored = completed.get(chunk.chunk_id)
+        if stored is None:
+            raise ValueError(f"recovered tree state is missing leaf {chunk.chunk_id!r}.")
+        leaf_capsules_ordered.append(load_canonical_json_object(stored.result_json))
+    ledger = build_fact_ledger(
+        leaf_capsules_ordered,
+        language=request.language,
+        chunks=division_plan.chunks,
+        symbols=division_plan.symbols,
+    )
+    final_result = load_canonical_json_object(completed[final_node.node_id].result_json)
+    large_identity = _large_identity(request, division_plan, reduction_tree)
+    return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +564,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
             respect_retry_after,
             retry_after_cap,
             profile,
+            context.division_plans or {},
+            context.reduction_trees or {},
+            context.provider_identity,
         )
         if _is_zero_progress_pass(outcome):
             _raise_rate_limit_exhausted(
@@ -279,6 +601,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
             max_workers=level,
             max_consecutive_failures=max_consecutive_failures,
             recorder=recorder,
+            division_plans=context.division_plans or {},
+            reduction_trees=context.reduction_trees or {},
+            provider_identity=context.provider_identity,
             profile=profile,
         )
         new_results.update(succeeded)
@@ -303,6 +628,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 respect_retry_after,
                 retry_after_cap,
                 profile,
+                context.division_plans or {},
+                context.reduction_trees or {},
+                context.provider_identity,
             )
 
         if not retry_rate_limited or not rate_limit_adaptive:
@@ -323,6 +651,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
                     respect_retry_after,
                     retry_after_cap,
                     profile,
+                    context.division_plans or {},
+                    context.reduction_trees or {},
+                    context.provider_identity,
                 )
                 if _is_zero_progress_pass(outcome):
                     _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -422,6 +753,9 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 respect_retry_after,
                 retry_after_cap,
                 profile,
+                context.division_plans or {},
+                context.reduction_trees or {},
+                context.provider_identity,
             )
             if _is_zero_progress_pass(outcome):
                 _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -436,6 +770,9 @@ def _process_descriptor_batch(
     error_reporter: ErrorReporter,
     max_workers: int,
     recorder: SafeWriter,
+    division_plans: dict[str, DivisionPlan] | None = None,
+    reduction_trees: dict[str, ReductionTreePlan] | None = None,
+    provider_identity: str = "",
     max_consecutive_failures: int = 5,
     profile: RateLimitProfile | None = None,
 ) -> tuple[dict[str, dict], list[tuple[FileExecutionRequest, Exception]], list[FileExecutionRequest]]:
@@ -471,9 +808,24 @@ def _process_descriptor_batch(
         orchestrator.llm.provider_name,
     )
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_map: dict[concurrent.futures.Future, FileExecutionRequest] = {
-            pool.submit(_process_and_record, request, orchestrator, recorder): request
+    stop_event = threading.Event()
+    bind_stop_event = getattr(orchestrator, "bind_stop_event", None)
+    if callable(bind_stop_event):
+        bind_stop_event(stop_event)
+    pool = concurrent.futures.ThreadPoolExecutor(max_workers=max_workers)
+    future_map: dict[concurrent.futures.Future, FileExecutionRequest] = {}
+    try:
+        future_map = {
+            pool.submit(
+                _process_and_record,
+                request,
+                orchestrator,
+                recorder,
+                (division_plans or {}).get(request.rel_path),
+                (reduction_trees or {}).get(request.rel_path),
+                provider_identity,
+                stop_event,
+            ): request
             for request in requests
         }
 
@@ -497,6 +849,7 @@ def _process_descriptor_batch(
                 # error after the executor shuts down.  Never enter the retry or
                 # rate-limit lists.
                 fatal_error = exc
+                stop_event.set()
                 _cancel_pending(future_map)
                 break
             except Exception as exc:
@@ -512,6 +865,7 @@ def _process_descriptor_batch(
                     abort_error = _build_terminal_abort(
                         exc, orchestrator.llm.provider_name, verdict
                     )
+                    stop_event.set()
                     _cancel_pending(future_map)
                     break
                 if verdict == "rate_limit":
@@ -542,6 +896,7 @@ def _process_descriptor_batch(
                         recorder.discard(rel_path)
                     except LiveBackupWriteError as discard_exc:
                         fatal_error = discard_exc
+                        stop_event.set()
                         _cancel_pending(future_map)
                         break
                     queue.mark_skipped_insufficient_source(rel_path, reason)
@@ -586,9 +941,13 @@ def _process_descriptor_batch(
                         context="parallel processing health check",
                         level="warning",
                     )
+    except BaseException:
+        stop_event.set()
+        _cancel_pending(future_map)
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=stop_event.is_set())
 
-    # The executor's context manager has now shut down (wait=True), so all
-    # running workers have completed or failed and no new work was scheduled.
     # Propagate the fatal persistence failure as the original error.
     if fatal_error is not None:
         raise fatal_error
@@ -614,6 +973,9 @@ def _process_files_sequentially(
     respect_retry_after: bool = True,
     retry_after_cap: int = 30,
     profile: RateLimitProfile | None = None,
+    division_plans: dict[str, DivisionPlan] | None = None,
+    reduction_trees: dict[str, ReductionTreePlan] | None = None,
+    provider_identity: str = "",
 ) -> _SequentialOutcome:
     """Process *requests* one at a time with per-file retries.
 
@@ -640,6 +1002,10 @@ def _process_files_sequentially(
                 request,
                 orchestrator,
                 retry_attempts,
+                division_plan=(division_plans or {}).get(rel_path),
+                reduction_tree=(reduction_trees or {}).get(rel_path),
+                provider_identity=provider_identity,
+                recorder=recorder,
                 respect_retry_after=respect_retry_after,
                 retry_after_cap=retry_after_cap,
                 profile=profile,
@@ -720,6 +1086,10 @@ def _process_one_file_with_retries(
     request: FileExecutionRequest,
     orchestrator: Orchestrator,
     retry_attempts: int,
+    division_plan: DivisionPlan | None = None,
+    reduction_tree: ReductionTreePlan | None = None,
+    provider_identity: str = "",
+    recorder: SafeWriter | None = None,
     respect_retry_after: bool = True,
     retry_after_cap: int = 30,
     profile: RateLimitProfile | None = None,
@@ -727,6 +1097,14 @@ def _process_one_file_with_retries(
     last_error: Exception | None = None
     for attempt in range(retry_attempts + 1):
         try:
+            if division_plan is not None:
+                if recorder is None:
+                    raise ValueError("split retries require a recovery recorder.")
+                if reduction_tree is None:
+                    raise ValueError("a division plan requires its matching reduction tree.")
+                return _process_divided_file(
+                    request, division_plan, reduction_tree, provider_identity, orchestrator, recorder
+                )
             return _process_one_file(request, orchestrator)
         except Exception as exc:
             last_error = exc
@@ -808,6 +1186,16 @@ def _process_one_file(request: FileExecutionRequest, orchestrator: Orchestrator)
         raise InsufficientSourceError(rel_path, reason)
     result = orchestrator.process(request)
     logger.debug("Outcome for owner=%s: state=%s", rel_path, result.get("state", "unknown"))
+    _raise_result_errors(result, orchestrator, rel_path)
+    return result
+
+
+def _raise_result_errors(
+    result: dict,
+    orchestrator: Orchestrator,
+    rel_path: str,
+) -> None:
+    """Raise the canonical typed failure represented by an agent result."""
     errors = _agent_errors(result)
     if errors:
         message = "; ".join(errors)
@@ -831,7 +1219,6 @@ def _process_one_file(request: FileExecutionRequest, orchestrator: Orchestrator)
                 correction_attempted=correction_attempted,
             )
         raise AgentError(orchestrator.__class__.__name__, rel_path, message)
-    return result
 
 
 def _agent_errors(result: dict) -> list[str]:

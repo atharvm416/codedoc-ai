@@ -9,6 +9,7 @@ from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import (
     clean_combined_report,
     clean_dependency_report,
+    clean_leaf_capsule_report,
     clean_structure_report,
 )
 from codedoc.agents.response_diagnostics import (
@@ -19,8 +20,13 @@ from codedoc.agents.response_diagnostics import (
     MAX_REMOVAL_ENTRIES,
     ResponseDiagnostic,
     extract_json_candidate,
+    process_fixed_capsule_response,
     process_response,
     required_field_paths,
+)
+from codedoc.core.file_division import (
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
+    MAX_LEAF_SYMBOL_NAME_CHARS,
 )
 from codedoc.utils.errors import AgentError, ResponseContractError
 
@@ -148,6 +154,78 @@ def test_item_limit_reported_for_overflow():
     functions = [{"name": f"f{i}"} for i in range(20)]
     result = clean_combined_report({"description": "d", "functions": functions}, "m.py")
     assert any(r.reason_code == "item_limit" for r in result.removed)
+
+
+def _run_leaf_capsule(raw):
+    return process_fixed_capsule_response(
+        json.dumps(raw),
+        label="split-leaf",
+        agent="leaf",
+        file_path="m.py",
+        clean_reporter=clean_leaf_capsule_report,
+        requested_paths=("description", "functions", "classes", "exports"),
+        required_paths=("description",),
+    )
+
+
+def test_fixed_leaf_capsule_preserves_every_fact_at_declared_bounds():
+    functions = [
+        {"name": f"f{index}".ljust(MAX_LEAF_SYMBOL_NAME_CHARS, "x")}
+        for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND)
+    ]
+
+    result = _run_leaf_capsule(
+        {"description": "visible facts", "functions": functions}
+    )
+
+    assert result["functions"] == functions
+
+
+@pytest.mark.parametrize(
+    "functions",
+    [
+        [{"name": "x" * (MAX_LEAF_SYMBOL_NAME_CHARS + 1)}],
+        [
+            {"name": f"function_{index}"}
+            for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND + 1)
+        ],
+    ],
+)
+def test_fixed_leaf_capsule_rejects_lossy_fact_caps(functions):
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(
+            {"description": "visible facts", "functions": functions}
+        )
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.stage == "clean"
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.reason_code in {"response_cap", "item_limit"}
+        for removal in diagnostic.removed
+    )
+
+
+def test_fixed_leaf_losslessness_survives_bounded_diagnostic_overflow():
+    raw = {"description": "visible facts"}
+    raw.update({f"unknown_{index}": "x" for index in range(80)})
+    raw["functions"] = [
+        {"name": "x" * (MAX_LEAF_SYMBOL_NAME_CHARS + 1)}
+    ]
+
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(raw)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert len(diagnostic.removed) <= MAX_REMOVAL_ENTRIES
+
+
+def test_many_unknown_fixed_leaf_fields_do_not_fake_a_fact_cap_failure():
+    raw = {"description": "visible facts"}
+    raw.update({f"unknown_{index}": "x" for index in range(80)})
+
+    assert _run_leaf_capsule(raw) == {"description": "visible facts"}
 
 def test_nested_unknown_symbol_and_object_fields_are_reported():
     result = clean_combined_report(

@@ -52,3 +52,17 @@ def test_sdist_manifest_includes_public_docs_and_excludes_repository_tests():
     assert "include RUN_FLOW.md" in manifest
     assert "recursive-include tests" not in manifest
     assert "prune tests" in manifest
+
+
+def test_optional_structure_dependency_is_pinned_and_runtime_optional():
+    import tomllib
+
+    project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    optional = project["project"]["optional-dependencies"]
+
+    assert "tree-sitter-language-pack==0.13.0" in optional["structure"]
+    assert "tree-sitter-language-pack==0.13.0" in optional["dev"]
+    assert not any(
+        dependency.startswith("tree-sitter-language-pack")
+        for dependency in project["project"]["dependencies"]
+    )

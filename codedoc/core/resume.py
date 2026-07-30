@@ -24,10 +24,11 @@ current run.
 from __future__ import annotations
 
 import os
+from dataclasses import dataclass
 from pathlib import Path
 
-from codedoc.core.db import compute_file_hash
 from codedoc.core.document import read_codedoc_document, records_by_path
+from codedoc.core.file_division import SplitTreeState, canonical_json
 from codedoc.core.markdown_view import markdown_to_view
 from codedoc.core.project_view import read_codedoc_meta
 from codedoc.core.record_meta import (
@@ -50,6 +51,20 @@ RECOVERY_FILENAME = "crash_recovery.json"
 
 # Supported versioned-recovery-identity schema version.
 _RECOVERY_IDENTITY_VERSION = 1
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryState:
+    """Deeply immutable contents of one compatible recovery file."""
+
+    records: tuple[tuple[str, str], ...] = ()
+    partial_files: tuple[SplitTreeState, ...] = ()
+
+    def records_by_path(self) -> dict[str, dict]:
+        """Materialize defensive record dictionaries for routing."""
+        import json
+
+        return {rel_path: json.loads(payload) for rel_path, payload in self.records}
 
 
 # ---------------------------------------------------------------------------
@@ -231,6 +246,7 @@ def build_recovery_identity(
     documentation_scope: str,
     analysis_mode: str,
     analysis_revision: str,
+    large_file_strategy: str = "truncate",
 ) -> dict:
     """Build the versioned ``_codedoc.recovery_identity`` object for this run.
 
@@ -239,11 +255,18 @@ def build_recovery_identity(
     Per-file ``_prompt_profile_digest`` values in ``CACHE_IDENTITY_KEYS`` already
     re-validate every recovered record individually, so a language-keyed or
     path-keyed run-level map would only reject otherwise-resumable recovery for
-    unrelated edits.  Narrowing the compared field set is backward-compatible and
-    keeps ``_RECOVERY_IDENTITY_VERSION`` at 1 (only widening it, or changing a
-    retained field's meaning, would require a version bump).
+    unrelated edits.
+
+    ``large_file_strategy`` is emitted **only** for a ``split`` run.  A
+    ``truncate`` run omits it, so default recovery-identity bytes are unchanged,
+    and an absent stored value is normalized back to ``"truncate"`` when
+    comparing (see :data:`_LEGACY_IDENTITY_DEFAULTS`).  Because absence has an
+    explicit backward-compatible meaning, a legacy recovery file stays readable
+    and ``_RECOVERY_IDENTITY_VERSION`` remains 1 (only widening the compared set
+    without such a default, or changing a retained field's meaning, would require
+    a version bump).
     """
-    return {
+    identity = {
         "version": _RECOVERY_IDENTITY_VERSION,
         "project_root": _normalized_path(project_root),
         "json_target": _normalized_path(json_target),
@@ -253,6 +276,9 @@ def build_recovery_identity(
         "analysis_mode": analysis_mode,
         "analysis_revision": analysis_revision,
     }
+    if large_file_strategy == "split":
+        identity["large_file_strategy"] = "split"
+    return identity
 
 
 _RECOVERY_IDENTITY_FIELDS = (
@@ -263,7 +289,23 @@ _RECOVERY_IDENTITY_FIELDS = (
     "documentation_scope",
     "analysis_mode",
     "analysis_revision",
+    "large_file_strategy",
 )
+
+# Identity fields whose absence carries an explicit backward-compatible value.
+# A legacy or default recovery file has no ``large_file_strategy`` and must stay
+# compatible with a ``truncate`` run; only a ``split`` run stores the field, so a
+# strategy change is a genuine mismatch instead of a silent reinterpretation of
+# incompatible split checkpoints.
+_LEGACY_IDENTITY_DEFAULTS = {"large_file_strategy": "truncate"}
+
+
+def _identity_field(identity: dict, field: str) -> object:
+    """Return one identity field, normalizing a legacy absent value."""
+    value = identity.get(field)
+    if value is None and field in _LEGACY_IDENTITY_DEFAULTS:
+        return _LEGACY_IDENTITY_DEFAULTS[field]
+    return value
 
 
 def _first_identity_mismatch(
@@ -274,22 +316,61 @@ def _first_identity_mismatch(
     if stored.get("version") != expected["version"]:
         return ("version", expected["version"], stored.get("version"))
     for field in _RECOVERY_IDENTITY_FIELDS:
-        if stored.get(field) != expected.get(field):
-            return (field, expected.get(field), stored.get(field))
+        found = _identity_field(stored, field)
+        wanted = _identity_field(expected, field)
+        if found != wanted:
+            return (field, wanted, found)
     return None
 
 
 def _recovery_remedy(recovery_path: Path) -> str:
+    """Preserve-first remedy for a generic recovery conflict.
+
+    Ordering matters: this file can hold already-paid checkpoints, so the
+    non-destructive options come first and deletion is described only as a
+    deliberate discard — matching the D11 predecessor remedy below and the
+    published recovery contract. Your stable completed output is never
+    touched by any of these choices.
+    """
     return (
-        f"Delete '{recovery_path.name}' in the output directory to start fresh, "
-        "or restore the prior run's configuration to resume."
+        f"To resume that work, restore the prior run's configuration. To "
+        f"continue with the current configuration instead, move "
+        f"'{recovery_path.name}' aside (for example, rename it) so a fresh "
+        f"recovery file is created; you may instead delete it, but that "
+        f"explicitly discards any completed work it still holds. Your prior "
+        f"stable completed output is untouched either way."
+    )
+
+
+def _legacy_split_partial_remedy(recovery_path: Path, rel_paths: tuple[str, ...]) -> str:
+    """The D11 preserve-or-move-aside remedy for a version-1 (predecessor
+    ordered-prefix) split partial.
+
+    This build never resumes or executes a version-1 split partial: it is
+    migration-readable only.  The message never suggests silently discarding
+    paid work; deletion is offered only as an explicit, named choice.
+    """
+    named = ", ".join(f"'{rel_path}'" for rel_path in rel_paths)
+    return (
+        f"'{recovery_path.name}' in the output directory contains predecessor "
+        f"(schema version 1) split checkpoint data for {named} that this build "
+        "does not resume or execute. To finish that in-progress split work, "
+        "re-run the exact predecessor CodeDoc build that created it. To "
+        f"continue with this build, move '{recovery_path.name}' aside (for "
+        "example, rename it) before re-running so a fresh recovery file is "
+        "created; you may instead delete it, but that explicitly discards "
+        "those predecessor split checkpoints. Your prior stable completed "
+        "output is untouched either way."
     )
 
 
 def load_recovery_records_if_compatible(
-    recovery_path: Path, identity: dict
-) -> dict[str, dict]:
-    """Return records from a compatible in-progress recovery file, else ``{}``.
+    recovery_path: Path,
+    identity: dict,
+    *,
+    include_partial_files: bool = False,
+) -> RecoveryState:
+    """Return one frozen compatible recovery state, else an empty state.
 
     Performs only the exact-path ownership/status/identity validation:
 
@@ -300,12 +381,17 @@ def load_recovery_records_if_compatible(
       :class:`ConfigError` — it is never renamed, relocated, or silently deleted.
 
     It does not select alternate names, read stable outputs, delete files, or
-    mutate ``SafeWriter``.
+    mutate ``SafeWriter``.  Partial loading is disabled by default; only an
+    explicit split-strategy caller enables it, so split-only state is neither
+    normalized nor returned across the default/truncate strategy boundary.
     """
     if not recovery_path.exists():
-        return {}
+        return RecoveryState()
     try:
-        document = read_codedoc_document(recovery_path)
+        document = read_codedoc_document(
+            recovery_path,
+            include_partial_files=include_partial_files,
+        )
     except (ConfigError, FileNotFoundError) as exc:
         raise ConfigError(
             f"'{recovery_path.name}' in the output directory is not a readable "
@@ -337,7 +423,16 @@ def load_recovery_records_if_compatible(
             f"different run: {field} expected {expected!r} but the recovery file "
             f"has {found!r}. {_recovery_remedy(recovery_path)}"
         )
-    return records_by_path(document)
+    if document.legacy_split_partial_rels:
+        raise ConfigError(_legacy_split_partial_remedy(recovery_path, document.legacy_split_partial_rels))
+    records = records_by_path(document)
+    return RecoveryState(
+        records=tuple(
+            (rel_path, canonical_json(records[rel_path]))
+            for rel_path in sorted(records)
+        ),
+        partial_files=tuple(document.partial_files),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -363,6 +458,9 @@ def _public_record_to_doc(file_record: dict) -> dict:
         "usage_example": file_record.get("usage_example", ""),
         "dependencies_analysis": deps,
     }
+    # A predecessor record's `division`/`documentation_units` fields (D11) are
+    # never reconstructed here: they are discarded on read and never carried
+    # into new JSON, Markdown, embedded views, or reverse conversion.
     cleaned = {k: v for k, v in doc.items() if v not in (None, "", [], {}, {"external": [], "internal": []})}
     # Carry registered private keys from the public record into the
     # reconstructed flat documentation result so they survive resume/reuse.
@@ -372,7 +470,7 @@ def _public_record_to_doc(file_record: dict) -> dict:
 
 def _build_documentation_records(
     rel_paths: set,
-    file_map: dict,
+    content_hashes: dict,
     ordered_paths: list,
     existing_docs: dict,
     new_results: dict,
@@ -395,11 +493,12 @@ def _build_documentation_records(
             continue
 
         if rel_path in new_results:
-            descriptor = file_map.get(rel_path, {})
-            try:
-                file_hash = compute_file_hash(descriptor["path"]) if descriptor.get("path") else ""
-            except Exception:
-                file_hash = existing_docs.get(rel_path, {}).get("hash", "")
+            file_hash = content_hashes.get(rel_path)
+            if not file_hash:
+                raise ValueError(
+                    f"new documentation result for {rel_path!r} has no frozen "
+                    "planning-snapshot hash."
+                )
         else:
             file_hash = existing_docs.get(rel_path, {}).get("hash", "")
 

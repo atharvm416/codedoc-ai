@@ -32,7 +32,7 @@ from codedoc.core.project_view import (
     _prune_empty,
     _tree,
     json_from_view,
-    without_schema_version,
+    sanitize_public_view,
 )
 from codedoc.utils.logger import get_logger
 
@@ -57,6 +57,7 @@ class EmbeddedViewResult:
 
     state: str  # "absent", "valid", or "invalid"
     view: dict | None
+    source_schema_version: object | None = None
 
 
 # Regex that matches the lightweight metadata comment embedded in Markdown output:
@@ -124,15 +125,14 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
     block allows :func:`markdown_to_view` to reconstruct the full public JSON
     view without any information loss on subsequent runs.
     """
+    view = sanitize_public_view(view)
     project = _project_overview_from_view(view)
     lines: list[str] = [
         _build_meta_comment(view, project),
         _build_full_view_comment(view),
         "# codedoc project documentation\n\n",
     ]
-    last_run = view.get("last_run") or _last_run_from_legacy_run(
-        view.get("run", {}), project
-    )
+    last_run = view.get("last_run", {})
 
     lines += [
         "## Project Overview\n\n",
@@ -152,6 +152,44 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
             "- Files resumed from recovery: "
             f"{last_run.get('files_resumed_from_recovery', 0)}\n"
         )
+    if last_run.get("large_file_strategy") == "split":
+        lines += [
+            "- Large-file strategy: split\n",
+            f"- Ordinary files: {last_run.get('split_ordinary_files', 0)}\n",
+            f"- Syntax-divided files: {last_run.get('split_syntax_files', 0)}\n",
+            f"- Lexical-divided files: {last_run.get('split_lexical_files', 0)}\n",
+            f"- Blocked files: {last_run.get('split_blocked_files', 0)}\n",
+            f"- Semantic units / leaf chunks: {last_run.get('split_units', 0)} / "
+            f"{last_run.get('split_chunks', 0)}\n",
+            f"- Continuation groups: {last_run.get('split_continuation_groups', 0)}\n",
+            "- Unit-consolidation levels / calls planned: "
+            f"{last_run.get('split_unit_consolidation_levels', 0)} / "
+            f"{last_run.get('split_unit_consolidation_calls_planned', 0)}\n",
+            "- General reduction levels / calls planned: "
+            f"{last_run.get('split_general_reduction_levels', 0)} / "
+            f"{last_run.get('split_general_reduction_calls_planned', 0)}\n",
+            "- Final synthesis calls planned: "
+            f"{last_run.get('split_final_synthesis_calls_planned', 0)}\n",
+            "- Restored leaves / unit-consolidations / general reductions / finals: "
+            f"{last_run.get('split_restored_complete_chunks', 0)} / "
+            f"{last_run.get('split_restored_unit_consolidation_calls', 0)} / "
+            f"{last_run.get('split_restored_general_reduction_calls', 0)} / "
+            f"{last_run.get('split_restored_final_synthesis_calls', 0)}\n",
+            "- Remaining planned call categories: "
+            f"{last_run.get('file_documentation_calls_planned', 0)} file / "
+            f"{last_run.get('unit_documentation_calls_planned', 0)} leaf / "
+            f"{last_run.get('file_reduction_calls_planned', 0)} reduction / "
+            f"{last_run.get('synthesis_calls_planned', 0)} synthesis\n",
+        ]
+        reasons = last_run.get("split_blocked_by_reason", {})
+        if isinstance(reasons, dict) and reasons:
+            lines.append(
+                "- Blocked reasons: "
+                + ", ".join(
+                    f"{reason}={count}" for reason, count in sorted(reasons.items())
+                )
+                + "\n"
+            )
     lines.append("\n")
 
     lines += ["## Project Tree\n\n", "```text\n"]
@@ -308,31 +346,6 @@ def markdown_from_json(data: str | dict, error_summary: str = "") -> str:
     return markdown_from_view(view, error_summary)
 
 
-def _last_run_from_legacy_run(run: dict, project: dict) -> dict:
-    """Project a legacy ``run`` block into the canonical ``last_run`` shape."""
-    file_count = _parse_int(str(project.get("file_count", 0)))
-    checked = _parse_int(str(run.get("files_checked", 0)))
-    failed = _parse_int(str(run.get("files_failed", 0)))
-    skipped = _parse_int(str(run.get("files_skipped", 0)))
-    reused = _parse_int(str(run.get("files_reused", 0)))
-    selected = max(file_count, checked + failed + skipped + reused)
-    entry_file = project.get("entry_file")
-    return {
-        "entry_file": entry_file,
-        "entry_source": "auto-detected" if entry_file else "none",
-        "documentation_scope": "entry" if entry_file else "all",
-        "analysis_mode": "single",
-        "files_scanned": selected,
-        "files_selected": selected,
-        "files_documented_by_llm": checked,
-        "files_failed": failed,
-        "files_unattempted": 0,
-        "files_reused_unchanged": skipped,
-        "files_reused_identical_content": reused,
-        "files_resumed_from_recovery": 0,
-    }
-
-
 def _complete_visible_last_run(last_run: dict, entry_file: str | None, file_count: int) -> dict:
     """Fill lossy defaults for visible-only Markdown conversion."""
     checked = last_run.get("files_documented_by_llm", 0)
@@ -430,7 +443,11 @@ def read_embedded_view_result(markdown: str) -> EmbeddedViewResult:
         )
         return EmbeddedViewResult(state="invalid", view=None)
 
-    return EmbeddedViewResult(state="valid", view=data)
+    return EmbeddedViewResult(
+        state="valid",
+        view=sanitize_public_view(data),
+        source_schema_version=data.get("schema_version"),
+    )
 
 
 def read_embedded_view(markdown: str) -> dict | None:
@@ -453,20 +470,7 @@ def _public_view_for_embedding(view: dict) -> dict:
     legacy view is converted to Markdown, the embedded lossless view is promoted
     to the current ``last_run`` shape instead of preserving ``project``/``run``.
     """
-    excluded = {"_crash_safety", "_codedoc", "generated_at"}
-    public = {k: v for k, v in view.items() if k not in excluded}
-    project = _project_overview_from_view(view)
-    if not isinstance(public.get("last_run"), dict):
-        public["last_run"] = _last_run_from_legacy_run(
-            public.get("run", {}) if isinstance(public.get("run"), dict) else {},
-            project,
-        )
-    elif "entry_file" not in public["last_run"]:
-        public["last_run"] = dict(public["last_run"])
-        public["last_run"]["entry_file"] = project.get("entry_file")
-    public.pop("project", None)
-    public.pop("run", None)
-    return without_schema_version(public)
+    return sanitize_public_view(view)
 
 
 def _build_full_view_comment(view: dict) -> str:
@@ -755,6 +759,8 @@ def _append_file_markdown(lines: list[str], file: dict) -> None:
         "**Reachable from entry:** "
         f"{'Yes' if file.get('reachable_from_entry', True) else 'No'}  \n\n",
     ]
+    # No internal division/unit/reduction content is ever rendered here
+    # (D9/D14): only the ordinary synthesized file-level fields below.
     if file.get("description"):
         lines += ["**Description:** ", file["description"], "\n\n"]
     if file.get("role_in_system"):

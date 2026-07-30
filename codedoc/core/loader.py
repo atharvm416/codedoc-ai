@@ -171,6 +171,9 @@ DEFAULTS: dict[str, Any] = {
     "ignore_paths": [],
     # Configurable per-file content limit sent to the LLM.
     "max_content_chars": 12000,
+    # Large-file handling strategy. "truncate" is the byte-compatible default;
+    # "split" opts into deterministic local source division before provider calls.
+    "large_file_strategy": "truncate",
     # -----------------------------------------------------------------------
     # Planning / CI safety
     # -----------------------------------------------------------------------
@@ -272,6 +275,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
     "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
+    "CODEDOC_LARGE_FILE_STRATEGY": "large_file_strategy",
     "CODEDOC_DRY_RUN": "dry_run",
     "CODEDOC_MAX_FILES": "max_files",
     "CODEDOC_MAX_PLANNED_CALLS": "max_planned_calls",
@@ -283,6 +287,10 @@ _ENV_KEY_MAP = {
 
 # Allowed values for the selectable per-file analysis mode.
 VALID_ANALYSIS_MODES = ("single", "triple")
+
+# Allowed values for oversized readable source handling.
+VALID_LARGE_FILE_STRATEGIES = ("truncate", "split")
+_SPLIT_EXECUTION_RELEASED = False
 
 # Config keys whose environment values are parsed as semicolon-separated lists.
 _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
@@ -850,6 +858,9 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
             "'triple' (the three-agent path)."
         )
 
+    if config.get("large_file_strategy", "truncate") not in VALID_LARGE_FILE_STRATEGIES:
+        raise ConfigError("large_file_strategy must be exactly 'truncate' or 'split'.")
+
     config["log_level"] = config["log_level"].upper()
     if config["log_level"] not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("log_level must be DEBUG, INFO, WARNING, or ERROR.")
@@ -868,6 +879,27 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
         "response_correction_enabled",
     ):
         config[key] = _coerce_strict_bool(config[key], key)
+
+    if (
+        config.get("analysis_mode", "single") == "triple"
+        and config.get("large_file_strategy", "truncate") == "split"
+    ):
+        raise ConfigError(
+            "large_file_strategy 'split' is unavailable with analysis_mode "
+            "'triple'; use analysis_mode 'single' for split planning, or use "
+            "large_file_strategy 'truncate' for triple mode."
+        )
+
+    if (
+        config.get("large_file_strategy", "truncate") == "split"
+        and not config["dry_run"]
+        and not _SPLIT_EXECUTION_RELEASED
+    ):
+        raise ConfigError(
+            "large_file_strategy 'split' is a provider-free planning preview. "
+            "Set dry_run=true or pass --dry-run to inspect the split plan; use "
+            "large_file_strategy 'truncate' for a real run."
+        )
 
     if (
         warn_missing_api_key

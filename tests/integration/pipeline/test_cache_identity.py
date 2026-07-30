@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+
 from codedoc.core.record_meta import expected_analysis_identity
 from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
 import json
@@ -20,11 +22,15 @@ from tests.support.providers import SmartFake
 from tests.support.cross_format_runs import _config
 from tests.support.cross_format_runs import _first_run
 from codedoc.core.db import compute_file_hash
+from codedoc.core.file_division import build_division_plan, build_reduction_tree
 from codedoc.core.graph import DependencyGraph
 from codedoc.core.planning import build_pipeline_plan
 from codedoc.core.record_meta import (
+    expected_large_file_identity,
     normalized_identity_value,
 )
+
+pytestmark = pytest.mark.future_split_execution
 
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
     import json
@@ -183,6 +189,65 @@ def test_steady_state_reuse_skips_provider(tmp_path, monkeypatch):
     second = run_pipeline(tmp_path, cfg)
     assert second["checked"] == 0
 
+
+def test_final_output_hash_remains_bound_to_the_documented_source_snapshot(
+    tmp_path, monkeypatch
+) -> None:
+    source_path = tmp_path / "main.py"
+    planned_source = "ORIGINAL = 1\n"
+    later_source = "CHANGED_AFTER_PLANNING = 2\n"
+    source_path.write_text(planned_source, encoding="utf-8")
+    expected_snapshot_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+
+    class MutateAfterPlanning(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.mutated = False
+
+        def complete_json(self, prompt, system=""):
+            if not self.mutated and "standards/safety review" not in prompt:
+                self.mutated = True
+                source_path.write_text(later_source, encoding="utf-8")
+            return super().complete_json(prompt, system)
+
+    provider = MutateAfterPlanning()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider
+    )
+
+    first = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "output_dir": "docs",
+            "propagate_changes": False,
+        },
+    )
+
+    record = json.loads(
+        (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
+    )["files"][0]
+    assert first["checked"] == 1
+    assert source_path.read_text(encoding="utf-8") == later_source
+    assert record["hash"] == expected_snapshot_hash
+    assert record["hash"] != compute_file_hash(source_path)
+
+    second_provider = SmartFake()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: second_provider
+    )
+    second = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "output_dir": "docs",
+            "propagate_changes": False,
+        },
+    )
+    assert second["checked"] == 1
+    assert second_provider.doc_calls == 1
+
+
 def test_mode_switch_invalidates_reuse(tmp_path, monkeypatch):
     from codedoc.pipeline import run_pipeline
 
@@ -225,6 +290,7 @@ def test_legacy_record_without_identity_reprocessed_once(tmp_path, monkeypatch):
     assert rec["_analysis_mode"] == "single"
 
 @pytest.mark.parametrize("source", ["same_path", "identical"])
+@pytest.mark.parametrize("stored_language", ["python", "javascript", None])
 @pytest.mark.parametrize(
     ("identity_change", "identity_value"),
     [
@@ -235,8 +301,8 @@ def test_legacy_record_without_identity_reprocessed_once(tmp_path, monkeypatch):
         ("_analysis_mode", "triple"),
     ],
 )
-def test_every_reuse_source_requires_complete_matching_identity(
-    tmp_path, source, identity_change, identity_value
+def test_every_reuse_source_requires_complete_matching_identity_and_language(
+    tmp_path, source, stored_language, identity_change, identity_value
 ):
     from codedoc.core.db import compute_file_hash
     from codedoc.core.graph import DependencyGraph
@@ -261,6 +327,8 @@ def test_every_reuse_source_requires_complete_matching_identity(
         "description": "cached",
         **identity,
     }
+    if stored_language is not None:
+        record["language"] = stored_language
     existing_docs = {}
     if source == "same_path":
         existing_docs["main.py"] = record
@@ -290,10 +358,10 @@ def test_every_reuse_source_requires_complete_matching_identity(
         },
     )
 
-    identity_matches = identity_change is None
-    if identity_matches and source == "same_path":
+    reuse_matches = identity_change is None and stored_language == "python"
+    if reuse_matches and source == "same_path":
         assert plan.unchanged_rels == frozenset({"main.py"})
-    elif identity_matches:  # identical
+    elif reuse_matches:
         assert plan.identical_reuse_rels == frozenset({"main.py"})
     else:
         assert plan.agent_rels == frozenset({"main.py"})
@@ -326,10 +394,11 @@ def test_v1_record_is_invalidated_once_under_v2(tmp_path):
     def _plan(revision):
         existing = {
             "main.py": {
-                "path": "main.py",
-                "hash": file_hash,
-                "description": "cached",
-                "_analysis_revision": revision,
+                    "path": "main.py",
+                    "hash": file_hash,
+                    "description": "cached",
+                    "language": "python",
+                    "_analysis_revision": revision,
                 "_analysis_mode": "single",
             }
         }
@@ -415,7 +484,7 @@ def test_truncation_identity_change_reprocesses_cross_format_fallback(
     (tmp_path / "main.py").write_text("x" * 2000, encoding="utf-8")
     first_fake = SmartFake()
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _cfg: first_fake)
-    run_pipeline(tmp_path, {**_config("json"), "max_content_chars": 1000})
+    run_pipeline(tmp_path, {**_config("json"), "max_content_chars": 2000})
     assert first_fake.doc_calls == 1
 
     second_fake = SmartFake()
@@ -450,6 +519,7 @@ def _oversized_plan(tmp_path, stored_mcr, *, max_chars=1000, head_ratio=0.70):
         "path": "main.py",
         "hash": compute_file_hash(src),
         "description": "cached",
+        "language": "python",
         "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
     }
@@ -478,6 +548,7 @@ def _small_plan(tmp_path, *, max_chars, head_ratio=0.70):
     # A small file would never carry _max_context_revision.
     record = {
         "path": "main.py", "hash": compute_file_hash(src), "description": "cached",
+        "language": "python",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
     }
     config = {
@@ -526,3 +597,63 @@ def test_v2_record_is_invalidated():
         "file-doc-v2"
     )
     assert ANALYSIS_REVISION != "file-doc-v2"
+
+def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
+    """One legitimately-reusable split record: its stored `_large_file_identity`
+    exactly matches the current division plan/reduction tree, computed the
+    same way planning computes it (see `_expected_identity_for`)."""
+    src = tmp_path / "main.py"
+    source = "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+    src.write_text(source, encoding="utf-8", newline="")
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=max_chars
+    )
+    tree = build_reduction_tree(
+        plan,
+        max_content_chars=max_chars,
+        language="python",
+    )
+    identity = expected_large_file_identity(
+        source_chars=len(source),
+        max_chars=max_chars,
+        rel_path="main.py",
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        structural_mode=plan.structural_mode,
+    )
+    file_map = {
+        "main.py": {
+            "path": src, "rel_path": "main.py",
+            "language": "python", "extension": ".py",
+        }
+    }
+    graph = DependencyGraph()
+    graph.add_file("main.py")
+    record = {
+        "path": "main.py",
+        "hash": compute_file_hash(src),
+        "description": "cached",
+        "language": "python",
+        "_analysis_revision": "file-doc-v3",
+        "_analysis_mode": "single",
+        "_large_file_identity": identity,
+    }
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": max_chars, "truncation_head_ratio": head_ratio,
+    }
+    plan, _ = build_pipeline_plan(
+        file_map, graph, {"main.py"}, "main.py", {"main.py": record}, [], config,
+    )
+    return plan
+
+def test_split_file_with_matching_identity_is_reused(tmp_path):
+    assert "main.py" in _split_plan(tmp_path).unchanged_rels
+
+def test_split_file_identity_is_invariant_to_truncation_head_ratio(tmp_path):
+    """Effective split reuse is never invalidated by a ratio-only change:
+    `_large_file_identity` does not depend on `truncation_head_ratio` at all,
+    unlike the ordinary truncate path's `_max_context_revision`."""
+    assert "main.py" in _split_plan(tmp_path, head_ratio=0.70).unchanged_rels
+    assert "main.py" in _split_plan(tmp_path, head_ratio=0.85).unchanged_rels
