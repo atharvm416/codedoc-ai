@@ -11,8 +11,8 @@ Behaviour notes
   printed to stdout.
 - On interrupt, the dedicated crash-recovery file path attached by the pipeline
   (``KeyboardInterrupt.recovery_path``) is named so the user knows the stable
-  output was preserved and which file enables resume; if no recovery file was
-  confirmed, a truthful generic message is printed instead.
+  output was preserved, together with the ordinary-versus-fresh reuse boundary;
+  if no recovery file was confirmed, a truthful generic message is printed.
 - When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
   reported in the run summary.
 
@@ -31,6 +31,12 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+
+_RECOVERY_REUSE_BOUNDARY = (
+    "Compatible completed ordinary files can resume; completed fresh-split "
+    "files are deliberately re-documented from scratch."
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -57,20 +63,21 @@ examples:
   codedoc --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
   codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
 
-large-file split planning preview:
-  split is accepted only with --dry-run and analysis-mode single. A real split
-  run and triple plus split are rejected during configuration validation before
-  scanning or other side effects. Planning divides oversized files at local
-  semantic or lexical boundaries, verifies complete source coverage, constructs
-  the bounded reduction topology, and reports exact initial call categories.
+large-file split execution:
+  split supports dry-run planning and fresh paid execution in analysis-mode
+  single. triple plus split is rejected during configuration validation before
+  scanning or other side effects. Oversized files are divided at local semantic
+  or lexical boundaries with complete source coverage and a bounded reduction topology.
 
   max_content_chars bounds each planned leaf, reducer manifest, and complete
   final manifest. Planning never truncates split source or silently falls back
   to truncate. It reports the first named provider-free capacity reason:
   atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
   reduction-fan-in-cap, reduction-depth-cap, or
-  final-synthesis-envelope-cap. No split provider call, completed output,
-  checkpoint, reuse, or recovery is available from this preview.
+  final-synthesis-envelope-cap. Fresh split mode deliberately performs every
+  oversized split file fresh: completed split reuse, node checkpoints, and
+  partial split recovery are unavailable. Under-threshold files retain ordinary
+  whole-file execution and reuse.
         """,
     )
 
@@ -296,8 +303,8 @@ large-file split planning preview:
         help=(
             "Oversized readable source handling: 'truncate' keeps the legacy "
             "head/tail behavior (default); 'split' enables provider-free "
-            "division and call planning only with --dry-run in single mode. "
-            "Real split execution is unavailable."
+            "planning or fresh paid execution in single mode. Completed split "
+            "reuse and partial split recovery are unavailable in fresh mode."
         ),
     )
     parser.add_argument(
@@ -871,21 +878,21 @@ def run_cli(argv: list[str] | None = None) -> int:
         # The pipeline attaches the exact selected crash-recovery path to
         # the interrupt as ``recovery_path`` only when that file exists on disk.
         # The stable output is never touched mid-run, so it is always preserved;
-        # we just report which file enables resume (or that none was created).
+        # we report the recovery path and the release-specific reuse boundary.
         recovery_path = getattr(exc, "recovery_path", None)
         if recovery_path:
             print(
                 "\nRun interrupted. Your previous stable output was left untouched. "
                 "Files completed before the interrupt are saved in the crash-recovery "
                 f"file:\n  {recovery_path}\n"
-                "Re-run the same command to resume from it.",
+                f"Re-run the same command. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
         else:
             print(
                 "\nRun interrupted before any crash-recovery file was created or "
                 "confirmed. Your previous stable output (if any) was left untouched. "
-                "Re-run the same command to start or resume.",
+                f"Re-run the same command to start. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
         return 130
@@ -897,8 +904,9 @@ def run_cli(argv: list[str] | None = None) -> int:
         )
 
         if isinstance(exc, UnrecoverableProviderError):
-            # A doomed-run safe stop — not an unexpected crash.  Completed files
-            # are in the crash-recovery file and re-running resumes.  A *terminal*
+            # A doomed-run safe stop — not an unexpected crash. Completed
+            # file-level results are in recovery, subject to the release-specific
+            # reuse boundary below. A *terminal*
             # abort (billing/credentials/model/access) is a setup/credentials
             # class problem → exit 2 (consistent
             # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
@@ -907,8 +915,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             print(
                 "\nCompleted files are saved in crash_recovery.json in your output "
-                "directory. Re-run the same command to resume — only the "
-                "unfinished files will be re-documented.",
+                f"directory. Re-run the same command. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
             if args.verbose:
@@ -954,17 +961,21 @@ def run_cli(argv: list[str] | None = None) -> int:
             category = classify_os_error(exc)
             if category == "locked":
                 print(
-                    "\nThis looks like a transient file lock. Completed work is "
-                    "preserved in the named crash-recovery file. Close any program "
-                    "that may be viewing the file and rerun the same command to "
-                    "resume. CodeDoc cannot identify the locking process unless the "
+                    "\nThis looks like a transient file lock. Any crash-recovery "
+                    "file already created by this run remains preserved; a lock "
+                    "can also occur before one is created. Close any program that "
+                    "may be viewing the file and rerun the same command to "
+                    f"continue. {_RECOVERY_REUSE_BOUNDARY} CodeDoc cannot identify "
+                    "the locking process unless the "
                     "operating system reports it.",
                     file=sys.stderr,
                 )
             else:
                 print(
                     "\nChoose a writable output directory or correct local "
-                    "permissions, then rerun the same command.",
+                    "permissions, then rerun the same command. Any crash-recovery "
+                    "file already created remains preserved; the failure can also "
+                    f"occur before one exists. {_RECOVERY_REUSE_BOUNDARY}",
                     file=sys.stderr,
                 )
             if args.verbose:

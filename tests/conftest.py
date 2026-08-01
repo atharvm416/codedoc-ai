@@ -66,15 +66,20 @@ def _attest_injected_pipeline_providers(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
-def _enable_future_split_execution(request):
-    if request.node.get_closest_marker("future_split_execution") is None:
+def _enable_future_split_recovery(request):
+    if request.node.get_closest_marker("future_split_recovery") is None:
         yield
         return
-    from codedoc.core import loader
+    from codedoc.core import release_policy
 
-    previous = loader._SPLIT_EXECUTION_RELEASED
-    loader._SPLIT_EXECUTION_RELEASED = True
+    previous = release_policy.CURRENT_SPLIT_RELEASE
+    release_policy.CURRENT_SPLIT_RELEASE = release_policy.SplitReleasePolicy(
+        execution=True,
+        completed_reuse=True,
+        partial_recovery=True,
+        node_checkpoints=True,
+    )
     try:
         yield
     finally:
-        loader._SPLIT_EXECUTION_RELEASED = previous
+        release_policy.CURRENT_SPLIT_RELEASE = previous

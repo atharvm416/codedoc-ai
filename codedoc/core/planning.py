@@ -63,11 +63,13 @@ from codedoc.core.prompt_profiles import (
 )
 from codedoc.core.record_meta import (
     CACHE_IDENTITY_KEYS,
+    FRESH_SPLIT_REUSE_CONTRACT,
     expected_analysis_identity,
     expected_large_file_identity,
     expected_max_context_revision,
     normalized_identity_value,
 )
+from codedoc.core.release_policy import current_split_release_policy
 from codedoc.core.source_precheck import insufficient_source
 from codedoc.parser.factory import parse_source
 from codedoc.utils.errors import ConfigError, ParseError
@@ -135,6 +137,11 @@ class PipelinePlan:
     # is not already covered by validated recovery. Insufficient-source,
     # capacity-blocked, and fully restored files are excluded.
     unpaid_action_rels: frozenset[str] = frozenset()
+    # Effective oversized split files that the installed release deliberately
+    # schedules as fresh paid work even when a compatible completed record is
+    # present.  This is separate from changed_rels so freshness policy alone
+    # never propagates work to unchanged dependents.
+    fresh_split_rels: frozenset[str] = frozenset()
     division_plan_rels: frozenset[str] = frozenset()
     # rel_path -> first-failing capacity-blocked reason under the frozen
     # evaluation order (D3/D6). A blocked file is never in agent_rels or
@@ -711,6 +718,7 @@ def _build_pipeline_plan_once(
     _imports_cache: dict[str, tuple[str, ...]] = {}
     division_blocked: dict[str, BlockedReason] = {}
     provider_identity = provider_execution_identity(config)
+    split_release = current_split_release_policy()
 
     def _imports_for(rel: str) -> tuple[str, ...]:
         if rel not in _imports_cache:
@@ -803,6 +811,7 @@ def _build_pipeline_plan_once(
             )
             if large_identity is not None:
                 identity["_large_file_identity"] = large_identity
+                identity["_split_reuse_contract"] = FRESH_SPLIT_REUSE_CONTRACT
         elif mcr is not None:
             # Effective split records never carry `_max_context_revision`
             # (D12/section 13): only an ordinary oversized truncate-path record does.
@@ -848,10 +857,22 @@ def _build_pipeline_plan_once(
     changed_rels |= effective_forced
     changed_rels |= set(insufficient_source_reasons)
 
+    # Fresh-only mode executes every effective oversized split target again. Keep this
+    # policy set out of changed_rels: an unchanged split file is paid work, but
+    # that scheduling decision is not a source/identity change and therefore
+    # must not falsely propagate to its dependents.
+    fresh_split_rels = {
+        rel
+        for rel in selected_rels
+        if not split_release.completed_reuse
+        and _split_outcome_for(rel) is not None
+    }
+
     if config.get("propagate_changes", True):
         process_rels = graph.affected_by_changes(changed_rels) & selected_rels
     else:
         process_rels = set(changed_rels)
+    process_rels |= fresh_split_rels
 
     unchanged_rels = selected_rels - process_rels
 
@@ -906,7 +927,11 @@ def _build_pipeline_plan_once(
             reduction_trees[rel_path] = reduction_tree
             agent_rels.add(rel_path)
             execution_requests[rel_path] = request
-            recovered = recovered_by_path.get(rel_path)
+            recovered = (
+                recovered_by_path.get(rel_path)
+                if split_release.partial_recovery
+                else None
+            )
             if recovered is not None and recovered.content_hash == content_hash:
                 provider_identity_for_node = provider_identity
                 individually_valid_nodes = tuple(
@@ -1025,6 +1050,10 @@ def _build_pipeline_plan_once(
             _route_execution_request(rel_path, descriptor, content_hash)
             continue
 
+        if rel_path in fresh_split_rels:
+            _route_execution_request(rel_path, descriptor, content_hash)
+            continue
+
         # Identical-content reuse: only a candidate that passes the centralized
         # predicate (hash + every cache-identity key) for this destination file
         # is eligible.  A candidate matching content but carrying a stale/missing
@@ -1069,6 +1098,7 @@ def _build_pipeline_plan_once(
         max_files=max_files,
         max_files_exceeded=max_files_exceeded,
         unpaid_action_rels=frozenset(agent_candidate_rels),
+        fresh_split_rels=frozenset(fresh_split_rels),
     )
     materials = PlanMaterials(
         identical_reuse_docs=identical_reuse_docs,

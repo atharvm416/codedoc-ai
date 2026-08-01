@@ -5,12 +5,28 @@ import json
 import pytest
 
 from codedoc.core.loader import DEFAULTS, load_config
+from codedoc.core.release_policy import current_split_release_policy
 from codedoc.utils.errors import ConfigError
 
 
 def test_large_file_strategy_defaults_to_truncate(tmp_path) -> None:
     assert load_config(tmp_path)["large_file_strategy"] == "truncate"
     assert DEFAULTS["large_file_strategy"] == "truncate"
+
+
+def test_0_14_1_split_capabilities_are_developer_owned_and_fresh_only() -> None:
+    policy = current_split_release_policy()
+
+    assert policy.execution is True
+    assert policy.completed_reuse is False
+    assert policy.partial_recovery is False
+    assert policy.node_checkpoints is False
+    assert not {
+        "split_execution",
+        "split_completed_reuse",
+        "split_partial_recovery",
+        "split_node_checkpoints",
+    }.intersection(DEFAULTS)
 
 
 def test_large_file_strategy_env_override(tmp_path, monkeypatch) -> None:
@@ -85,58 +101,55 @@ def test_large_file_strategy_split_accepts_single_analysis_mode(tmp_path) -> Non
     assert config["dry_run"] is True
 
 
-def test_large_file_strategy_split_rejects_real_run(tmp_path) -> None:
-    with pytest.raises(ConfigError, match="planning preview.*dry_run"):
-        load_config(
-            tmp_path,
-            {
-                "large_file_strategy": "split",
-                "analysis_mode": "single",
-                "dry_run": False,
-            },
-        )
+def test_large_file_strategy_split_accepts_real_single_run(tmp_path) -> None:
+    config = load_config(
+        tmp_path,
+        {
+            "large_file_strategy": "split",
+            "analysis_mode": "single",
+            "dry_run": False,
+        },
+    )
+
+    assert config["large_file_strategy"] == "split"
+    assert config["analysis_mode"] == "single"
+    assert config["dry_run"] is False
 
 
-def test_large_file_strategy_real_split_rejects_before_pipeline_side_effects(
+def test_large_file_strategy_real_split_enters_normal_pipeline_lifecycle(
     tmp_path, monkeypatch
 ) -> None:
     import codedoc.pipeline as pipeline_module
     from codedoc.pipeline import run_pipeline
 
-    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
-    monkeypatch.setattr(
-        pipeline_module,
-        "scan_files",
-        lambda *_a, **_k: pytest.fail("scanner ran before split release gate"),
-    )
-    monkeypatch.setattr(
-        pipeline_module,
-        "load_recovery_records_if_compatible",
-        lambda *_a, **_k: pytest.fail("recovery ran before split release gate"),
-    )
-    monkeypatch.setattr(
-        pipeline_module,
-        "preflight_output_accessibility",
-        lambda *_a, **_k: pytest.fail("output preflight ran before split release gate"),
-    )
+    (tmp_path / "main.py").write_text("   \n", encoding="utf-8")
+    scanned = []
+    real_scan = pipeline_module.scan_files
+
+    def recording_scan(*args, **kwargs):
+        scanned.append(True)
+        return real_scan(*args, **kwargs)
+
+    monkeypatch.setattr(pipeline_module, "scan_files", recording_scan)
     monkeypatch.setattr(
         pipeline_module,
         "create_provider",
-        lambda *_a, **_k: pytest.fail("provider ran before split release gate"),
+        lambda *_a, **_k: pytest.fail("under-threshold no-op fixture created a provider"),
     )
 
-    with pytest.raises(ConfigError, match="planning preview.*dry_run"):
-        run_pipeline(
-            tmp_path,
-            {
-                "entry_file": "main.py",
-                "large_file_strategy": "split",
-                "dry_run": False,
-                "output_dir": "docs",
-            },
-        )
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "dry_run": False,
+            "output_dir": "docs",
+            "max_content_chars": 1000,
+        },
+    )
 
-    assert not (tmp_path / "docs").exists()
+    assert scanned == [True]
+    assert stats["checked"] == 0
 
 
 def test_large_file_strategy_split_rejects_triple_from_environment(

@@ -17,8 +17,6 @@ from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import UnrecoverableProviderError
 from tests.support.one_call_cases import _COMBINED_JSON
 
-pytestmark = pytest.mark.future_split_execution
-
 _PROVIDERS = (
     ("openai", "openai", "gpt-test", None),
     (
@@ -315,6 +313,7 @@ def test_split_retry_and_correction_are_provider_adapter_neutral(
     assert prompt_sets[0] == prompt_sets[1] == prompt_sets[2] == prompt_sets[3]
 
 
+@pytest.mark.future_split_recovery
 def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
     tmp_path,
     monkeypatch,

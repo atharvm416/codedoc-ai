@@ -16,7 +16,7 @@ from tests.support.feasibility_cases import _cross_file_profile
 from tests.support.feasibility_cases import _ReviewFake
 from codedoc.core.loader import load_config
 from codedoc.utils.errors import (
-    UnrecoverableProviderError,
+    LLMError,
 )
 
 @pytest.mark.parametrize(
@@ -56,15 +56,16 @@ def test_removed_utilities_are_absent_from_help():
     assert "--init-instructions" not in help_text
 
 
-def test_cli_help_exposes_the_large_file_split_planning_boundary():
-    help_text = build_parser().format_help()
+def test_cli_help_exposes_the_large_file_split_fresh_execution_boundary():
+    help_text = " ".join(build_parser().format_help().split())
 
     for required in (
-        "large-file split planning preview:",
+        "large-file split execution:",
         "analysis-mode single",
-        "accepted only with --dry-run",
-        "real split",
-        "rejected during configuration validation",
+        "fresh paid execution",
+        "triple plus split",
+        "completed split reuse",
+        "partial split recovery",
         "complete source coverage",
         "atom-cap",
         "symbol-cap",
@@ -74,8 +75,6 @@ def test_cli_help_exposes_the_large_file_split_planning_boundary():
         "reduction-fan-in-cap",
         "reduction-depth-cap",
         "final-synthesis-envelope-cap",
-        "No split provider call",
-        "checkpoint, reuse, or recovery",
     ):
         assert required in help_text
 
@@ -583,6 +582,8 @@ def test_cli_prints_recovery_path_when_attached(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "crash_recovery.json" in err
     assert "left untouched" in err
+    assert "completed ordinary files can resume" in err
+    assert "completed fresh-split files are deliberately re-documented" in err
 
 def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys):
     import codedoc.pipeline as pipeline_mod
@@ -599,6 +600,8 @@ def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys
     assert exc_info.value.code == 130
     err = capsys.readouterr().err
     assert "crash-recovery file was created or confirmed" in err
+    assert "completed ordinary files can resume" in err
+    assert "completed fresh-split files are deliberately re-documented" in err
     assert not list(tmp_path.glob("**/crash_recovery.json"))
 
 @pytest.mark.parametrize(
@@ -609,9 +612,19 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     tmp_path, monkeypatch, capsys, category, expected_code
 ):
     from codedoc.cli.cli import run_cli
+    from codedoc.core.error_classifier import (
+        _build_rate_limit_exhausted_abort,
+        _build_terminal_abort,
+    )
 
     def fake_pipeline(*args, **kwargs):
-        raise UnrecoverableProviderError("openai", "stopped: doomed run", category)
+        if category == "terminal":
+            raise _build_terminal_abort(
+                LLMError("openai", "insufficient_quota"),
+                "openai",
+                "terminal_billing",
+            )
+        raise _build_rate_limit_exhausted_abort("openai")
 
     monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
 
@@ -623,3 +636,51 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     # Resume hint is always printed.
     assert "re-run" in err.lower()
     assert "crash_recovery.json" in err
+    assert "completed ordinary files can resume" in err
+    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "resumes the unfinished files" not in err
+
+
+def test_cli_locked_output_explains_fresh_split_recovery_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    from codedoc.cli.cli import run_cli
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        root = PermissionError("The process cannot access the file")
+        root.winerror = 32
+        root.errno = 13
+        raise OutputError("out.json", "atomic replace failed") from root
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "transient file lock" in err
+    assert "Any crash-recovery file already created" in err
+    assert "can also occur before one is created" in err
+    assert "Completed work is preserved" not in err
+    assert "completed ordinary files can resume" in err
+    assert "completed fresh-split files are deliberately re-documented" in err
+
+
+def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    from codedoc.cli.cli import run_cli
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        raise OutputError("out.json", "permission denied") from PermissionError(
+            "permission denied"
+        )
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "Choose a writable output directory" in err
+    assert "failure can also occur before one exists" in err
+    assert "completed ordinary files can resume" in err
+    assert "completed fresh-split files are deliberately re-documented" in err

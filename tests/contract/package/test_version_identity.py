@@ -32,5 +32,5 @@ def test_version_flag_reports_canonical_identity(capsys):
     assert __version__ in capsys.readouterr().out
 
 
-def test_release_identity_is_0_14_0():
-    assert __version__ == "0.14.0"
+def test_release_identity_is_0_14_1():
+    assert __version__ == "0.14.1"

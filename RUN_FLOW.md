@@ -1,25 +1,32 @@
 # CodeDoc run lifecycle
 
-This document describes the active phase ordering for ordinary real runs and
-the separate provider-free large-file planning preview. Local scanning,
-parsing, graph construction, output cleaning, and serialization are
-deterministic; provider output is bounded enrichment.
+This document describes the active phase ordering for ordinary and large-file
+runs. Local scanning, parsing, graph construction, split planning, output
+cleaning, and serialization are deterministic; provider output is bounded
+enrichment.
 
 ## Availability boundary
 
 The default `large_file_strategy: truncate` supports real `single` and `triple`
-runs. `large_file_strategy: split` is accepted only when `dry_run: true` and
-`analysis_mode: single`.
+runs. `large_file_strategy: split` supports provider-free dry-run planning and
+fresh paid execution with `analysis_mode: single`.
 
-A real split request fails during configuration validation before scanning,
+`triple + split` fails during configuration validation before scanning,
 recovery inspection, output-directory creation, prompt-customization review,
-provider construction, or provider calls. `triple + split` fails at the same
-boundary. Neither request silently falls back to truncate.
+provider construction, or provider calls. It never silently falls back to
+truncate.
 
-A valid split dry-run may scan and construct a complete local division,
-reduction topology, capacity result, and initial-call estimate. It never accepts
-or reuses split completed state or partial recovery, never writes output or a
-checkpoint, and never contacts a provider.
+In fresh split mode, a valid oversized split file always executes its full leaf,
+reduction, and final-synthesis tree fresh. CodeDoc does not reuse same-path or
+identical-content completed split records, and it neither reads nor writes split
+node checkpoints. A detected in-progress split recovery file is preserved and
+blocks the fresh run with explicit move-aside guidance. Under-threshold files
+continue through ordinary whole-file execution and ordinary reuse.
+
+Accepted split-node results may live in process-local memory across retry and
+rate-limit ladder attempts so only the failed logical call is repeated. This
+ephemeral state is never serialized, never authorizes another run, and vanishes
+on interruption or process exit.
 
 ## Persistent-file allowlist
 
@@ -27,7 +34,7 @@ CodeDoc automatically reads or writes only:
 
 1. `<project_root>/codedoc.config.json` for optional configuration and inline
    instructions;
-2. `<output_dir>/crash_recovery.json` while an ordinary real run is in
+2. `<output_dir>/crash_recovery.json` while a real run is in
    progress; and
 3. the exact selected CodeDoc-owned JSON and/or Markdown final target, plus its
    deterministic opposite-format counterpart only when the selected target is
@@ -37,10 +44,10 @@ There is no alternate-config, `.env`, external-profile, directory-wide output,
 database, issue-log, or `.gitignore` discovery. A named output uses only its
 configured counterpart; CodeDoc does not scan unrelated siblings.
 
-## Provider-free split planning
+## Split planning and fresh execution
 
-When `large_file_strategy` resolves to `split` in a valid dry-run, CodeDoc reads
-one canonical decoded snapshot per selected source file. A file at or below
+When `large_file_strategy` resolves to `split`, CodeDoc reads one canonical
+decoded snapshot per selected source file. A file at or below
 `max_content_chars` remains one planned whole-file call. An oversized file is
 divided at deterministic syntax boundaries when available, otherwise at
 complete lexical line boundaries. An individually oversized semantic unit or
@@ -83,81 +90,83 @@ fixed order:
 8. `final-synthesis-envelope-cap`.
 
 A blocked file contributes no provider call. Dry-run reports each blocked path
-and reason and exits without mutation. A genuine planning invariant failure is
-not converted into a capacity result; it aborts planning while prior output
-remains untouched.
+and reason and exits without mutation; a real run stops before provider creation
+or persistent mutation. A genuine planning invariant failure is not converted
+into a capacity result; it aborts planning while prior output remains untouched.
 
 The split dry-run manifest reports ordinary-file, leaf,
 unit-consolidation/general-reduction, and final-synthesis call categories. It
 also reports a deterministic worst-case final-input estimate that reserves the
 complete 3,000-character canonical ledger-synopsis allowance rather than using
 one concrete trimmed ledger as a proxy. It is a character-based estimate rather
-than a tokenizer-exact prediction. These are planning estimates only: split
-execution, completed split output, reuse, checkpointing, and recovery are
-unavailable.
+than a tokenizer-exact prediction. Dry-run stops after this provider-free plan;
+a real run executes the same authorized topology. Completed split reuse and all
+split node checkpoint/recovery behavior remain unavailable.
 
-## Ordered phases for an ordinary real run
+## Ordered phases for a real run
 
-1. **Load configuration.** Read only the exact `codedoc.config.json`, merge
-   supported environment and in-memory overrides, normalize strict values, and
-   reject unavailable strategy/mode combinations.
+1. **Load configuration and instructions.** Read only the exact
+   `codedoc.config.json`, merge supported environment and in-memory overrides,
+   normalize strict values, reject unavailable strategy/mode combinations, and
+   resolve/classify the effective prompt profile. Instruction resolution occurs
+   before entry recovery, ownership inspection, stable-output reads, or source
+   scanning.
 
-2. **Read-only output preflight.** Resolve exact targets and verify ownership of
-   every existing selected artifact. If a selected format is absent, inspect
-   only its exact opposite-format counterpart. Foreign, malformed, conflicting,
-   or unsupported ownership blocks before provider use or mutation.
+2. **Resolve exact artifacts and inspect ownership.** Resolve entry information
+   from configuration or the exact selected documentation, validate that JSON,
+   Markdown, and recovery targets do not collide, then inspect ownership of the
+   selected targets. If a selected format is absent, read only its exact
+   opposite-format counterpart. Foreign, malformed, conflicting, or unsupported
+   ownership blocks before provider use or mutation.
 
-3. **Instruction resolution.** Validate `prompt_profiles`, resolve the effective
-   single/triple shape for each extension, and build deterministic projection
-   when a single-only customization is selected in triple mode.
-
-4. **Scan and select.** Scan supported source, construct the dependency graph,
+3. **Scan and select.** Scan supported source, construct the dependency graph,
    determine entry reachability and documentation scope, and freeze each
    provider-bound file from one source snapshot. Content, byte hash, effective
    language, and derived imports describe that same snapshot. A detected
    concurrent source change causes one complete source-dependent rebuild; a
    second change fails before accounting or provider construction.
 
-5. **Recovery inspection.** Inspect only the exact
-   `<output_dir>/crash_recovery.json`. Compatible ordinary completed records may
-   overlay stable output. Foreign, completed, unsupported, malformed, or
-   run-identity-mismatched recovery blocks without mutation. Restore the prior
-   configuration to resume, or move the recovery file aside to start fresh;
-   deletion explicitly discards that state.
+4. **Inspect recovery and build the final read-only plan.** Inspect only the
+   exact `<output_dir>/crash_recovery.json`. Compatible ordinary completed
+   records may overlay stable output. Foreign, completed, unsupported,
+   malformed, or run-identity-mismatched recovery blocks without mutation. A
+   fresh split run also preserves and rejects any split-node partial
+   state. Planning applies ordinary reuse, rejects insufficient source locally,
+   divides oversized split files, and blocks any capacity failure before calls.
 
-6. **Final read-only plan and caps.** Apply same-path and identical-content reuse
-   only when the current hash, effective language, analysis identity, and prompt
-   profile agree. Reject empty or whitespace-only source locally. Build the
-   canonical review and documentation call manifest. Enforce `max_files` and
-   `max_planned_calls` before usage accounting, confirmation, writer
-   initialization, or provider construction.
+5. **Build the canonical manifest and enforce caps.** Derive review scopes only
+   from files with unpaid work, then build one review/documentation call
+   manifest. Enforce `max_files` and `max_planned_calls` before usage accounting,
+   confirmation, writer initialization, or provider construction.
 
-7. **Prompt-customization review.** If active non-default instructions will
+6. **Prompt-customization review.** If active non-default instructions will
    reach unpaid provider work, construct the provider and run the mandatory
-   semantic review. A later output-accessibility failure must state that this
-   review may already have been billed; it must not claim the run was
-   provider-free.
+   semantic review. A later output-accessibility failure states that this review
+   may already have been billed; it does not claim the run was provider-free.
 
-8. **Mutation preflight.** Create and probe the output directory through the
+7. **Mutation preflight.** Create and probe the output directory through the
    classified create/write/fsync/atomic-rename/delete boundary. Permission and
    space failures become stable output errors rather than raw filesystem
    exceptions.
 
-9. **Execution and recovery.** Initialize the one recovery file only when
-   ordinary provider work remains. Process dependencies before dependents where
-   possible. Single mode makes one combined call per ordinary file; triple mode
-   makes its three bounded agent calls. Response cleaning, optional correction,
-   retry limits, terminal-provider handling, and usage accounting share the
-   canonical call boundary. Completed ordinary records are checkpointed
-   atomically.
+8. **Execution and recovery.** Initialize the one recovery file only when
+   provider work remains, before documentation-provider construction. Process
+   dependencies before dependents where possible. Ordinary single mode makes one
+   combined call per file; triple mode makes three bounded calls. An oversized
+   split file runs its planned leaf/reduction/final tree without persistent node
+   checkpoint reads or writes. Accepted nodes remain in run-local memory across
+   retries so earlier paid calls are not replayed. Only its completed file-level result reaches the ordinary
+   writer. Response cleaning, optional correction, retry limits,
+   terminal-provider handling, cancellation, and usage accounting share the
+   canonical call boundary.
 
-10. **Finalization.** Project every completed record through the public schema
-    before deriving JSON, visible Markdown, embedded views, or lightweight
-    metadata. Render selected payloads before replacement. Each artifact is
-    replaced atomically; `both` mode is per-artifact atomic, not a cross-file
-    transaction. Remove recovery only after every selected write succeeds.
+9. **Finalization.** Project every completed record through the public schema
+   before deriving JSON, visible Markdown, embedded views, or lightweight
+   metadata. Render selected payloads before replacement. Each artifact is
+   replaced atomically; `both` mode is per-artifact atomic, not a cross-file
+   transaction. Remove recovery only after every selected write succeeds.
 
-11. **Diagnostics.** Keep bounded issues in memory and terminal output.
+10. **Diagnostics.** Keep bounded issues in memory and terminal output.
     Permitted hard-error summaries may appear in final output. CodeDoc does not
     create a persistent `error.log`.
 
@@ -176,26 +185,32 @@ targets, entry, documentation scope, analysis mode/revision, and the effective
 large-file strategy. Every recovered record is still revalidated by the
 per-file predicate.
 
-The split preview constructs private planning identities for deterministic
-topology and tests, but it does not accept or publish a completed split identity
-and does not inspect split partial recovery.
+An oversized split result additionally publishes private topology and
+`fresh-only-v1` contract identities. These prevent it from being mistaken for
+an ordinary record, but fresh split mode deliberately schedules it again even when every
+identity matches. Dry-run does not inspect split partial recovery; a real fresh
+split run recognizes, preserves, and rejects split-node partial state.
 
 ## Call authorization and accounting
 
-Dry-run and ordinary execution derive counts from one canonical call manifest.
+Dry-run and real execution derive counts from one canonical call manifest.
 `max_planned_calls` is checked before provider construction and covers initial
 logical calls, including mandatory prompt-review calls. Retries and corrections
 are additional attempts attached to an existing logical call.
 
-An ordinary real run reconciles planned logical calls with attempted calls.
+Every real run reconciles planned logical calls with attempted calls.
 `planned_calls_not_attempted` may be non-zero after a bounded stop;
 `additional_attempts` records retries and corrections. A clean completion,
 allowed partial completion, and terminal abort use the same accounting model.
 
 ## Failure invariants
 
-- Real split and `triple + split` fail before every side effect.
+- `triple + split` fails before every side effect.
 - Split dry-run performs no provider call and no persistent mutation.
+- Every oversized split file executes fresh; completed split records,
+  identical-content split records, and node checkpoints authorize no reuse.
+- Existing split-node partial recovery is preserved and rejected before any
+  provider call or persistent mutation.
 - Stable output is not mutated during analysis.
 - Recovery is initialized only after read-only gates, caps, and any semantic
   review.

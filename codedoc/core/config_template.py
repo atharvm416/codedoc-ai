@@ -122,13 +122,14 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     (
         "large_file_strategy",
         "Large-file handling. 'truncate' (default) keeps the byte-compatible "
-        "legacy head/tail path. 'split' is a provider-free planning preview "
-        "accepted only with dry_run true and analysis_mode 'single'. It "
+        "legacy head/tail path. 'split' supports provider-free dry-run planning "
+        "and fresh paid execution with analysis_mode 'single'. It "
         "divides oversized source at deterministic semantic or lexical "
         "boundaries, proves complete coverage, builds the reduction topology, "
-        "and reports call and capacity estimates without provider calls, "
-        "output, reuse, checkpoints, or recovery. Real split execution and "
-        "triple plus split are rejected before scanning or other side effects.",
+        "and reports call and capacity estimates before provider calls. In "
+        "fresh mode every oversized split file executes again; completed split "
+        "reuse, node checkpoints, and partial split recovery are unavailable. "
+        "Triple plus split is rejected before scanning or other side effects.",
     ),
     ("dry_run", "Plan only: no writes and no provider calls."),
     ("max_files", "Safety cap on files that may make LLM calls (0 = unlimited)."),
@@ -216,8 +217,8 @@ def init_config(project_root: Path | str, force: bool = False) -> InitResult:
                 # comments explaining each key. Point config-first users at the
                 # per-key guidance instead of leaving them with bare values.
                 "Every key is documented in the README configuration section; "
-                "'codedoc --help' additionally describes the provider-free "
-                "large-file split planning preview and its capacity reasons.\n"
+                "'codedoc --help' additionally describes large-file split "
+                "planning, fresh execution, and capacity reasons.\n"
                 + _CREDENTIAL_NOTE
             ),
         )

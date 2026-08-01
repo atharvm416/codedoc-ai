@@ -41,6 +41,7 @@ from codedoc.core.execution_model import (
 )
 from codedoc.core.file_division import FactLedger, refine_narrative_inputs
 from codedoc.core.record_meta import (
+    FRESH_SPLIT_REUSE_CONTRACT,
     expected_analysis_identity,
     expected_max_context_revision,
 )
@@ -133,6 +134,7 @@ def assemble_final_result(
     if bundle.digest != NO_PROMPT_PROFILE_DIGEST:
         result["_prompt_profile_digest"] = bundle.digest
     result["_large_file_identity"] = large_file_identity
+    result["_split_reuse_contract"] = FRESH_SPLIT_REUSE_CONTRACT
     return result
 
 

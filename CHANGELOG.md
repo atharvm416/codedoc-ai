@@ -1,5 +1,46 @@
 # Changelog
 
+## 0.14.1 - 2026-08-01
+
+### Fresh large-file split execution
+
+- Enabled real `large_file_strategy: split` execution for `analysis_mode:
+  single`. The existing provider-free dry-run uses the same deterministic
+  complete-source division, capacity gates, reduction topology, and canonical
+  call manifest. `triple + split` remains rejected before scanning or any other
+  side effect, and `truncate` remains the default.
+- Made the release boundary explicit and non-configurable: every oversized split
+  file performs fresh paid leaf, reduction, and final-synthesis work on every
+  run. Same-path and identical-content completed split reuse, node checkpoints,
+  and partial split recovery remain unavailable. Under-threshold files continue
+  through the ordinary whole-file reuse path.
+- Added private `fresh-only-v1` split-result identity. Existing split-node
+  recovery is recognized, preserved byte-for-byte, and rejected before provider
+  use or persistent mutation instead of being silently overwritten.
+- Kept split-node persistence outside the fresh executor. A completed split file
+  reaches only the ordinary file-level crash writer and stable-output pipeline;
+  no leaf, reducer, or synthesis checkpoint is read or written.
+- Retained accepted split nodes only in process-local memory across file retries
+  and rate-limit ladder passes. A retry repeats the failed logical call without
+  replaying earlier successful paid nodes; this ephemeral state is never
+  serialized and cannot survive interruption or authorize a later run.
+- Propagated the shared cancellation signal through sequential split retries, so
+  an observed stop prevents every later initial, retry, correction, reduction,
+  or synthesis call.
+- Allocated signed facts before unsigned facts against unconsumed authoritative
+  parser symbol/unit IDs. Mixed forms consolidate for one declaration while
+  out-of-order same-name overload reports retain every distinct declaration.
+- Added offline contract coverage against the installed OpenAI, Anthropic, and
+  Gemini SDK request surfaces without making network calls.
+
+### Active split identities
+
+- The active release identities are `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v5`, `leaf-capsule-v4`, `fact-ledger-v5`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v1`,
+  `file-synthesis-v3`, `division-execution-v5`, `large-file-v2`, and
+  `file-doc-v3`.
+
 ## 0.14.0 - 2026-07-30
 
 ### Large-file planning preview

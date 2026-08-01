@@ -9,8 +9,6 @@ from tests.support.pipeline_usage import FakeProvider
 from tests.support.pipeline_usage import write_py
 from tests.support.pipeline_usage import make_graph
 
-pytestmark = pytest.mark.future_split_execution
-
 def patch_provider(monkeypatch) -> None:
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda config: FakeProvider())
 

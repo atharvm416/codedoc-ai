@@ -61,8 +61,6 @@ from tests.support.providers import SmartFake
 from tests.support.profiles import INLINE
 from tests.support.structure_extra import requires_structure_pack
 
-pytestmark = pytest.mark.future_split_execution
-
 
 def _large_python_source(lines: int = 220) -> str:
     # Named function declarations, not bare top-level statements: under
@@ -721,6 +719,7 @@ def test_mixed_ordinary_and_divided_files_resume_after_rate_limit_step_down(
     assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
+@pytest.mark.future_split_recovery
 def test_terminal_split_failure_cancels_pending_file_tasks_and_keeps_checkpoint(
     tmp_path,
 ) -> None:
@@ -834,6 +833,7 @@ def test_terminal_split_failure_cancels_pending_file_tasks_and_keeps_checkpoint(
     assert next(iter(persisted_nodes.values()))["node_type"] == "leaf"
 
 
+@pytest.mark.future_split_recovery
 def test_fully_synthesized_split_recovery_finalizes_without_a_provider(
     tmp_path, monkeypatch
 ) -> None:
@@ -929,6 +929,7 @@ def test_fully_synthesized_split_recovery_finalizes_without_a_provider(
     assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
+@pytest.mark.future_split_recovery
 def test_truncate_run_blocks_on_split_recovery_without_erasing_checkpoints(
     tmp_path, monkeypatch
 ) -> None:
@@ -1480,6 +1481,7 @@ def test_division_internal_defect_leaves_prior_state_untouched_and_unblocked(
     assert not recovery_path.exists()
 
 
+@pytest.mark.future_split_recovery
 def test_rejected_recovery_partial_does_not_force_retention(
     tmp_path, monkeypatch
 ) -> None:

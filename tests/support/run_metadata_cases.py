@@ -24,6 +24,7 @@ def _records() -> list[dict]:
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_prompt_profile_digest": "no-profile",
             "_large_file_identity": "large-file-v1:test",
+            "_split_reuse_contract": "fresh-only-v1",
             "documentation": {
                 "description": "Entry point.",
                 "dependencies_analysis": {"external": ["requests"]},
@@ -65,6 +66,7 @@ def _split_record() -> dict:
         "file_path": "large.py",
         "language": "python",
         "_large_file_identity": "large-file-v2:test",
+        "_split_reuse_contract": "fresh-only-v1",
         "documentation": {
             "description": "Large module.",
             "functions": [{"name": "alpha"}],

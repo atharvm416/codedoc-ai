@@ -97,6 +97,7 @@ from codedoc.core.prompt_profiles import (
 )
 from codedoc.core.queue import ProcessingQueue, STATUS_SKIPPED_INSUFFICIENT_SOURCE
 from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.release_policy import current_split_release_policy
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
     RecoveryState,
@@ -180,6 +181,7 @@ def run_pipeline(
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
     dry_run = bool(config.get("dry_run", False))
+    split_release = current_split_release_policy()
     split_planning_preview = (
         dry_run and config.get("large_file_strategy", "truncate") == "split"
     )
@@ -455,7 +457,7 @@ def run_pipeline(
     # large_file_strategy 'split' (loader._validate rejects it first), but the
     # check stays visible here as defense-in-depth rather than relying solely
     # on that earlier gate.
-    include_partial_recovery = (
+    effective_real_split = (
         large_file_strategy == "split"
         and analysis_mode == "single"
         and not dry_run
@@ -469,19 +471,46 @@ def run_pipeline(
         recovery_state = load_recovery_records_if_compatible(
             recovery_path,
             recovery_identity,
-            include_partial_files=include_partial_recovery,
+            # A fresh-only release still parses current partial state so it can
+            # preserve and reject it explicitly instead of silently dropping
+            # paid checkpoints on the first writer flush.
+            include_partial_files=effective_real_split,
         )
     except ConfigError:
         if not dry_run:
             raise
     recovery_records = recovery_state.records_by_path()
+    if (
+        effective_real_split
+        and recovery_state.partial_files
+        and not split_release.partial_recovery
+    ):
+        partial_paths = ", ".join(
+            repr(state.rel_path) for state in recovery_state.partial_files
+        )
+        raise ConfigError(
+            f"'{recovery_path.name}' contains split node checkpoints for "
+            f"{partial_paths}. This CodeDoc build executes split files fresh and "
+            "does not consume or overwrite node checkpoints. Resume with the "
+            "exact build that created them, or move the recovery file aside "
+            "before starting fresh. The stable completed output is untouched."
+        )
     if split_planning_preview:
-        recovery_records = {}
+        # A fresh split preview must ignore completed split records, but
+        # ordinary completed recovery remains reusable in the identical real
+        # run. Dropping every record here overstates paid work and makes dry
+        # and real manifests disagree.
+        recovery_records = {
+            rel_path: record
+            for rel_path, record in recovery_records.items()
+            if not record.get("_large_file_identity")
+            and not record.get("_split_reuse_contract")
+        }
     # Every structurally parseable partial. Planning narrows this to the subset
     # that is actually reusable; the writer is seeded from that narrower set.
     recovered_partials_by_path = (
         {}
-        if split_planning_preview
+        if split_planning_preview or not split_release.partial_recovery
         else {state.rel_path: state for state in recovery_state.partial_files}
     )
     if recovery_records:
@@ -813,7 +842,10 @@ def run_pipeline(
             source_doc.get("path", "unknown"),
         )
     reused = len(plan.identical_reuse_rels)
-    resumed = len(set(recovery_records) | set(materials.tree_states))
+    resumed = len(
+        (set(recovery_records) - set(plan.fresh_split_rels))
+        | set(materials.tree_states)
+    )
 
     agent_rels = set(plan.agent_rels)
     locally_restored = 0
@@ -1000,6 +1032,9 @@ def run_pipeline(
         division_plans=materials.division_plans,
         reduction_trees=materials.reduction_trees,
         provider_identity=materials.provider_identity,
+        split_execution_mode=(
+            "recovery" if split_release.partial_recovery else "fresh"
+        ),
     )
     try:
         execute_agent_files(context)
@@ -1358,7 +1393,7 @@ def _build_dry_run_stats(
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": len(
-            set(recovery_resumed_paths)
+            (set(recovery_resumed_paths) - set(plan.fresh_split_rels))
             | set(materials.tree_states if materials is not None else ())
         ),
         "forced": len(plan.forced_rels),

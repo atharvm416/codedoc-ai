@@ -11,8 +11,6 @@ from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ParseError
 from tests.support.execution_requests import make_execution_request
 
-pytestmark = pytest.mark.future_split_execution
-
 @pytest.mark.parametrize("content", ["", " \n\t"])
 def test_process_one_file_skips_before_orchestrator(
     tmp_path, monkeypatch, content

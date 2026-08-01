@@ -17,6 +17,7 @@ from codedoc.utils.json_utils import (
     loads_no_duplicate_keys,
 )
 from codedoc.utils.logger import get_logger
+from codedoc.core.release_policy import current_split_release_policy
 
 logger = get_logger(__name__)
 
@@ -290,7 +291,6 @@ VALID_ANALYSIS_MODES = ("single", "triple")
 
 # Allowed values for oversized readable source handling.
 VALID_LARGE_FILE_STRATEGIES = ("truncate", "split")
-_SPLIT_EXECUTION_RELEASED = False
 
 # Config keys whose environment values are parsed as semicolon-separated lists.
 _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
@@ -893,12 +893,13 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
     if (
         config.get("large_file_strategy", "truncate") == "split"
         and not config["dry_run"]
-        and not _SPLIT_EXECUTION_RELEASED
+        and not current_split_release_policy().execution
     ):
         raise ConfigError(
-            "large_file_strategy 'split' is a provider-free planning preview. "
-            "Set dry_run=true or pass --dry-run to inspect the split plan; use "
-            "large_file_strategy 'truncate' for a real run."
+            "Real large_file_strategy 'split' execution is disabled by this "
+            "build's release policy. Set dry_run=true or pass --dry-run to "
+            "inspect the split plan; use large_file_strategy 'truncate' for a "
+            "real run."
         )
 
     if (

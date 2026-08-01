@@ -41,7 +41,7 @@ from tests.support.execution_requests import make_execution_request
 from tests.support.providers import SmartFake
 from tests.support.run_metadata_cases import _view as run_metadata_view
 
-pytestmark = pytest.mark.future_split_execution
+pytestmark = pytest.mark.future_split_recovery
 
 _CONTENT_HASH = "0" * 64
 _PLAN_DIGEST = "division-plan:" + "1" * 64

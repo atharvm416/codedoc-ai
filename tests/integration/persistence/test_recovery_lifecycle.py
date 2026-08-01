@@ -15,13 +15,14 @@ from tests.support.recovery_rate_limit_runs import _patch_provider
 from tests.support.recovery_rate_limit_runs import _run as recovery_rate_limit_run
 from codedoc.agents.response_cleaning import clean_combined_response
 from codedoc.core.document import read_codedoc_document
-from codedoc.core.safe_writer import SafeWriter
+from codedoc.core.safe_writer import SafeWriter, _CRASH_SAFETY_BANNER
 from codedoc.utils.errors import ConfigError
 from tests.support.versionless_documents import _assert_versionless
 from codedoc.core.document import records_by_path
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
     RecoveryState,
+    _recovery_remedy,
     build_recovery_identity,
 )
 from codedoc.pipeline import run_pipeline
@@ -38,6 +39,21 @@ from codedoc.core.resume import (
     load_recovery_records_if_compatible,
 )
 from tests.support.execution_requests import make_execution_request
+
+
+def test_crash_recovery_banner_explains_fresh_split_rerun_boundary():
+    assert "compatible completed ordinary files can resume" in _CRASH_SAFETY_BANNER
+    assert "completed fresh-split files are deliberately" in _CRASH_SAFETY_BANNER
+    assert "re-run the same command to resume" not in _CRASH_SAFETY_BANNER
+
+
+def test_generic_recovery_remedy_explains_fresh_split_rerun_boundary(tmp_path):
+    message = _recovery_remedy(tmp_path / RECOVERY_FILENAME)
+
+    assert "completed ordinary files can then resume" in message
+    assert "completed fresh-split files are deliberately re-documented" in message
+    assert "resume that work" not in message
+
 
 class _RateLimitOrch:
     class _LLM:

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.14.0"
+version = "0.14.1"
 description = "Generate structured, incremental documentation for any codebase using OpenAI, Anthropic, or Gemini"
 readme = "README.md"
 license = "MIT"
@@ -87,7 +87,7 @@ testpaths = ["tests"]
 tmp_path_retention_policy = "failed"
 tmp_path_retention_count = 3
 markers = [
-    "future_split_execution: validates unreleased split execution internals behind the public release gate",
+    "future_split_recovery: validates post-0.14.1 split reuse and recovery behind the internal release policy",
     "platform: filesystem or OS-sensitive behavior; may skip on restricted filesystems",
 ]
 # tests/conftest.py redirects the temp ROOT into the repo (.pyt_tmp) so a

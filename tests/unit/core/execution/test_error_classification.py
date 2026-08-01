@@ -12,7 +12,11 @@ from codedoc.core.execution import (
 )
 from codedoc.utils.errors import AgentError, LLMError, UnrecoverableProviderError
 import codedoc.core.execution as execution
-from codedoc.core.error_classifier import _find_insufficient_source_error
+from codedoc.core.error_classifier import (
+    _build_rate_limit_exhausted_abort,
+    _find_insufficient_source_error,
+    _raise_rate_limit_exhausted,
+)
 from codedoc.utils.errors import InsufficientSourceError
 
 @pytest.mark.parametrize(
@@ -222,6 +226,31 @@ def test_terminal_abort_names_only_the_matched_global_cause(message, expected, a
     abort = _build_terminal_abort(LLMError("openai", message), "openai", "global")
     assert expected in abort.reason
     assert absent not in abort.reason
+    assert "resumes compatible completed ordinary files" in abort.reason
+    assert "completed fresh-split files are deliberately" in abort.reason
+    assert "resumes the unfinished files" not in abort.reason
+
+
+def test_rate_limit_exhausted_abort_explains_fresh_split_rerun_boundary():
+    abort = _build_rate_limit_exhausted_abort("openai")
+
+    assert "resumes compatible completed ordinary files" in abort.reason
+    assert "completed fresh-split files are deliberately" in abort.reason
+    assert "resumes the unfinished files" not in abort.reason
+
+
+def test_rate_limit_exhausted_warning_explains_fresh_split_rerun_boundary(capsys):
+    class Recorder:
+        def record(self, *_args, **_kwargs):
+            return None
+
+    with pytest.raises(UnrecoverableProviderError):
+        _raise_rate_limit_exhausted("openai", Recorder())
+
+    warning = capsys.readouterr().out
+    assert "resumes compatible completed ordinary files" in warning
+    assert "completed fresh-split files are deliberately" in warning
+    assert "re-run the same command to resume" not in warning
 
 def test_provider_construction_errors_are_classified_as_setup_errors(monkeypatch):
     from codedoc.llm.factory import create_provider

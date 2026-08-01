@@ -30,8 +30,6 @@ from codedoc.core.record_meta import (
     normalized_identity_value,
 )
 
-pytestmark = pytest.mark.future_split_execution
-
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
     import json
 
@@ -599,9 +597,7 @@ def test_v2_record_is_invalidated():
     assert ANALYSIS_REVISION != "file-doc-v2"
 
 def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
-    """One legitimately-reusable split record: its stored `_large_file_identity`
-    exactly matches the current division plan/reduction tree, computed the
-    same way planning computes it (see `_expected_identity_for`)."""
+    """One reusable fresh-origin split record under the future policy fixture."""
     src = tmp_path / "main.py"
     source = "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
     src.write_text(source, encoding="utf-8", newline="")
@@ -637,6 +633,7 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
         "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
         "_large_file_identity": identity,
+        "_split_reuse_contract": "fresh-only-v1",
     }
     config = {
         "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
@@ -648,12 +645,12 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
     )
     return plan
 
+@pytest.mark.future_split_recovery
 def test_split_file_with_matching_identity_is_reused(tmp_path):
     assert "main.py" in _split_plan(tmp_path).unchanged_rels
 
+@pytest.mark.future_split_recovery
 def test_split_file_identity_is_invariant_to_truncation_head_ratio(tmp_path):
-    """Effective split reuse is never invalidated by a ratio-only change:
-    `_large_file_identity` does not depend on `truncation_head_ratio` at all,
-    unlike the ordinary truncate path's `_max_context_revision`."""
+    """A truncate-only head-ratio change does not invalidate future split reuse."""
     assert "main.py" in _split_plan(tmp_path, head_ratio=0.70).unchanged_rels
     assert "main.py" in _split_plan(tmp_path, head_ratio=0.85).unchanged_rels

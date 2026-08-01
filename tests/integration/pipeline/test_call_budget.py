@@ -12,8 +12,6 @@ from codedoc.utils.errors import ConfigError
 from tests.support.pipeline_scenarios import no_llm
 from tests.support.pipeline_usage import write_py
 
-pytestmark = pytest.mark.future_split_execution
-
 
 def _write_files(root, count):
     for i in range(count):

@@ -1658,6 +1658,24 @@ def _semantic_key(
     )
 
 
+def _fact_occurrence_key(
+    item: Mapping[str, object], kind: str, language: str
+) -> str:
+    """Return a signature-independent authoritative allocation counter key."""
+
+    name = item.get("name")
+    return canonical_json(
+        {
+            "kind": kind,
+            "name": (
+                _normalize_symbol_key(name, language)
+                if isinstance(name, str)
+                else ""
+            ),
+        }
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class FactLedger:
     """Lossless internal structured fact ledger for one file (D7/section 8)."""
@@ -1686,6 +1704,15 @@ def _merge_symbol_descriptions(existing: dict, candidate: Mapping[str, object]) 
     candidate_desc = candidate.get("description", "") if isinstance(candidate, Mapping) else ""
     if not existing_desc and candidate_desc:
         result["description"] = candidate_desc
+    existing_signature = existing.get("signature", "")
+    candidate_signature = (
+        candidate.get("signature", "") if isinstance(candidate, Mapping) else ""
+    )
+    if not existing_signature and candidate_signature:
+        # A continuation may omit the declaration signature. When its signed
+        # report is allocated to the same authoritative scope, retain that
+        # bounded matching metadata instead of letting response order erase it.
+        result["signature"] = candidate_signature
     origins: list[Mapping[str, object]] = []
     seen_origins: set[str] = set()
     for source in (existing, candidate):
@@ -1835,6 +1862,8 @@ def _fact_scope(
     chunk: ChunkPlan,
     occurrence: int,
     symbols: Sequence[SymbolFact],
+    reserved_scope_ids: set[str] | None = None,
+    fallback_unit_signatures: dict[str, str] | None = None,
 ) -> tuple[
     str,
     tuple[SemanticUnitIdentity, ...],
@@ -1847,10 +1876,20 @@ def _fact_scope(
         chunk,
         symbols,
     )
-    if symbol_candidates:
-        symbol = symbol_candidates[
-            min(occurrence, len(symbol_candidates) - 1)
-        ]
+    reserved = reserved_scope_ids if reserved_scope_ids is not None else set()
+    available_symbols = tuple(
+        symbol for symbol in symbol_candidates if symbol.symbol_id not in reserved
+    )
+    if available_symbols or len(symbol_candidates) == 1:
+        # A sole already-reserved exact match is a duplicate report for the
+        # same declaration and intentionally consolidates. Otherwise consume
+        # the first still-unassigned parser symbol.
+        symbol = (
+            available_symbols[0]
+            if available_symbols
+            else symbol_candidates[0]
+        )
+        reserved.add(symbol.symbol_id)
         owner_units = tuple(
             unit
             for unit in chunk.semantic_units
@@ -1861,13 +1900,55 @@ def _fact_scope(
             owner_units or chunk.semantic_units,
             symbol,
         )
+    if symbol_candidates:
+        # Parser symbols are authoritative.  When multiple matching
+        # declarations have all been consumed, an additional ambiguous model
+        # fact must not fall through to their still-unreserved semantic-unit
+        # IDs and acquire false declaration ownership.
+        return (
+            _domain_id(
+                "fact-scope",
+                {
+                    "revision": LEDGER_SCHEMA_REVISION,
+                    "group_unit_id": chunk.unit_id,
+                    "fact_key": _semantic_key(item, kind, language),
+                    "occurrence": occurrence,
+                },
+            ),
+            chunk.semantic_units,
+            None,
+        )
     candidates = _matching_fact_units(item, kind, language, chunk)
-    if candidates:
-        unit = candidates[min(occurrence, len(candidates) - 1)]
+    available_units = tuple(
+        unit for unit in candidates if unit.unit_id not in reserved
+    )
+    if available_units or len(candidates) == 1:
+        unit = available_units[0] if available_units else candidates[0]
+        reserved.add(unit.unit_id)
         return unit.unit_id, (unit,), None
     if len(chunk.semantic_units) == 1:
         unit = chunk.semantic_units[0]
-        return unit.unit_id, (unit,), None
+        raw_signature = item.get("signature")
+        signature = (
+            _normalize_symbol_key(raw_signature, language)
+            if isinstance(raw_signature, str) and raw_signature.strip()
+            else ""
+        )
+        assigned_signatures = (
+            fallback_unit_signatures
+            if fallback_unit_signatures is not None
+            else {}
+        )
+        assigned_signature = assigned_signatures.get(unit.unit_id)
+        if unit.unit_id not in reserved:
+            reserved.add(unit.unit_id)
+            assigned_signatures[unit.unit_id] = signature
+            return unit.unit_id, (unit,), None
+        if not signature or signature == assigned_signature:
+            # An unsigned continuation or exact duplicate remains attached to
+            # the one authoritative unit. A second explicit, different
+            # signature cannot safely inherit that declaration identity.
+            return unit.unit_id, (unit,), None
     return (
         _domain_id(
             "fact-scope",
@@ -1931,9 +2012,10 @@ def build_fact_ledger(
 ) -> FactLedger:
     """Deterministically merge cleaned leaf capsules into one whole-file ledger.
 
-    Functions/classes are deduplicated by normalized name, kind, signature,
-    and locally authoritative semantic-unit scope when aligned chunks are
-    supplied. Order is deterministic first-source order.
+    Without aligned chunks, functions/classes are deduplicated by normalized
+    name, kind, and reported signature. With aligned chunks, parser-owned symbol
+    or semantic-unit scope is authoritative and reported signatures are only
+    matching hints. Order is deterministic first-source order.
     """
     authoritative_chunks = tuple(chunks) if chunks is not None else None
     authoritative_symbols = tuple(symbols) if symbols is not None else ()
@@ -1973,40 +2055,114 @@ def build_fact_ledger(
                 if symbol.atom_id in atom_ids
             )
         for kind, bucket in (("functions", functions), ("classes", classes)):
+            raw_items = tuple(capsule.get(kind, []) or [])
+            valid_items = tuple(
+                (index, item)
+                for index, item in enumerate(raw_items)
+                if isinstance(item, Mapping)
+                and isinstance(item.get("name"), str)
+            )
+            # Allocate explicit signatures before unsigned facts regardless of
+            # model response order. Signed facts reserve their authoritative
+            # parser match; unsigned facts then consume the first unassigned
+            # same-name symbol/unit. Canonical item ordering makes ambiguous
+            # unsigned allocation independent of response list order.
+            allocation_order = sorted(
+                valid_items,
+                key=lambda pair: (
+                    0
+                    if isinstance(pair[1].get("signature"), str)
+                    and bool(str(pair[1].get("signature", "")).strip())
+                    else 1,
+                    canonical_json(pair[1]),
+                ),
+            )
             occurrences: dict[str, int] = {}
-            for item in capsule.get(kind, []) or []:
-                if not isinstance(item, Mapping) or not isinstance(item.get("name"), str):
-                    continue
-                base_key = _semantic_key(item, kind, language)
+            reserved_scope_ids: set[str] = set()
+            fallback_unit_signatures: dict[str, str] = {}
+            allocated_scopes: dict[
+                int,
+                tuple[str, tuple[SemanticUnitIdentity, ...], SymbolFact | None],
+            ] = {}
+            for item_index, item in allocation_order:
+                # Signed and unsigned reports of the same declaration share
+                # one authoritative occurrence namespace.  Signature text is
+                # matching metadata only; it cannot choose a separate counter.
+                base_key = _fact_occurrence_key(item, kind, language)
                 occurrence = occurrences.get(base_key, 0)
                 occurrences[base_key] = occurrence + 1
-                scope_id = ""
-                local_origin: dict | None = None
                 if chunk is not None:
-                    scope_id, semantic_units, symbol = _fact_scope(
+                    allocated_scopes[item_index] = _fact_scope(
                         item,
                         kind,
                         language,
                         chunk,
                         occurrence,
                         chunk_symbols,
+                        reserved_scope_ids,
+                        fallback_unit_signatures,
                     )
+
+            output_items = valid_items
+            if chunk is not None:
+                def _allocated_source_key(
+                    pair: tuple[int, Mapping[str, object]],
+                ) -> tuple[int, str]:
+                    scope_id, semantic_units, symbol = allocated_scopes[pair[0]]
+                    if symbol is not None:
+                        start_byte = symbol.range.start_byte
+                    elif semantic_units:
+                        start_byte = min(
+                            unit.source_range.start_byte for unit in semantic_units
+                        )
+                    elif chunk.owning_ranges:
+                        start_byte = min(
+                            source_range.start_byte
+                            for source_range in chunk.owning_ranges
+                        )
+                    else:
+                        start_byte = chunk.source_range.start_byte
+                    return start_byte, canonical_json(
+                        {"scope_id": scope_id, "fact": pair[1]}
+                    )
+
+                output_items = tuple(sorted(valid_items, key=_allocated_source_key))
+
+            for item_index, item in output_items:
+                scope_id = ""
+                local_origin: dict | None = None
+                if chunk is not None:
+                    scope_id, semantic_units, symbol = allocated_scopes[item_index]
                     local_origin = _fact_origin(
                         chunk,
                         semantic_units,
                         symbol,
                     )
-                key = _semantic_key(
-                    item,
-                    kind,
-                    language,
-                    scope_id=scope_id,
-                )
+                if chunk is not None:
+                    # The parser/plan-owned scope is declaration identity.
+                    # This consolidates signed/unsigned continuation reports
+                    # while distinct overloads retain distinct symbol/unit IDs.
+                    key = canonical_json(
+                        {
+                            "kind": kind,
+                            "name": _normalize_symbol_key(
+                                str(item.get("name", "")), language
+                            ),
+                            "scope_id": scope_id,
+                        }
+                    )
+                else:
+                    key = _semantic_key(item, kind, language)
                 candidate = {
                     field: value
                     for field, value in item.items()
                     if field != "_provenance"
                 }
+                if chunk is not None and symbol is not None:
+                    if symbol.signature:
+                        candidate["signature"] = symbol.signature
+                    else:
+                        candidate.pop("signature", None)
                 if local_origin is not None:
                     candidate["_provenance"] = [local_origin]
                 if key in bucket:

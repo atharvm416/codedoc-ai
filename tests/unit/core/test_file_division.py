@@ -1254,6 +1254,76 @@ def test_ledger_uses_occurrence_scopes_for_ambiguous_lexical_facts() -> None:
     )
 
 
+def test_lexical_single_unit_keeps_distinct_same_name_signatures() -> None:
+    plan = build_division_plan(
+        rel_path="single-unit.unknown",
+        language="unknown",
+        content="one lexical source line with no structural symbols\n",
+        source_budget_chars=1000,
+    )
+    assert plan.structural_mode == "lexical"
+    assert len(plan.chunks) == 1
+    assert len(plan.chunks[0].semantic_units) == 1
+    assert plan.symbols == ()
+
+    facts = [
+        {"name": "run", "signature": "run(value)", "description": "one"},
+        {
+            "name": "run",
+            "signature": "run(value, other)",
+            "description": "two",
+        },
+    ]
+    ledger = build_fact_ledger(
+        [{"functions": facts}],
+        language="unknown",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+    reversed_ledger = build_fact_ledger(
+        [{"functions": list(reversed(facts))}],
+        language="unknown",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+
+    assert reversed_ledger == ledger
+    assert len(ledger.functions) == 2
+    assert {fact["signature"] for fact in ledger.functions} == {
+        "run(value)",
+        "run(value, other)",
+    }
+
+
+def test_lexical_single_unit_merges_signed_and_unsigned_continuations() -> None:
+    plan = build_division_plan(
+        rel_path="single-unit.unknown",
+        language="unknown",
+        content="one lexical source line with no structural symbols\n",
+        source_budget_chars=1000,
+    )
+    ledger = build_fact_ledger(
+        [
+            {
+                "functions": [
+                    {"name": "run", "description": "continuation"},
+                    {
+                        "name": "run",
+                        "signature": "run(value)",
+                        "description": "declaration",
+                    },
+                ]
+            }
+        ],
+        language="unknown",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+
+    assert len(ledger.functions) == 1
+    assert ledger.functions[0]["signature"] == "run(value)"
+
+
 @requires_structure_pack
 def test_symbol_scoped_ledger_deduplicates_single_unit_continuations() -> None:
     source = (
@@ -1294,6 +1364,160 @@ def test_symbol_scoped_ledger_deduplicates_single_unit_continuations() -> None:
     assert len(origins) == len(plan.chunks)
     assert {origin["symbol_id"] for origin in origins} == {
         plan.symbols[0].symbol_id
+    }
+
+
+@requires_structure_pack
+def test_symbol_scoped_ledger_merges_signed_and_unsigned_continuations() -> None:
+    source = (
+        "def run(value: int) -> int:\n"
+        f"    payload = {'1' * 500}\n"
+        "    return value\n"
+    )
+    plan = build_division_plan(
+        rel_path="continued.py",
+        language="python",
+        content=source,
+        source_budget_chars=100,
+    )
+    assert len(plan.chunks) > 1
+
+    capsules = []
+    for index, _chunk in enumerate(plan.chunks):
+        fact = {"name": "run", "description": f"part {index}"}
+        if index % 2 == 0:
+            fact["signature"] = "run(value: int) -> int"
+        capsules.append({"functions": [fact]})
+
+    ledger = build_fact_ledger(
+        capsules,
+        language="python",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+
+    assert len(ledger.functions) == 1
+    assert ledger.functions[0]["signature"] == plan.symbols[0].signature
+    assert len(ledger.functions[0]["_provenance"]) == len(plan.chunks)
+
+
+@requires_structure_pack
+def test_symbol_scoped_ledger_reserves_signed_overload_before_unsigned_fact() -> None:
+    source = (
+        "def run(value: int) -> int:\n"
+        "    return value\n\n"
+        "def run(value: int, other: int) -> int:\n"
+        "    return value + other\n"
+    )
+    plan = build_division_plan(
+        rel_path="overloads.py",
+        language="python",
+        content=source,
+        source_budget_chars=1000,
+    )
+    run_symbols = tuple(
+        symbol for symbol in plan.symbols if symbol.qualified_name.endswith("run")
+    )
+    assert len(run_symbols) == 2
+    assert len(plan.chunks) == 1
+
+    # The model reports the later overload first with a signature, then the
+    # earlier declaration without one. Allocation must not consume the later
+    # parser symbol twice merely because response order differs from source.
+    capsule = {
+        "functions": [
+            {
+                "name": "run",
+                "signature": run_symbols[1].signature,
+                "description": "two arguments",
+            },
+            {"name": "run", "description": "one argument"},
+        ]
+    }
+    ledger = build_fact_ledger(
+        [capsule],
+        language="python",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+    reversed_ledger = build_fact_ledger(
+        [{"functions": list(reversed(capsule["functions"]))}],
+        language="python",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+
+    assert len(ledger.functions) == 2
+    assert reversed_ledger == ledger
+    assert {fact["signature"] for fact in ledger.functions} == {
+        symbol.signature for symbol in run_symbols
+    }
+    assert {
+        fact["_provenance"][0]["symbol_id"] for fact in ledger.functions
+    } == {symbol.symbol_id for symbol in run_symbols}
+
+
+@requires_structure_pack
+def test_symbol_scoped_ledger_uses_ambiguity_scope_after_overloads_are_exhausted() -> None:
+    source = (
+        "def run(value: int) -> int:\n"
+        "    return value\n\n"
+        "def run(value: int, other: int) -> int:\n"
+        "    return value + other\n"
+    )
+    plan = build_division_plan(
+        rel_path="overloads.py",
+        language="python",
+        content=source,
+        source_budget_chars=1000,
+    )
+    run_symbols = tuple(
+        symbol for symbol in plan.symbols if symbol.qualified_name.endswith("run")
+    )
+    assert len(run_symbols) == 2
+    assert len(plan.chunks) == 1
+
+    ledger = build_fact_ledger(
+        [
+            {
+                "functions": [
+                    {
+                        "name": "run",
+                        "signature": run_symbols[0].signature,
+                        "description": "first declaration",
+                    },
+                    {
+                        "name": "run",
+                        "signature": run_symbols[1].signature,
+                        "description": "second declaration",
+                    },
+                    {"name": "run", "description": "ambiguous extra report"},
+                ]
+            }
+        ],
+        language="python",
+        chunks=plan.chunks,
+        symbols=plan.symbols,
+    )
+
+    assert len(ledger.functions) == 3
+    attributed = [
+        fact
+        for fact in ledger.functions
+        if "symbol_id" in fact["_provenance"][0]
+    ]
+    assert {fact["_provenance"][0]["symbol_id"] for fact in attributed} == {
+        symbol.symbol_id for symbol in run_symbols
+    }
+    ambiguous = next(
+        fact
+        for fact in ledger.functions
+        if fact["description"] == "ambiguous extra report"
+    )
+    ambiguous_origin = ambiguous["_provenance"][0]
+    assert "symbol_id" not in ambiguous_origin
+    assert set(ambiguous_origin["semantic_unit_ids"]) == {
+        unit.unit_id for unit in plan.units
     }
 
 

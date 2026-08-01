@@ -53,8 +53,10 @@ class UnrecoverableProviderError(LLMError):
     *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
-    *safe*: crash_recovery.json is left intact and resumable; no stop path
-    deletes the backup or overwrites it with a "complete" final output.
+    *safe*: crash_recovery.json is left intact; compatible completed ordinary
+    files remain resumable, while completed fresh-split files remain preserved
+    but are deliberately re-documented. No stop path deletes the backup or
+    overwrites it with a "complete" final output.
 
     Parameters
     ----------

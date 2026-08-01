@@ -194,6 +194,9 @@ class ExecutionContext:
     # for this run (see codedoc.core.file_division.provider_execution_identity),
     # computed once by the pipeline from resolved configuration.
     provider_identity: str = ""
+    # ``fresh`` is the public fresh-only path: no split node read/write.  The
+    # recovery-aware executor remains test-gated for a later milestone.
+    split_execution_mode: str = "recovery"
 
 
 # ---------------------------------------------------------------------------
@@ -208,6 +211,8 @@ def _process_and_record(
     reduction_tree: ReductionTreePlan | None = None,
     provider_identity: str = "",
     stop_event: threading.Event | None = None,
+    split_execution_mode: str = "recovery",
+    fresh_completed_nodes: dict[str, dict] | None = None,
 ) -> dict:
     """Process one file and record it in crash recovery from the worker thread.
 
@@ -228,15 +233,28 @@ def _process_and_record(
         if division_plan is not None:
             if reduction_tree is None:
                 raise ValueError("a division plan requires its matching reduction tree.")
-            result = _process_divided_file(
-                request,
-                division_plan,
-                reduction_tree,
-                provider_identity,
-                orchestrator,
-                recorder,
-                stop_event,
-            )
+            if split_execution_mode == "fresh":
+                result = _process_fresh_divided_file(
+                    request,
+                    division_plan,
+                    reduction_tree,
+                    provider_identity,
+                    orchestrator,
+                    stop_event,
+                    fresh_completed_nodes,
+                )
+            elif split_execution_mode == "recovery":
+                result = _process_divided_file(
+                    request,
+                    division_plan,
+                    reduction_tree,
+                    provider_identity,
+                    orchestrator,
+                    recorder,
+                    stop_event,
+                )
+            else:
+                raise ValueError("unknown split execution mode.")
         else:
             result = _process_one_file(request, orchestrator)
     except (KeyboardInterrupt, SystemExit):
@@ -302,19 +320,89 @@ def _process_divided_file(
     (see ``codedoc.core.file_division.validate_node_for_tree``); this never
     re-derives that judgement, only whether a given node ID is present.
     """
+    return _execute_divided_file(
+        request,
+        division_plan,
+        reduction_tree,
+        provider_identity,
+        orchestrator,
+        recorder=recorder,
+        stop_event=stop_event,
+        recovery_enabled=True,
+    )
+
+
+def _process_fresh_divided_file(
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+    provider_identity: str,
+    orchestrator: Orchestrator,
+    stop_event: threading.Event | None = None,
+    completed_nodes: dict[str, dict] | None = None,
+) -> dict:
+    """Execute one effective split without reading or writing node state.
+
+    This is the public fresh-only executor. Its signature deliberately accepts no
+    recovery writer, so a leaf/reducer/final result cannot become a resumable
+    node checkpoint accidentally. ``completed_nodes`` is run-local memory used
+    only to avoid replaying successful paid calls during retries in this
+    invocation; it is never serialized. The caller may persist the fully
+    assembled file-level result through ordinary crash recovery after this
+    function returns successfully.
+    """
+
+    return _execute_divided_file(
+        request,
+        division_plan,
+        reduction_tree,
+        provider_identity,
+        orchestrator,
+        recorder=None,
+        stop_event=stop_event,
+        recovery_enabled=False,
+        fresh_completed_nodes=(
+            completed_nodes if completed_nodes is not None else {}
+        ),
+    )
+
+
+def _execute_divided_file(
+    request: FileExecutionRequest,
+    division_plan: DivisionPlan,
+    reduction_tree: ReductionTreePlan,
+    provider_identity: str,
+    orchestrator: Orchestrator,
+    *,
+    recorder: SafeWriter | None,
+    stop_event: threading.Event | None,
+    recovery_enabled: bool,
+    fresh_completed_nodes: dict[str, dict] | None = None,
+) -> dict:
+    """Shared split kernel behind fresh and recovery-aware entry points."""
+    if recovery_enabled and recorder is None:
+        raise ValueError("recovery-aware split execution requires a recorder.")
     rel_path = request.rel_path
     allowed_paths = resolved_synthesis_shape(
         request.context.resolved_shape_bundle
     ).requested_field_paths
-    recovered = recorder.get_tree_state(rel_path)
-    completed = recovered.by_id() if recovered is not None else {}
+    recovered = recorder.get_tree_state(rel_path) if recovery_enabled else None
+    completed = (
+        recovered.by_id()
+        if recovered is not None
+        else (fresh_completed_nodes or {})
+    )
 
     results_by_id: dict[str, dict] = {}
     leaf_capsules_ordered: list[dict] = []
     for chunk in division_plan.chunks:
         stored = completed.get(chunk.chunk_id)
         if stored is not None:
-            result = load_canonical_json_object(stored.result_json)
+            result = (
+                load_canonical_json_object(stored.result_json)
+                if recovery_enabled
+                else stored
+            )
         else:
             _raise_if_stopping(stop_event)
             leaf_request = UnitChunkExecutionRequest(
@@ -339,25 +427,28 @@ def _process_divided_file(
                 context=request.context,
             )
             result = orchestrator.process_leaf_chunk(leaf_request)
-            _checkpoint_node(
-                recorder,
-                request=request,
-                division_plan=division_plan,
-                reduction_tree=reduction_tree,
-                node_id=chunk.chunk_id,
-                node_type="leaf",
-                unit_id=None,
-                child_ids=(),
-                coverage_leaf_ids=(chunk.chunk_id,),
-                execution_identity=leaf_execution_identity(
-                    rel_path=rel_path,
-                    content_hash=request.content_hash,
-                    division_plan_digest=division_plan.plan_digest,
-                    provider_identity=provider_identity,
-                    chunk=chunk,
-                ),
-                result=result,
-            )
+            if recovery_enabled:
+                _checkpoint_node(
+                    recorder,
+                    request=request,
+                    division_plan=division_plan,
+                    reduction_tree=reduction_tree,
+                    node_id=chunk.chunk_id,
+                    node_type="leaf",
+                    unit_id=None,
+                    child_ids=(),
+                    coverage_leaf_ids=(chunk.chunk_id,),
+                    execution_identity=leaf_execution_identity(
+                        rel_path=rel_path,
+                        content_hash=request.content_hash,
+                        division_plan_digest=division_plan.plan_digest,
+                        provider_identity=provider_identity,
+                        chunk=chunk,
+                    ),
+                    result=result,
+                )
+            elif fresh_completed_nodes is not None:
+                fresh_completed_nodes[chunk.chunk_id] = result
         results_by_id[chunk.chunk_id] = result
         leaf_capsules_ordered.append(result)
 
@@ -371,7 +462,11 @@ def _process_divided_file(
     for node in reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes:
         stored = completed.get(node.node_id)
         if stored is not None:
-            result = load_canonical_json_object(stored.result_json)
+            result = (
+                load_canonical_json_object(stored.result_json)
+                if recovery_enabled
+                else stored
+            )
         else:
             _raise_if_stopping(stop_event)
             child_capsules = tuple(results_by_id[child_id] for child_id in node.child_ids)
@@ -390,32 +485,39 @@ def _process_divided_file(
                 context=request.context,
             )
             result = orchestrator.process_reduction_node(reduction_request)
-            _checkpoint_node(
-                recorder,
-                request=request,
-                division_plan=division_plan,
-                reduction_tree=reduction_tree,
-                node_id=node.node_id,
-                node_type=node.phase,
-                unit_id=node.unit_id,
-                child_ids=node.child_ids,
-                coverage_leaf_ids=node.leaf_ids,
-                execution_identity=reduction_execution_identity(
-                    rel_path=rel_path,
-                    content_hash=request.content_hash,
-                    division_plan_digest=division_plan.plan_digest,
-                    reduction_tree_digest=reduction_tree.tree_digest,
-                    provider_identity=provider_identity,
-                    node=node,
-                ),
-                result=result,
-            )
+            if recovery_enabled:
+                _checkpoint_node(
+                    recorder,
+                    request=request,
+                    division_plan=division_plan,
+                    reduction_tree=reduction_tree,
+                    node_id=node.node_id,
+                    node_type=node.phase,
+                    unit_id=node.unit_id,
+                    child_ids=node.child_ids,
+                    coverage_leaf_ids=node.leaf_ids,
+                    execution_identity=reduction_execution_identity(
+                        rel_path=rel_path,
+                        content_hash=request.content_hash,
+                        division_plan_digest=division_plan.plan_digest,
+                        reduction_tree_digest=reduction_tree.tree_digest,
+                        provider_identity=provider_identity,
+                        node=node,
+                    ),
+                    result=result,
+                )
+            elif fresh_completed_nodes is not None:
+                fresh_completed_nodes[node.node_id] = result
         results_by_id[node.node_id] = result
 
     final_node = reduction_tree.final_node
     stored = completed.get(final_node.node_id)
     if stored is not None:
-        final_result = load_canonical_json_object(stored.result_json)
+        final_result = (
+            load_canonical_json_object(stored.result_json)
+            if recovery_enabled
+            else stored
+        )
     else:
         _raise_if_stopping(stop_event)
         child_results = [results_by_id[child_id] for child_id in final_node.child_ids]
@@ -435,27 +537,30 @@ def _process_divided_file(
         final_result = orchestrator.synthesize_divided_file(
             request, division_plan.plan_digest, manifest_json
         )
-        _checkpoint_node(
-            recorder,
-            request=request,
-            division_plan=division_plan,
-            reduction_tree=reduction_tree,
-            node_id=final_node.node_id,
-            node_type="final",
-            unit_id=None,
-            child_ids=final_node.child_ids,
-            coverage_leaf_ids=final_node.leaf_ids,
-            execution_identity=final_execution_identity(
-                rel_path=rel_path,
-                content_hash=request.content_hash,
-                division_plan_digest=division_plan.plan_digest,
-                reduction_tree_digest=reduction_tree.tree_digest,
-                provider_identity=provider_identity,
-                prompt_profile_digest=request.context.resolved_shape_bundle.digest,
-                node=final_node,
-            ),
-            result=final_result,
-        )
+        if recovery_enabled:
+            _checkpoint_node(
+                recorder,
+                request=request,
+                division_plan=division_plan,
+                reduction_tree=reduction_tree,
+                node_id=final_node.node_id,
+                node_type="final",
+                unit_id=None,
+                child_ids=final_node.child_ids,
+                coverage_leaf_ids=final_node.leaf_ids,
+                execution_identity=final_execution_identity(
+                    rel_path=rel_path,
+                    content_hash=request.content_hash,
+                    division_plan_digest=division_plan.plan_digest,
+                    reduction_tree_digest=reduction_tree.tree_digest,
+                    provider_identity=provider_identity,
+                    prompt_profile_digest=request.context.resolved_shape_bundle.digest,
+                    node=final_node,
+                ),
+                result=final_result,
+            )
+        elif fresh_completed_nodes is not None:
+            fresh_completed_nodes[final_node.node_id] = final_result
 
     large_identity = _large_identity(request, division_plan, reduction_tree)
     return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
@@ -536,6 +641,13 @@ def execute_agent_files(context: ExecutionContext) -> None:
     max_consecutive_failures = options.max_consecutive_failures
     respect_retry_after = options.respect_retry_after
     retry_after_cap = options.retry_after_cap_s
+    # Fresh split calls may be retried across parallel ladder rungs and the
+    # sequential fallback. Keep accepted node results for this process run so a
+    # retry repeats only the failed logical call. This map is never persisted or
+    # exposed as recovery state.
+    fresh_completed_nodes_by_path: dict[str, dict[str, dict]] | None = (
+        {} if context.split_execution_mode == "fresh" else None
+    )
 
     # The coordinator's one lookup step: every queued descriptor already has a
     # frozen request PipelinePlan built (reused/unchanged files never reach the
@@ -567,6 +679,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
             context.division_plans or {},
             context.reduction_trees or {},
             context.provider_identity,
+            context.split_execution_mode,
+            fresh_completed_nodes_by_path,
         )
         if _is_zero_progress_pass(outcome):
             _raise_rate_limit_exhausted(
@@ -604,6 +718,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
             division_plans=context.division_plans or {},
             reduction_trees=context.reduction_trees or {},
             provider_identity=context.provider_identity,
+            split_execution_mode=context.split_execution_mode,
+            fresh_completed_nodes_by_path=fresh_completed_nodes_by_path,
             profile=profile,
         )
         new_results.update(succeeded)
@@ -631,6 +747,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 context.division_plans or {},
                 context.reduction_trees or {},
                 context.provider_identity,
+                context.split_execution_mode,
+                fresh_completed_nodes_by_path,
             )
 
         if not retry_rate_limited or not rate_limit_adaptive:
@@ -654,6 +772,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                     context.division_plans or {},
                     context.reduction_trees or {},
                     context.provider_identity,
+                    context.split_execution_mode,
+                    fresh_completed_nodes_by_path,
                 )
                 if _is_zero_progress_pass(outcome):
                     _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -756,6 +876,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 context.division_plans or {},
                 context.reduction_trees or {},
                 context.provider_identity,
+                context.split_execution_mode,
+                fresh_completed_nodes_by_path,
             )
             if _is_zero_progress_pass(outcome):
                 _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -775,6 +897,8 @@ def _process_descriptor_batch(
     provider_identity: str = "",
     max_consecutive_failures: int = 5,
     profile: RateLimitProfile | None = None,
+    split_execution_mode: str = "recovery",
+    fresh_completed_nodes_by_path: dict[str, dict[str, dict]] | None = None,
 ) -> tuple[dict[str, dict], list[tuple[FileExecutionRequest, Exception]], list[FileExecutionRequest]]:
     """Process a batch of requests in parallel at *max_workers* concurrency.
 
@@ -825,6 +949,12 @@ def _process_descriptor_batch(
                 (reduction_trees or {}).get(request.rel_path),
                 provider_identity,
                 stop_event,
+                split_execution_mode,
+                (
+                    fresh_completed_nodes_by_path.setdefault(request.rel_path, {})
+                    if fresh_completed_nodes_by_path is not None
+                    else None
+                ),
             ): request
             for request in requests
         }
@@ -976,6 +1106,8 @@ def _process_files_sequentially(
     division_plans: dict[str, DivisionPlan] | None = None,
     reduction_trees: dict[str, ReductionTreePlan] | None = None,
     provider_identity: str = "",
+    split_execution_mode: str = "recovery",
+    fresh_completed_nodes_by_path: dict[str, dict[str, dict]] | None = None,
 ) -> _SequentialOutcome:
     """Process *requests* one at a time with per-file retries.
 
@@ -995,6 +1127,11 @@ def _process_files_sequentially(
         orchestrator.llm.provider_name,
     )
 
+    stop_event = threading.Event()
+    bind_stop_event = getattr(orchestrator, "bind_stop_event", None)
+    if callable(bind_stop_event):
+        bind_stop_event(stop_event)
+
     for index, request in enumerate(requests, start=1):
         rel_path = request.rel_path
         try:
@@ -1006,6 +1143,13 @@ def _process_files_sequentially(
                 reduction_tree=(reduction_trees or {}).get(rel_path),
                 provider_identity=provider_identity,
                 recorder=recorder,
+                stop_event=stop_event,
+                split_execution_mode=split_execution_mode,
+                fresh_completed_nodes=(
+                    fresh_completed_nodes_by_path.setdefault(rel_path, {})
+                    if fresh_completed_nodes_by_path is not None
+                    else None
+                ),
                 respect_retry_after=respect_retry_after,
                 retry_after_cap=retry_after_cap,
                 profile=profile,
@@ -1017,12 +1161,16 @@ def _process_files_sequentially(
             consecutive_failures = 0
             succeeded_any = True
             _log_file_progress("OK", rel_path, index, total)
+        except (KeyboardInterrupt, SystemExit):
+            stop_event.set()
+            raise
         except LiveBackupWriteError:
             # Fatal: the crash-safety backup could not be persisted, so the
             # resume guarantee no longer holds.  Do not retry, do not mark the
             # file failed — stop scheduling work and propagate immediately.
             # (LiveBackupWriteError subclasses OutputError, so this clause must
             # precede the recoverable OutputError handler below.)
+            stop_event.set()
             raise
         except UnrecoverableProviderError:
             # A terminal billing/credentials/model/access abort raised by
@@ -1031,6 +1179,7 @@ def _process_files_sequentially(
             # Mirrors the LiveBackupWriteError re-raise; must precede the
             # recoverable AgentError/OutputError and generic handlers below
             # (UnrecoverableProviderError is an LLMError, not one of those).
+            stop_event.set()
             raise
         except InsufficientSourceError as exc:
             recorder.discard(rel_path)
@@ -1090,24 +1239,53 @@ def _process_one_file_with_retries(
     reduction_tree: ReductionTreePlan | None = None,
     provider_identity: str = "",
     recorder: SafeWriter | None = None,
+    stop_event: threading.Event | None = None,
+    split_execution_mode: str = "recovery",
+    fresh_completed_nodes: dict[str, dict] | None = None,
     respect_retry_after: bool = True,
     retry_after_cap: int = 30,
     profile: RateLimitProfile | None = None,
 ) -> dict:
     last_error: Exception | None = None
+    if split_execution_mode == "fresh" and fresh_completed_nodes is None:
+        fresh_completed_nodes = {}
     for attempt in range(retry_attempts + 1):
         try:
+            _raise_if_stopping(stop_event)
             if division_plan is not None:
-                if recorder is None:
-                    raise ValueError("split retries require a recovery recorder.")
                 if reduction_tree is None:
                     raise ValueError("a division plan requires its matching reduction tree.")
+                if split_execution_mode == "fresh":
+                    return _process_fresh_divided_file(
+                        request,
+                        division_plan,
+                        reduction_tree,
+                        provider_identity,
+                        orchestrator,
+                        stop_event,
+                        fresh_completed_nodes,
+                    )
+                if split_execution_mode != "recovery":
+                    raise ValueError("unknown split execution mode.")
+                if recorder is None:
+                    raise ValueError("split retries require a recovery recorder.")
                 return _process_divided_file(
-                    request, division_plan, reduction_tree, provider_identity, orchestrator, recorder
+                    request,
+                    division_plan,
+                    reduction_tree,
+                    provider_identity,
+                    orchestrator,
+                    recorder,
+                    stop_event,
                 )
             return _process_one_file(request, orchestrator)
         except Exception as exc:
             last_error = exc
+            # Cancellation is a scheduling boundary, never a retryable file
+            # failure.  Re-raise immediately so even retry bookkeeping/sleep
+            # cannot occur after the shared stop signal is observed.
+            if stop_event is not None and stop_event.is_set():
+                raise
             # Apply the fixed failure precedence before consuming the next
             # attempt.  Abort cases raise immediately (no remaining attempts);
             # an input-too-large error re-raises immediately so it is recorded as
@@ -1115,6 +1293,8 @@ def _process_one_file_with_retries(
             # keeps the existing retry/sleep behavior.
             verdict = _classify_failure(exc, profile)
             if verdict in ("terminal_billing", "global"):
+                if stop_event is not None:
+                    stop_event.set()
                 raise _build_terminal_abort(
                     exc, orchestrator.llm.provider_name, verdict
                 )

@@ -7,8 +7,6 @@ from types import SimpleNamespace
 
 import pytest
 
-pytestmark = pytest.mark.future_split_execution
-
 
 def test_parallel_split_files_finalize_without_leaking_partial_state(
     tmp_path, monkeypatch

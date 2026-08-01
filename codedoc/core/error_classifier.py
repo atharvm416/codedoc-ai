@@ -315,8 +315,10 @@ def _build_terminal_abort(
             cause = "forbidden or permission-denied access"
     reason = (
         f"Provider error that cannot recover by retrying ({cause}). "
-        "Completed files were saved to crash_recovery.json in the output "
-        "directory; re-running the same command resumes the unfinished files."
+        "Completed file-level results were saved to crash_recovery.json in the "
+        "output directory. Re-running the same command resumes compatible "
+        "completed ordinary files; completed fresh-split files are deliberately "
+        "re-documented from scratch."
     )
     err = UnrecoverableProviderError(provider_name, reason, category="terminal")
     err.__cause__ = exc
@@ -332,8 +334,10 @@ def _build_rate_limit_exhausted_abort(
         "Provider is persistently rate-limited or out of quota: no file made "
         "progress after stepping down to the lowest concurrency, so retrying was "
         "stopped to avoid sleeping through the backoff schedule for nothing. "
-        "Partial results were saved to crash_recovery.json in the output "
-        "directory; re-running the same command resumes the unfinished files."
+        "Completed file-level results were saved to crash_recovery.json in the "
+        "output directory. Re-running the same command resumes compatible "
+        "completed ordinary files; completed fresh-split files are deliberately "
+        "re-documented from scratch."
     )
     return UnrecoverableProviderError(
         provider_name, reason, category="rate_limit_exhausted"
@@ -349,7 +353,9 @@ def _raise_rate_limit_exhausted(
     warn_msg = (
         f"[{provider_name}] Persistent rate limit / quota: no file made progress "
         "at the lowest concurrency. Stopping the run; completed files are saved "
-        "in crash_recovery.json — re-run the same command to resume."
+        "in crash_recovery.json. Re-running resumes compatible completed ordinary "
+        "files; completed fresh-split files are deliberately re-documented from "
+        "scratch."
     )
     print(warn_msg, flush=True)
     logger.warning(warn_msg)

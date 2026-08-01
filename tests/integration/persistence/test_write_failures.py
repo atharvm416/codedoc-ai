@@ -111,7 +111,12 @@ def test_initialize_empty_raises_on_write_failure(tmp_path, monkeypatch):
     with pytest.raises(LiveBackupWriteError) as excinfo:
         sw.initialize_empty()
     # Carries the target path, retains the original cause, leaks no source data.
-    assert "codedoc.json" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "codedoc.json" in message
+    assert "persisted before this failed write remains preserved" in message
+    assert "result being written is not guaranteed saved" in message
+    assert "completed ordinary files can resume" in message
+    assert "completed fresh-split files are deliberately re-documented" in message
     assert isinstance(excinfo.value.__cause__, OSError)
 
 def test_pipeline_initialization_failure_creates_no_provider(tmp_path, monkeypatch):

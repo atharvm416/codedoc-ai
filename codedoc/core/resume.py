@@ -333,7 +333,9 @@ def _recovery_remedy(recovery_path: Path) -> str:
     touched by any of these choices.
     """
     return (
-        f"To resume that work, restore the prior run's configuration. To "
+        f"To return to that work, restore the prior run's configuration. "
+        "Compatible completed ordinary files can then resume; completed "
+        "fresh-split files are deliberately re-documented from scratch. To "
         f"continue with the current configuration instead, move "
         f"'{recovery_path.name}' aside (for example, rename it) so a fresh "
         f"recovery file is created; you may instead delete it, but that "

@@ -20,7 +20,9 @@ All formats
     directory.  On clean completion the stable output is written first and the
     recovery file is then deleted by ``SafeWriter.delete()``.  On interrupt or
     failure the stable output is left intact and the recovery file is preserved
-    so the next run resumes from it.
+    so the next run can resume compatible ordinary files. Completed fresh-split
+    files are preserved at file level but deliberately re-documented under the
+    active fresh-execution policy.
 
 Banner
 ------
@@ -73,8 +75,9 @@ _STATUS_IN_PROGRESS = "in_progress"
 _CRASH_SAFETY_BANNER = (
     "INCOMPLETE RUN - codedoc is still generating or stopped before completion. "
     "This JSON is a crash-recovery backup containing only files that were "
-    "successfully documented so far. Re-run the same command to resume and "
-    "produce the final clean output."
+    "successfully documented so far. Re-run the same command to continue: "
+    "compatible completed ordinary files can resume, while completed fresh-split "
+    "files are deliberately re-documented from scratch."
 )
 
 
@@ -597,7 +600,10 @@ class SafeWriter:
                 str(self._path),
                 f"could not update crash recovery file '{self._path.name}': {detail}. "
                 "Close any program viewing the file and rerun the same command; "
-                "completed work is preserved.",
+                "recovery data persisted before this failed write remains preserved, "
+                "but the result being written is not guaranteed saved. Compatible "
+                "completed ordinary files can resume; completed fresh-split files "
+                "are deliberately re-documented from scratch.",
             ) from exc
 
 

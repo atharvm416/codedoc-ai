@@ -73,6 +73,12 @@ from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 # reprocessed exactly once under the current contract before reuse.
 ANALYSIS_REVISION = "file-doc-v3"
 
+# Fresh-mode split records are valid owned completed documentation, but they must
+# never authorize unpaid split reuse.  The explicit marker survives every
+# public-format round trip as private metadata so a later reuse release can reject this
+# predecessor contract without inferring policy from the package version.
+FRESH_SPLIT_REUSE_CONTRACT = "fresh-only-v1"
+
 # Per-file truncation identity token.  The head-plus-tail truncation of an
 # oversized file depends on the effective ``max_content_chars`` ceiling and the
 # ``truncation_head_ratio``.  Both participate in cache identity: otherwise
@@ -102,6 +108,7 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
         "_max_context_revision",
         "_prompt_profile_digest",
         "_large_file_identity",
+        "_split_reuse_contract",
     }
 )
 
@@ -127,6 +134,7 @@ PRIVATE_KEY_ORDER: tuple[str, ...] = (
     "_max_context_revision",
     "_prompt_profile_digest",
     "_large_file_identity",
+    "_split_reuse_contract",
 )
 
 # Registered private record keys: persisted through JSON / Markdown / live

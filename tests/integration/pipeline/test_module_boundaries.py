@@ -167,6 +167,7 @@ def test_execution_context_fields():
         "division_plans",
         "reduction_trees",
         "provider_identity",
+        "split_execution_mode",
     }
 
 def test_execute_agent_files_is_public_entry():

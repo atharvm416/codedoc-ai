@@ -109,6 +109,7 @@ def test_carry_orders_production_keys_canonically_from_reversed_source():
     record_meta.carry_private_keys(
         {
             "_large_file_identity": "large-file-v1:test",
+            "_split_reuse_contract": "fresh-only-v1",
             "_prompt_profile_digest": "profile-digest",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_analysis_mode": "single",
@@ -122,6 +123,7 @@ def test_carry_orders_production_keys_canonically_from_reversed_source():
         "_max_context_revision",
         "_prompt_profile_digest",
         "_large_file_identity",
+        "_split_reuse_contract",
     ]
 
 def test_carry_orders_production_keys_canonically_from_shuffled_source():
