@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 from contextlib import redirect_stderr, redirect_stdout
-import hashlib
 import io
 import json
 import os
@@ -426,7 +425,7 @@ def _scenario_imports_only(root: Path) -> None:
         node_id=final.node_id,
         node_type="final",
         rel_path="main.py",
-        content_hash=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+        content_hash=recovered.content_hash,
         division_plan_digest=division.plan_digest,
         execution_identity_digest=final_execution_identity(
             rel_path="main.py",
@@ -663,19 +662,23 @@ def _child_run(project: Path, cli_args: list[str]) -> int:
 
 def _run_all() -> int:
     _package_path, console_path = _prove_installed_origin()
+    original_cwd = Path.cwd()
     with tempfile.TemporaryDirectory(prefix="codedoc-installed-smoke-") as temp_name:
         neutral_root = Path(temp_name).resolve()
         if _is_within(neutral_root, _repository_root()):
             raise SmokeFailure("neutral-project-inside-repository")
-        os.chdir(neutral_root)
-        _scenario_truncate(neutral_root)
-        _scenario_fresh_split(neutral_root)
-        _scenario_redirected_verbose(neutral_root)
-        _scenario_completed_reuse(neutral_root)
-        _scenario_interrupt_resume(neutral_root)
-        _scenario_imports_only(neutral_root)
-        _scenario_preserve_first(neutral_root)
-        _scenario_exit_fidelity(neutral_root, console_path)
+        try:
+            os.chdir(neutral_root)
+            _scenario_truncate(neutral_root)
+            _scenario_fresh_split(neutral_root)
+            _scenario_redirected_verbose(neutral_root)
+            _scenario_completed_reuse(neutral_root)
+            _scenario_interrupt_resume(neutral_root)
+            _scenario_imports_only(neutral_root)
+            _scenario_preserve_first(neutral_root)
+            _scenario_exit_fidelity(neutral_root, console_path)
+        finally:
+            os.chdir(original_cwd)
     print("installed artifact smoke: ok")
     return 0
 
