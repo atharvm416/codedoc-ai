@@ -32,11 +32,66 @@ import argparse
 import sys
 from pathlib import Path
 
+from codedoc.utils.errors import CodeDocError, bounded_exception_summary
 
 _RECOVERY_REUSE_BOUNDARY = (
-    "Compatible completed ordinary files can resume; completed fresh-split "
-    "files are deliberately re-documented from scratch."
+    "Compatible completed ordinary and split records may be reused, and "
+    "compatible current schema-3 split node checkpoints may resume. Forced, "
+    "stale, identity-mismatched, legacy, foreign, or unsupported state is "
+    "rerun or preserved and blocked according to the documented remedy."
 )
+
+
+def _bounded_reason(exc: BaseException) -> str:
+    """Rendering-boundary two-tier check shared by every CLI error branch."""
+    return str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
+
+
+def _bounded_traceback(exc: BaseException) -> str:
+    """Render a ``--verbose`` diagnostic trace bounded to CodeDoc frames and
+    exception categories only.
+
+    Never renders an exception message, chained-cause text, request/response
+    body, prompt, source, credential, or local-variable value -- only each
+    frame's file/line/function location (filtered to CodeDoc's own package)
+    and bounded exception categories.  This replaces
+    ``traceback.print_exc()``, whose default rendering includes the full
+    chained exception message text.
+    """
+    import traceback as _traceback
+
+    import codedoc as _codedoc_pkg
+
+    codedoc_dir = Path(_codedoc_pkg.__file__).resolve().parent
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    lines = [
+        "Bounded diagnostic trace (--verbose): CodeDoc frames and exception "
+        "categories only."
+    ]
+    for level, node in enumerate(reversed(chain)):
+        indent = "  " * level
+        category = (
+            type(node).__name__
+            if isinstance(node, CodeDocError)
+            else bounded_exception_summary(node).split(" (", 1)[0]
+        )
+        lines.append(f"{indent}[{category}]")
+        for frame in _traceback.extract_tb(node.__traceback__):
+            try:
+                Path(frame.filename).resolve().relative_to(codedoc_dir)
+                frame_in_codedoc = True
+            except (OSError, ValueError):
+                frame_in_codedoc = False
+            if frame_in_codedoc:
+                lines.append(f"{indent}  {Path(frame.filename).name}:{frame.lineno} in {frame.name}")
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -64,20 +119,21 @@ examples:
   codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
 
 large-file split execution:
-  split supports dry-run planning and fresh paid execution in analysis-mode
-  single. triple plus split is rejected during configuration validation before
-  scanning or other side effects. Oversized files are divided at local semantic
-  or lexical boundaries with complete source coverage and a bounded reduction topology.
+  split supports dry-run planning, paid execution, same-path completed split reuse,
+  and node recovery in analysis-mode single. triple plus split is rejected
+  during configuration validation before scanning or other side effects.
+  Oversized files are divided at local semantic or lexical boundaries with
+  complete source coverage and a bounded reduction topology.
 
   max_content_chars bounds each planned leaf, reducer manifest, and complete
   final manifest. Planning never truncates split source or silently falls back
   to truncate. It reports the first named provider-free capacity reason:
   atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
   reduction-fan-in-cap, reduction-depth-cap, or
-  final-synthesis-envelope-cap. Fresh split mode deliberately performs every
-  oversized split file fresh: completed split reuse, node checkpoints, and
-  partial split recovery are unavailable. Under-threshold files retain ordinary
-  whole-file execution and reuse.
+  final-synthesis-envelope-cap. Exactly compatible same-path completed split
+  records are reused with zero calls; current schema-3 checkpoints resume only
+  unpaid nodes. Forced, stale, legacy, foreign, or unsupported state is rerun
+  or preserved and blocked. Under-threshold files retain ordinary execution.
         """,
     )
 
@@ -303,8 +359,8 @@ large-file split execution:
         help=(
             "Oversized readable source handling: 'truncate' keeps the legacy "
             "head/tail behavior (default); 'split' enables provider-free "
-            "planning or fresh paid execution in single mode. Completed split "
-            "reuse and partial split recovery are unavailable in fresh mode."
+            "planning, paid execution, same-path completed split reuse, and current "
+            "schema-3 node recovery in single mode."
         ),
     )
     parser.add_argument(
@@ -434,6 +490,21 @@ def _print_split_observability(
     print(
         "    Final synthesis calls   : "
         f"{stats.get('split_final_synthesis_calls_planned', 0)}"
+    )
+    print(
+        "    Completed reused / partial resumed: "
+        f"{stats.get('split_completed_files_reused', 0)} / "
+        f"{stats.get('split_partial_files_resumed', 0)}"
+    )
+    print(
+        "    Unpaid/reexecuted/quarantined nodes: "
+        f"{stats.get('split_unpaid_nodes', 0)} / "
+        f"{stats.get('split_reexecuted_nodes', 0)} / "
+        f"{stats.get('split_quarantined_nodes', 0)}"
+    )
+    print(
+        "    Recovery conflict files : "
+        f"{stats.get('split_recovery_conflict_files', 0)}"
     )
     print(
         "    Planned call categories: "
@@ -775,7 +846,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         except SystemExit as exc:
             return int(exc.code or 2)
         except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(f"Error: {_bounded_reason(exc)}", file=sys.stderr)
             return 2
 
     if args.force:
@@ -872,7 +943,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: {_bounded_reason(exc)}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as exc:
         # The pipeline attaches the exact selected crash-recovery path to
@@ -919,9 +990,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 file=sys.stderr,
             )
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
@@ -945,9 +1014,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
             print(f"Error: {exc}", file=sys.stderr)
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 2
         if isinstance(exc, OutputError):
             # The OutputError message already carries the sanitized OS
@@ -979,15 +1046,11 @@ def run_cli(argv: list[str] | None = None) -> int:
                     file=sys.stderr,
                 )
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 1
-        print(f"Fatal error: {exc}", file=sys.stderr)
+        print(f"Fatal error: {_bounded_reason(exc)}", file=sys.stderr)
         if args.verbose:
-            import traceback
-
-            traceback.print_exc()
+            print(_bounded_traceback(exc), file=sys.stderr)
         return 1
 
 

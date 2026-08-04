@@ -98,7 +98,7 @@ def _leaf_node_state(plan, tree, content_hash, chunk) -> SplitTreeState:
         rel_path=plan.rel_path,
         content_hash=content_hash,
         division_plan_digest=plan.plan_digest,
-        reduction_tree_digest=tree.tree_digest,
+        input_digest="test-input:" + "7" * 64,
         execution_identity_digest=identity,
         unit_id=None,
         child_ids=(),
@@ -109,7 +109,7 @@ def _leaf_node_state(plan, tree, content_hash, chunk) -> SplitTreeState:
 
 def _tree_state(plan, tree, content_hash, nodes) -> SplitTreeState:
     return SplitTreeState(
-        schema_version=2,
+        schema_version=3,
         owner="codedoc-ai",
         rel_path=plan.rel_path,
         content_hash=content_hash,

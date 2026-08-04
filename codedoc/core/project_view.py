@@ -64,6 +64,14 @@ _SPLIT_LAST_RUN_INTEGER_FIELDS = (
     "file_reduction_calls_planned",
     "synthesis_calls_planned",
 )
+_SPLIT_OPTIONAL_LAST_RUN_INTEGER_FIELDS = (
+    "split_completed_files_reused",
+    "split_partial_files_resumed",
+    "split_unpaid_nodes",
+    "split_reexecuted_nodes",
+    "split_quarantined_nodes",
+    "split_recovery_conflict_files",
+)
 _BLOCKED_REASONS = (
     "atom-cap",
     "symbol-cap",
@@ -248,7 +256,10 @@ def _build_last_run(stats: dict, entry_file: str | None, file_count: int) -> dic
         last_run.update(
             {
                 key: _nonnegative_int(stats.get(key, 0))
-                for key in _SPLIT_LAST_RUN_INTEGER_FIELDS
+                for key in (
+                    *_SPLIT_LAST_RUN_INTEGER_FIELDS,
+                    *_SPLIT_OPTIONAL_LAST_RUN_INTEGER_FIELDS,
+                )
             }
         )
         raw_reasons = stats.get("split_blocked_by_reason", {})
@@ -514,6 +525,7 @@ def sanitize_public_view(view: dict) -> dict:
     if raw_last_run.get("large_file_strategy") == "split":
         allowed_last_run.add("large_file_strategy")
         allowed_last_run.update(_SPLIT_LAST_RUN_INTEGER_FIELDS)
+        allowed_last_run.update(_SPLIT_OPTIONAL_LAST_RUN_INTEGER_FIELDS)
         allowed_last_run.add("split_blocked_by_reason")
     last_run: dict = {}
     last_run_strings = frozenset(
@@ -523,6 +535,7 @@ def sanitize_public_view(view: dict) -> dict:
         {"entry_file", *last_run_strings}
     )
     last_run_integers |= frozenset(_SPLIT_LAST_RUN_INTEGER_FIELDS)
+    last_run_integers |= frozenset(_SPLIT_OPTIONAL_LAST_RUN_INTEGER_FIELDS)
     for key, value in raw_last_run.items():
         if key not in allowed_last_run:
             continue

@@ -23,7 +23,12 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import ConfigError, ProviderInitError
+from codedoc.utils.errors import (
+    CodeDocError,
+    ConfigError,
+    ProviderInitError,
+    bounded_exception_summary,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -193,8 +198,21 @@ def create_provider(config: dict) -> LLMProvider:
         except ConfigError:
             raise
         except Exception as exc:
+            # A wrapped CodeDocError (e.g. an LLMError raised by a provider's
+            # own __init__ for a missing SDK package) is already bounded by
+            # construction and renders unchanged (tier 1). Anything else is
+            # reduced (tier 2); "unknown-error" is replaced with the more
+            # specific "provider-initialization-failed" for this construction
+            # context, since every fault reaching here occurred while building
+            # the provider, not while it was already in use.
+            if isinstance(exc, CodeDocError):
+                detail = str(exc)
+            else:
+                detail = bounded_exception_summary(exc)
+                if detail == "unknown-error":
+                    detail = "provider-initialization-failed"
             raise ProviderInitError(
-                f"LLM provider initialization failed: {exc}"
+                f"LLM provider initialization failed: {detail}"
             ) from exc
 
     raise ConfigError(

@@ -313,7 +313,6 @@ def test_split_retry_and_correction_are_provider_adapter_neutral(
     assert prompt_sets[0] == prompt_sets[1] == prompt_sets[2] == prompt_sets[3]
 
 
-@pytest.mark.future_split_recovery
 def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
     tmp_path,
     monkeypatch,
@@ -357,9 +356,9 @@ def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
         recovery_path = project / "docs" / "crash_recovery.json"
         recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
         partial = recovery["_codedoc"]["partial_files"]["main.py"]
-        assert partial["schema_version"] == 2
+        assert partial["schema_version"] == 3
         leaf_nodes = [
-            node for node in partial["nodes"].values() if node["node_type"] == "leaf"
+            node for node in partial["nodes"] if node["node_type"] == "leaf"
         ]
         assert len(leaf_nodes) == 1
         assert recovery["files"] == []

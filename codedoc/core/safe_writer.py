@@ -20,9 +20,10 @@ All formats
     directory.  On clean completion the stable output is written first and the
     recovery file is then deleted by ``SafeWriter.delete()``.  On interrupt or
     failure the stable output is left intact and the recovery file is preserved
-    so the next run can resume compatible ordinary files. Completed fresh-split
-    files are preserved at file level but deliberately re-documented under the
-    active fresh-execution policy.
+    so the next run can reuse compatible completed ordinary and split records
+    and resume compatible current schema-3 split node checkpoints. Forced,
+    stale, identity-mismatched, legacy, foreign, or unsupported state is rerun
+    or preserved and blocked according to the documented remedy.
 
 Banner
 ------
@@ -64,7 +65,12 @@ from codedoc.core.io_diagnostics import (
     describe_cause,
 )
 from codedoc.core.project_view import clean_file_record
-from codedoc.core.file_division import SPLIT_PARTIAL_SCHEMA_VERSION, ReductionNodeState, SplitTreeState
+from codedoc.core.file_division import (
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    ReductionNodeState,
+    SplitTreeState,
+    node_state_public_json,
+)
 from codedoc.utils.errors import LiveBackupWriteError, OutputError
 from codedoc.utils.logger import get_logger
 
@@ -76,8 +82,10 @@ _CRASH_SAFETY_BANNER = (
     "INCOMPLETE RUN - codedoc is still generating or stopped before completion. "
     "This JSON is a crash-recovery backup containing only files that were "
     "successfully documented so far. Re-run the same command to continue: "
-    "compatible completed ordinary files can resume, while completed fresh-split "
-    "files are deliberately re-documented from scratch."
+    "compatible completed ordinary and split records may be reused, and "
+    "compatible current schema-3 split node checkpoints may resume. Forced, "
+    "stale, identity-mismatched, legacy, foreign, or unsupported state is "
+    "rerun or preserved and blocked according to the documented remedy."
 )
 
 
@@ -124,6 +132,11 @@ class SafeWriter:
         self._lock: threading.Lock = threading.Lock()
         self._clean_records: dict[str, dict] = {}
         self._tree_states: dict[str, SplitTreeState] = {}
+        # A forced split file's structurally valid recovered container,
+        # carried forward untouched (section 9): re-emitted on every flush
+        # alongside `_tree_states`, but never returned by `get_tree_state()`
+        # -- force bypasses execution, not preservation.
+        self._carry_states: dict[str, SplitTreeState] = {}
         # rel_paths actually written via record() during THIS run, as opposed to
         # records preloaded from a prior output by load().  Used to decide whether
         # a rate-limited file may be treated as "already done" (only if a worker
@@ -153,6 +166,7 @@ class SafeWriter:
         *,
         include_partial_files: bool = False,
         preloaded_partials: Mapping[str, SplitTreeState] | None = None,
+        preloaded_carry_partials: Mapping[str, SplitTreeState] | None = None,
     ) -> dict[str, dict]:
         """
         Pre-populate in-memory state from an existing recovery file or output.
@@ -182,6 +196,14 @@ class SafeWriter:
             from every parsed partial is what keeps rejected, stale-hash,
             unselected, and unrelated checkpoints from becoming deletion
             authority in :meth:`has_partial_state`.
+        preloaded_carry_partials:
+            A forced split file's structurally valid recovered container,
+            carried forward untouched (section 9).  Re-emitted on every
+            flush alongside *preloaded_partials* -- keeping
+            :meth:`has_partial_state` true and the recovery file alive -- so
+            the prior checkpoint survives a forced run that fails or is
+            interrupted, but it is never returned by :meth:`get_tree_state`:
+            force bypasses execution, not preservation.
 
         Ownership guard
         ---------------
@@ -211,6 +233,13 @@ class SafeWriter:
                     f"rel_path: {rel_path!r} != {state.rel_path!r}"
                 )
             self._tree_states[rel_path] = state
+        for rel_path, state in (preloaded_carry_partials or {}).items():
+            if rel_path != state.rel_path:
+                raise ValueError(
+                    "preloaded carry-partial key does not match its "
+                    f"normalized rel_path: {rel_path!r} != {state.rel_path!r}"
+                )
+            self._carry_states[rel_path] = state
 
         if not self._path.exists():
             return {}
@@ -317,6 +346,7 @@ class SafeWriter:
 
             self._clean_records[rel_path] = clean
             prior_partial = self._tree_states.pop(rel_path, None)
+            prior_carry = self._carry_states.pop(rel_path, None)
             self._recorded_this_run.add(rel_path)
             try:
                 self._flush_locked()
@@ -327,6 +357,8 @@ class SafeWriter:
                     self._clean_records.pop(rel_path, None)
                 if prior_partial is not None:
                     self._tree_states[rel_path] = prior_partial
+                if prior_carry is not None:
+                    self._carry_states[rel_path] = prior_carry
                 if not was_recorded_this_run:
                     self._recorded_this_run.discard(rel_path)
                 raise
@@ -348,15 +380,23 @@ class SafeWriter:
                     self._recorded_this_run.add(rel_path)
                 raise
 
-    def record_tree_node(self, rel_path: str, node: ReductionNodeState) -> None:
+    def record_tree_node(
+        self, rel_path: str, node: ReductionNodeState, *, reduction_tree_digest: str
+    ) -> None:
         """Transactionally append one dependency-validated split-tree node
-        checkpoint (split-partial schema version 2; see D11/D12/section 12).
+        checkpoint (split-partial schema version 3; see D11/D12/section 9/12).
 
         Every node for one file shares that file's `SplitTreeState` container;
         this appends *node* to the existing container (creating one if this is
         the file's first checkpointed node) and re-persists the whole
         container atomically.  Re-checkpointing an already-present node ID
         replaces it in place rather than duplicating it.
+
+        *reduction_tree_digest* is the caller's current writer-time tree
+        digest, stored at the container level only (never per-node,
+        section 9): it is provenance, not a reuse gate, so it always reflects
+        the newest known topology even when older, still-valid nodes were
+        checkpointed under a different (compatible) topology.
         """
         with self._lock:
             if rel_path in self._recorded_this_run:
@@ -365,8 +405,16 @@ class SafeWriter:
                     "refusing to store a split node for a file completed in this run "
                     f"('{rel_path}').",
                 )
+            if rel_path in self._carry_states:
+                # Only one recovery container may exist per path. A forced or
+                # source-incompatible rerun therefore cannot checkpoint new
+                # nodes without overwriting the old paid state it is required
+                # to preserve. Keep carrying the prior container unchanged
+                # until a completed record transactionally replaces it.
+                return
             prior = self._tree_states.get(rel_path)
             existing_nodes = tuple(prior.nodes) if prior is not None else ()
+            existing_quarantine = prior.quarantine if prior is not None else ()
             if any(existing.node_id == node.node_id for existing in existing_nodes):
                 updated_nodes = tuple(
                     node if existing.node_id == node.node_id else existing
@@ -374,14 +422,19 @@ class SafeWriter:
                 )
             else:
                 updated_nodes = existing_nodes + (node,)
+            # A valid replacement clears any quarantine entry for the same ID.
+            updated_quarantine = tuple(
+                entry for entry in existing_quarantine if entry.node_id != node.node_id
+            )
             self._tree_states[rel_path] = SplitTreeState(
                 schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
                 owner="codedoc-ai",
                 rel_path=rel_path,
                 content_hash=node.content_hash,
                 division_plan_digest=node.division_plan_digest,
-                reduction_tree_digest=node.reduction_tree_digest,
+                reduction_tree_digest=reduction_tree_digest,
                 nodes=updated_nodes,
+                quarantine=updated_quarantine,
             )
             try:
                 self._flush_locked()
@@ -398,15 +451,19 @@ class SafeWriter:
             return self._tree_states.get(rel_path)
 
     def has_partial_state(self) -> bool:
-        """Whether any pipeline-authorized split checkpoint remains retained.
+        """Whether any pipeline-authorized split checkpoint remains retained
+        or carried.
 
         This is the recovery-deletion authority.  It is meaningful only because
         writer partial state is seeded from the pipeline's retention set: it
-        answers "is there checkpointed work still worth resuming?", not "did the
-        recovery file happen to contain a parseable partial?".
+        answers "is there checkpointed work still worth resuming, or forced-
+        file carry state still worth preserving?", not "did the recovery file
+        happen to contain a parseable partial?".  A carried (forced) file that
+        never completed this run must keep the recovery file alive even when
+        no retained state exists (section 9).
         """
         with self._lock:
-            return bool(self._tree_states)
+            return bool(self._tree_states or self._carry_states)
 
     def clear_tree_state(self, rel_path: str) -> None:
         """Transactionally remove one file's split-tree checkpoint."""
@@ -537,7 +594,9 @@ class SafeWriter:
         A preloaded stable record plus a current partial for the same path is
         legitimate and is not rejected.
         """
-        collisions = sorted(self._recorded_this_run & set(self._tree_states))
+        collisions = sorted(
+            self._recorded_this_run & (set(self._tree_states) | set(self._carry_states))
+        )
         if collisions:
             raise LiveBackupWriteError(
                 str(self._path),
@@ -571,10 +630,13 @@ class SafeWriter:
         }
         if self._recovery_identity is not None:
             codedoc_block["recovery_identity"] = self._recovery_identity
-        if self._tree_states:
+        all_partial_paths = set(self._tree_states) | set(self._carry_states)
+        if all_partial_paths:
             codedoc_block["partial_files"] = {
-                rel_path: _tree_state_to_json(self._tree_states[rel_path])
-                for rel_path in sorted(self._tree_states)
+                rel_path: _tree_state_to_json(
+                    self._tree_states.get(rel_path) or self._carry_states[rel_path]
+                )
+                for rel_path in sorted(all_partial_paths)
             }
         payload: dict = {
             "_crash_safety": _CRASH_SAFETY_BANNER,
@@ -602,32 +664,42 @@ class SafeWriter:
                 "Close any program viewing the file and rerun the same command; "
                 "recovery data persisted before this failed write remains preserved, "
                 "but the result being written is not guaranteed saved. Compatible "
-                "completed ordinary files can resume; completed fresh-split files "
-                "are deliberately re-documented from scratch.",
+                "completed ordinary and split records may be reused, and compatible "
+                "current schema-3 split node checkpoints may resume; forced, stale, "
+                "identity-mismatched, legacy, foreign, or unsupported state is rerun "
+                "or preserved and blocked according to the documented remedy.",
             ) from exc
 
 
 def _tree_state_to_json(state: SplitTreeState) -> dict:
-    """Serialize one node-keyed split-partial container (schema version 2)."""
-    return {
+    """Serialize one node-keyed split-partial container (schema version 3).
+
+    ``nodes`` is an ordered array (never a dict): the writer always appends
+    node checkpoints in exact canonical plan order (one file's split
+    execution is strictly sequential -- leaves in plan order, then reducers,
+    then final -- and an in-place replacement preserves the existing
+    position), so array order is already plan-canonical without needing to
+    re-derive it here.  ``reduction_tree_digest`` is container-level
+    writer-time provenance only, never stamped per node.  ``quarantine`` is
+    omitted entirely when empty, so a run with no quarantine produces
+    byte-identical output to one that never had the field.
+    """
+    payload: dict = {
         "schema_version": state.schema_version,
         "owner": state.owner,
         "rel_path": state.rel_path,
         "content_hash": state.content_hash,
         "division_plan_digest": state.division_plan_digest,
         "reduction_tree_digest": state.reduction_tree_digest,
-        "nodes": {
-            node.node_id: {
-                "node_type": node.node_type,
-                "content_hash": node.content_hash,
-                "division_plan_digest": node.division_plan_digest,
-                "reduction_tree_digest": node.reduction_tree_digest,
-                "execution_identity_digest": node.execution_identity_digest,
-                "unit_id": node.unit_id,
-                "child_ids": list(node.child_ids),
-                "coverage_leaf_ids": list(node.coverage_leaf_ids),
-                "result_json": node.result_json,
-            }
-            for node in state.nodes
-        },
+        "nodes": [node_state_public_json(node) for node in state.nodes],
     }
+    if state.quarantine:
+        payload["quarantine"] = [
+            {
+                "node_id": entry.node_id,
+                "reason": entry.reason,
+                "raw_json": entry.raw_json,
+            }
+            for entry in state.quarantine
+        ]
+    return payload

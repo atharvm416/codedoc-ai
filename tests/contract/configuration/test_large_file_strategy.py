@@ -14,13 +14,17 @@ def test_large_file_strategy_defaults_to_truncate(tmp_path) -> None:
     assert DEFAULTS["large_file_strategy"] == "truncate"
 
 
-def test_0_14_1_split_capabilities_are_developer_owned_and_fresh_only() -> None:
+def test_current_release_split_capabilities_are_developer_owned_and_reuse_and_recovery_capable() -> None:
+    """Section 4: same-path completed split reuse and node-keyed partial
+    recovery are both public in the current release, and the policy remains
+    entirely developer-owned -- no environment variable, config key, CLI
+    flag, or public Python argument selects it."""
     policy = current_split_release_policy()
 
     assert policy.execution is True
-    assert policy.completed_reuse is False
-    assert policy.partial_recovery is False
-    assert policy.node_checkpoints is False
+    assert policy.completed_reuse is True
+    assert policy.partial_recovery is True
+    assert policy.node_checkpoints is True
     assert not {
         "split_execution",
         "split_completed_reuse",

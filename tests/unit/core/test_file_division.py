@@ -15,6 +15,7 @@ from codedoc.core.file_division import (
     dependency_closed_nodes,
     distinct_units,
     final_execution_identity,
+    final_node_covers_every_leaf,
     final_synthesis_input,
     is_legacy_split_partial,
     leaf_execution_identity,
@@ -27,6 +28,7 @@ from codedoc.core.file_division import (
     refine_narrative_inputs,
     tree_node_state,
     validate_node_for_tree,
+    validate_recovered_tree,
     verify_provider_execution_identity,
     worst_case_final_synthesis_chars,
     worst_case_reduction_manifest_chars,
@@ -1043,6 +1045,7 @@ def test_effective_language_invalidates_split_plan_and_node_identities() -> None
                 division_plan_digest=plan.plan_digest,
                 reduction_tree_digest=tree.tree_digest,
                 structural_mode=plan.structural_mode,
+                imports_digest=file_division.deterministic_imports_digest(()),
             ),
             leaf_execution_identity(
                 rel_path="sample.foo",
@@ -1784,6 +1787,7 @@ def test_leaf_reduction_final_identities_are_distinct_and_stable() -> None:
         reduction_tree_digest=tree.tree_digest,
         provider_identity="provider-execution:" + "b" * 64,
         prompt_profile_digest="no-prompt-profile-v1",
+        imports_digest=file_division.deterministic_imports_digest(()),
         node=tree.final_node,
     )
     assert len({leaf, reduction, final}) == 3
@@ -1793,6 +1797,7 @@ def test_leaf_reduction_final_identities_are_distinct_and_stable() -> None:
         reduction_tree_digest=tree.tree_digest,
         provider_identity="provider-execution:" + "b" * 64,
         prompt_profile_digest="some-other-digest",
+        imports_digest=file_division.deterministic_imports_digest(()),
         node=tree.final_node,
     )
     assert final_other_profile != final
@@ -1842,8 +1847,11 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
         reduction_tree_digest=tree.tree_digest,
         provider_identity=provider_identity,
         prompt_profile_digest=profile_digest,
+        imports_digest=file_division.deterministic_imports_digest(()),
         node=tree.final_node,
     )
+
+    _INPUT_DIGEST = "test-input:" + "7" * 64
 
     states = [
         tree_node_state(
@@ -1852,7 +1860,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
             rel_path=plan.rel_path,
             content_hash=content_hash,
             division_plan_digest=plan.plan_digest,
-            reduction_tree_digest=tree.tree_digest,
+            input_digest=_INPUT_DIGEST,
             execution_identity_digest=old_identities[chunk.chunk_id],
             unit_id=None,
             child_ids=(),
@@ -1872,7 +1880,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
             rel_path=plan.rel_path,
             content_hash=content_hash,
             division_plan_digest=plan.plan_digest,
-            reduction_tree_digest=tree.tree_digest,
+            input_digest=_INPUT_DIGEST,
             execution_identity_digest=old_identities[node.node_id],
             unit_id=node.unit_id,
             child_ids=node.child_ids,
@@ -1889,7 +1897,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
             rel_path=plan.rel_path,
             content_hash=content_hash,
             division_plan_digest=plan.plan_digest,
-            reduction_tree_digest=tree.tree_digest,
+            input_digest=_INPUT_DIGEST,
             execution_identity_digest=old_identities[final.node_id],
             unit_id=None,
             child_ids=final.child_ids,
@@ -1933,6 +1941,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
         reduction_tree_digest=tree.tree_digest,
         provider_identity=provider_identity,
         prompt_profile_digest=profile_digest,
+        imports_digest=file_division.deterministic_imports_digest(()),
         node=final,
     )
 
@@ -1962,7 +1971,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
 
 
 # ---------------------------------------------------------------------------
-# Node-keyed recovery (schema version 2) and legacy (v1) detection — section 12/D11
+# Node-keyed recovery (schema version 3) and legacy (v1/v2) detection — section 12/D11
 # ---------------------------------------------------------------------------
 
 
@@ -1979,7 +1988,7 @@ def test_validate_node_for_tree_accepts_exact_match_and_rejects_drift() -> None:
         rel_path="a.py",
         content_hash="a" * 64,
         division_plan_digest=plan.plan_digest,
-        reduction_tree_digest=tree.tree_digest,
+        input_digest="test-input:" + "7" * 64,
         execution_identity_digest=identity,
         unit_id=None,
         child_ids=(),
@@ -2013,7 +2022,7 @@ def test_validate_node_for_tree_rejects_foreign_node_id() -> None:
         rel_path="a.py",
         content_hash="a" * 64,
         division_plan_digest=plan.plan_digest,
-        reduction_tree_digest=tree.tree_digest,
+        input_digest="test-input:" + "7" * 64,
         execution_identity_digest=identity,
         unit_id=None,
         child_ids=(),
@@ -2040,7 +2049,7 @@ def test_validate_node_for_tree_rejects_stage_swap_and_empty_leaf_capsule() -> N
         "rel_path": plan.rel_path,
         "content_hash": "a" * 64,
         "division_plan_digest": plan.plan_digest,
-        "reduction_tree_digest": tree.tree_digest,
+        "input_digest": "test-input:" + "7" * 64,
         "execution_identity_digest": identity,
         "unit_id": None,
         "child_ids": (),
@@ -2080,6 +2089,93 @@ def test_validate_node_for_tree_rejects_stage_swap_and_empty_leaf_capsule() -> N
     )
 
 
+def test_validate_node_for_tree_rejects_a_coverage_permutation() -> None:
+    """Section 11: coverage is compared by ordered-tuple equality, never a
+    sorted set, so a node carrying exactly the planned leaf IDs in a
+    different order must be rejected rather than validated.  The `0.14.1`
+    baseline compared `tuple(sorted(...))` in both symbols below and would
+    accept the permuted node, which is what makes this a regression guard."""
+    plan = build_division_plan(
+        rel_path="a.py",
+        language="unknown",
+        content=_large_source(90),
+        source_budget_chars=200,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000)
+    identity = "division-execution:" + "d" * 64
+    input_digest = "test-input:" + "7" * 64
+    reducer = next(
+        node for node in tree.all_intermediate_nodes if len(node.leaf_ids) >= 2
+    )
+
+    def _reducer_with_coverage(coverage):
+        return tree_node_state(
+            node_id=reducer.node_id,
+            node_type=reducer.phase,
+            rel_path=plan.rel_path,
+            content_hash="a" * 64,
+            division_plan_digest=plan.plan_digest,
+            input_digest=input_digest,
+            execution_identity_digest=identity,
+            unit_id=reducer.unit_id,
+            child_ids=reducer.child_ids,
+            coverage_leaf_ids=coverage,
+            result={"narrative": "Reduced."},
+        )
+
+    def _permute(leaf_ids):
+        # Same multiset, different order: only an ordered comparison separates
+        # these two, so a sorted-set comparison would accept both.
+        permuted = (leaf_ids[1], leaf_ids[0], *leaf_ids[2:])
+        assert permuted != leaf_ids
+        assert sorted(permuted) == sorted(leaf_ids)
+        return permuted
+
+    exact = _reducer_with_coverage(reducer.leaf_ids)
+    permuted = _reducer_with_coverage(_permute(reducer.leaf_ids))
+
+    assert validate_node_for_tree(
+        exact,
+        plan=plan,
+        tree=tree,
+        content_hash="a" * 64,
+        expected_identity=identity,
+        expected_input_digest=input_digest,
+    )
+    assert not validate_node_for_tree(
+        permuted,
+        plan=plan,
+        tree=tree,
+        content_hash="a" * 64,
+        expected_identity=identity,
+        expected_input_digest=input_digest,
+    )
+
+    # The final-coverage predicate carries the same ordered rule.
+    final = tree.final_node
+    assert final.leaf_ids == tuple(chunk.chunk_id for chunk in plan.chunks)
+
+    def _final_with_coverage(coverage):
+        return tree_node_state(
+            node_id=final.node_id,
+            node_type="final",
+            rel_path=plan.rel_path,
+            content_hash="a" * 64,
+            division_plan_digest=plan.plan_digest,
+            input_digest=input_digest,
+            execution_identity_digest=identity,
+            unit_id=final.unit_id,
+            child_ids=final.child_ids,
+            coverage_leaf_ids=coverage,
+            result={"description": "Final."},
+        )
+
+    assert final_node_covers_every_leaf(plan, _final_with_coverage(final.leaf_ids))
+    assert not final_node_covers_every_leaf(
+        plan, _final_with_coverage(_permute(final.leaf_ids))
+    )
+
+
 def test_recovered_reducer_and_final_nodes_require_dependency_closure() -> None:
     plan = build_division_plan(
         rel_path="a.py",
@@ -2095,7 +2191,7 @@ def test_recovered_reducer_and_final_nodes_require_dependency_closure() -> None:
         rel_path=plan.rel_path,
         content_hash="a" * 64,
         division_plan_digest=plan.plan_digest,
-        reduction_tree_digest=tree.tree_digest,
+        input_digest="test-input:" + "7" * 64,
         execution_identity_digest="division-execution:" + "d" * 64,
         unit_id=final.unit_id,
         child_ids=final.child_ids,
@@ -2104,6 +2200,150 @@ def test_recovered_reducer_and_final_nodes_require_dependency_closure() -> None:
     )
 
     assert dependency_closed_nodes((orphan,), plan=plan, tree=tree) == ()
+
+
+def test_validate_recovered_tree_prunes_a_reducer_whose_child_narrative_changed() -> None:
+    """Section 11: a reducer's execution identity never binds its children's
+    actual result content (only structure/provenance), so an individually-
+    valid, dependency-closed reducer checkpoint built from a leaf's OLD
+    narrative must be rejected once that leaf's stored result changes --
+    even though the leaf's own identity and input digest (purely structural)
+    still validate on their own. This is the regression the recompute-from-
+    retained-children input digest exists to catch."""
+    plan = build_division_plan(
+        rel_path="a.py",
+        language="unknown",
+        content=_large_source(90),
+        source_budget_chars=200,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000)
+    content_hash = "a" * 64
+    provider_identity = "provider-execution:" + "b" * 64
+    profile_digest = "no-prompt-profile-v1"
+    reduction_node = (tree.unit_consolidation_nodes + tree.general_nodes)[0]
+    imports_digest = file_division.deterministic_imports_digest(())
+
+    results_by_id: dict[str, dict] = {}
+    nodes = []
+    for chunk in plan.chunks:
+        result = {
+            "description": "original",
+            "chunk_id": chunk.chunk_id,
+            "unit_id": chunk.unit_id,
+        }
+        results_by_id[chunk.chunk_id] = result
+        nodes.append(
+            tree_node_state(
+                node_id=chunk.chunk_id,
+                node_type="leaf",
+                rel_path=plan.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=plan.plan_digest,
+                input_digest=file_division.leaf_input_digest(
+                    rel_path=plan.rel_path,
+                    language="unknown",
+                    chunk=chunk,
+                    unit_indexes=plan.unit_positions(chunk),
+                    unit_count=len(plan.units),
+                ),
+                execution_identity_digest=leaf_execution_identity(
+                    rel_path=plan.rel_path,
+                    content_hash=content_hash,
+                    division_plan_digest=plan.plan_digest,
+                    provider_identity=provider_identity,
+                    chunk=chunk,
+                ),
+                unit_id=None,
+                child_ids=(),
+                coverage_leaf_ids=(chunk.chunk_id,),
+                result=result,
+            )
+        )
+
+    raw_narratives = tuple(
+        results_by_id[child_id]["description"] for child_id in reduction_node.child_ids
+    )
+    nodes.append(
+        tree_node_state(
+            node_id=reduction_node.node_id,
+            node_type=reduction_node.phase,
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            input_digest=file_division.reduction_input_digest(
+                rel_path=plan.rel_path,
+                phase=reduction_node.phase,
+                level=reduction_node.level,
+                unit_id=reduction_node.unit_id,
+                child_count=len(reduction_node.child_ids),
+                ordered_child_narratives=file_division.refine_narrative_inputs(
+                    raw_narratives
+                ),
+            ),
+            execution_identity_digest=reduction_execution_identity(
+                rel_path=plan.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=plan.plan_digest,
+                reduction_tree_digest=tree.tree_digest,
+                provider_identity=provider_identity,
+                node=reduction_node,
+            ),
+            unit_id=reduction_node.unit_id,
+            child_ids=reduction_node.child_ids,
+            coverage_leaf_ids=reduction_node.leaf_ids,
+            result={"narrative": "reduced from original"},
+        )
+    )
+
+    retained, quarantine_entries = validate_recovered_tree(
+        nodes,
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=profile_digest,
+        imports_digest=imports_digest,
+        language="unknown",
+    )
+    assert {state.node_id for state in retained} == {
+        chunk.chunk_id for chunk in plan.chunks
+    } | {reduction_node.node_id}
+    assert quarantine_entries == ()
+
+    mutated_leaf_id = reduction_node.child_ids[0]
+    mutated_unit_id = next(
+        chunk.unit_id for chunk in plan.chunks if chunk.chunk_id == mutated_leaf_id
+    )
+    replaced_result = file_division.canonical_json(
+        {
+            "description": "replaced",
+            "chunk_id": mutated_leaf_id,
+            "unit_id": mutated_unit_id,
+        }
+    )
+    mutated_nodes = tuple(
+        replace(node, result_json=replaced_result)
+        if node.node_id == mutated_leaf_id
+        else node
+        for node in nodes
+    )
+
+    retained_after_mutation, quarantine_after_mutation = validate_recovered_tree(
+        mutated_nodes,
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=profile_digest,
+        imports_digest=imports_digest,
+        language="unknown",
+    )
+    retained_ids_after = {state.node_id for state in retained_after_mutation}
+    assert mutated_leaf_id in retained_ids_after
+    assert reduction_node.node_id not in retained_ids_after
+    assert len(quarantine_after_mutation) == 1
+    assert quarantine_after_mutation[0].node_id == reduction_node.node_id
+    assert quarantine_after_mutation[0].reason == "input-digest-mismatch"
 
 
 def test_worst_case_helpers_use_distinct_maximum_outputs_and_full_ledger() -> None:

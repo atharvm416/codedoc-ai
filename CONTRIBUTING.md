@@ -101,13 +101,6 @@ python -m pytest tests/platform
 - The registered `platform` marker belongs at module level on every test module
   under `tests/platform/` and nowhere else. Use
   `python -m pytest -m "not platform"` on a restricted filesystem.
-- The registered `future_split_recovery` marker identifies only completed split
-  reuse, node-checkpoint, and dependency-valid partial-recovery tests for a
-  later patch. Its shared fixture selects that developer-owned future policy
-  only for those tests. Current fresh split execution, public configuration,
-  and dry-run planning tests must remain unmarked and run under the production
-  policy; do not apply this marker at module scope to a mixed current/future
-  test module.
 
 `tests/meta/test_suite_architecture.py` enforces these rules structurally from
 paths and ASTs without importing collected test modules.

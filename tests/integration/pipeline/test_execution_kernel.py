@@ -64,7 +64,7 @@ def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
     assert result["description"] == "frozen"
     assert "division" not in result
     assert "documentation_units" not in result
-    assert result["_large_file_identity"].startswith("large-file-v2:")
+    assert result["_large_file_identity"].startswith("large-file-v3:")
     tree_state = writer.get_tree_state("large.py")
     assert tree.final_node.node_id in tree_state.by_id()
 
@@ -511,6 +511,7 @@ class TestPlannedIdReconciliation:
                 max_consecutive_failures=5,
                 new_results={},
                 recorder=recorder,
+                split_execution_mode="recovery",
             )
         assert excinfo.value.category == "terminal"
 

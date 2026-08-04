@@ -1,4 +1,5 @@
-"""Public 0.14.1 fresh-only split execution contracts."""
+"""Public split execution contracts: real fresh execution, node checkpoint
+writing, same-path completed reuse, and node-keyed partial recovery."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from codedoc.core.file_division import (
     build_division_plan,
     build_reduction_tree,
     leaf_execution_identity,
+    leaf_input_digest,
     provider_execution_identity,
     tree_node_state,
 )
@@ -22,7 +24,7 @@ from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import build_recovery_identity
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.pipeline import run_pipeline
-from codedoc.utils.errors import ConfigError, LLMError, UnrecoverableProviderError
+from codedoc.utils.errors import LLMError, UnrecoverableProviderError
 from tests.support.execution_requests import make_execution_request
 from tests.support.providers import SmartFake
 
@@ -43,10 +45,27 @@ def _config() -> dict:
     }
 
 
-def test_real_split_is_fresh_and_writes_no_node_checkpoint(tmp_path, monkeypatch) -> None:
+def test_real_split_writes_node_checkpoints_and_second_run_is_zero_call_reuse(
+    tmp_path, monkeypatch
+) -> None:
+    """Current release: split execution checkpoints every node as it completes
+    (node_checkpoints=True), and an unchanged second run reuses the completed
+    record with zero provider calls (completed_reuse=True) rather than
+    re-executing fresh -- the opposite of the retired 0.14.1 fresh-only
+    contract this test used to verify."""
     source = _large_python_source()
     (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
     providers: list[SmartFake] = []
+    checkpointed_nodes: list[str] = []
+    from codedoc.core.safe_writer import SafeWriter
+
+    original_record_tree_node = SafeWriter.record_tree_node
+
+    def recording_record_tree_node(self, rel_path, node, *, reduction_tree_digest):
+        checkpointed_nodes.append(node.node_id)
+        return original_record_tree_node(
+            self, rel_path, node, reduction_tree_digest=reduction_tree_digest
+        )
 
     def provider_factory(_config):
         provider = SmartFake()
@@ -56,23 +75,28 @@ def test_real_split_is_fresh_and_writes_no_node_checkpoint(tmp_path, monkeypatch
     monkeypatch.setattr("codedoc.pipeline.create_provider", provider_factory)
     monkeypatch.setattr(
         "codedoc.core.safe_writer.SafeWriter.record_tree_node",
-        lambda *_a, **_k: pytest.fail("0.14.1 wrote a split node checkpoint"),
+        recording_record_tree_node,
     )
 
     first = run_pipeline(tmp_path, _config())
+    assert len(checkpointed_nodes) > 0, "the current release must checkpoint split nodes"
     second = run_pipeline(tmp_path, _config())
 
-    assert first["checked"] == second["checked"] == 1
-    assert first["reused"] == second["reused"] == 0
-    assert first["resumed"] == second["resumed"] == 0
-    assert len(providers) == 2
-    assert providers[0].doc_calls == providers[1].doc_calls
-    assert providers[0].doc_calls == first["documentation_calls_planned"]
+    assert first["checked"] == 1
+    assert first["reused"] == 0
+    assert first["resumed"] == 0
+    # The unchanged second run is a completed-record reuse: it does not
+    # re-execute (not "checked"), makes zero provider calls, and is not
+    # double-counted as a node-level "resume" (that counter is for a
+    # genuinely interrupted/partial file, not a fully completed one).
+    assert second["checked"] == 0
+    assert second["skipped"] == 1
+    assert len(providers) == 1, "an unchanged completed split file must make zero provider calls"
 
     payload = json.loads((tmp_path / "codedoc" / "codedoc.json").read_text(encoding="utf-8"))
     record = payload["files"][0]
-    assert record["_split_reuse_contract"] == "fresh-only-v1"
-    assert record["_large_file_identity"].startswith("large-file-v2:")
+    assert "_split_reuse_contract" not in record
+    assert record["_large_file_identity"].startswith("large-file-v")
     assert not (tmp_path / "codedoc" / "crash_recovery.json").exists()
 
 
@@ -106,9 +130,13 @@ def test_under_threshold_split_selection_keeps_ordinary_reuse(
     assert "_split_reuse_contract" not in payload["files"][0]
 
 
-def test_freshness_policy_does_not_propagate_to_unchanged_dependents(
+def test_completed_split_reuse_does_not_propagate_to_unchanged_dependents(
     tmp_path, monkeypatch
 ) -> None:
+    """Current release: an unchanged completed split file is itself reused
+    (zero calls), and — exactly as under the retired fresh-only policy — that
+    routing decision alone must still never propagate a redo to its unchanged
+    dependent. Both files are skipped on the identical second run."""
     (tmp_path / "large.py").write_text(
         _large_python_source(), encoding="utf-8", newline=""
     )
@@ -136,10 +164,9 @@ def test_freshness_policy_does_not_propagate_to_unchanged_dependents(
 
     assert first["file_documentation_calls_planned"] == 1
     assert second["file_documentation_calls_planned"] == 0
-    assert second["checked"] == 1
-    assert second["skipped"] == 1
-    assert second["split_divided_files"] == 1
-    assert providers[1].doc_calls == second["documentation_calls_planned"]
+    assert second["checked"] == 0
+    assert second["skipped"] == 2
+    assert len(providers) == 1, "the unchanged second run must make zero provider calls"
 
 
 def test_fresh_sequential_retry_observes_stop_before_next_leaf(tmp_path) -> None:
@@ -421,9 +448,13 @@ def test_split_dry_run_keeps_ordinary_recovery_and_matches_real_plan(
     assert real_provider.doc_calls == real["documentation_calls_planned"]
 
 
-def test_fresh_release_preserves_and_blocks_existing_node_checkpoints(
+def test_current_release_resumes_an_existing_valid_node_checkpoint(
     tmp_path, monkeypatch
 ) -> None:
+    """Current release: a pre-existing, dependency-valid node checkpoint is
+    consumed by a real run rather than blocked -- the opposite of the retired
+    0.14.1 fresh-only ConfigError this test used to verify. Only the
+    remaining unpaid leaf/reduction/final nodes reach the provider."""
     source = _large_python_source()
     source_path = tmp_path / "main.py"
     source_path.write_text(source, encoding="utf-8", newline="")
@@ -473,7 +504,13 @@ def test_fresh_release_preserves_and_blocks_existing_node_checkpoints(
             rel_path="main.py",
             content_hash=content_hash,
             division_plan_digest=plan.plan_digest,
-            reduction_tree_digest=tree.tree_digest,
+            input_digest=leaf_input_digest(
+                rel_path=plan.rel_path,
+                language="python",
+                chunk=chunk,
+                unit_indexes=plan.unit_positions(chunk),
+                unit_count=len(plan.units),
+            ),
             execution_identity_digest=leaf_execution_identity(
                 rel_path="main.py",
                 content_hash=content_hash,
@@ -484,16 +521,42 @@ def test_fresh_release_preserves_and_blocks_existing_node_checkpoints(
             unit_id=None,
             child_ids=(),
             coverage_leaf_ids=(chunk.chunk_id,),
-            result={"description": "already paid"},
+            # Must match exactly what the live leaf cleaner would produce, so
+            # validate_node_for_tree accepts it as dependency-valid rather
+            # than rejecting a checkpoint whose stored result no longer
+            # matches the current cleaner/required-field contract.
+            result={
+                "description": "already paid",
+                "chunk_id": chunk.chunk_id,
+                "unit_id": chunk.unit_id,
+            },
         ),
+        reduction_tree_digest=tree.tree_digest,
     )
-    before = recovery_path.read_bytes()
+
+    leaf_prompts: list[str] = []
+    provider = SmartFake()
+    original_complete_json = provider.complete_json
+
+    def counting_complete_json(prompt, system=""):
+        if "This is one bounded fragment of a larger" in prompt:
+            leaf_prompts.append(prompt)
+        return original_complete_json(prompt, system)
+
+    provider.complete_json = counting_complete_json
+    provider_created = []
     monkeypatch.setattr(
         "codedoc.pipeline.create_provider",
-        lambda *_a, **_k: pytest.fail("provider created before partial-state rejection"),
+        lambda *_a, **_k: (provider_created.append(True), provider)[1],
     )
 
-    with pytest.raises(ConfigError, match="executes split files fresh"):
-        run_pipeline(tmp_path, _config())
+    stats = run_pipeline(tmp_path, _config())
 
-    assert recovery_path.read_bytes() == before
+    # The provider IS created (force bypasses nothing here; this is an
+    # ordinary resumable run), and the pre-checkpointed leaf is never
+    # re-requested: only the remaining leaves reach the provider.
+    assert provider_created == [True]
+    assert len(leaf_prompts) == len(plan.chunks) - 1
+    assert stats["checked"] == 1
+    assert not recovery_path.exists()
+    assert (output_dir / "codedoc.json").exists()

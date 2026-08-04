@@ -24,10 +24,12 @@ import copy
 from codedoc.core.document import (
     _LAST_RUN_INTEGER_FIELDS,
     _LAST_RUN_OPTIONAL_INTEGER_FIELDS,
+    _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS,
 )
 from codedoc.core.output import _is_codedoc_owned
 from tests.support.run_metadata_cases import _view as run_metadata_view
 from tests.support.run_metadata_cases import _partition_sum
+from tests.support.run_metadata_cases import _split_record, _split_stats
 from tests.support.json_document_cases import _view as json_contract_view
 
 def _completed_json(tmp_path, schema="1.4", entry="main.py", files=None, name="codedoc.json"):
@@ -599,6 +601,66 @@ def test_json_reader_rejects_malformed_optional_skip_counter(tmp_path, value):
     data = json.loads(json_from_view(run_metadata_view()))
     data["last_run"]["files_skipped_insufficient_source"] = value
     path = tmp_path / "malformed-optional-counter.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        read_codedoc_document(path)
+
+
+def _split_document_data() -> dict:
+    return json.loads(json_from_view(build_project_view([_split_record()], _split_stats())))
+
+
+def test_split_optional_counter_set_is_exact_and_predecessor_absence_is_readable(tmp_path):
+    assert _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS == {
+        "split_completed_files_reused",
+        "split_partial_files_resumed",
+        "split_unpaid_nodes",
+        "split_reexecuted_nodes",
+        "split_quarantined_nodes",
+        "split_recovery_conflict_files",
+    }
+    data = _split_document_data()
+    for key in _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS:
+        data["last_run"].pop(key)
+    path = tmp_path / "predecessor-split.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = read_codedoc_document(path)
+
+    assert all(
+        key not in loaded.view["last_run"]
+        for key in _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS
+    )
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+@pytest.mark.parametrize("field", sorted(_LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS))
+def test_json_reader_rejects_malformed_optional_split_counter(tmp_path, field, value):
+    data = _split_document_data()
+    data["last_run"][field] = value
+    path = tmp_path / f"malformed-{field}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        read_codedoc_document(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("split_unpaid_nodes", 4),
+        ("split_reexecuted_nodes", 4),
+        ("split_completed_files_reused", 1),
+        ("split_partial_files_resumed", 1),
+    ],
+)
+def test_json_reader_rejects_contradictory_optional_split_counter(
+    tmp_path, field, value
+):
+    data = _split_document_data()
+    data["last_run"][field] = value
+    path = tmp_path / f"contradictory-{field}.json"
     path.write_text(json.dumps(data), encoding="utf-8")
 
     with pytest.raises(ConfigError):

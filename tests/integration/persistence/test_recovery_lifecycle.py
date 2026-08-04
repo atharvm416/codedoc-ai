@@ -41,17 +41,19 @@ from codedoc.core.resume import (
 from tests.support.execution_requests import make_execution_request
 
 
-def test_crash_recovery_banner_explains_fresh_split_rerun_boundary():
-    assert "compatible completed ordinary files can resume" in _CRASH_SAFETY_BANNER
-    assert "completed fresh-split files are deliberately" in _CRASH_SAFETY_BANNER
+def test_crash_recovery_banner_explains_reuse_and_recovery_boundary():
+    assert "compatible completed ordinary and split records may be reused" in _CRASH_SAFETY_BANNER
+    assert "compatible current schema-3 split node checkpoints may resume" in _CRASH_SAFETY_BANNER
+    assert "deliberately re-documented" not in _CRASH_SAFETY_BANNER
     assert "re-run the same command to resume" not in _CRASH_SAFETY_BANNER
 
 
-def test_generic_recovery_remedy_explains_fresh_split_rerun_boundary(tmp_path):
+def test_generic_recovery_remedy_explains_reuse_and_recovery_boundary(tmp_path):
     message = _recovery_remedy(tmp_path / RECOVERY_FILENAME)
 
-    assert "completed ordinary files can then resume" in message
-    assert "completed fresh-split files are deliberately re-documented" in message
+    assert "completed ordinary and split records may then be reused" in message
+    assert "compatible current schema-3 split node checkpoints may resume" in message
+    assert "deliberately re-documented" not in message
     assert "resume that work" not in message
 
 
@@ -90,6 +92,7 @@ def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
+        split_execution_mode="recovery",
     )
 
     assert succeeded.get("x.py", {}).get("description") == "Fresh desc"
@@ -130,6 +133,7 @@ def test_A4_preloaded_stale_record_is_retried_not_restored(tmp_path):
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
+        split_execution_mode="recovery",
     )
 
     retried_paths = [r.rel_path for r, _exc in retry_rate_limited]

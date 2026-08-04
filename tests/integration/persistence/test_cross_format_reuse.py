@@ -22,7 +22,6 @@ from tests.support.cross_format_runs import _first_run
 from tests.support.cross_format_runs import _forbid_provider
 
 
-@pytest.mark.future_split_recovery
 @pytest.mark.parametrize(
     ("first_format", "second_format", "first_name", "second_name"),
     [

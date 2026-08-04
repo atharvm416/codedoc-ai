@@ -175,6 +175,15 @@ def markdown_from_view(view: dict, error_summary: str = "") -> str:
             f"{last_run.get('split_restored_unit_consolidation_calls', 0)} / "
             f"{last_run.get('split_restored_general_reduction_calls', 0)} / "
             f"{last_run.get('split_restored_final_synthesis_calls', 0)}\n",
+            "- Completed split files reused / partial files resumed: "
+            f"{last_run.get('split_completed_files_reused', 0)} / "
+            f"{last_run.get('split_partial_files_resumed', 0)}\n",
+            "- Unpaid / reexecuted / quarantined nodes: "
+            f"{last_run.get('split_unpaid_nodes', 0)} / "
+            f"{last_run.get('split_reexecuted_nodes', 0)} / "
+            f"{last_run.get('split_quarantined_nodes', 0)}\n",
+            "- Recovery conflict files: "
+            f"{last_run.get('split_recovery_conflict_files', 0)}\n",
             "- Remaining planned call categories: "
             f"{last_run.get('file_documentation_calls_planned', 0)} file / "
             f"{last_run.get('unit_documentation_calls_planned', 0)} leaf / "

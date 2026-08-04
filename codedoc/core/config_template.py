@@ -122,14 +122,16 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     (
         "large_file_strategy",
         "Large-file handling. 'truncate' (default) keeps the byte-compatible "
-        "legacy head/tail path. 'split' supports provider-free dry-run planning "
-        "and fresh paid execution with analysis_mode 'single'. It "
-        "divides oversized source at deterministic semantic or lexical "
-        "boundaries, proves complete coverage, builds the reduction topology, "
-        "and reports call and capacity estimates before provider calls. In "
-        "fresh mode every oversized split file executes again; completed split "
-        "reuse, node checkpoints, and partial split recovery are unavailable. "
-        "Triple plus split is rejected before scanning or other side effects.",
+        "legacy head/tail path. 'split' supports provider-free dry-run planning, "
+        "paid execution, same-path completed-record reuse, and node-level "
+        "partial recovery with analysis_mode 'single'. It divides oversized "
+        "source at deterministic semantic or lexical boundaries, proves "
+        "complete coverage, builds the reduction topology, and reports call "
+        "and capacity estimates before provider calls. An exact unchanged "
+        "completed split file is reused with zero provider calls; an "
+        "interrupted split file resumes only its unpaid leaf, reducer, and "
+        "final nodes. Triple plus split is rejected before scanning or other "
+        "side effects.",
     ),
     ("dry_run", "Plan only: no writes and no provider calls."),
     ("max_files", "Safety cap on files that may make LLM calls (0 = unlimited)."),

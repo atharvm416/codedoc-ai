@@ -4,11 +4,26 @@ Issues are collected in memory only — CodeDoc never writes a persistent
 ``error.log``.  Bounded diagnostics are printed to the terminal and embedded in
 the final output (and preserved in ``crash_recovery.json`` while a run is
 interrupted).  Error counters include only errors; issue counters include both.
+
+This module is also the canonical bounded error-projection owner
+(:func:`bounded_exception_summary`).  Two tiers govern every rendering
+boundary in this codebase:
+
+1. **CodeDoc-owned exceptions are bounded by construction, not by rendering.**
+   Every :class:`CodeDocError` subclass has a message CodeDoc composed itself
+   (any foreign text was already passed through :func:`bounded_exception_summary`
+   at its construction site).  A rendering boundary emits ``str(exc)``
+   **unchanged** for these types.
+2. **Everything else is reduced** through :func:`bounded_exception_summary`.
+
+The rule is decidable from the type alone: never call
+:func:`bounded_exception_summary` on a :class:`CodeDocError` instance, and
+never skip it for a foreign exception being wrapped into a new CodeDoc error.
 """
 
 from __future__ import annotations
 
-import traceback
+from concurrent.futures import CancelledError
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -53,10 +68,12 @@ class UnrecoverableProviderError(LLMError):
     *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
-    *safe*: crash_recovery.json is left intact; compatible completed ordinary
-    files remain resumable, while completed fresh-split files remain preserved
-    but are deliberately re-documented. No stop path deletes the backup or
-    overwrites it with a "complete" final output.
+    *safe*: crash_recovery.json is left intact. Compatible completed ordinary
+    and split records may be reused, and compatible current schema-3 split node
+    checkpoints may resume; forced, stale, identity-mismatched, legacy,
+    foreign, or unsupported state is rerun or preserved and blocked according
+    to the documented remedy. No stop path deletes the backup or overwrites it
+    with a "complete" final output.
 
     Parameters
     ----------
@@ -189,6 +206,120 @@ class LiveBackupWriteError(OutputError):
 
 
 # ---------------------------------------------------------------------------
+# Bounded exception rendering (section 3A)
+# ---------------------------------------------------------------------------
+# Frozen contract: bounded_exception_summary(exc) returns exactly
+# "<reason_code>" or "<reason_code> (<detail>)" -- never an exception class
+# name, module path, repr(), or chained-cause text.  Callers decide the tier:
+# a CodeDocError's own str(exc) is never passed through this helper.
+
+MAX_BOUNDED_SUMMARY_CHARS = 200
+
+# Closed reason-code enum. No free text is ever emitted by
+# bounded_exception_summary outside this set.
+BOUNDED_EXCEPTION_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "provider-request-failed",
+        "provider-initialization-failed",
+        "provider-authentication-rejected",
+        "provider-rate-limited",
+        "provider-quota-exhausted",
+        "provider-model-unavailable",
+        "provider-timeout",
+        "provider-connection-failed",
+        "provider-response-malformed",
+        "filesystem-error",
+        "cancelled",
+        "unknown-error",
+    }
+)
+
+# Frozen (module, class_name) -> reason-code table, resolved by walking the
+# exception's MRO from most- to least-derived and taking the first match.
+# Matching is by fully-qualified type name only: no provider SDK is imported
+# here, so this table has zero import-time coupling to optional or
+# not-yet-installed provider packages.  OpenAI and Anthropic mirror the same
+# exception hierarchy (module == package name); google-genai only
+# distinguishes client/server faults, so both map to the general
+# request-failed code and rely on the numeric ``.code`` detail below to carry
+# the HTTP status.
+_PROVIDER_EXCEPTION_REASON_CODES: dict[tuple[str, str], str] = {
+    ("openai", "AuthenticationError"): "provider-authentication-rejected",
+    ("openai", "PermissionDeniedError"): "provider-authentication-rejected",
+    ("openai", "RateLimitError"): "provider-rate-limited",
+    ("openai", "APITimeoutError"): "provider-timeout",
+    ("openai", "APIConnectionError"): "provider-connection-failed",
+    ("openai", "NotFoundError"): "provider-model-unavailable",
+    ("openai", "UnprocessableEntityError"): "provider-response-malformed",
+    ("openai", "APIStatusError"): "provider-request-failed",
+    ("openai", "APIError"): "provider-request-failed",
+    ("anthropic", "AuthenticationError"): "provider-authentication-rejected",
+    ("anthropic", "PermissionDeniedError"): "provider-authentication-rejected",
+    ("anthropic", "RateLimitError"): "provider-rate-limited",
+    ("anthropic", "APITimeoutError"): "provider-timeout",
+    ("anthropic", "APIConnectionError"): "provider-connection-failed",
+    ("anthropic", "NotFoundError"): "provider-model-unavailable",
+    ("anthropic", "UnprocessableEntityError"): "provider-response-malformed",
+    ("anthropic", "APIStatusError"): "provider-request-failed",
+    ("anthropic", "APIError"): "provider-request-failed",
+    ("google.genai.errors", "ClientError"): "provider-request-failed",
+    ("google.genai.errors", "ServerError"): "provider-request-failed",
+    ("google.genai.errors", "APIError"): "provider-request-failed",
+}
+
+
+def _reason_code_for(exc: BaseException) -> str:
+    """Resolve the closed reason code for *exc*, by type alone."""
+    if isinstance(exc, OSError):
+        return "filesystem-error"
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, CancelledError)):
+        return "cancelled"
+    for cls in type(exc).__mro__:
+        code = _PROVIDER_EXCEPTION_REASON_CODES.get((cls.__module__, cls.__name__))
+        if code is not None:
+            return code
+    return "unknown-error"
+
+
+def _bounded_detail(exc: BaseException) -> int | str | None:
+    """Resolve the one permitted ``detail`` for *exc*, from a closed source
+    list only.  Never calls ``str()``/``repr()`` on the exception or any of
+    its attributes, and never traverses ``__cause__``/``__context__``."""
+    if isinstance(exc, OSError):
+        from codedoc.core.io_diagnostics import category_reason, classify_os_error
+
+        return category_reason(classify_os_error(exc))
+    for attr in ("status_code", "code", "retry_after"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def bounded_exception_summary(exc: BaseException) -> str:
+    """Render *exc* as a stable, non-sensitive, bounded summary.
+
+    Returns exactly ``"<reason_code>"`` or ``"<reason_code> (<detail>)"`` --
+    never an exception class name, module path, ``repr()``, or chained-cause
+    text.  *exc* must not be a :class:`CodeDocError`: those are bounded at
+    construction, not at rendering, and every rendering boundary in this
+    codebase emits their text unchanged instead of calling this helper.
+
+    An exception whose type matches no row in the frozen mapping returns
+    exactly ``"unknown-error"`` with no detail -- there is no fallback to
+    ``str(exc)``, no partial rendering, and no best-effort path.
+    """
+    reason_code = _reason_code_for(exc)
+    detail = (
+        _bounded_detail(exc)
+        if reason_code == "filesystem-error" or reason_code.startswith("provider-")
+        else None
+    )
+    text = reason_code if detail is None else f"{reason_code} ({detail})"
+    return text[:MAX_BOUNDED_SUMMARY_CHARS]
+
+
+# ---------------------------------------------------------------------------
 # Error Reporter
 # ---------------------------------------------------------------------------
 
@@ -234,12 +365,16 @@ class ErrorReporter:
         """
         if len(self._entries) >= self._MAX_ENTRIES:
             return
+        message = (
+            str(error)
+            if isinstance(error, CodeDocError)
+            else bounded_exception_summary(error)
+        )
         entry = {
             "type": type(error).__name__,
-            "message": str(error),
+            "message": message,
             "context": context,
             "level": level,
-            "traceback": traceback.format_exc(),
         }
         self._entries.append(entry)
 

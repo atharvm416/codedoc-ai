@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+import hashlib
 import json
 from tests.support.pipeline_scenarios import patch_provider
 from tests.support.pipeline_scenarios import no_llm
@@ -17,6 +18,7 @@ from tests.support.pipeline_usage import write_py
 from tests.support.pipeline_usage import make_graph
 from dataclasses import asdict, fields
 from codedoc.core.loader import load_config
+from codedoc.core.execution_model import build_call_manifest
 from codedoc.core.planning import PipelinePlan, build_pipeline_plan
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ConfigError
@@ -30,6 +32,122 @@ from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.pipeline import _final_entry_source
 from tests.support.run_metadata_cases import _records
 from tests.support.run_metadata_cases import _stats
+
+
+def test_retained_split_nodes_are_excluded_from_exact_unpaid_manifest(tmp_path):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    source_path = tmp_path / "main.py"
+    source_path.write_text(source, encoding="utf-8", newline="")
+    config = load_config(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "analysis_mode": "single",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+        },
+    )
+    division = file_division.build_division_plan(
+        rel_path="main.py",
+        language="python",
+        content=source,
+        source_budget_chars=2000,
+    )
+    tree = file_division.build_reduction_tree(
+        division,
+        max_content_chars=2000,
+        language="python",
+    )
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    provider_identity = file_division.provider_execution_identity(config)
+    retained_chunks = division.chunks[:2]
+    recovered = file_division.SplitTreeState(
+        schema_version=file_division.SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=tuple(
+            file_division.tree_node_state(
+                node_id=chunk.chunk_id,
+                node_type="leaf",
+                rel_path="main.py",
+                content_hash=content_hash,
+                division_plan_digest=division.plan_digest,
+                input_digest=file_division.leaf_input_digest(
+                    rel_path="main.py",
+                    language="python",
+                    chunk=chunk,
+                    unit_indexes=division.unit_positions(chunk),
+                    unit_count=len(division.units),
+                ),
+                execution_identity_digest=file_division.leaf_execution_identity(
+                    rel_path="main.py",
+                    content_hash=content_hash,
+                    division_plan_digest=division.plan_digest,
+                    provider_identity=provider_identity,
+                    chunk=chunk,
+                ),
+                unit_id=None,
+                child_ids=(),
+                coverage_leaf_ids=(chunk.chunk_id,),
+                result={
+                    "description": f"retained {index}",
+                    "chunk_id": chunk.chunk_id,
+                    "unit_id": chunk.unit_id,
+                },
+            )
+            for index, chunk in enumerate(retained_chunks)
+        ),
+    )
+    graph = make_graph("main.py")
+    plan, materials = build_pipeline_plan(
+        {
+            "main.py": {
+                "path": source_path,
+                "rel_path": "main.py",
+                "language": "python",
+                "extension": ".py",
+            }
+        },
+        graph,
+        {"main.py"},
+        "main.py",
+        {},
+        [],
+        config,
+        recovered_partials={"main.py": recovered},
+    )
+
+    manifest = build_call_manifest(
+        [],
+        plan.agent_rels,
+        "single",
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
+    )
+    planned = plan.with_call_manifest(
+        manifest,
+        0,
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
+    )
+
+    retained_ids = set(materials.tree_states["main.py"].by_id())
+    assert retained_ids == {chunk.chunk_id for chunk in retained_chunks}
+    assert all(call.owner not in retained_ids for call in manifest.calls)
+    assert planned.total_calls_planned == (
+        planned.unit_documentation_calls_planned
+        + planned.file_reduction_calls_planned
+        + planned.synthesis_calls_planned
+    )
+    assert planned.total_calls_planned == (
+        len(division.chunks) + len(tree.all_nodes) - len(retained_ids)
+    )
 
 
 def test_split_dry_run_plans_chunks_and_synthesis_without_provider_or_output(

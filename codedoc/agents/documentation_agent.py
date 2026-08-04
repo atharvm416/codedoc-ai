@@ -19,6 +19,7 @@ from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
 )
+from codedoc.utils.errors import CodeDocError, bounded_exception_summary
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -170,7 +171,8 @@ class DocumentationAgent(BaseAgent):
         except CancelledError:
             raise
         except Exception as exc:
-            logger.warning("DocumentationAgent failed on %s: %s", file_path, exc)
+            detail = str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
+            logger.warning("DocumentationAgent failed on %s: %s", file_path, detail)
             return self._agent_error_result(exc)
 
     def _run_with_context(

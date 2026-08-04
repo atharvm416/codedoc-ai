@@ -18,6 +18,10 @@ from codedoc.core.loader import load_config
 from codedoc.utils.errors import (
     LLMError,
 )
+from tests.support.logging_sentinels import (
+    assert_no_sentinels_leaked,
+    sentinel_bearing_exception,
+)
 
 @pytest.mark.parametrize(
     "argv",
@@ -56,16 +60,18 @@ def test_removed_utilities_are_absent_from_help():
     assert "--init-instructions" not in help_text
 
 
-def test_cli_help_exposes_the_large_file_split_fresh_execution_boundary():
+def test_cli_help_exposes_the_large_file_split_reuse_and_recovery_boundary():
     help_text = " ".join(build_parser().format_help().split())
 
     for required in (
         "large-file split execution:",
         "analysis-mode single",
-        "fresh paid execution",
+        "paid execution",
         "triple plus split",
         "completed split reuse",
-        "partial split recovery",
+        "node recovery",
+        "current schema-3 checkpoints",
+        "zero calls",
         "complete source coverage",
         "atom-cap",
         "symbol-cap",
@@ -582,8 +588,8 @@ def test_cli_prints_recovery_path_when_attached(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "crash_recovery.json" in err
     assert "left untouched" in err
-    assert "completed ordinary files can resume" in err
-    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-3 split node checkpoints may resume" in err
 
 def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys):
     import codedoc.pipeline as pipeline_mod
@@ -600,8 +606,8 @@ def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys
     assert exc_info.value.code == 130
     err = capsys.readouterr().err
     assert "crash-recovery file was created or confirmed" in err
-    assert "completed ordinary files can resume" in err
-    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-3 split node checkpoints may resume" in err
     assert not list(tmp_path.glob("**/crash_recovery.json"))
 
 @pytest.mark.parametrize(
@@ -636,9 +642,28 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     # Resume hint is always printed.
     assert "re-run" in err.lower()
     assert "crash_recovery.json" in err
-    assert "completed ordinary files can resume" in err
-    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-3 split node checkpoints may resume" in err
     assert "resumes the unfinished files" not in err
+
+
+def test_verbose_bounded_trace_never_renders_foreign_type_or_message() -> None:
+    from codedoc.cli.cli import _bounded_traceback
+
+    try:
+        raise sentinel_bearing_exception("foreign-provider-exception")
+    except RuntimeError as cause:
+        try:
+            raise ConfigError("bounded outer reason") from cause
+        except ConfigError as outer:
+            rendered = _bounded_traceback(outer)
+
+    assert "Bounded diagnostic trace" in rendered
+    assert "ConfigError" in rendered
+    assert "unknown-error" in rendered
+    assert "RuntimeError" not in rendered
+    assert "foreign-provider-exception" not in rendered
+    assert_no_sentinels_leaked(rendered)
 
 
 def test_cli_locked_output_explains_fresh_split_recovery_boundary(
@@ -661,8 +686,8 @@ def test_cli_locked_output_explains_fresh_split_recovery_boundary(
     assert "Any crash-recovery file already created" in err
     assert "can also occur before one is created" in err
     assert "Completed work is preserved" not in err
-    assert "completed ordinary files can resume" in err
-    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-3 split node checkpoints may resume" in err
 
 
 def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
@@ -682,5 +707,5 @@ def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
     err = capsys.readouterr().err
     assert "Choose a writable output directory" in err
     assert "failure can also occur before one exists" in err
-    assert "completed ordinary files can resume" in err
-    assert "completed fresh-split files are deliberately re-documented" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-3 split node checkpoints may resume" in err

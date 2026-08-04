@@ -47,7 +47,7 @@ def test_carry_is_idempotent(private_key):
     assert target == {"_secret": "v"}
 
 def test_empty_registry_carries_nothing():
-    # The production registry holds the four private keys; neither "_secret" nor
+    # The production registry holds the complete private-key contract; neither
     # "_anything" is registered, so nothing is carried.
     target: dict = {}
     record_meta.carry_private_keys({"_secret": "v", "_anything": 1}, target)
@@ -160,6 +160,17 @@ def test_partial_key_set_preserves_canonical_relative_order():
 def test_cache_identity_keys_are_a_subset_of_registered_private_keys():
     assert record_meta.CACHE_IDENTITY_KEYS <= record_meta.PRIVATE_RECORD_KEYS
     assert set(record_meta.PRIVATE_RECORD_KEYS) == set(record_meta.PRIVATE_KEY_ORDER)
+
+
+def test_retired_split_contract_stays_registered_without_an_absent_default():
+    key = "_split_reuse_contract"
+    assert record_meta.FRESH_SPLIT_REUSE_CONTRACT == "fresh-only-v1"
+    assert key in record_meta.CACHE_IDENTITY_KEYS
+    assert key in record_meta.PRIVATE_RECORD_KEYS
+    assert record_meta.PRIVATE_KEY_ORDER[-1] == key
+    assert key not in record_meta._CACHE_KEY_ABSENT_DEFAULTS
+    assert record_meta.normalized_identity_value(key, {}) is None
+    assert key not in record_meta.expected_analysis_identity("single")
 
 def test_registered_synthetic_keys_are_carried_in_sorted_order(monkeypatch):
     monkeypatch.setattr(

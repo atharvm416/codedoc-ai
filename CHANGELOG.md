@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.14.2 2026-08-04
+
+### Logging privacy and redirected Windows safety
+
+- Scoped verbose DEBUG logging to the `codedoc` namespace without raising the
+  root logger, and held the reviewed provider, authentication, HTTP-client, and
+  transport namespaces at WARNING or stricter. Redirected legacy-code-page
+  output now uses deterministic encoding-safe rendering.
+- Replaced provider- and user-derived exception text at every rendering boundary
+  with closed bounded reason codes. Exception types and CLI exit-code classes
+  are unchanged, but affected message text intentionally changes. In-memory
+  `ErrorReporter` entries no longer retain a `traceback` field.
+- Added bounded split-node completion diagnostics that report only owner,
+  category, node digest, ordinal/count, stage, reason, and response size.
+
+### Completed split reuse and node recovery
+
+- Enabled exactly compatible same-path completed split reuse and schema-3
+  dependency-valid node recovery. Forced paths bypass execution reuse while
+  preserving prior output/recovery until replacement; cross-path split reuse
+  remains unavailable.
+- Added deterministic imports and stage-local input digests, strict
+  duplicate-aware recovery parsing, bounded non-executable quarantine, ordered
+  coverage checks, and preserve-first handling for schema-1, schema-2, foreign,
+  malformed, and future recovery.
+- Retired new `_split_reuse_contract` stamping while retaining the registry key
+  so `0.14.1` `fresh-only-v1` records remain round-trippable and stale by
+  design. Advanced active split identities to `leaf-capsule-v5`,
+  `fact-ledger-v6`, `division-execution-v6`, `large-file-v3`, and split-partial
+  schema version `3`; ordinary `file-doc-v3` remains unchanged.
+- Retained the unchanged narrow identities `source-structure-v2`,
+  `semantic-unit-v3`, `division-packer-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v1`, and `file-synthesis-v3`.
+- Added six optional split run counters for completed reuse, partial resume,
+  unpaid/reexecuted nodes, quarantine, and recovery-conflict files without
+  making predecessor `last_run` documents unreadable.
+
+### Packaging metadata
+
+- Raised the declared setuptools build-backend minimum to 77 for the existing
+  PEP 639 `license` and `license-files` form.
+
 ## 0.14.1 - 2026-08-01
 
 ### Fresh large-file split execution

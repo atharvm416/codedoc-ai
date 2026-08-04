@@ -26,7 +26,7 @@ import concurrent.futures
 import logging
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -52,11 +52,16 @@ from codedoc.core.file_division import (
     ReductionTreePlan,
     SplitTreeState,
     build_fact_ledger,
+    canonical_json,
+    deterministic_imports_digest,
     final_execution_identity,
+    final_input_digest,
     final_synthesis_input,
     leaf_execution_identity,
+    leaf_input_digest,
     load_canonical_json_object,
     reduction_execution_identity,
+    reduction_input_digest,
     refine_narrative_inputs,
     tree_node_state,
 )
@@ -69,6 +74,7 @@ from codedoc.core.source_precheck import insufficient_source
 from codedoc.llm.rate_limit_profile import RateLimitProfile
 from codedoc.utils.errors import (
     AgentError,
+    CodeDocError,
     ErrorReporter,
     InsufficientSourceError,
     LiveBackupWriteError,
@@ -76,10 +82,21 @@ from codedoc.utils.errors import (
     ParseError,
     ResponseContractError,
     UnrecoverableProviderError,
+    bounded_exception_summary,
 )
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _bounded_reason(exc: BaseException) -> str:
+    """The rendering-boundary two-tier check for a progress/failure reason.
+
+    A :class:`CodeDocError` (e.g. ``AgentError``, ``ParseError``,
+    ``OutputError``) is already bounded by construction and renders unchanged;
+    anything else is reduced through :func:`bounded_exception_summary`.
+    """
+    return str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
 
 # ---------------------------------------------------------------------------
 # Compat re-exports (deprecated; import from error_classifier instead)
@@ -194,9 +211,13 @@ class ExecutionContext:
     # for this run (see codedoc.core.file_division.provider_execution_identity),
     # computed once by the pipeline from resolved configuration.
     provider_identity: str = ""
-    # ``fresh`` is the public fresh-only path: no split node read/write.  The
-    # recovery-aware executor remains test-gated for a later milestone.
-    split_execution_mode: str = "recovery"
+    # Keyword-only and required (section 4): a shared executor or request must
+    # never default silently to either mode. ``"fresh"`` performs no split node
+    # read/write; ``"recovery"`` is the production reuse/recovery-aware
+    # executor. Omission is a TypeError at every construction site, in tests
+    # and production alike, rather than a silent behavior change in either
+    # direction.
+    split_execution_mode: str = field(kw_only=True)
 
 
 # ---------------------------------------------------------------------------
@@ -211,7 +232,8 @@ def _process_and_record(
     reduction_tree: ReductionTreePlan | None = None,
     provider_identity: str = "",
     stop_event: threading.Event | None = None,
-    split_execution_mode: str = "recovery",
+    *,
+    split_execution_mode: str,
     fresh_completed_nodes: dict[str, dict] | None = None,
 ) -> dict:
     """Process one file and record it in crash recovery from the worker thread.
@@ -282,24 +304,32 @@ def _checkpoint_node(
     child_ids: tuple[str, ...],
     coverage_leaf_ids: tuple[str, ...],
     execution_identity: str,
+    input_digest: str,
     result: dict,
 ) -> None:
     """Persist one dependency-validated node-keyed checkpoint (split-partial
-    schema version 2; see D11/D12/section 12)."""
+    schema version 3; see D11/D12/section 9/section 12).
+
+    ``reduction_tree.tree_digest`` is passed to the writer as container-level
+    writer-time provenance only -- never stamped onto the node itself, so a
+    topology-only change never invalidates this otherwise-compatible node.
+    """
     node = tree_node_state(
         node_id=node_id,
         node_type=node_type,
         rel_path=request.rel_path,
         content_hash=request.content_hash,
         division_plan_digest=division_plan.plan_digest,
-        reduction_tree_digest=reduction_tree.tree_digest,
         execution_identity_digest=execution_identity,
+        input_digest=input_digest,
         unit_id=unit_id,
         child_ids=child_ids,
         coverage_leaf_ids=coverage_leaf_ids,
         result=result,
     )
-    recorder.record_tree_node(request.rel_path, node)
+    recorder.record_tree_node(
+        request.rel_path, node, reduction_tree_digest=reduction_tree.tree_digest
+    )
 
 
 def _process_divided_file(
@@ -317,7 +347,7 @@ def _process_divided_file(
 
     ``recorder.get_tree_state(...)`` already carries only nodes the pipeline
     validated as exact, current, and dependency-consistent for this plan/tree
-    (see ``codedoc.core.file_division.validate_node_for_tree``); this never
+    (see ``codedoc.core.file_division.validate_recovered_tree``); this never
     re-derives that judgement, only whether a given node ID is present.
     """
     return _execute_divided_file(
@@ -343,13 +373,12 @@ def _process_fresh_divided_file(
 ) -> dict:
     """Execute one effective split without reading or writing node state.
 
-    This is the public fresh-only executor. Its signature deliberately accepts no
-    recovery writer, so a leaf/reducer/final result cannot become a resumable
-    node checkpoint accidentally. ``completed_nodes`` is run-local memory used
-    only to avoid replaying successful paid calls during retries in this
-    invocation; it is never serialized. The caller may persist the fully
-    assembled file-level result through ordinary crash recovery after this
-    function returns successfully.
+    This retained policy-specific executor accepts no recovery writer, so a
+    leaf/reducer/final result cannot become a resumable node checkpoint
+    accidentally. The current release selects the recovery-capable executor;
+    ``completed_nodes`` remains run-local retry memory for explicit fresh-mode
+    callers and is never serialized. The caller may persist only the fully
+    assembled file-level result after this function returns successfully.
     """
 
     return _execute_divided_file(
@@ -364,6 +393,43 @@ def _process_fresh_divided_file(
         fresh_completed_nodes=(
             completed_nodes if completed_nodes is not None else {}
         ),
+    )
+
+
+def _log_split_node_event(
+    *,
+    rel_path: str,
+    category: str,
+    node_id: str,
+    stage: str,
+    reason: str,
+    ordinal: int,
+    count: int,
+    result: dict,
+) -> None:
+    """Emit one bounded verbose split-diagnostic event (section 3A/19).
+
+    Bounded to: normalized relative owner path, category, the node's own
+    content-hash-derived ID, fragment ordinal/count, stage, reason code, and a
+    response character count. Never the chunk payload, complete range
+    manifest, prompt, request options/body, uncleaned response, authorization
+    data, or recovery payload.  A CodeDoc verbosity setting must never opt any
+    dependency into request/body DEBUG logging; this event is the intended
+    fragment-sequence substitute.
+    """
+    if not logger.isEnabledFor(logging.DEBUG):
+        return
+    logger.debug(
+        "Split node %s: owner=%s category=%s node_id=%s stage=%s ordinal=%d/%d "
+        "response_chars=%d",
+        reason,
+        rel_path,
+        category,
+        node_id,
+        stage,
+        ordinal,
+        count,
+        len(canonical_json(dict(result))),
     )
 
 
@@ -383,6 +449,7 @@ def _execute_divided_file(
     if recovery_enabled and recorder is None:
         raise ValueError("recovery-aware split execution requires a recorder.")
     rel_path = request.rel_path
+    split_content_hash = request.content_hash
     allowed_paths = resolved_synthesis_shape(
         request.context.resolved_shape_bundle
     ).requested_field_paths
@@ -440,15 +507,32 @@ def _execute_divided_file(
                     coverage_leaf_ids=(chunk.chunk_id,),
                     execution_identity=leaf_execution_identity(
                         rel_path=rel_path,
-                        content_hash=request.content_hash,
+                        content_hash=split_content_hash,
                         division_plan_digest=division_plan.plan_digest,
                         provider_identity=provider_identity,
                         chunk=chunk,
+                    ),
+                    input_digest=leaf_input_digest(
+                        rel_path=rel_path,
+                        language=request.language,
+                        chunk=chunk,
+                        unit_indexes=division_plan.unit_positions(chunk),
+                        unit_count=len(division_plan.units),
                     ),
                     result=result,
                 )
             elif fresh_completed_nodes is not None:
                 fresh_completed_nodes[chunk.chunk_id] = result
+        _log_split_node_event(
+            rel_path=rel_path,
+            category="split-leaf",
+            node_id=chunk.chunk_id,
+            stage="leaf",
+            reason="reused" if stored is not None else "computed",
+            ordinal=chunk.global_index,
+            count=chunk.global_count,
+            result=result,
+        )
         results_by_id[chunk.chunk_id] = result
         leaf_capsules_ordered.append(result)
 
@@ -459,7 +543,9 @@ def _execute_divided_file(
         symbols=division_plan.symbols,
     )
 
-    for node in reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes:
+    reduction_nodes = reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes
+    reduction_node_count = len(reduction_nodes)
+    for reduction_ordinal, node in enumerate(reduction_nodes, start=1):
         stored = completed.get(node.node_id)
         if stored is not None:
             result = (
@@ -486,6 +572,16 @@ def _execute_divided_file(
             )
             result = orchestrator.process_reduction_node(reduction_request)
             if recovery_enabled:
+                # Mirrors the orchestrator's own narrative extraction exactly
+                # (codedoc/agents/orchestrator.py Orchestrator.process_reduction_node)
+                # so the stored input digest binds precisely what the reducer
+                # prompt actually consumed.
+                raw_narratives = tuple(
+                    capsule.get("narrative", capsule.get("description", ""))
+                    if isinstance(capsule, dict)
+                    else ""
+                    for capsule in child_capsules
+                )
                 _checkpoint_node(
                     recorder,
                     request=request,
@@ -498,16 +594,34 @@ def _execute_divided_file(
                     coverage_leaf_ids=node.leaf_ids,
                     execution_identity=reduction_execution_identity(
                         rel_path=rel_path,
-                        content_hash=request.content_hash,
+                        content_hash=split_content_hash,
                         division_plan_digest=division_plan.plan_digest,
                         reduction_tree_digest=reduction_tree.tree_digest,
                         provider_identity=provider_identity,
                         node=node,
                     ),
+                    input_digest=reduction_input_digest(
+                        rel_path=rel_path,
+                        phase=node.phase,
+                        level=node.level,
+                        unit_id=node.unit_id,
+                        child_count=len(node.child_ids),
+                        ordered_child_narratives=refine_narrative_inputs(raw_narratives),
+                    ),
                     result=result,
                 )
             elif fresh_completed_nodes is not None:
                 fresh_completed_nodes[node.node_id] = result
+        _log_split_node_event(
+            rel_path=rel_path,
+            category="split-reduction",
+            node_id=node.node_id,
+            stage=node.phase,
+            reason="reused" if stored is not None else "computed",
+            ordinal=reduction_ordinal,
+            count=reduction_node_count,
+            result=result,
+        )
         results_by_id[node.node_id] = result
 
     final_node = reduction_tree.final_node
@@ -538,6 +652,7 @@ def _execute_divided_file(
             request, division_plan.plan_digest, manifest_json
         )
         if recovery_enabled:
+            imports_digest = deterministic_imports_digest(request.imports)
             _checkpoint_node(
                 recorder,
                 request=request,
@@ -550,17 +665,33 @@ def _execute_divided_file(
                 coverage_leaf_ids=final_node.leaf_ids,
                 execution_identity=final_execution_identity(
                     rel_path=rel_path,
-                    content_hash=request.content_hash,
+                    content_hash=split_content_hash,
                     division_plan_digest=division_plan.plan_digest,
                     reduction_tree_digest=reduction_tree.tree_digest,
                     provider_identity=provider_identity,
                     prompt_profile_digest=request.context.resolved_shape_bundle.digest,
+                    imports_digest=imports_digest,
                     node=final_node,
+                ),
+                input_digest=final_input_digest(
+                    imports_digest=imports_digest,
+                    resolved_shape_digest=request.context.resolved_shape_bundle.digest,
+                    manifest_json=manifest_json,
                 ),
                 result=final_result,
             )
         elif fresh_completed_nodes is not None:
             fresh_completed_nodes[final_node.node_id] = final_result
+    _log_split_node_event(
+        rel_path=rel_path,
+        category="split-final",
+        node_id=final_node.node_id,
+        stage="final",
+        reason="reused" if stored is not None else "computed",
+        ordinal=1,
+        count=1,
+        result=final_result,
+    )
 
     large_identity = _large_identity(request, division_plan, reduction_tree)
     return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
@@ -578,6 +709,7 @@ def _large_identity(
         division_plan_digest=division_plan.plan_digest,
         reduction_tree_digest=reduction_tree.tree_digest,
         structural_mode=division_plan.structural_mode,
+        imports_digest=deterministic_imports_digest(request.imports),
     )
     if value is None:
         raise ValueError("oversized split record is missing its cache identity.")
@@ -592,7 +724,7 @@ def restore_completed_tree_result(
 ) -> dict:
     """Finalize one exact, fully computed recovered tree locally, without a
     provider.  Callers must supply a tree state whose every node already
-    passed ``validate_node_for_tree`` (the pipeline retains only such nodes).
+    passed ``validate_recovered_tree`` (the pipeline retains only such nodes).
     """
     completed = recovered.by_id()
     final_node = reduction_tree.final_node
@@ -679,8 +811,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
             context.division_plans or {},
             context.reduction_trees or {},
             context.provider_identity,
-            context.split_execution_mode,
-            fresh_completed_nodes_by_path,
+            split_execution_mode=context.split_execution_mode,
+            fresh_completed_nodes_by_path=fresh_completed_nodes_by_path,
         )
         if _is_zero_progress_pass(outcome):
             _raise_rate_limit_exhausted(
@@ -747,8 +879,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 context.division_plans or {},
                 context.reduction_trees or {},
                 context.provider_identity,
-                context.split_execution_mode,
-                fresh_completed_nodes_by_path,
+                split_execution_mode=context.split_execution_mode,
+                fresh_completed_nodes_by_path=fresh_completed_nodes_by_path,
             )
 
         if not retry_rate_limited or not rate_limit_adaptive:
@@ -772,8 +904,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                     context.division_plans or {},
                     context.reduction_trees or {},
                     context.provider_identity,
-                    context.split_execution_mode,
-                    fresh_completed_nodes_by_path,
+                    split_execution_mode=context.split_execution_mode,
+                    fresh_completed_nodes_by_path=fresh_completed_nodes_by_path,
                 )
                 if _is_zero_progress_pass(outcome):
                     _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -876,8 +1008,8 @@ def execute_agent_files(context: ExecutionContext) -> None:
                 context.division_plans or {},
                 context.reduction_trees or {},
                 context.provider_identity,
-                context.split_execution_mode,
-                fresh_completed_nodes_by_path,
+                split_execution_mode=context.split_execution_mode,
+                fresh_completed_nodes_by_path=fresh_completed_nodes_by_path,
             )
             if _is_zero_progress_pass(outcome):
                 _raise_rate_limit_exhausted(provider_name, error_reporter)
@@ -897,7 +1029,8 @@ def _process_descriptor_batch(
     provider_identity: str = "",
     max_consecutive_failures: int = 5,
     profile: RateLimitProfile | None = None,
-    split_execution_mode: str = "recovery",
+    *,
+    split_execution_mode: str,
     fresh_completed_nodes_by_path: dict[str, dict[str, dict]] | None = None,
 ) -> tuple[dict[str, dict], list[tuple[FileExecutionRequest, Exception]], list[FileExecutionRequest]]:
     """Process a batch of requests in parallel at *max_workers* concurrency.
@@ -949,8 +1082,8 @@ def _process_descriptor_batch(
                 (reduction_trees or {}).get(request.rel_path),
                 provider_identity,
                 stop_event,
-                split_execution_mode,
-                (
+                split_execution_mode=split_execution_mode,
+                fresh_completed_nodes=(
                     fresh_completed_nodes_by_path.setdefault(request.rel_path, {})
                     if fresh_completed_nodes_by_path is not None
                     else None
@@ -1007,7 +1140,9 @@ def _process_descriptor_batch(
                         # Preserve the causing exception alongside the
                         # request so the caller can parse Retry-After hints.
                         retry_rate_limited.append((request, exc))
-                        _log_file_progress("RATE-LIMIT", rel_path, completed, total, str(exc))
+                        _log_file_progress(
+                            "RATE-LIMIT", rel_path, completed, total, _bounded_reason(exc)
+                        )
                     else:
                         # Already recorded — treat as succeeded.  Recover the
                         # real persisted record (A4) so the final output is not
@@ -1045,16 +1180,16 @@ def _process_descriptor_batch(
                     # must never become a duplicate whole-file call.  Record here
                     # and keep processing other files without a sequential retry.
                     error_reporter.record(exc, context=rel_path)
-                    queue.mark_failed(rel_path, str(exc))
+                    queue.mark_failed(rel_path, _bounded_reason(exc))
                     stats["failed"] += 1
                     consecutive_failures += 1
-                    _log_file_progress("FAIL", rel_path, completed, total, str(exc))
+                    _log_file_progress("FAIL", rel_path, completed, total, _bounded_reason(exc))
                 else:
                     # Transient non-rate-limit failures retain the existing
                     # sequential retry path for clearer diagnostics.
                     failed_non_rate_limited.append(request)
                     consecutive_failures += 1
-                    _log_file_progress("RETRY", rel_path, completed, total, str(exc))
+                    _log_file_progress("RETRY", rel_path, completed, total, _bounded_reason(exc))
 
                 if (
                     consecutive_failures >= max_consecutive_failures
@@ -1106,7 +1241,8 @@ def _process_files_sequentially(
     division_plans: dict[str, DivisionPlan] | None = None,
     reduction_trees: dict[str, ReductionTreePlan] | None = None,
     provider_identity: str = "",
-    split_execution_mode: str = "recovery",
+    *,
+    split_execution_mode: str,
     fresh_completed_nodes_by_path: dict[str, dict[str, dict]] | None = None,
 ) -> _SequentialOutcome:
     """Process *requests* one at a time with per-file retries.
@@ -1195,22 +1331,22 @@ def _process_files_sequentially(
             )
         except (ParseError, OutputError, AgentError) as exc:
             error_reporter.record(exc, context=rel_path)
-            queue.mark_failed(rel_path, str(exc))
+            queue.mark_failed(rel_path, _bounded_reason(exc))
             stats["failed"] += 1
             consecutive_failures += 1
             failures += 1
             if _classify_failure(exc, profile) != "rate_limit":
                 all_failures_rate_limited = False
-            _log_file_progress("FAIL", rel_path, index, total, str(exc))
+            _log_file_progress("FAIL", rel_path, index, total, _bounded_reason(exc))
         except Exception as exc:
             error_reporter.record(exc, context=rel_path)
-            queue.mark_failed(rel_path, str(exc))
+            queue.mark_failed(rel_path, _bounded_reason(exc))
             stats["failed"] += 1
             consecutive_failures += 1
             failures += 1
             if _classify_failure(exc, profile) != "rate_limit":
                 all_failures_rate_limited = False
-            _log_file_progress("FAIL", rel_path, index, total, str(exc))
+            _log_file_progress("FAIL", rel_path, index, total, _bounded_reason(exc))
 
         if consecutive_failures >= max_consecutive_failures:
             error_reporter.record(
@@ -1240,7 +1376,8 @@ def _process_one_file_with_retries(
     provider_identity: str = "",
     recorder: SafeWriter | None = None,
     stop_event: threading.Event | None = None,
-    split_execution_mode: str = "recovery",
+    *,
+    split_execution_mode: str,
     fresh_completed_nodes: dict[str, dict] | None = None,
     respect_retry_after: bool = True,
     retry_after_cap: int = 30,

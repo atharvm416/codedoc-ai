@@ -63,23 +63,3 @@ def _attest_injected_pipeline_providers(monkeypatch):
         "verify_provider_execution_identity",
         _verify,
     )
-
-
-@pytest.fixture(autouse=True)
-def _enable_future_split_recovery(request):
-    if request.node.get_closest_marker("future_split_recovery") is None:
-        yield
-        return
-    from codedoc.core import release_policy
-
-    previous = release_policy.CURRENT_SPLIT_RELEASE
-    release_policy.CURRENT_SPLIT_RELEASE = release_policy.SplitReleasePolicy(
-        execution=True,
-        completed_reuse=True,
-        partial_recovery=True,
-        node_checkpoints=True,
-    )
-    try:
-        yield
-    finally:
-        release_policy.CURRENT_SPLIT_RELEASE = previous

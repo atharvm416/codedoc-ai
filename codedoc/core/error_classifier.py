@@ -49,6 +49,11 @@ _RATE_LIMIT_SIGNALS = (
     "overloaded",           # Anthropic
     "529",                  # Anthropic overloaded
     "503",
+    # bounded_exception_summary's own closed reason code (codedoc/utils/errors.py):
+    # once an exception crosses the agent-dict boundary (_agent_error_result ->
+    # _raise_result_errors), only this bounded text -- never the original
+    # message -- survives for classification to inspect.
+    "provider-rate-limited",
 )
 
 # ---------------------------------------------------------------------------
@@ -66,6 +71,9 @@ _TERMINAL_BILLING_SIGNALS = (
     "payment required",
     "hard limit",
     "spending limit",
+    # bounded_exception_summary's own closed reason code: see the note on
+    # _RATE_LIMIT_SIGNALS above.
+    "provider-quota-exhausted",
 )
 
 _CREDENTIAL_SIGNALS = (
@@ -81,6 +89,9 @@ _CREDENTIAL_SIGNALS = (
     "could not authenticate",
     "unauthenticated",
     "unauthorized",
+    # bounded_exception_summary's own closed reason code: see the note on
+    # _RATE_LIMIT_SIGNALS above.
+    "provider-authentication-rejected",
 )
 
 _ACCESS_SIGNALS = (
@@ -98,6 +109,9 @@ _MODEL_SIGNALS = (
     "not found for api version",
     "unknown model",
     "no such model",
+    # bounded_exception_summary's own closed reason code: see the note on
+    # _RATE_LIMIT_SIGNALS above.
+    "provider-model-unavailable",
 )
 
 _GLOBAL_PERMANENT_SIGNALS = (
@@ -316,9 +330,11 @@ def _build_terminal_abort(
     reason = (
         f"Provider error that cannot recover by retrying ({cause}). "
         "Completed file-level results were saved to crash_recovery.json in the "
-        "output directory. Re-running the same command resumes compatible "
-        "completed ordinary files; completed fresh-split files are deliberately "
-        "re-documented from scratch."
+        "output directory. Re-running the same command reuses compatible "
+        "completed ordinary and split records and resumes compatible current "
+        "schema-3 split node checkpoints; forced, stale, identity-mismatched, "
+        "legacy, foreign, or unsupported state is rerun or preserved and "
+        "blocked according to the documented remedy."
     )
     err = UnrecoverableProviderError(provider_name, reason, category="terminal")
     err.__cause__ = exc
@@ -335,9 +351,11 @@ def _build_rate_limit_exhausted_abort(
         "progress after stepping down to the lowest concurrency, so retrying was "
         "stopped to avoid sleeping through the backoff schedule for nothing. "
         "Completed file-level results were saved to crash_recovery.json in the "
-        "output directory. Re-running the same command resumes compatible "
-        "completed ordinary files; completed fresh-split files are deliberately "
-        "re-documented from scratch."
+        "output directory. Re-running the same command reuses compatible "
+        "completed ordinary and split records and resumes compatible current "
+        "schema-3 split node checkpoints; forced, stale, identity-mismatched, "
+        "legacy, foreign, or unsupported state is rerun or preserved and "
+        "blocked according to the documented remedy."
     )
     return UnrecoverableProviderError(
         provider_name, reason, category="rate_limit_exhausted"
@@ -353,9 +371,11 @@ def _raise_rate_limit_exhausted(
     warn_msg = (
         f"[{provider_name}] Persistent rate limit / quota: no file made progress "
         "at the lowest concurrency. Stopping the run; completed files are saved "
-        "in crash_recovery.json. Re-running resumes compatible completed ordinary "
-        "files; completed fresh-split files are deliberately re-documented from "
-        "scratch."
+        "in crash_recovery.json. Re-running reuses compatible completed ordinary "
+        "and split records and resumes compatible current schema-3 split node "
+        "checkpoints; forced, stale, identity-mismatched, legacy, foreign, or "
+        "unsupported state is rerun or preserved and blocked according to the "
+        "documented remedy."
     )
     print(warn_msg, flush=True)
     logger.warning(warn_msg)

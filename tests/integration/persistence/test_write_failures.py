@@ -115,8 +115,8 @@ def test_initialize_empty_raises_on_write_failure(tmp_path, monkeypatch):
     assert "codedoc.json" in message
     assert "persisted before this failed write remains preserved" in message
     assert "result being written is not guaranteed saved" in message
-    assert "completed ordinary files can resume" in message
-    assert "completed fresh-split files are deliberately re-documented" in message
+    assert "completed ordinary and split records may be reused" in message
+    assert "compatible current schema-3 split node checkpoints may resume" in message
     assert isinstance(excinfo.value.__cause__, OSError)
 
 def test_pipeline_initialization_failure_creates_no_provider(tmp_path, monkeypatch):
@@ -260,6 +260,7 @@ def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeyp
             max_consecutive_failures=5,
             new_results={},
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # Recorded exactly once — never retried — and never demoted to a per-file
@@ -283,6 +284,7 @@ def test_parallel_persistence_failure_is_fatal_without_retry(tmp_path, monkeypat
             reporter,
             max_workers=4,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # No file was reclassified as a rate-limit or ordinary failure.
@@ -318,6 +320,7 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
             reporter,
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # One additional task may already be running when the first failed future is
@@ -353,6 +356,7 @@ def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
             max_consecutive_failures=5,
             new_results={},
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert recorder.discard_calls == 1
@@ -386,6 +390,7 @@ def test_parallel_skip_discard_failure_uses_fatal_abort_protocol(
             ErrorReporter(),
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert recorder.discard_calls == 1

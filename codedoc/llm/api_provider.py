@@ -17,7 +17,7 @@ All three providers follow the same contract:
 from __future__ import annotations
 
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import LLMError
+from codedoc.utils.errors import LLMError, bounded_exception_summary
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -71,7 +71,7 @@ class OpenAIProvider(LLMProvider):
             )
             return response.choices[0].message.content or ""
         except Exception as exc:
-            raise LLMError("OpenAI", str(exc)) from exc
+            raise LLMError("OpenAI", bounded_exception_summary(exc)) from exc
 
     def complete_json(self, prompt: str, system: str = "") -> str:
         """
@@ -94,7 +94,7 @@ class OpenAIProvider(LLMProvider):
             )
             return response.choices[0].message.content or ""
         except Exception as exc:
-            raise LLMError("OpenAI", str(exc)) from exc
+            raise LLMError("OpenAI", bounded_exception_summary(exc)) from exc
 
     @property
     def provider_name(self) -> str:
@@ -144,7 +144,7 @@ class AnthropicProvider(LLMProvider):
             response = self._client.messages.create(**kwargs)
             return response.content[0].text or ""
         except Exception as exc:
-            raise LLMError("Anthropic", str(exc)) from exc
+            raise LLMError("Anthropic", bounded_exception_summary(exc)) from exc
 
     # Anthropic does not expose a dedicated JSON-mode parameter in the
     # standard Messages API, so we rely on the base class text-instruction
@@ -201,7 +201,7 @@ class GeminiProvider(LLMProvider):
             )
             return response.text or ""
         except Exception as exc:
-            raise LLMError("Gemini", str(exc)) from exc
+            raise LLMError("Gemini", bounded_exception_summary(exc)) from exc
 
     def complete_json(self, prompt: str, system: str = "") -> str:
         """
@@ -225,7 +225,7 @@ class GeminiProvider(LLMProvider):
             )
             return response.text or ""
         except Exception as exc:
-            raise LLMError("Gemini", str(exc)) from exc
+            raise LLMError("Gemini", bounded_exception_summary(exc)) from exc
 
     @property
     def provider_name(self) -> str:

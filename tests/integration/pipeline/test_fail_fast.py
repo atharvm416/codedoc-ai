@@ -113,6 +113,7 @@ def test_sequential_abort_without_retry(tmp_path, exc):
             max_consecutive_failures=5,
             new_results={},
             recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+            split_execution_mode="recovery",
         )
 
     assert excinfo.value.category == "terminal"
@@ -152,6 +153,7 @@ def test_sequential_input_permanent_marks_failed_without_retry_and_continues(tmp
         max_consecutive_failures=5,
         new_results=new_results,
         recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+        split_execution_mode="recovery",
     )
 
     # f0 failed with exactly one attempt (no retry); f1 succeeded; run continued.
@@ -190,6 +192,7 @@ def test_sequential_transient_error_still_retries_and_succeeds(tmp_path):
         max_consecutive_failures=5,
         new_results={},
         recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+        split_execution_mode="recovery",
     )
 
     assert stats["checked"] == 1
@@ -217,6 +220,7 @@ def test_parallel_abort_without_retry(tmp_path, exc):
             reporter,
             max_workers=2,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert excinfo.value.category == "terminal"
@@ -251,6 +255,7 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
             reporter,
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # At most one extra task may already be running when the abort is observed;
@@ -286,6 +291,7 @@ def test_parallel_input_permanent_is_recorded_without_sequential_retry(tmp_path)
         reporter,
         max_workers=2,
         recorder=recorder,
+        split_execution_mode="recovery",
     )
 
     assert set(succeeded) == {"f1.py"}

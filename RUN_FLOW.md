@@ -8,25 +8,26 @@ enrichment.
 ## Availability boundary
 
 The default `large_file_strategy: truncate` supports real `single` and `triple`
-runs. `large_file_strategy: split` supports provider-free dry-run planning and
-fresh paid execution with `analysis_mode: single`.
+runs. Beginning in `0.14.2`, `large_file_strategy: split` supports provider-free
+dry-run planning, paid execution, same-path completed reuse, and dependency-valid
+node recovery with `analysis_mode: single`.
 
 `triple + split` fails during configuration validation before scanning,
 recovery inspection, output-directory creation, prompt-customization review,
 provider construction, or provider calls. It never silently falls back to
 truncate.
 
-In fresh split mode, a valid oversized split file always executes its full leaf,
-reduction, and final-synthesis tree fresh. CodeDoc does not reuse same-path or
-identical-content completed split records, and it neither reads nor writes split
-node checkpoints. A detected in-progress split recovery file is preserved and
-blocks the fresh run with explicit move-aside guidance. Under-threshold files
-continue through ordinary whole-file execution and ordinary reuse.
+An exactly compatible same-path completed split record authorizes zero-call
+reuse. Cross-path identical-content split reuse remains unavailable because
+split identities are path-bound. Accepted leaf, reducer, and final nodes are
+checkpointed only after cleaning and validation; a compatible interrupted run
+resumes only unpaid nodes. An explicit force bypasses reuse/recovery for that
+path while old stable output and recovery remain preserved until replacement.
 
-Accepted split-node results may live in process-local memory across retry and
-rate-limit ladder attempts so only the failed logical call is repeated. This
-ephemeral state is never serialized, never authorizes another run, and vanishes
-on interruption or process exit.
+The predecessor `0.14.1` `fresh-only-v1` split record is stale by default under
+`0.14.2` and reruns once. Schema-1 and schema-2 partials are preserved but not
+resumed. Rolling back to `0.14.1` reruns `large-file-v3` split output fresh and
+blocks schema-3 recovery preserve-first.
 
 ## Persistent-file allowlist
 
@@ -44,7 +45,7 @@ There is no alternate-config, `.env`, external-profile, directory-wide output,
 database, issue-log, or `.gitignore` discovery. A named output uses only its
 configured counterpart; CodeDoc does not scan unrelated siblings.
 
-## Split planning and fresh execution
+## Split planning, reuse, and recovery
 
 When `large_file_strategy` resolves to `split`, CodeDoc reads one canonical
 decoded snapshot per selected source file. A file at or below
@@ -99,9 +100,10 @@ unit-consolidation/general-reduction, and final-synthesis call categories. It
 also reports a deterministic worst-case final-input estimate that reserves the
 complete 3,000-character canonical ledger-synopsis allowance rather than using
 one concrete trimmed ledger as a proxy. It is a character-based estimate rather
-than a tokenizer-exact prediction. Dry-run stops after this provider-free plan;
-a real run executes the same authorized topology. Completed split reuse and all
-split node checkpoint/recovery behavior remain unavailable.
+than a tokenizer-exact prediction. Dry-run stops after this provider-free plan
+and does not consume checkpoints; a real run executes the same authorized
+topology after completed reuse and dependency-valid recovery remove already-paid
+work.
 
 ## Ordered phases for a real run
 
@@ -129,9 +131,10 @@ split node checkpoint/recovery behavior remain unavailable.
 4. **Inspect recovery and build the final read-only plan.** Inspect only the
    exact `<output_dir>/crash_recovery.json`. Compatible ordinary completed
    records may overlay stable output. Foreign, completed, unsupported,
-   malformed, or run-identity-mismatched recovery blocks without mutation. A
-   fresh split run also preserves and rejects any split-node partial
-   state. Planning applies ordinary reuse, rejects insufficient source locally,
+   malformed, or run-identity-mismatched recovery blocks without mutation.
+   Current schema-3 split nodes are validated topologically; valid siblings are
+   retained, rejected nodes are quarantined, and their ancestors are pruned.
+   Planning applies completed reuse, rejects insufficient source locally,
    divides oversized split files, and blocks any capacity failure before calls.
 
 5. **Build the canonical manifest and enforce caps.** Derive review scopes only
@@ -153,10 +156,11 @@ split node checkpoint/recovery behavior remain unavailable.
    provider work remains, before documentation-provider construction. Process
    dependencies before dependents where possible. Ordinary single mode makes one
    combined call per file; triple mode makes three bounded calls. An oversized
-   split file runs its planned leaf/reduction/final tree without persistent node
-   checkpoint reads or writes. Accepted nodes remain in run-local memory across
-   retries so earlier paid calls are not replayed. Only its completed file-level result reaches the ordinary
-   writer. Response cleaning, optional correction, retry limits,
+   split file runs only unpaid nodes in its planned leaf/reduction/final tree.
+   Every returned node is cleaned, schema-validated, and transactionally
+   checkpointed before a dependent is scheduled. A fully recovered final is
+   restored locally with no provider or review. Only completed file-level output
+   reaches the public record. Response cleaning, optional correction, retry limits,
    terminal-provider handling, cancellation, and usage accounting share the
    canonical call boundary.
 
@@ -185,11 +189,20 @@ targets, entry, documentation scope, analysis mode/revision, and the effective
 large-file strategy. Every recovered record is still revalidated by the
 per-file predicate.
 
-An oversized split result additionally publishes private topology and
-`fresh-only-v1` contract identities. These prevent it from being mistaken for
-an ordinary record, but fresh split mode deliberately schedules it again even when every
-identity matches. Dry-run does not inspect split partial recovery; a real fresh
-split run recognizes, preserves, and rejects split-node partial state.
+An oversized split result additionally carries the private current
+`large-file-v3` topology/imports identity. The retired `_split_reuse_contract`
+key is no longer stamped, but remains registered so literal `0.14.1`
+`fresh-only-v1` records round-trip unchanged and compare stale. Completed cache
+reuse is provider-agnostic. Partial node identity additionally binds provider,
+model, and effective endpoint; imports-only changes preserve leaves/reducers and
+rerun final synthesis. Cross-path split reuse remains unavailable.
+
+Schema-3 recovery stores container provenance, ordered node state, exact
+stage-local input digests, and bounded non-executable quarantine. Schema-1,
+schema-2, unknown, foreign, duplicate, aliased, or unsafe container state is
+preserved and blocked. The remedies are ordered preserve-first: restore the
+matching version/configuration or move the file aside; deletion is only an
+explicit discard.
 
 ## Call authorization and accounting
 
@@ -207,10 +220,13 @@ allowed partial completion, and terminal abort use the same accounting model.
 
 - `triple + split` fails before every side effect.
 - Split dry-run performs no provider call and no persistent mutation.
-- Every oversized split file executes fresh; completed split records,
-  identical-content split records, and node checkpoints authorize no reuse.
-- Existing split-node partial recovery is preserved and rejected before any
-  provider call or persistent mutation.
+- Exactly compatible same-path completed split records authorize zero-call
+  reuse; cross-path split records do not.
+- Current dependency-valid schema-3 nodes authorize only their own paid work;
+  invalid nodes never authorize an ancestor and remain quarantined until valid
+  replacement or completed output succeeds.
+- Schema-1/schema-2, foreign, future, malformed, duplicate, or aliased recovery
+  is preserved and blocked before provider construction or mutation.
 - Stable output is not mutated during analysis.
 - Recovery is initialized only after read-only gates, caps, and any semantic
   review.
@@ -222,5 +238,7 @@ allowed partial completion, and terminal abort use the same accounting model.
   placeholder.
 - No unrelated sibling or legacy file is opened or deleted.
 - Output replacement is ownership-guarded and atomic per artifact.
-- Provider errors and public output never expose credentials, raw prompts,
-  source text, or raw provider responses.
+- CodeDoc verbosity never raises the root logger or lowers reviewed provider,
+  authentication, HTTP-client, or transport floors. Provider errors and public
+  output never expose credentials, raw prompts, source text, or raw provider
+  responses.

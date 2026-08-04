@@ -267,6 +267,12 @@ metadata and `files[]` for per-file documentation.
 | `files_reused_unchanged` | Files reused because content and analysis identity were unchanged. |
 | `files_reused_identical_content` | Files reused from another path with identical content. |
 | `files_resumed_from_recovery` | Files restored from compatible crash-recovery state. |
+| `split_completed_files_reused` | Same-path completed split records reused with no split execution. |
+| `split_partial_files_resumed` | Split files with at least one validated retained node. |
+| `split_unpaid_nodes` | Exact initially planned unpaid leaf, reducer, and final nodes. |
+| `split_reexecuted_nodes` | Previously paid split nodes scheduled again after invalidation. |
+| `split_quarantined_nodes` | Bounded non-executable rejected-node entries retained in recovery. |
+| `split_recovery_conflict_files` | Split files containing a bounded recovery conflict. |
 
 The truthful `last_run` partition is:
 
@@ -379,7 +385,7 @@ instruction schema instead of copying a partial configuration.
 | `rate_limit_signals_remove` | Remove recognized rate-limit signals. |
 | `ignore_paths` | Set project-relative paths to ignore. |
 | `max_content_chars` | Set the ordinary source ceiling and the ceiling for each split leaf, reduction manifest, and final manifest. |
-| `large_file_strategy` | Choose head-and-tail `truncate` handling or complete-source `split` planning and fresh execution. |
+| `large_file_strategy` | Choose head-and-tail `truncate` handling or complete-source `split` planning, execution, completed reuse, and node recovery. |
 | `dry_run` | Plan without writes, provider construction, or provider calls. |
 | `max_files` | Cap files with unpaid provider work; `0` is unlimited. |
 | `max_planned_calls` | Cap initially planned LLM calls before provider construction; `0` is unlimited. |
@@ -399,7 +405,7 @@ keys adjust the resolved value.
 
 ### Large files
 
-#### Fresh-execution boundary
+#### Reuse and recovery boundary
 
 The default `large_file_strategy: truncate` keeps the established head-plus-tail
 behavior. With `analysis_mode: single`, `large_file_strategy: split` supports
@@ -408,21 +414,30 @@ Any `triple + split` request fails configuration validation before scanning,
 recovery inspection, output-directory creation, prompt review, or provider
 construction; it never silently falls back to truncation.
 
-Fresh split mode intentionally performs **fresh split execution**. Every oversized
-split file performs its complete paid leaf, reduction, and final-synthesis work
-again on every real run, even when compatible completed output exists. Split
-node checkpoints, completed split reuse, identical-content split reuse, and
-partial split recovery are not active. If an in-progress split recovery file is
-present, CodeDoc preserves it and stops with instructions to use the matching
-future recovery-capable release or move it aside. Files at or below
-`max_content_chars` continue through the ordinary whole-file path and retain
-ordinary completed-record reuse.
+Completed split reuse and node-level partial recovery begin in `0.14.2`. An
+exactly compatible same-path completed split record is reused without provider
+construction, review calls, documentation calls, partial writes, or paid-cap
+usage. Cross-path identical-content split reuse remains unavailable because the
+split plan and completed identity are path-bound. An explicit force bypasses
+reuse and recovery for that path while preserving prior stable output and
+recovery until replacement succeeds.
 
-Within one running process, accepted leaf, reduction, and synthesis results are
-held only in memory so a retry repeats the failed logical call rather than
-replaying earlier successful paid calls. This ephemeral retry state is never
-written to recovery, cannot be reused by another run, and is lost on interruption
-or process exit.
+Each accepted leaf, reduction, and final-synthesis result is checkpointed only
+after it has been cleaned and validated. A compatible interrupted run resumes
+only unpaid nodes in dependency order. Schema-1 and schema-2 partial state is
+recognized and preserved but not resumed; unknown, foreign, aliased, duplicate,
+or otherwise unsafe containers block with preserve-first guidance. Move an
+incompatible recovery file aside to retain it for diagnosis or a matching
+version; deletion is an explicit discard of that state.
+
+Imports-only changes preserve compatible leaves and reducers but invalidate
+final synthesis. Provider, model, or effective-endpoint changes invalidate
+partial nodes, while completed cache reuse remains provider-agnostic.
+
+The `0.14.1` `fresh-only-v1` completed split contract is stale by default under
+`0.14.2` and reruns once to produce the current `large-file-v3` identity.
+Rolling back to `0.14.1` likewise reruns current split output fresh. Files at or
+below `max_content_chars` continue through the ordinary whole-file path.
 
 A split dry-run scans the canonical source snapshot, builds the same
 deterministic semantic or lexical chunks, verifies complete coverage, constructs
@@ -522,7 +537,7 @@ general roots + fact ledger + actual path/language/imports
 
 </details>
 
-The diagram describes both provider-free planning and active fresh execution.
+The diagram describes both provider-free planning and active split execution.
 
 #### Semantic division and synthesis
 
@@ -604,9 +619,9 @@ and aborts the whole run (dry or real) before any provider or writer side
 effect, leaving prior stable output completely untouched; it is never a
 per-file failure statistic.
 
-#### Active split accounting, identity, and provider checks
+#### Split accounting, identity, and provider checks
 
-Fresh split dry-runs and real runs report ordinary, leaf,
+Split dry-runs and real runs report ordinary, leaf,
 unit-consolidation, general-reduction, and final-synthesis calls as separate
 categories. The synthesis input-token estimate is a deterministic worst-case
 envelope, not a tokenizer-exact count. An oversized requested-split record
@@ -616,16 +631,15 @@ This private key is persisted in machine-readable JSON and the embedded
 Markdown view for safe round trips, but never appears in visible documentation
 prose.
 
-The fresh initial-call plan is `P = R + O + C + U + G + F`: `R` is
+The exact initial-call plan is
+`P = R + O + (C - Hc) + (U - Hu) + (G - Hg) + (F - Hf)`: `R` is
 prompt-customization review calls; `O` is ordinary provider-bound whole-file
-calls remaining after ordinary reuse or recovery, including under-threshold
-files; `C` is leaf chunk calls; `U` is unit-consolidation calls; `G` is general
-file-reduction calls; and `F` is final-synthesis calls. Retries and optional
-corrections are additional attempts attached to an existing logical call, not
-new entries in `P`. `max_files` counts files with at least one unpaid provider
-action. Fresh split files always contribute their complete initial split call
-set in fresh split mode, while compatible completed ordinary recovery records do
-not contribute another ordinary call.
+calls remaining after reuse; `C`/`Hc` are planned/restored leaf calls; `U`/`Hu`
+are planned/restored unit-consolidation calls; `G`/`Hg` are planned/restored
+general reductions; and `F`/`Hf` are planned/restored final syntheses. Retries
+and corrections are additional attempts attached to an existing logical call.
+`max_files` and `max_planned_calls` count exact unpaid work; a fully restored or
+completed-reused split file contributes neither a paid candidate nor a review.
 
 Provider construction must attest to the provider, model, and effective
 endpoint used by the plan. Missing attestation fails closed. Implicit HTTP/HTTPS
@@ -635,33 +649,19 @@ endpoint. A malformed HTTP(S) URL, host, or port is rejected as configuration
 before provider creation using a value-free diagnostic that does not echo
 credentials or URL details.
 
-#### Later completed split reuse and node recovery (not active in fresh split mode)
+#### Completed split reuse and node recovery
 
-<details>
-<summary>Planned recovery-capable extensions</summary>
-
-The future recovery-capable design checkpoints every leaf, unit-consolidation, general
-reduction, and final-synthesis node independently and by its own node ID, each
+CodeDoc checkpoints every leaf, unit-consolidation, general reduction, and
+final-synthesis node independently and by its own node ID, each
 carrying a provider/model/effective-endpoint execution identity; resuming
 revalidates every checkpoint against its exact planned node type, ordered
-children, coverage, node-specific identity, and the same live cleaner/required
-field schema. Recovery is dependency-closed: an invalid or missing descendant
-also invalidates every affected reducer/final ancestor, while unrelated valid
-leaves remain reusable.
-
-The exact initial-call plan is
-`P = R + O + (C - Hc) + (U - Hu) + (G - Hg) + (F - Hf)`: `R` is
-prompt-customization review calls; `O` is ordinary provider-bound whole-file
-calls remaining after reuse, including under-threshold files; `C`/`Hc` are
-planned and restored leaf chunk calls; `U`/`Hu` are planned and restored
-unit-consolidation calls; `G`/`Hg` are planned and restored general
-file-reduction calls; and `F`/`Hf` are planned and restored final-synthesis
-calls. Here `Hc`, `Hu`, `Hg`, and `Hf` are valid restored calls of each split
-category. `max_files` then counts only files with at least one unpaid provider
-action after exact split recovery; a fully restored file contributes no
-candidate and does not trigger a prompt-customization review.
-
-</details>
+children, ordered coverage, stage-local input digest, node-specific identity,
+and the same live cleaner/required-field schema. Recovery is dependency-closed:
+an invalid or missing descendant prunes every affected reducer/final ancestor,
+while unrelated valid leaves remain reusable. Equal-length imports-only changes
+preserve compatible leaves and reducers but rerun final synthesis. Provider,
+model, or effective-endpoint changes invalidate partial nodes; completed cache
+reuse remains provider-agnostic.
 
 ### Response correction (opt-in)
 
@@ -689,6 +689,11 @@ facts and inventing nothing.
   position, and a response character count). CodeDoc's rejection diagnostic
   records do not include raw provider-response text, source, prompts, or
   credentials.
+- CodeDoc verbosity raises only the `codedoc` logger namespace. It never raises
+  the root logger or lowers the reviewed OpenAI, Anthropic, Gemini,
+  authentication, HTTP-client, or transport logger floors. In an embedding
+  application, unrelated logging explicitly enabled by the host remains the
+  host's responsibility.
 
 ## Command-line options
 
@@ -712,7 +717,7 @@ facts and inventing nothing.
 | `--allow-partial` | Exit zero after a completed run with file failures. |
 | `--no-parallel` | Disable within-file parallel agents in triple mode. |
 | `--analysis-mode {single,triple}` | Select one combined call or the three-agent path. |
-| `--large-file-strategy {truncate,split}` | Use head/tail truncation or deterministic complete-source split planning/fresh execution in single mode. |
+| `--large-file-strategy {truncate,split}` | Use head/tail truncation or deterministic complete-source split planning/execution with same-path reuse and node recovery in single mode. |
 | `--init-config` | Create the complete active config and exit. |
 | `--force` | With `--init-config`, refresh only editable profiles. |
 | `--max-parallel-files N` | Set concurrent file processing (default `5`). |
@@ -902,22 +907,25 @@ Every real run that reaches the finalization pipeline selects exactly
 returns without creating it. The file is initialized only when provider work
 remains, after ownership/path checks, deterministic validation, read-only
 planning, paid caps, and any mandatory semantic review have succeeded. It is
-updated atomically after each completed file-level result, whether ordinary or
-fresh split. Fresh split node progress remains process-local and is never
-serialized into this file.
+updated atomically after each completed ordinary file and after every returned,
+cleaned, live-schema-valid split node. A checkpoint is committed before its
+dependent is scheduled.
 
 The recovery file includes a versioned identity covering project root, exact
 selected targets, entry, documentation scope, analysis mode/revision, and
 large-file strategy. It no longer binds a profile-wide digest: each recovered
 completed record is instead re-validated individually against the current
 per-file `_prompt_profile_digest`, so an unrelated profile edit or a newly added
-file no longer discards a resumable run. Compatible completed ordinary-file
-records are resumed; completed fresh-split records are deliberately rerun in
-fresh split mode. A foreign, completed, unsupported, or identity-mismatched
-recovery file blocks without mutation. To resume, restore the prior run configuration.
-To start fresh without immediately destroying paid checkpoint history, move
-`crash_recovery.json` aside before rerunning; deleting it is an explicit choice
-to discard that recovery state.
+file no longer discards a resumable run. Compatible completed ordinary and split
+records may be reused. A current schema-3 split container is validated in plan
+order; valid siblings remain reusable, rejected nodes are retained in bounded
+non-executable quarantine, and affected ancestors rerun. Provider changes
+invalidate partial nodes but not a compatible completed record. Imports-only
+changes retain compatible leaves and reducers while rerunning final synthesis.
+A foreign, completed, unsupported, or identity-mismatched recovery file blocks
+without mutation. Restore the prior configuration or matching CodeDoc version
+to resume it, or move `crash_recovery.json` aside before starting fresh.
+Recovery-file deletion is an explicit choice to discard that recovery state.
 
 During provider work, prior stable output is untouched. On successful
 finalization, each selected artifact is atomically replaced and recovery is
@@ -937,10 +945,11 @@ and the CLI exits with code 130.
 `--dry-run` performs scanning and planning without persistent mutation, provider
 creation, or API calls. It reports empty/whitespace-only files separately and
 excludes their expected documentation calls and prompt tokens. `--max-files N`
-caps files with at least one unpaid provider action. For ordinary files this is
-after completed-record reuse and dependency-closed recovery; oversized split
-files are always unpaid candidates in fresh split mode. `--force-files PATH` bypasses
-ordinary reuse for a selected file. In split mode the dry run reports exact ordinary-file, leaf,
+caps files with at least one unpaid provider action. This is measured after
+completed-record reuse and dependency-closed recovery, so a completed-reused or
+fully restored split file is not a paid candidate. `--force-files PATH`
+bypasses reuse and recovery for the selected file while preserving prior state
+until replacement succeeds. In split mode the dry run reports exact ordinary-file, leaf,
 unit-consolidation, general-reduction, and final-synthesis call counts;
 structural routing and capacity-block reasons; and a deterministic worst-case
 final-synthesis input estimate rather than a tokenizer-exact prediction. Split

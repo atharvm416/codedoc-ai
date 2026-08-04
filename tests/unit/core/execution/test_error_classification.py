@@ -226,20 +226,22 @@ def test_terminal_abort_names_only_the_matched_global_cause(message, expected, a
     abort = _build_terminal_abort(LLMError("openai", message), "openai", "global")
     assert expected in abort.reason
     assert absent not in abort.reason
-    assert "resumes compatible completed ordinary files" in abort.reason
-    assert "completed fresh-split files are deliberately" in abort.reason
+    assert "reuses compatible completed ordinary and split records" in abort.reason
+    assert "resumes compatible current schema-3 split node checkpoints" in abort.reason
+    assert "deliberately re-documented" not in abort.reason
     assert "resumes the unfinished files" not in abort.reason
 
 
-def test_rate_limit_exhausted_abort_explains_fresh_split_rerun_boundary():
+def test_rate_limit_exhausted_abort_explains_reuse_and_recovery_boundary():
     abort = _build_rate_limit_exhausted_abort("openai")
 
-    assert "resumes compatible completed ordinary files" in abort.reason
-    assert "completed fresh-split files are deliberately" in abort.reason
+    assert "reuses compatible completed ordinary and split records" in abort.reason
+    assert "resumes compatible current schema-3 split node checkpoints" in abort.reason
+    assert "deliberately re-documented" not in abort.reason
     assert "resumes the unfinished files" not in abort.reason
 
 
-def test_rate_limit_exhausted_warning_explains_fresh_split_rerun_boundary(capsys):
+def test_rate_limit_exhausted_warning_explains_reuse_and_recovery_boundary(capsys):
     class Recorder:
         def record(self, *_args, **_kwargs):
             return None
@@ -248,8 +250,9 @@ def test_rate_limit_exhausted_warning_explains_fresh_split_rerun_boundary(capsys
         _raise_rate_limit_exhausted("openai", Recorder())
 
     warning = capsys.readouterr().out
-    assert "resumes compatible completed ordinary files" in warning
-    assert "completed fresh-split files are deliberately" in warning
+    assert "reuses compatible completed ordinary and split records" in warning
+    assert "resumes compatible current schema-3 split node checkpoints" in warning
+    assert "deliberately re-documented" not in warning
     assert "re-run the same command to resume" not in warning
 
 def test_provider_construction_errors_are_classified_as_setup_errors(monkeypatch):

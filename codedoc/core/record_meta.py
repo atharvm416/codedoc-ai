@@ -73,10 +73,10 @@ from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 # reprocessed exactly once under the current contract before reuse.
 ANALYSIS_REVISION = "file-doc-v3"
 
-# Fresh-mode split records are valid owned completed documentation, but they must
-# never authorize unpaid split reuse.  The explicit marker survives every
-# public-format round trip as private metadata so a later reuse release can reject this
-# predecessor contract without inferring policy from the package version.
+# Rejected predecessor value from the 0.14.1 fresh-only split contract. Current
+# production code never stamps it, but the key remains registered so predecessor
+# records survive every public-format round trip and mismatch the current absent
+# expected value without inferring policy from the package version.
 FRESH_SPLIT_REUSE_CONTRACT = "fresh-only-v1"
 
 # Per-file truncation identity token.  The head-plus-tail truncation of an
@@ -215,20 +215,24 @@ def expected_large_file_identity(
     division_plan_digest: str,
     reduction_tree_digest: str,
     structural_mode: str,
+    imports_digest: str,
 ) -> str | None:
     """Return the effective-split cache-identity value, or ``None``.
 
     ``None`` for a record whose source fits `max_chars` (never split) or that
     was never a completed effective split.  There is no capacity-fallback or
     effective-truncate identity case: a completed record carrying this key
-    always describes a complete effective split (D8/D11/section 13).  The revision
-    prefix (``large-file-v2``) is distinct from the predecessor's so an
-    unreleased predecessor split identity can never satisfy this comparison.
+    always describes a complete effective split (D8/D11/section 13).  The
+    revision prefix (``large-file-v3``) is distinct from every predecessor's
+    so an earlier split identity (including the dormant ``large-file-v2``)
+    can never satisfy this comparison.  Binds the deterministic imports
+    digest (section 6) so an equal-length import change invalidates the
+    completed record.
     """
     if source_chars <= max_chars:
         return None
     payload = {
-        "revision": "large-file-identity-v2",
+        "revision": "large-file-identity-v3",
         "requested_strategy": "split",
         "effective_strategy": "split",
         "source_budget": int(max_chars),
@@ -236,6 +240,7 @@ def expected_large_file_identity(
         "division_plan_digest": division_plan_digest,
         "reduction_tree_digest": reduction_tree_digest,
         "structural_mode": structural_mode,
+        "imports_digest": imports_digest,
         "parser_package_version": PARSER_PACKAGE_VERSION,
         "grammar_availability_mode": (
             "bundled-grammar-or-complete-lexical-fallback-v1"
@@ -269,7 +274,7 @@ def expected_large_file_identity(
             "final_synthesis": FINAL_SYNTHESIS_REVISION,
         },
     }
-    return "large-file-v2:" + hashlib.sha256(
+    return "large-file-v3:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
 

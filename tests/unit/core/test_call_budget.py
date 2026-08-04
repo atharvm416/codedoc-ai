@@ -10,6 +10,7 @@ from codedoc.core.execution_model import CallManifest, PlannedCall, build_call_m
 from codedoc.core.file_division import (
     build_division_plan,
     build_reduction_tree,
+    deterministic_imports_digest,
     leaf_execution_identity,
     reduction_execution_identity,
     final_execution_identity,
@@ -112,6 +113,7 @@ class TestEmptyAndAllReusedRuns:
         content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
         provider_identity = "provider-execution:" + "a" * 64
 
+        _INPUT_DIGEST = "test-input:" + "7" * 64
         nodes = []
         for chunk in division.chunks:
             identity = leaf_execution_identity(
@@ -128,7 +130,7 @@ class TestEmptyAndAllReusedRuns:
                     rel_path=division.rel_path,
                     content_hash=content_hash,
                     division_plan_digest=division.plan_digest,
-                    reduction_tree_digest=tree.tree_digest,
+                    input_digest=_INPUT_DIGEST,
                     execution_identity_digest=identity,
                     unit_id=None,
                     child_ids=(),
@@ -152,7 +154,7 @@ class TestEmptyAndAllReusedRuns:
                     rel_path=division.rel_path,
                     content_hash=content_hash,
                     division_plan_digest=division.plan_digest,
-                    reduction_tree_digest=tree.tree_digest,
+                    input_digest=_INPUT_DIGEST,
                     execution_identity_digest=identity,
                     unit_id=node.unit_id,
                     child_ids=node.child_ids,
@@ -167,6 +169,7 @@ class TestEmptyAndAllReusedRuns:
             reduction_tree_digest=tree.tree_digest,
             provider_identity=provider_identity,
             prompt_profile_digest="test-profile",
+            imports_digest=deterministic_imports_digest(()),
             node=tree.final_node,
         )
         nodes.append(
@@ -176,7 +179,7 @@ class TestEmptyAndAllReusedRuns:
                 rel_path=division.rel_path,
                 content_hash=content_hash,
                 division_plan_digest=division.plan_digest,
-                reduction_tree_digest=tree.tree_digest,
+                input_digest=_INPUT_DIGEST,
                 execution_identity_digest=final_identity,
                 unit_id=None,
                 child_ids=tree.final_node.child_ids,
@@ -185,7 +188,7 @@ class TestEmptyAndAllReusedRuns:
             )
         )
         restored = SplitTreeState(
-            schema_version=2,
+            schema_version=3,
             owner="codedoc-ai",
             rel_path=division.rel_path,
             content_hash=content_hash,

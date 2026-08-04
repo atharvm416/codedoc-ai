@@ -112,11 +112,13 @@ from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import create_provider, describe_provider_selection
 from codedoc.llm.rate_limit_profile import get_rate_limit_profile
 from codedoc.utils.errors import (
+    CodeDocError,
     ConfigError,
     ErrorReporter,
     LiveBackupWriteError,
     PromptCustomizationValidationError,
     UnrecoverableProviderError,
+    bounded_exception_summary,
 )
 from codedoc.utils.logger import get_logger, set_level
 
@@ -471,30 +473,15 @@ def run_pipeline(
         recovery_state = load_recovery_records_if_compatible(
             recovery_path,
             recovery_identity,
-            # A fresh-only release still parses current partial state so it can
-            # preserve and reject it explicitly instead of silently dropping
-            # paid checkpoints on the first writer flush.
+            # Split node checkpoints are consumed for real (dependency-valid)
+            # recovery; a dry run never reads them (see split_planning_preview
+            # below, section 18).
             include_partial_files=effective_real_split,
         )
     except ConfigError:
         if not dry_run:
             raise
     recovery_records = recovery_state.records_by_path()
-    if (
-        effective_real_split
-        and recovery_state.partial_files
-        and not split_release.partial_recovery
-    ):
-        partial_paths = ", ".join(
-            repr(state.rel_path) for state in recovery_state.partial_files
-        )
-        raise ConfigError(
-            f"'{recovery_path.name}' contains split node checkpoints for "
-            f"{partial_paths}. This CodeDoc build executes split files fresh and "
-            "does not consume or overwrite node checkpoints. Resume with the "
-            "exact build that created them, or move the recovery file aside "
-            "before starting fresh. The stable completed output is untouched."
-        )
     if split_planning_preview:
         # A fresh split preview must ignore completed split records, but
         # ordinary completed recovery remains reusable in the identical real
@@ -504,7 +491,6 @@ def run_pipeline(
             rel_path: record
             for rel_path, record in recovery_records.items()
             if not record.get("_large_file_identity")
-            and not record.get("_split_reuse_contract")
         }
     # Every structurally parseable partial. Planning narrows this to the subset
     # that is actually reusable; the writer is seeded from that narrower set.
@@ -728,7 +714,12 @@ def run_pipeline(
             _set_manifest_reconciliation(
                 review_stats, usage, plan, call_tracker
             )
-            raise PromptCustomizationValidationError(str(exc), stats=review_stats) from exc
+            detail = (
+                str(exc)
+                if isinstance(exc, CodeDocError)
+                else bounded_exception_summary(exc)
+            )
+            raise PromptCustomizationValidationError(detail, stats=review_stats) from exc
         review_stats["prompt_customization_security_review_calls_completed"] = (
             outcome.calls_completed
         )
@@ -825,6 +816,7 @@ def run_pipeline(
     recorder.load(
         preloaded=existing_docs,
         preloaded_partials=dict(materials.tree_states),
+        preloaded_carry_partials=dict(materials.carry_states),
     )
 
     skipped = len(plan.unchanged_rels)
@@ -843,7 +835,7 @@ def run_pipeline(
         )
     reused = len(plan.identical_reuse_rels)
     resumed = len(
-        (set(recovery_records) - set(plan.fresh_split_rels))
+        (set(recovery_records) - set(plan.split_execution_rels))
         | set(materials.tree_states)
     )
 
@@ -1066,8 +1058,13 @@ def run_pipeline(
             if recovery_path.exists()
             else ""
         )
+        detail = (
+            str(exc)
+            if isinstance(exc, CodeDocError)
+            else bounded_exception_summary(exc)
+        )
         print(
-            f"\nError: {exc}{recovery_note}",
+            f"\nError: {detail}{recovery_note}",
             file=sys.stderr,
             flush=True,
         )
@@ -1393,7 +1390,7 @@ def _build_dry_run_stats(
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
         "would_resume": len(
-            (set(recovery_resumed_paths) - set(plan.fresh_split_rels))
+            (set(recovery_resumed_paths) - set(plan.split_execution_rels))
             | set(materials.tree_states if materials is not None else ())
         ),
         "forced": len(plan.forced_rels),
@@ -1692,6 +1689,21 @@ def _split_division_stats(
     # the aggregate split counters.
     blocked_pairs = tuple(sorted(blocked.items()))
 
+    split_unpaid_nodes = (
+        plan.unit_documentation_calls_planned
+        + plan.file_reduction_calls_planned
+        + plan.synthesis_calls_planned
+        if plan is not None
+        else 0
+    )
+    reexecuted_nodes = materials.reexecuted_nodes if materials is not None else 0
+    if reexecuted_nodes > split_unpaid_nodes:
+        raise ValueError("split reexecuted-node count exceeds exact unpaid work.")
+    partial_files_resumed = sum(
+        1 for state in tree_states.values() if state.nodes
+    )
+    quarantined_nodes = sum(len(state.quarantine) for state in tree_states.values())
+
     return {
         "large_file_strategy": "split",
         "split_ordinary_files": ordinary,
@@ -1713,6 +1725,16 @@ def _split_division_stats(
         "split_restored_unit_consolidation_calls": restored_uc,
         "split_restored_general_reduction_calls": restored_gr,
         "split_restored_final_synthesis_calls": restored_final,
+        "split_completed_files_reused": (
+            len(plan.completed_split_reuse_rels) if plan is not None else 0
+        ),
+        "split_partial_files_resumed": partial_files_resumed,
+        "split_unpaid_nodes": split_unpaid_nodes,
+        "split_reexecuted_nodes": reexecuted_nodes,
+        "split_quarantined_nodes": quarantined_nodes,
+        "split_recovery_conflict_files": (
+            materials.recovery_conflict_files if materials is not None else 0
+        ),
         "file_documentation_calls_planned": (
             plan.file_documentation_calls_planned if plan is not None else 0
         ),

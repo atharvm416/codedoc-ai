@@ -27,6 +27,9 @@ def test_markdown_renders_split_run_summary_without_internal_unit_content():
     markdown = markdown_from_view(view)
 
     assert "Semantic units / leaf chunks" in markdown
+    assert "Completed split files reused / partial files resumed: 0 / 0" in markdown
+    assert "Unpaid / reexecuted / quarantined nodes: 3 / 1 / 2" in markdown
+    assert "Recovery conflict files: 1" in markdown
     assert "**Source coverage:**" not in markdown
     assert "Documentation Unit" not in markdown
     assert markdown_to_view(markdown) == view

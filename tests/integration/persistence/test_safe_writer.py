@@ -101,7 +101,7 @@ def test_5_parallel_worker_records_before_main_collects(tmp_path):
         def process(request):
             return {"language": "python", "description": "test"}
 
-    _process_and_record(request, FakeOrchestrator(), sw)
+    _process_and_record(request, FakeOrchestrator(), sw, split_execution_mode="recovery")
 
     assert "main.py" in recorded, "record() must be called inside worker"
     data = json.loads(backup.read_text(encoding="utf-8"))

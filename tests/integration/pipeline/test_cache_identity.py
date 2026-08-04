@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+from pathlib import Path
 
 from codedoc.core.record_meta import expected_analysis_identity
 from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
@@ -22,7 +23,11 @@ from tests.support.providers import SmartFake
 from tests.support.cross_format_runs import _config
 from tests.support.cross_format_runs import _first_run
 from codedoc.core.db import compute_file_hash
-from codedoc.core.file_division import build_division_plan, build_reduction_tree
+from codedoc.core.file_division import (
+    build_division_plan,
+    build_reduction_tree,
+    deterministic_imports_digest,
+)
 from codedoc.core.graph import DependencyGraph
 from codedoc.core.planning import build_pipeline_plan
 from codedoc.core.record_meta import (
@@ -597,7 +602,7 @@ def test_v2_record_is_invalidated():
     assert ANALYSIS_REVISION != "file-doc-v2"
 
 def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
-    """One reusable fresh-origin split record under the future policy fixture."""
+    """One reusable completed split record under the current release policy."""
     src = tmp_path / "main.py"
     source = "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
     src.write_text(source, encoding="utf-8", newline="")
@@ -616,6 +621,7 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
         division_plan_digest=plan.plan_digest,
         reduction_tree_digest=tree.tree_digest,
         structural_mode=plan.structural_mode,
+        imports_digest=deterministic_imports_digest(()),
     )
     file_map = {
         "main.py": {
@@ -633,7 +639,6 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
         "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
         "_large_file_identity": identity,
-        "_split_reuse_contract": "fresh-only-v1",
     }
     config = {
         "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
@@ -645,12 +650,63 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
     )
     return plan
 
-@pytest.mark.future_split_recovery
 def test_split_file_with_matching_identity_is_reused(tmp_path):
     assert "main.py" in _split_plan(tmp_path).unchanged_rels
 
-@pytest.mark.future_split_recovery
 def test_split_file_identity_is_invariant_to_truncation_head_ratio(tmp_path):
-    """A truncate-only head-ratio change does not invalidate future split reuse."""
+    """A truncate-only head-ratio change does not invalidate current split reuse."""
     assert "main.py" in _split_plan(tmp_path, head_ratio=0.70).unchanged_rels
     assert "main.py" in _split_plan(tmp_path, head_ratio=0.85).unchanged_rels
+
+
+def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path):
+    """The frozen record was produced by the reviewed 0.14.1 commit, rather
+    than reconstructed in this test. Both predecessor identity values must
+    cause current planning to schedule the file as unpaid work."""
+    fixture_dir = Path(__file__).resolve().parents[2] / "fixtures" / "split_state"
+    predecessor = json.loads(
+        (fixture_dir / "completed_0_14_1.json").read_text(encoding="utf-8")
+    )
+    record = predecessor["files"][0]
+    assert record["_split_reuse_contract"] == "fresh-only-v1"
+    assert record["_large_file_identity"].startswith("large-file-v2:")
+
+    rel_path = record["path"]
+    source = (Path(__file__).with_name(rel_path)).read_bytes()
+    src = tmp_path / rel_path
+    src.write_bytes(source)
+    assert compute_file_hash(src) == record["hash"]
+    file_map = {
+        rel_path: {
+            "path": src, "rel_path": rel_path,
+            "language": "python", "extension": ".py",
+        }
+    }
+    graph = DependencyGraph()
+    graph.add_file(rel_path)
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": 2500, "truncation_head_ratio": 0.70,
+    }
+    plan_result, _ = build_pipeline_plan(
+        file_map, graph, {rel_path}, rel_path, {rel_path: record}, [], config,
+    )
+    assert rel_path not in plan_result.unchanged_rels
+    assert rel_path in plan_result.changed_rels
+
+
+def test_actual_predecessor_completed_split_recovery_has_no_partial_files():
+    fixture_dir = Path(__file__).resolve().parents[2] / "fixtures" / "split_state"
+    payload = json.loads(
+        (fixture_dir / "recovery_0_14_1_completed_split.json").read_text(
+            encoding="utf-8"
+        )
+    )
+
+    assert payload["_codedoc"]["status"] == "in_progress"
+    assert "partial_files" not in payload["_codedoc"]
+    assert len(payload["files"]) == 1
+    record = payload["files"][0]
+    assert record["_split_reuse_contract"] == "fresh-only-v1"
+    assert record["_large_file_identity"].startswith("large-file-v2:")

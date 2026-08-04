@@ -1,0 +1,103 @@
+{
+  "last_run": {
+    "entry_file": "test_config_precedence.py",
+    "entry_source": "explicit",
+    "documentation_scope": "entry",
+    "analysis_mode": "single",
+    "files_scanned": 20,
+    "files_selected": 1,
+    "files_documented_by_llm": 1,
+    "files_failed": 0,
+    "files_unattempted": 0,
+    "files_skipped_insufficient_source": 0,
+    "files_reused_unchanged": 0,
+    "files_reused_identical_content": 0,
+    "files_resumed_from_recovery": 0,
+    "large_file_strategy": "split",
+    "split_ordinary_files": 0,
+    "split_syntax_files": 0,
+    "split_lexical_files": 1,
+    "split_blocked_files": 0,
+    "split_divided_files": 1,
+    "split_units": 63,
+    "split_chunks": 2,
+    "split_continuation_groups": 0,
+    "split_unit_consolidation_levels": 0,
+    "split_unit_consolidation_calls_planned": 0,
+    "split_general_reduction_levels": 1,
+    "split_general_reduction_calls_planned": 1,
+    "split_final_synthesis_calls_planned": 1,
+    "split_restored_complete_chunks": 0,
+    "split_restored_unit_consolidation_calls": 0,
+    "split_restored_general_reduction_calls": 0,
+    "split_restored_final_synthesis_calls": 0,
+    "file_documentation_calls_planned": 0,
+    "unit_documentation_calls_planned": 2,
+    "file_reduction_calls_planned": 1,
+    "synthesis_calls_planned": 1,
+    "split_blocked_by_reason": {}
+  },
+  "tree": {
+    "test_config_precedence.py": {
+      "type": "file",
+      "path": "test_config_precedence.py"
+    }
+  },
+  "folders": [
+    {
+      "path": ".",
+      "summary": "Root-level python files (1 file(s)). Common concepts: kc.",
+      "file_count": 1,
+      "languages": [
+        "python"
+      ],
+      "files": [
+        "test_config_precedence.py"
+      ],
+      "key_concepts": [
+        "kc"
+      ]
+    }
+  ],
+  "files": [
+    {
+      "hash": "f4cdd10b2d2d0cdc6e7239d1552c3dcac319a27be2176ab73b3a9703e62696bb",
+      "path": "test_config_precedence.py",
+      "language": "python",
+      "description": "A file.",
+      "role_in_system": "core",
+      "imports": [
+        "__future__",
+        "json",
+        "codedoc.core.loader",
+        "codedoc.pipeline",
+        "tests.support.configuration_cases"
+      ],
+      "functions": [
+        {
+          "name": "f",
+          "description": "does f"
+        }
+      ],
+      "key_concepts": [
+        "kc"
+      ],
+      "usage_example": "import x",
+      "_analysis_revision": "file-doc-v3",
+      "_analysis_mode": "single",
+      "_large_file_identity": "large-file-v2:66808c4f103ee04e27633faee25a0de30beb09d9a2289eaafe200f058375ddbf",
+      "_split_reuse_contract": "fresh-only-v1",
+      "reachable_from_entry": true,
+      "links": {
+        "external_dependencies": [
+          "codedoc",
+          "tests"
+        ],
+        "sdk_dependencies": [
+          "__future__",
+          "json"
+        ]
+      }
+    }
+  ]
+}

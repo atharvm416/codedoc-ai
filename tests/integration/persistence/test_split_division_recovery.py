@@ -1,4 +1,4 @@
-"""Node-keyed split recovery (schema version 2 — D11/D12/section 12).
+"""Node-keyed split recovery (schema version 3 — D11/D12/section 9/section 12).
 
 Every leaf, unit-consolidation, general-reduction, and final-synthesis node is
 checkpointed independently and keyed by its own node ID; resuming a run
@@ -41,13 +41,12 @@ from tests.support.execution_requests import make_execution_request
 from tests.support.providers import SmartFake
 from tests.support.run_metadata_cases import _view as run_metadata_view
 
-pytestmark = pytest.mark.future_split_recovery
-
 _CONTENT_HASH = "0" * 64
 _PLAN_DIGEST = "division-plan:" + "1" * 64
 _TREE_DIGEST = "reduction-tree:" + "2" * 64
 _EXECUTION_ID = "division-execution:" + "3" * 64
 _CHUNK_ID = "chunk_" + "4" * 64
+_INPUT_DIGEST = "leaf-input:" + "5" * 64
 
 
 def _leaf_node(rel_path: str):
@@ -57,8 +56,8 @@ def _leaf_node(rel_path: str):
         rel_path=rel_path,
         content_hash=_CONTENT_HASH,
         division_plan_digest=_PLAN_DIGEST,
-        reduction_tree_digest=_TREE_DIGEST,
         execution_identity_digest=_EXECUTION_ID,
+        input_digest=_INPUT_DIGEST,
         unit_id=None,
         child_ids=(),
         coverage_leaf_ids=(_CHUNK_ID,),
@@ -74,7 +73,9 @@ def test_split_partial_is_internal_to_recovery_metadata(tmp_path) -> None:
         {},
         {"version": 1},
     )
-    writer.record_tree_node("src/large.py", _leaf_node("src/large.py"))
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
 
     text = writer.path.read_text(encoding="utf-8")
 
@@ -83,7 +84,7 @@ def test_split_partial_is_internal_to_recovery_metadata(tmp_path) -> None:
     assert "src/large.py" in text
 
 
-def test_schema_two_recovery_retains_valid_nodes_beside_malformed_siblings(
+def test_schema_three_recovery_retains_valid_nodes_beside_malformed_siblings(
     tmp_path,
 ) -> None:
     writer = SafeWriter(
@@ -93,29 +94,88 @@ def test_schema_two_recovery_retains_valid_nodes_beside_malformed_siblings(
         {},
         {"version": 1},
     )
-    writer.record_tree_node("src/large.py", _leaf_node("src/large.py"))
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
     payload = json.loads(writer.path.read_text(encoding="utf-8"))
     nodes = payload["_codedoc"]["partial_files"]["src/large.py"]["nodes"]
-    valid_node = next(iter(nodes.values()))
-    nodes["chunk_" + "5" * 64] = {
-        **valid_node,
-        "content_hash": "9" * 64,
-    }
-    nodes["chunk_" + "6" * 64] = {
-        "node_type": "leaf",
-        "child_ids": 7,
-    }
+    valid_node = nodes[0]
+    nodes.append({**valid_node, "node_id": "chunk_" + "5" * 64, "content_hash": "9" * 64})
+    nodes.append({"node_id": "chunk_" + "6" * 64, "node_type": "leaf", "child_ids": 7})
+    nodes.append(
+        {
+            **valid_node,
+            "node_id": "chunk_" + "7" * 64,
+            "reduction_tree_digest": _TREE_DIGEST,
+        }
+    )
     writer.path.write_text(json.dumps(payload), encoding="utf-8")
 
     document = read_codedoc_document(writer.path)
 
     assert len(document.partial_files) == 1
     assert tuple(document.partial_files[0].by_id()) == (_CHUNK_ID,)
+    quarantine = document.partial_files[0].quarantine_by_id()
+    assert set(quarantine) == {
+        "chunk_" + "5" * 64,
+        "chunk_" + "6" * 64,
+        "chunk_" + "7" * 64,
+    }
+    assert quarantine["chunk_" + "5" * 64].reason == "stale-identity"
+    assert quarantine["chunk_" + "6" * 64].reason == "live-schema-mismatch"
+    assert quarantine["chunk_" + "7" * 64].reason == "live-schema-mismatch"
+
+
+def test_duplicate_key_json_is_fatal_and_preserves_the_recovery_bytes(tmp_path) -> None:
+    writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
+    text = writer.path.read_text(encoding="utf-8")
+    needle = f'"node_id": "{_CHUNK_ID}"'
+    duplicate = f'{needle},\n          {needle}'
+    assert text.count(needle) == 1
+    writer.path.write_text(text.replace(needle, duplicate), encoding="utf-8")
+    before = writer.path.read_bytes()
+
+    with pytest.raises(ConfigError, match="duplicate JSON key"):
+        read_codedoc_document(writer.path)
+
+    assert writer.path.read_bytes() == before
+
+
+def test_unknown_schema_three_container_field_is_fatal(tmp_path) -> None:
+    writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
+    payload = json.loads(writer.path.read_text(encoding="utf-8"))
+    payload["_codedoc"]["partial_files"]["src/large.py"]["future_field"] = True
+    writer.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="unknown or missing field"):
+        read_codedoc_document(writer.path)
+
+
+def test_duplicate_schema_three_node_id_is_fatal(tmp_path) -> None:
+    writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
+    payload = json.loads(writer.path.read_text(encoding="utf-8"))
+    nodes = payload["_codedoc"]["partial_files"]["src/large.py"]["nodes"]
+    nodes.append(dict(nodes[0]))
+    writer.path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ConfigError, match="duplicate split-partial node ID"):
+        read_codedoc_document(writer.path)
 
 
 def test_completed_record_clears_same_path_split_partial(tmp_path) -> None:
     writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {"src/large.py": {}})
-    writer.record_tree_node("src/large.py", _leaf_node("src/large.py"))
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
 
     writer.record(
         "src/large.py",
@@ -136,7 +196,9 @@ def test_flush_refuses_partial_state_for_a_file_completed_this_run(tmp_path) -> 
     record — and that the prior recovery file survives the refusal intact.
     """
     writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {})
-    writer.record_tree_node("src/large.py", _leaf_node("src/large.py"))
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
     intact = writer.path.read_bytes()
 
     # Simulate the forbidden state the public guards prevent.
@@ -160,7 +222,9 @@ def test_flush_allows_a_preloaded_stable_record_beside_a_current_partial(
         {},
     )
     writer.load(preloaded={"src/large.py": {"path": "src/large.py"}})
-    writer.record_tree_node("src/large.py", _leaf_node("src/large.py"))
+    writer.record_tree_node(
+        "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
+    )
 
     assert '"partial_files"' in writer.path.read_text(encoding="utf-8")
 
@@ -239,7 +303,7 @@ def test_resume_runs_only_unpaid_nodes_and_then_synthesis(tmp_path) -> None:
     assert resumed.synthesis_calls == 1
     assert "division" not in result
     assert "documentation_units" not in result
-    assert result["_large_file_identity"].startswith("large-file-v2:")
+    assert result["_large_file_identity"].startswith("large-file-v3:")
     assert tree.final_node.node_id in writer.get_tree_state(request.rel_path).by_id()
 
 
@@ -320,6 +384,7 @@ def test_terminal_split_failure_preserves_stable_output_and_resumes_only_unpaid_
             reduction_tree=tree,
             provider_identity="test-provider",
             recorder=writer,
+            split_execution_mode="recovery",
         )
 
     checkpoint = writer.get_tree_state(request.rel_path)
@@ -558,7 +623,7 @@ def test_pipeline_terminal_chunk_failure_retains_resumable_checkpoint(
     ]
     assert list(partials) == ["main.py"]
     leaf_nodes = [
-        node for node in partials["main.py"]["nodes"].values()
+        node for node in partials["main.py"]["nodes"]
         if node["node_type"] == "leaf"
     ]
     assert len(leaf_nodes) == 1
@@ -584,7 +649,7 @@ def test_pipeline_terminal_chunk_failure_retains_resumable_checkpoint(
     )["files"][0]
     assert "division" not in record
     assert "documentation_units" not in record
-    assert record["_large_file_identity"].startswith("large-file-v2:")
+    assert record["_large_file_identity"].startswith("large-file-v3:")
     assert record["description"]
 
 
@@ -683,13 +748,17 @@ def test_malformed_schema_two_container_blocks_without_overwriting_recovery(
             large_file_strategy="split",
         ),
     )
-    writer.record_tree_node("main.py", _leaf_node("main.py"))
+    writer.record_tree_node(
+        "main.py", _leaf_node("main.py"), reduction_tree_digest=_TREE_DIGEST
+    )
     payload = json.loads(recovery_path.read_text(encoding="utf-8"))
     container = payload["_codedoc"]["partial_files"]["main.py"]
     if malformation == "unsupported-schema":
-        container["schema_version"] = 3
+        # 2 is the dormant per-node-tree-digest-gated predecessor schema
+        # (section 16): recognized only enough to fail closed, never executed.
+        container["schema_version"] = 2
     elif malformation == "non-object-nodes":
-        container["nodes"] = []
+        container["nodes"] = {}
     elif malformation == "foreign-owner":
         container["owner"] = "foreign"
     else:
@@ -752,7 +821,9 @@ def test_aliased_split_partial_paths_block_without_mutation_or_provider(
             large_file_strategy="split",
         ),
     )
-    writer.record_tree_node("src/main.py", _leaf_node("src/main.py"))
+    writer.record_tree_node(
+        "src/main.py", _leaf_node("src/main.py"), reduction_tree_digest=_TREE_DIGEST
+    )
     payload = json.loads(recovery_path.read_text(encoding="utf-8"))
     partials = payload["_codedoc"]["partial_files"]
     partials[alias] = dict(partials["src/main.py"])

@@ -1,7 +1,11 @@
 """Shared test support extracted from mapped source modules."""
 
 from __future__ import annotations
+
+from codedoc.core.record_meta import FRESH_SPLIT_REUSE_CONTRACT
 from codedoc.core.project_view import build_project_view
+
+PREDECESSOR_LARGE_FILE_IDENTITY = "large-file-v2:test"
 
 def _partition_sum(last_run: dict) -> int:
     return (
@@ -14,6 +18,7 @@ def _partition_sum(last_run: dict) -> int:
     )
 
 def _records() -> list[dict]:
+    """Mixed ordinary records including an explicit 0.14.1 predecessor split."""
     return [
         {
             "hash": "h-main",
@@ -23,8 +28,8 @@ def _records() -> list[dict]:
             "_analysis_mode": "single",
             "_max_context_revision": "truncate-v1:max=10:head=0.7000",
             "_prompt_profile_digest": "no-profile",
-            "_large_file_identity": "large-file-v1:test",
-            "_split_reuse_contract": "fresh-only-v1",
+            "_large_file_identity": PREDECESSOR_LARGE_FILE_IDENTITY,
+            "_split_reuse_contract": FRESH_SPLIT_REUSE_CONTRACT,
             "documentation": {
                 "description": "Entry point.",
                 "dependencies_analysis": {"external": ["requests"]},
@@ -58,15 +63,15 @@ def _view() -> dict:
 
 
 def _split_record() -> dict:
-    """A completed effective-split record: only the ordinary supported
+    """An explicit 0.14.1 predecessor split record: only the ordinary supported
     file-level shape plus private identity — no division/documentation_units
     or any other internal split content (D9/D14)."""
     return {
         "hash": "h-large",
         "file_path": "large.py",
         "language": "python",
-        "_large_file_identity": "large-file-v2:test",
-        "_split_reuse_contract": "fresh-only-v1",
+        "_large_file_identity": PREDECESSOR_LARGE_FILE_IDENTITY,
+        "_split_reuse_contract": FRESH_SPLIT_REUSE_CONTRACT,
         "documentation": {
             "description": "Large module.",
             "functions": [{"name": "alpha"}],
@@ -99,6 +104,12 @@ def _split_stats() -> dict:
         "split_restored_unit_consolidation_calls": 0,
         "split_restored_general_reduction_calls": 0,
         "split_restored_final_synthesis_calls": 0,
+        "split_completed_files_reused": 0,
+        "split_partial_files_resumed": 0,
+        "split_unpaid_nodes": 3,
+        "split_reexecuted_nodes": 1,
+        "split_quarantined_nodes": 2,
+        "split_recovery_conflict_files": 1,
         "file_documentation_calls_planned": 0,
         "unit_documentation_calls_planned": 2,
         "file_reduction_calls_planned": 0,

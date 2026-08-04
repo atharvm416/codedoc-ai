@@ -81,3 +81,15 @@ def test_generated_config_exposes_the_compatible_large_file_default(tmp_path):
     )
     assert persisted["large_file_strategy"] == "truncate"
     assert load_config(tmp_path)["large_file_strategy"] == "truncate"
+
+
+def test_generated_large_file_guidance_describes_current_reuse_and_recovery():
+    from codedoc.core.config_template import PUBLIC_CONFIG_KEYS
+
+    descriptions = dict(PUBLIC_CONFIG_KEYS)
+    guidance = descriptions["large_file_strategy"]
+    assert "'truncate' (default)" in guidance
+    assert "provider-free dry-run planning" in guidance
+    assert "same-path completed-record reuse" in guidance
+    assert "node-level partial recovery" in guidance
+    assert "Triple plus split is rejected" in guidance

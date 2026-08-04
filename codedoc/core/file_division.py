@@ -10,7 +10,7 @@ This module owns every provider-free planning concern for split:
 - the lossless internal structured fact ledger merged from cleaned leaf
   capsules (:func:`build_fact_ledger` / :func:`merge_leaf_capsules`);
 - the bounded final-synthesis manifest (:func:`final_synthesis_input`);
-- node-keyed split-partial recovery state (schema version 2) and its
+- node-keyed split-partial recovery state (schema version 3) and its
   dependency-validated reuse predicate; and
 - the provider-free provider/model/effective-endpoint execution identity
   shared by every recoverable node.
@@ -68,13 +68,22 @@ from codedoc.core.result_assembly import flat_combined_result
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
 PACKER_SCHEMA_REVISION = "division-packer-v5"
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v4"
-LEDGER_SCHEMA_REVISION = "fact-ledger-v5"
+# Advanced from v4: signature-aware matching became load-bearing after
+# leaf-capsule-v4 was already active, so a predecessor signatureless leaf
+# cannot validate as a current checkpoint.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v5"
+# Advanced from v5. Bound into final-node execution identity, the final-node
+# exact input digest, and the completed split identity; a ledger revision
+# change alone reruns final synthesis but preserves compatible leaves and
+# reducers (they consume narratives, not the final structured ledger).
+LEDGER_SCHEMA_REVISION = "fact-ledger-v6"
 REDUCTION_CAPSULE_SCHEMA_REVISION = "reduction-capsule-v1"
 REDUCTION_PACKING_REVISION = "reduction-packing-v4"
 REDUCER_PROMPT_REVISION = "file-reduction-v1"
 FINAL_SYNTHESIS_REVISION = "file-synthesis-v3"
-EXECUTION_IDENTITY_SCHEMA_REVISION = "division-execution-v5"
+# Advanced from v5 to division-execution-v6 alongside the leaf/ledger bumps
+# above.
+EXECUTION_IDENTITY_SCHEMA_REVISION = "division-execution-v6"
 
 # ---------------------------------------------------------------------------
 # Deterministic safety bounds
@@ -199,8 +208,15 @@ SPLIT_COMPLEXITY_ADVISORY_REDUCTION_DEPTH = 2
 
 # Node-keyed split-partial container schema version.  Distinct from the
 # enclosing run-level `_RECOVERY_IDENTITY_VERSION` (resume.py), which stays 1
-# because the recovery-container contract is unchanged (D11/D12).
-SPLIT_PARTIAL_SCHEMA_VERSION = 2
+# because the recovery-container contract is unchanged (D11/D12).  Advanced
+# from 2: the per-node `reduction_tree_digest` gate is removed (a topology-only
+# change must not invalidate an otherwise-compatible leaf), a per-node exact
+# stage-local input digest is added, and a bounded quarantine map is added.
+SPLIT_PARTIAL_SCHEMA_VERSION = 3
+# Schema 2 (node-keyed, per-node tree-digest gated) remains recognizable for
+# preserve-first guidance but is dormant: never executable and never
+# automatically migrated (section 16).
+DORMANT_SPLIT_PARTIAL_SCHEMA_VERSION = 2
 # The predecessor ordered-prefix partial's schema version, recognized only so
 # it can be rejected with the D11 preserve-or-move-aside remedy.
 LEGACY_SPLIT_PARTIAL_SCHEMA_VERSION = 1
@@ -260,6 +276,16 @@ class SplitCapacityBlocked(Exception):
         super().__init__(f"{self.rel_path}: blocked by capacity reason {reason!r}")
 
 
+class SplitRecoveryStateError(ValueError):
+    """A current schema-3 recovery container cannot be safely executed.
+
+    Planning translates this into preserve-first ``ConfigError`` guidance
+    before writer initialization or provider construction.  It is distinct
+    from a division invariant defect: the source plan may be sound while the
+    retained recovery state is foreign, unplanned, or exceeds its hard bound.
+    """
+
+
 # ---------------------------------------------------------------------------
 # Canonical JSON / digest primitives
 # ---------------------------------------------------------------------------
@@ -285,8 +311,16 @@ def _pairs_without_duplicates(pairs):
     return result
 
 
-def load_canonical_json_object(text: str) -> dict:
-    """Load one canonical JSON object, rejecting duplicates and non-finite values."""
+def load_canonical_json_object(
+    text: str, *, require_canonical: bool = True
+) -> dict:
+    """Load one JSON object, rejecting duplicates and non-finite values.
+
+    Node ``result_json`` uses the canonical default.  The pretty-printed
+    recovery envelope calls this same duplicate-aware owner with
+    ``require_canonical=False``; it must not grow a second JSON parser merely
+    because its whitespace is intentionally human-readable.
+    """
     if not isinstance(text, str):
         raise ValueError("canonical JSON must be text.")
 
@@ -303,7 +337,7 @@ def load_canonical_json_object(text: str) -> dict:
         raise ValueError("invalid canonical JSON.") from exc
     if not isinstance(value, dict):
         raise ValueError("canonical recovery JSON must contain one object.")
-    if canonical_json(value) != text:
+    if require_canonical and canonical_json(value) != text:
         raise ValueError("recovery JSON is not in canonical form.")
     return value
 
@@ -316,6 +350,29 @@ def _digest(prefix: str, value: object) -> str:
 def _domain_id(prefix: str, value: object) -> str:
     digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     return f"{prefix}_{digest}"
+
+
+DETERMINISTIC_IMPORTS_REVISION = "deterministic-imports-v1"
+
+
+def deterministic_imports_digest(imports: Sequence[str]) -> str:
+    """Pure digest over the exact ordered parser-derived imports (section 6).
+
+    Preserves parser order and duplicates -- never sorted or case-folded, so
+    a reordering (with no net addition/removal) or a duplicate change is
+    still visible. Bound into the final-node execution identity, the
+    final-node exact stage-local input digest, and the completed
+    `_large_file_identity`; never into leaf or reducer identities, so an
+    equal-length import change reruns only final synthesis while leaves and
+    reducers stay reusable. Persists only this digest in identity metadata --
+    never the raw import list.
+    """
+    payload = {
+        "domain": "deterministic-imports",
+        "revision": DETERMINISTIC_IMPORTS_REVISION,
+        "imports": list(imports),
+    }
+    return _digest("deterministic-imports", payload)
 
 
 def _real_int(value: object, name: str, *, minimum: int = 0) -> int:
@@ -1210,8 +1267,6 @@ def _plan_payload(
             for chunk in chunks
         ],
     }
-
-
 # ---------------------------------------------------------------------------
 # Deterministic hierarchical reduction tree
 # ---------------------------------------------------------------------------
@@ -2641,13 +2696,16 @@ def final_execution_identity(
     reduction_tree_digest: str,
     provider_identity: str,
     prompt_profile_digest: str,
+    imports_digest: str,
     node: ReductionNodePlan,
 ) -> str:
     """Execution identity for the final synthesis node.
 
     Additionally includes the resolved final-shape digest, so changing a
     final prompt profile reuses compatible leaves/reducers but reruns final
-    synthesis only.
+    synthesis only.  Also includes the deterministic imports digest
+    (section 6): leaf and reducer identities deliberately exclude it, so an
+    equal-length import change reruns only final synthesis.
     """
     _digest_text(content_hash, "content_hash")
     return _digest(
@@ -2661,34 +2719,173 @@ def final_execution_identity(
             "reduction_tree_digest": reduction_tree_digest,
             "provider_identity": provider_identity,
             "prompt_profile_digest": prompt_profile_digest,
+            "imports_digest": imports_digest,
             "node_id": node.node_id,
             "node_type": node.phase,
             "level": node.level,
             "ordinal": node.ordinal,
             "child_ids": list(node.child_ids),
             "coverage_leaf_ids": list(node.leaf_ids),
+            "ledger_revision": LEDGER_SCHEMA_REVISION,
             "final_synthesis_revision": FINAL_SYNTHESIS_REVISION,
         },
     )
 
 
 # ---------------------------------------------------------------------------
-# Node-keyed split-partial recovery (schema version 2) — section 12
+# Stage-local exact input digests (section 10)
 # ---------------------------------------------------------------------------
+# Domain-separated from execution identity: execution identity binds *which*
+# planned node this is and *which* provider serviced it; an input digest binds
+# only the exact stage-local inputs a node's prompt was built from, so a
+# recovered reducer or final result can never be silently paired with
+# different child results that happen to share planned IDs (section 11).
+
+LEAF_INPUT_DIGEST_REVISION = "leaf-input-v1"
+REDUCTION_INPUT_DIGEST_REVISION = "reduction-input-v1"
+FINAL_INPUT_DIGEST_REVISION = "final-input-v1"
+
+
+def leaf_input_digest(
+    *,
+    rel_path: str,
+    language: str,
+    chunk: ChunkPlan,
+    unit_indexes: Sequence[int],
+    unit_count: int,
+) -> str:
+    """Exact stage-local input digest for one leaf chunk.
+
+    Provider-agnostic by design (never includes a provider identity -- that
+    is ``leaf_execution_identity``'s job): binds only the fixed prompt
+    inputs -- effective language, chunk payload, metadata, ranges, and unit
+    identities -- plus the leaf capsule revision.
+    """
+    return _digest(
+        "leaf-input",
+        {
+            "revision": LEAF_INPUT_DIGEST_REVISION,
+            "path": normalize_rel_path(rel_path),
+            "language": language,
+            "fragment_index": chunk.unit_chunk_index + 1,
+            "fragment_count": chunk.unit_chunk_count,
+            "global_index": chunk.global_index + 1,
+            "global_count": chunk.global_count,
+            "fragment_metadata": render_leaf_prompt_metadata(
+                group_unit_id=chunk.group_unit_id,
+                semantic_units=chunk.semantic_units,
+                unit_indexes=unit_indexes,
+                unit_count=unit_count,
+                owning_ranges=chunk.owning_ranges,
+            ),
+            "unit_chunk_index": chunk.unit_chunk_index,
+            "unit_chunk_count": chunk.unit_chunk_count,
+            "continuation_before": chunk.continuation_before,
+            "continuation_after": chunk.continuation_after,
+            "known_symbols": list(chunk.known_symbols),
+            "payload": chunk.payload,
+            "leaf_capsule_revision": LEAF_CAPSULE_SCHEMA_REVISION,
+        },
+    )
+
+
+def reduction_input_digest(
+    *,
+    rel_path: str,
+    phase: str,
+    level: int,
+    unit_id: str | None,
+    child_count: int,
+    ordered_child_narratives: Sequence[str],
+) -> str:
+    """Exact stage-local input digest for one unit-consolidation or general
+    reduction node.
+
+    Binds the exact rendered ordered child narratives a reducer actually
+    consumed (after the same order-preserving de-duplication the reducer
+    prompt itself applies -- see :func:`refine_narrative_inputs`), plus
+    phase, level, unit, and the reducer prompt revision.
+    """
+    return _digest(
+        "reduction-input",
+        {
+            "revision": REDUCTION_INPUT_DIGEST_REVISION,
+            "path": normalize_rel_path(rel_path),
+            "phase": phase,
+            "level": level,
+            "unit_id": unit_id,
+            "child_count": child_count,
+            "child_narratives": list(ordered_child_narratives),
+            "reducer_prompt_revision": REDUCER_PROMPT_REVISION,
+        },
+    )
+
+
+def final_input_digest(
+    *,
+    imports_digest: str,
+    resolved_shape_digest: str,
+    manifest_json: str,
+) -> str:
+    """Exact stage-local input digest for the final synthesis node.
+
+    ``manifest_json`` is the exact bounded canonical JSON manifest string
+    already built by :func:`final_synthesis_input` for the final prompt --
+    reused directly rather than re-derived, so this digest is guaranteed to
+    bind precisely what the final call actually received.
+    """
+    return _digest(
+        "final-input",
+        {
+            "revision": FINAL_INPUT_DIGEST_REVISION,
+            "imports_digest": imports_digest,
+            "resolved_shape_digest": resolved_shape_digest,
+            "manifest_json": manifest_json,
+            "ledger_revision": LEDGER_SCHEMA_REVISION,
+            "final_synthesis_revision": FINAL_SYNTHESIS_REVISION,
+        },
+    )
+
+
+# ---------------------------------------------------------------------------
+# Node-keyed split-partial recovery (schema version 3) — section 9/section 12
+# ---------------------------------------------------------------------------
+
+
+QUARANTINE_REASONS: frozenset[str] = frozenset(
+    {
+        "unknown-node",
+        "stage-mismatch",
+        "stale-identity",
+        "stale-revision",
+        "child-order-mismatch",
+        "coverage-mismatch",
+        "input-digest-mismatch",
+        "live-schema-mismatch",
+    }
+)
+MAX_QUARANTINE_ENTRIES_PER_FILE = 32
+MAX_QUARANTINE_ENTRY_CHARS = 4096
 
 
 @dataclass(frozen=True, slots=True)
 class ReductionNodeState:
     """One recoverable, dependency-validated checkpoint: leaf, unit-
-    consolidation, general reduction, or final synthesis."""
+    consolidation, general reduction, or final synthesis.
+
+    ``reduction_tree_digest`` is deliberately NOT a field here (schema 3):
+    the writer-time tree digest is container-level provenance only, never a
+    per-node reuse gate, so a topology-only change (compatible chunk payload,
+    changed reduction shape) does not invalidate a compatible leaf.
+    """
 
     node_id: str
     node_type: Literal["leaf", "unit-consolidation", "general", "final"]
     rel_path: str
     content_hash: str
     division_plan_digest: str
-    reduction_tree_digest: str
     execution_identity_digest: str
+    input_digest: str
     unit_id: str | None
     child_ids: tuple[str, ...]
     coverage_leaf_ids: tuple[str, ...]
@@ -2700,12 +2897,13 @@ class ReductionNodeState:
             raise ValueError("invalid reduction node state type.")
         _digest_text(self.content_hash, "content_hash")
         _digest_text(self.division_plan_digest, "division_plan_digest", prefix="division-plan")
-        _digest_text(self.reduction_tree_digest, "reduction_tree_digest", prefix="reduction-tree")
         _digest_text(
             self.execution_identity_digest,
             "execution_identity_digest",
             prefix="division-execution",
         )
+        if not isinstance(self.input_digest, str) or ":" not in self.input_digest:
+            raise ValueError("input_digest must be a domain-prefixed digest.")
         child_ids = tuple(self.child_ids)
         coverage_leaf_ids = tuple(self.coverage_leaf_ids)
         if not coverage_leaf_ids:
@@ -2719,20 +2917,48 @@ class ReductionNodeState:
 
 
 @dataclass(frozen=True, slots=True)
-class SplitTreeState:
-    """Node-keyed split-partial container, schema version 2.
+class QuarantineEntry:
+    """One bounded, non-executable record of a rejected node (section 9/14).
 
-    Distinct from — and never interchangeable with — the predecessor
-    ordered-prefix payload (schema version 1); see D11.
+    Preserved until a valid replacement with the same ``node_id`` is
+    transactionally checkpointed, or the file's completed record is
+    transactionally recorded. Never enters public output, prompts, logs, or
+    recovered-work counts.
     """
 
-    schema_version: Literal[2]
+    node_id: str
+    reason: str
+    raw_json: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.node_id, str) or not self.node_id:
+            raise ValueError("quarantine entry node_id must be non-empty text.")
+        if self.reason not in QUARANTINE_REASONS:
+            raise ValueError(f"unsupported quarantine reason: {self.reason!r}")
+        if not isinstance(self.raw_json, str):
+            raise ValueError("quarantine entry raw_json must be text.")
+        if len(self.raw_json) > MAX_QUARANTINE_ENTRY_CHARS:
+            object.__setattr__(self, "raw_json", self.raw_json[:MAX_QUARANTINE_ENTRY_CHARS])
+
+
+@dataclass(frozen=True, slots=True)
+class SplitTreeState:
+    """Node-keyed split-partial container, schema version 3.
+
+    Distinct from — and never interchangeable with — the predecessor
+    ordered-prefix payload (schema version 1) or the dormant per-node
+    tree-digest-gated payload (schema version 2); see D11 and section 9.
+    """
+
+    schema_version: Literal[3]
     owner: Literal["codedoc-ai"]
     rel_path: str
     content_hash: str
     division_plan_digest: str
+    # Writer-time provenance only, never a per-node reuse gate (section 9).
     reduction_tree_digest: str
     nodes: tuple[ReductionNodeState, ...]
+    quarantine: tuple[QuarantineEntry, ...] = ()
 
     def __post_init__(self) -> None:
         if self.schema_version != SPLIT_PARTIAL_SCHEMA_VERSION or self.owner != "codedoc-ai":
@@ -2757,15 +2983,26 @@ class SplitTreeState:
             node.rel_path != rel_path
             or node.content_hash != self.content_hash
             or node.division_plan_digest != self.division_plan_digest
-            or node.reduction_tree_digest != self.reduction_tree_digest
             for node in nodes
         ):
             raise ValueError("split-partial tree state node identity mismatch.")
+        quarantine = tuple(self.quarantine)
+        if len(quarantine) > MAX_QUARANTINE_ENTRIES_PER_FILE:
+            raise ValueError("quarantine map exceeds the bounded entry count.")
+        quarantine_ids = [entry.node_id for entry in quarantine]
+        if len(quarantine_ids) != len(set(quarantine_ids)):
+            raise ValueError("split-partial quarantine has duplicate node IDs.")
+        if set(node_ids) & set(quarantine_ids):
+            raise ValueError("a split-partial node cannot also be quarantined.")
         object.__setattr__(self, "rel_path", rel_path)
         object.__setattr__(self, "nodes", nodes)
+        object.__setattr__(self, "quarantine", quarantine)
 
     def by_id(self) -> dict[str, ReductionNodeState]:
         return {node.node_id: node for node in self.nodes}
+
+    def quarantine_by_id(self) -> dict[str, QuarantineEntry]:
+        return {entry.node_id: entry for entry in self.quarantine}
 
 
 def tree_node_state(
@@ -2775,8 +3012,8 @@ def tree_node_state(
     rel_path: str,
     content_hash: str,
     division_plan_digest: str,
-    reduction_tree_digest: str,
     execution_identity_digest: str,
+    input_digest: str,
     unit_id: str | None,
     child_ids: Sequence[str],
     coverage_leaf_ids: Sequence[str],
@@ -2789,13 +3026,32 @@ def tree_node_state(
         rel_path=rel_path,
         content_hash=content_hash,
         division_plan_digest=division_plan_digest,
-        reduction_tree_digest=reduction_tree_digest,
         execution_identity_digest=execution_identity_digest,
+        input_digest=input_digest,
         unit_id=unit_id,
         child_ids=tuple(child_ids),
         coverage_leaf_ids=tuple(coverage_leaf_ids),
         result_json=canonical_json(dict(result)),
     )
+
+
+def node_state_public_json(node: ReductionNodeState) -> dict:
+    """The exact per-node public wire shape (section 9), shared by the
+    container serializer (``safe_writer._tree_state_to_json``) and quarantine
+    raw-JSON capture so the two never drift apart."""
+    return {
+        "node_id": node.node_id,
+        "node_type": node.node_type,
+        "rel_path": node.rel_path,
+        "content_hash": node.content_hash,
+        "division_plan_digest": node.division_plan_digest,
+        "execution_identity_digest": node.execution_identity_digest,
+        "input_digest": node.input_digest,
+        "unit_id": node.unit_id,
+        "child_ids": list(node.child_ids),
+        "coverage_leaf_ids": list(node.coverage_leaf_ids),
+        "result_json": node.result_json,
+    }
 
 
 def _expected_node_shapes(
@@ -2941,24 +3197,34 @@ def validate_node_for_tree(
     tree: ReductionTreePlan,
     content_hash: str,
     expected_identity: str,
+    expected_input_digest: str | None = None,
     resolved_shape: object | None = None,
     language: str = "",
     imports: Sequence[str] = (),
 ) -> bool:
     """Whether *node* is an exact, current, dependency-valid checkpoint.
 
-    Rejects a foreign/malformed node, a node from another content/tree
-    revision, a node with incorrect child order or coverage, and a node
-    produced under a different provider/model/effective-endpoint execution
-    identity or a stale final-shape digest.
+    Rejects a foreign/malformed node, a node from another content revision, a
+    node with incorrect child order or coverage, a node produced under a
+    different provider/model/effective-endpoint execution identity or a
+    stale final-shape digest, and (when *expected_input_digest* is supplied)
+    a node whose stage-local input digest no longer matches -- the
+    recompute-from-retained-children check for reducers/final (section 11).
+
+    Never compares a per-node ``reduction_tree_digest`` (schema 3, section
+    9): the container-level digest is writer-time provenance only, so a
+    topology-only change never invalidates a compatible leaf through this
+    function.  Coverage and child order are compared by ordered-tuple
+    equality, never a sorted set, so a coverage permutation is rejected.
     """
     if (
         node.rel_path != plan.rel_path
         or node.content_hash != content_hash
         or node.division_plan_digest != plan.plan_digest
-        or node.reduction_tree_digest != tree.tree_digest
         or node.execution_identity_digest != expected_identity
     ):
+        return False
+    if expected_input_digest is not None and node.input_digest != expected_input_digest:
         return False
     shapes = _expected_node_shapes(plan, tree)
     expected = shapes.get(node.node_id)
@@ -2968,7 +3234,7 @@ def validate_node_for_tree(
     if (
         node.node_type != expected_type
         or node.child_ids != expected_children
-        or tuple(sorted(node.coverage_leaf_ids)) != tuple(sorted(expected_leaves))
+        or node.coverage_leaf_ids != expected_leaves
         or node.unit_id != expected_unit
     ):
         return False
@@ -3030,9 +3296,267 @@ def dependency_closed_nodes(
 def final_node_covers_every_leaf(
     plan: DivisionPlan, node: ReductionNodeState
 ) -> bool:
-    return tuple(sorted(node.coverage_leaf_ids)) == tuple(
-        sorted(chunk.chunk_id for chunk in plan.chunks)
+    """Ordered-tuple equality against the planned chunk-ID sequence (section
+    11): a coverage permutation must not validate."""
+    return node.coverage_leaf_ids == tuple(chunk.chunk_id for chunk in plan.chunks)
+
+
+def _quarantine_reason_for(
+    node: ReductionNodeState,
+    *,
+    plan: DivisionPlan,
+    tree: ReductionTreePlan,
+    content_hash: str,
+    expected_identity: str,
+    expected_input_digest: str,
+) -> str:
+    """Classify why *node* failed :func:`validate_node_for_tree`, as one of
+    the closed quarantine reason codes (section 9/14).
+
+    Only called for a node reached through a known planned ID (a leaf chunk
+    ID or a tree node ID), so the returned reason is always attributable to a
+    node the wire format's quarantine-entry ``node_id`` constraint allows;
+    a genuinely foreign node ID is never classified or quarantined by this
+    function -- section 9's "unknown-node" and "stale-revision" reasons are
+    reserved for round-trip preservation of an entry written by a different
+    mechanism and are never produced here.  Mirrors
+    ``validate_node_for_tree``'s own check order, so the reported reason is
+    the first check that would actually fail.
+    """
+    if (
+        node.rel_path != plan.rel_path
+        or node.content_hash != content_hash
+        or node.division_plan_digest != plan.plan_digest
+        or node.execution_identity_digest != expected_identity
+    ):
+        return "stale-identity"
+    if node.input_digest != expected_input_digest:
+        return "input-digest-mismatch"
+    expected_type, expected_children, expected_leaves, expected_unit = (
+        _expected_node_shapes(plan, tree)[node.node_id]
     )
+    if node.node_type != expected_type or node.unit_id != expected_unit:
+        return "stage-mismatch"
+    if node.child_ids != expected_children:
+        return "child-order-mismatch"
+    if node.coverage_leaf_ids != expected_leaves:
+        return "coverage-mismatch"
+    return "live-schema-mismatch"
+
+
+def validate_recovered_tree(
+    nodes: Sequence[ReductionNodeState],
+    *,
+    plan: DivisionPlan,
+    tree: ReductionTreePlan,
+    content_hash: str,
+    provider_identity: str,
+    prompt_profile_digest: str,
+    imports_digest: str,
+    imports: Sequence[str] = (),
+    language: str = "",
+    resolved_shape: object | None = None,
+    max_content_chars: int | None = None,
+    existing_quarantine: Sequence[QuarantineEntry] = (),
+) -> tuple[tuple[ReductionNodeState, ...], tuple[QuarantineEntry, ...]]:
+    """Full section-11 topological validation of one file's recovered nodes.
+
+    A node's own execution identity never binds its children's actual result
+    content (only structure/provenance), so an individually-valid, dependency-
+    closed reducer or final node can still be stale if a sibling beneath it
+    was replaced. This walks the plan in strict topological order -- leaves,
+    then each reducer only once every ordered child is already retained, then
+    final only once its complete dependency graph is retained -- and for each
+    reducer/final recomputes the expected stage-local input digest from the
+    *exact retained child results* (mirroring the live executor's own
+    narrative extraction and final-manifest assembly) rather than trusting
+    the checkpoint's own claim. A node whose recomputed input digest no
+    longer matches is rejected, which prunes every ancestor in turn.
+
+    Returns ``(retained_nodes, quarantine_entries)``. A node reached through
+    a known planned ID that fails validation is quarantined (bounded,
+    non-executable, canonical-plan-ordered) rather than silently discarded
+    (section 14). Exceeding ``MAX_QUARANTINE_ENTRIES_PER_FILE`` raises
+    :class:`SplitRecoveryStateError`: the original recovery remains untouched
+    and planning makes zero provider calls.
+    """
+    raw_by_id = {node.node_id: node for node in nodes}
+    canonical_order = tuple(chunk.chunk_id for chunk in plan.chunks) + tuple(
+        node.node_id for node in tree.all_nodes
+    )
+    planned_ids = frozenset(canonical_order)
+    unplanned_nodes = sorted(set(raw_by_id) - planned_ids)
+    if unplanned_nodes:
+        raise SplitRecoveryStateError(
+            "schema-3 recovery contains an unplanned split node ID."
+        )
+    existing_by_id = {entry.node_id: entry for entry in existing_quarantine}
+    if set(existing_by_id) - planned_ids:
+        raise SplitRecoveryStateError(
+            "schema-3 recovery quarantine contains an unplanned split node ID."
+        )
+    retained: dict[str, ReductionNodeState] = {}
+    retained_results: dict[str, dict] = {}
+    quarantine_by_id: dict[str, QuarantineEntry] = dict(existing_by_id)
+
+    def _quarantine(node: ReductionNodeState, reason: str) -> None:
+        quarantine_by_id[node.node_id] = QuarantineEntry(
+            node_id=node.node_id,
+            reason=reason,
+            raw_json=canonical_json(node_state_public_json(node)),
+        )
+        if len(quarantine_by_id) > MAX_QUARANTINE_ENTRIES_PER_FILE:
+            raise SplitRecoveryStateError(
+                "schema-3 recovery quarantine exceeds its bounded entry count."
+            )
+
+    def _keep(
+        node: ReductionNodeState, expected_identity: str, expected_input_digest: str
+    ) -> None:
+        if validate_node_for_tree(
+            node,
+            plan=plan,
+            tree=tree,
+            content_hash=content_hash,
+            expected_identity=expected_identity,
+            expected_input_digest=expected_input_digest,
+            resolved_shape=resolved_shape,
+            language=language,
+            imports=imports,
+        ):
+            retained[node.node_id] = node
+            retained_results[node.node_id] = load_canonical_json_object(node.result_json)
+            quarantine_by_id.pop(node.node_id, None)
+            return
+        _quarantine(
+            node,
+            _quarantine_reason_for(
+                node,
+                plan=plan,
+                tree=tree,
+                content_hash=content_hash,
+                expected_identity=expected_identity,
+                expected_input_digest=expected_input_digest,
+            )
+        )
+
+    for chunk in plan.chunks:
+        node = raw_by_id.get(chunk.chunk_id)
+        if node is None:
+            continue
+        _keep(
+            node,
+            leaf_execution_identity(
+                rel_path=plan.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=plan.plan_digest,
+                provider_identity=provider_identity,
+                chunk=chunk,
+            ),
+            leaf_input_digest(
+                rel_path=plan.rel_path,
+                language=language,
+                chunk=chunk,
+                unit_indexes=plan.unit_positions(chunk),
+                unit_count=len(plan.units),
+            ),
+        )
+
+    for planned in tree.all_intermediate_nodes:
+        if not all(child_id in retained for child_id in planned.child_ids):
+            continue
+        node = raw_by_id.get(planned.node_id)
+        if node is None:
+            continue
+        raw_narratives = tuple(
+            capsule.get("narrative", capsule.get("description", ""))
+            if isinstance(capsule, dict)
+            else ""
+            for capsule in (retained_results[cid] for cid in planned.child_ids)
+        )
+        _keep(
+            node,
+            reduction_execution_identity(
+                rel_path=plan.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=plan.plan_digest,
+                reduction_tree_digest=tree.tree_digest,
+                provider_identity=provider_identity,
+                node=planned,
+            ),
+            reduction_input_digest(
+                rel_path=plan.rel_path,
+                phase=planned.phase,
+                level=planned.level,
+                unit_id=planned.unit_id,
+                child_count=len(planned.child_ids),
+                ordered_child_narratives=refine_narrative_inputs(raw_narratives),
+            ),
+        )
+
+    final_node = tree.final_node
+    all_leaves_retained = all(chunk.chunk_id in retained for chunk in plan.chunks)
+    if all_leaves_retained and all(
+        child_id in retained for child_id in final_node.child_ids
+    ):
+        node = raw_by_id.get(final_node.node_id)
+        if node is not None:
+            leaf_capsules_ordered = [
+                retained_results[chunk.chunk_id] for chunk in plan.chunks
+            ]
+            ledger = build_fact_ledger(
+                leaf_capsules_ordered,
+                language=language,
+                chunks=plan.chunks,
+                symbols=plan.symbols,
+            )
+            child_results = [retained_results[cid] for cid in final_node.child_ids]
+            raw_narratives = tuple(
+                child.get("narrative", child.get("description", ""))
+                for child in child_results
+            )
+            manifest_json = final_synthesis_input(
+                rel_path=plan.rel_path,
+                language=language,
+                imports=imports,
+                root_narratives=refine_narrative_inputs(raw_narratives),
+                root_coverage_leaf_ids=final_node.leaf_ids,
+                ledger=ledger,
+                max_chars=max_content_chars,
+            )
+            _keep(
+                node,
+                final_execution_identity(
+                    rel_path=plan.rel_path,
+                    content_hash=content_hash,
+                    division_plan_digest=plan.plan_digest,
+                    reduction_tree_digest=tree.tree_digest,
+                    provider_identity=provider_identity,
+                    prompt_profile_digest=prompt_profile_digest,
+                    imports_digest=imports_digest,
+                    node=final_node,
+                ),
+                final_input_digest(
+                    imports_digest=imports_digest,
+                    resolved_shape_digest=prompt_profile_digest,
+                    manifest_json=manifest_json,
+                ),
+            )
+
+    closed = dependency_closed_nodes(tuple(retained.values()), plan=plan, tree=tree)
+    closed_ids = {node.node_id for node in closed}
+    # A checkpointed ancestor whose dependency was rejected is non-executable
+    # too. Preserve its bounded raw state until a valid replacement lands.
+    for node_id in canonical_order:
+        node = raw_by_id.get(node_id)
+        if node is not None and node_id not in closed_ids and node_id not in quarantine_by_id:
+            _quarantine(node, "input-digest-mismatch")
+    quarantine = tuple(
+        quarantine_by_id[node_id]
+        for node_id in canonical_order
+        if node_id in quarantine_by_id
+    )
+    return closed, quarantine
 
 
 def is_legacy_split_partial(value: object) -> bool:

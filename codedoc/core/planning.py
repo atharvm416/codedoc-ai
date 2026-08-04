@@ -34,15 +34,13 @@ from codedoc.core.file_division import (
     DivisionPlan,
     ReductionTreePlan,
     SplitCapacityBlocked,
+    SplitRecoveryStateError,
     SplitTreeState,
     build_division_plan,
     build_reduction_tree,
-    dependency_closed_nodes,
-    final_execution_identity,
-    leaf_execution_identity,
+    deterministic_imports_digest,
     provider_execution_identity,
-    reduction_execution_identity,
-    validate_node_for_tree,
+    validate_recovered_tree,
 )
 from codedoc.core.execution_model import (
     DOC_AGENTS_BY_MODE,
@@ -63,7 +61,6 @@ from codedoc.core.prompt_profiles import (
 )
 from codedoc.core.record_meta import (
     CACHE_IDENTITY_KEYS,
-    FRESH_SPLIT_REUSE_CONTRACT,
     expected_analysis_identity,
     expected_large_file_identity,
     expected_max_context_revision,
@@ -137,12 +134,16 @@ class PipelinePlan:
     # is not already covered by validated recovery. Insufficient-source,
     # capacity-blocked, and fully restored files are excluded.
     unpaid_action_rels: frozenset[str] = frozenset()
-    # Effective oversized split files that the installed release deliberately
-    # schedules as fresh paid work even when a compatible completed record is
-    # present.  This is separate from changed_rels so freshness policy alone
-    # never propagates work to unchanged dependents.
-    fresh_split_rels: frozenset[str] = frozenset()
+    # Effective oversized split files that still require paid execution after
+    # completed-record reuse and partial recovery have been evaluated. This is
+    # separate from changed_rels so execution policy alone never propagates work
+    # to unchanged dependents.
+    split_execution_rels: frozenset[str] = frozenset()
     division_plan_rels: frozenset[str] = frozenset()
+    # Same-path completed split records accepted by the canonical reuse
+    # predicate. Cross-path split reuse remains unavailable because the
+    # completed identity is path-bound.
+    completed_split_reuse_rels: frozenset[str] = frozenset()
     # rel_path -> first-failing capacity-blocked reason under the frozen
     # evaluation order (D3/D6). A blocked file is never in agent_rels or
     # division_plan_rels and never counts toward max_files (D8).
@@ -398,13 +399,21 @@ class PlanMaterials:
     # plan above.
     reduction_trees: Mapping[str, ReductionTreePlan] = field(default_factory=dict)
     # rel_path -> exact, dependency-validated retained split-tree checkpoint
-    # state (only nodes that passed validate_node_for_tree survive here).
+    # state (only nodes that passed validate_recovered_tree survive here).
     tree_states: Mapping[str, SplitTreeState] = field(default_factory=dict)
+    # rel_path -> a forced split file's structurally valid recovered
+    # container, carried forward untouched (section 9): never validated,
+    # never consulted for scheduling, never counted as restored work.
+    carry_states: Mapping[str, SplitTreeState] = field(default_factory=dict)
     # rel_path -> first-failing capacity-blocked reason (D3/D6/D8).
     division_blocked: Mapping[str, str] = field(default_factory=dict)
     # The provider-free provider/model/effective-endpoint execution identity
     # for this run (D12), shared by every recoverable split node.
     provider_identity: str = ""
+    # Provider-free recovery observability (section 19). These count planned
+    # nodes and conflict files, never provider attempts.
+    reexecuted_nodes: int = 0
+    recovery_conflict_files: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -415,6 +424,7 @@ class PlanMaterials:
             "division_plans",
             "reduction_trees",
             "tree_states",
+            "carry_states",
             "division_blocked",
         ):
             object.__setattr__(
@@ -422,6 +432,10 @@ class PlanMaterials:
                 name,
                 MappingProxyType(dict(getattr(self, name))),
             )
+        for name in ("reexecuted_nodes", "recovery_conflict_files"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer.")
 
 
 @dataclass(frozen=True)
@@ -808,10 +822,10 @@ def _build_pipeline_plan_once(
                 division_plan_digest=division_plan.plan_digest,
                 reduction_tree_digest=reduction_tree.tree_digest,
                 structural_mode=division_plan.structural_mode,
+                imports_digest=deterministic_imports_digest(_imports_for(rel)),
             )
             if large_identity is not None:
                 identity["_large_file_identity"] = large_identity
-                identity["_split_reuse_contract"] = FRESH_SPLIT_REUSE_CONTRACT
         elif mcr is not None:
             # Effective split records never carry `_max_context_revision`
             # (D12/section 13): only an ordinary oversized truncate-path record does.
@@ -857,11 +871,11 @@ def _build_pipeline_plan_once(
     changed_rels |= effective_forced
     changed_rels |= set(insufficient_source_reasons)
 
-    # Fresh-only mode executes every effective oversized split target again. Keep this
-    # policy set out of changed_rels: an unchanged split file is paid work, but
-    # that scheduling decision is not a source/identity change and therefore
-    # must not falsely propagate to its dependents.
-    fresh_split_rels = {
+    # Track oversized targets that were not accepted for same-path completed reuse.
+    # Keep this policy set out of changed_rels: an unchanged split file can still
+    # require paid work, but that is not a source/identity change and must not
+    # falsely propagate to its dependents.
+    split_execution_rels = {
         rel
         for rel in selected_rels
         if not split_release.completed_reuse
@@ -872,15 +886,27 @@ def _build_pipeline_plan_once(
         process_rels = graph.affected_by_changes(changed_rels) & selected_rels
     else:
         process_rels = set(changed_rels)
-    process_rels |= fresh_split_rels
+    process_rels |= split_execution_rels
 
     unchanged_rels = selected_rels - process_rels
+    completed_split_reuse_rels = {
+        rel for rel in unchanged_rels if _split_outcome_for(rel) is not None
+    }
 
     identical_reuse_docs: dict[str, dict] = {}
     execution_requests: dict[str, FileExecutionRequest] = {}
     division_plans: dict[str, DivisionPlan] = {}
     reduction_trees: dict[str, ReductionTreePlan] = {}
     tree_states: dict[str, SplitTreeState] = {}
+    # A forced split file's structurally valid recovered container, carried
+    # forward untouched (section 9): force bypasses reuse and recovery for
+    # THIS run's scheduling, but the prior checkpoint is preserved so a later
+    # non-forced run may still resume it if forced execution fails or is
+    # interrupted. Never validated, never consulted for scheduling, never
+    # counted as restored work.
+    carry_states: dict[str, SplitTreeState] = {}
+    reexecuted_nodes = 0
+    recovery_conflict_paths: set[str] = set()
     recovered_by_path = dict(recovered_partials or {})
     identical_reuse: set[str] = set()
     agent_rels: set[str] = set()
@@ -891,6 +917,7 @@ def _build_pipeline_plan_once(
         descriptor: dict,
         content_hash: str,
     ) -> None:
+        nonlocal reexecuted_nodes
         if rel_path in insufficient_source_reasons:
             return
         request = _build_execution_request(
@@ -923,6 +950,7 @@ def _build_pipeline_plan_once(
                 # excluded from max_files candidates (D8).
                 return
             division_plan, reduction_tree = outcome
+            split_content_hash = content_hash
             division_plans[rel_path] = division_plan
             reduction_trees[rel_path] = reduction_tree
             agent_rels.add(rel_path)
@@ -932,45 +960,78 @@ def _build_pipeline_plan_once(
                 if split_release.partial_recovery
                 else None
             )
-            if recovered is not None and recovered.content_hash == content_hash:
-                provider_identity_for_node = provider_identity
-                individually_valid_nodes = tuple(
-                    node
-                    for node in recovered.nodes
-                    if validate_node_for_tree(
-                        node,
-                        plan=division_plan,
-                        tree=reduction_tree,
-                        content_hash=content_hash,
-                        expected_identity=_expected_node_identity(
-                            node,
-                            division_plan,
-                            reduction_tree,
-                            provider_identity_for_node,
-                            request,
-                        ),
-                        resolved_shape=resolved_synthesis_shape(
-                            request.context.resolved_shape_bundle
-                        ),
-                        language=request.language,
-                        imports=request.imports,
-                    )
-                )
-                retained_nodes = dependency_closed_nodes(
-                    individually_valid_nodes,
-                    plan=division_plan,
-                    tree=reduction_tree,
-                )
-                if retained_nodes:
-                    tree_states[rel_path] = SplitTreeState(
-                        schema_version=recovered.schema_version,
-                        owner=recovered.owner,
-                        rel_path=rel_path,
-                        content_hash=content_hash,
-                        division_plan_digest=division_plan.plan_digest,
-                        reduction_tree_digest=reduction_tree.tree_digest,
-                        nodes=retained_nodes,
-                    )
+            if rel_path in effective_forced:
+                # Force bypasses execution, not preservation (section 9): the
+                # recovered container is carried forward untouched rather than
+                # validated or scheduled from, so a later non-forced run may
+                # still resume it if this forced run fails or is interrupted.
+                if recovered is not None:
+                    carry_states[rel_path] = recovered
+            elif recovered is not None:
+                if recovered.content_hash != split_content_hash:
+                    # A source revision invalidates every old node. Preserve
+                    # the old container until a completed replacement succeeds;
+                    # SafeWriter suppresses new checkpoints while carry state
+                    # for this path exists, so a failed run cannot overwrite it.
+                    carry_states[rel_path] = recovered
+                    recovery_conflict_paths.add(rel_path)
+                    current_node_ids = {
+                        *(chunk.chunk_id for chunk in division_plan.chunks),
+                        *(node.node_id for node in reduction_tree.all_nodes),
+                    }
+                    recovered_paid_ids = {
+                        node.node_id for node in recovered.nodes
+                    } | {entry.node_id for entry in recovered.quarantine}
+                    reexecuted_nodes += len(recovered_paid_ids & current_node_ids)
+                else:
+                    try:
+                        retained_nodes, quarantine_entries = validate_recovered_tree(
+                            recovered.nodes,
+                            plan=division_plan,
+                            tree=reduction_tree,
+                            content_hash=split_content_hash,
+                            provider_identity=provider_identity,
+                            prompt_profile_digest=(
+                                request.context.resolved_shape_bundle.digest
+                            ),
+                            imports_digest=deterministic_imports_digest(
+                                request.imports
+                            ),
+                            imports=request.imports,
+                            language=request.language,
+                            resolved_shape=resolved_synthesis_shape(
+                                request.context.resolved_shape_bundle
+                            ),
+                            max_content_chars=request.context.max_content_chars,
+                            existing_quarantine=recovered.quarantine,
+                        )
+                    except SplitRecoveryStateError as exc:
+                        raise ConfigError(
+                            f"Recovery for {rel_path!r} cannot be safely bounded "
+                            "under the current schema-3 plan. The recovery file "
+                            "and stable output were left untouched. Resume with "
+                            "the CodeDoc version that created it, or move the "
+                            "recovery file aside before starting fresh; delete "
+                            "it only as a deliberate discard."
+                        ) from exc
+                    retained_ids = {node.node_id for node in retained_nodes}
+                    previously_paid_ids = {
+                        node.node_id for node in recovered.nodes
+                    } | {entry.node_id for entry in recovered.quarantine}
+                    reexecuted_nodes += len(previously_paid_ids - retained_ids)
+                    if quarantine_entries:
+                        recovery_conflict_paths.add(rel_path)
+                    if retained_nodes or quarantine_entries:
+                        tree_states[rel_path] = SplitTreeState(
+                            schema_version=recovered.schema_version,
+                            owner=recovered.owner,
+                            rel_path=rel_path,
+                            content_hash=split_content_hash,
+                            division_plan_digest=division_plan.plan_digest,
+                            reduction_tree_digest=reduction_tree.tree_digest,
+                            nodes=retained_nodes,
+                            quarantine=quarantine_entries,
+                        )
             completed_ids = frozenset(
                 tree_states[rel_path].by_id()
                 if rel_path in tree_states
@@ -986,53 +1047,6 @@ def _build_pipeline_plan_once(
         agent_candidate_rels.add(rel_path)
         agent_rels.add(rel_path)
         execution_requests[rel_path] = request
-
-    def _expected_node_identity(
-        node,
-        division_plan: DivisionPlan,
-        reduction_tree: ReductionTreePlan,
-        provider_identity_value: str,
-        request: FileExecutionRequest,
-    ) -> str:
-        chunks_by_id = {
-            chunk.chunk_id: chunk for chunk in division_plan.chunks
-        }
-        planned_nodes_by_id = {
-            planned.node_id: planned for planned in reduction_tree.all_nodes
-        }
-        chunk = chunks_by_id.get(node.node_id)
-        if chunk is not None:
-            return leaf_execution_identity(
-                rel_path=request.rel_path,
-                content_hash=request.content_hash,
-                division_plan_digest=division_plan.plan_digest,
-                provider_identity=provider_identity_value,
-                chunk=chunk,
-            )
-        planned_node = planned_nodes_by_id.get(node.node_id)
-        if planned_node is None:
-            # A foreign node cannot match a valid execution identity. Returning
-            # a stable impossible digest lets validate_node_for_tree reject it
-            # without deriving any expectation from the checkpoint's claim.
-            return "division-execution:" + ("0" * 64)
-        if planned_node.phase == "final":
-            return final_execution_identity(
-                rel_path=request.rel_path,
-                content_hash=request.content_hash,
-                division_plan_digest=division_plan.plan_digest,
-                reduction_tree_digest=reduction_tree.tree_digest,
-                provider_identity=provider_identity_value,
-                prompt_profile_digest=request.context.resolved_shape_bundle.digest,
-                node=planned_node,
-            )
-        return reduction_execution_identity(
-            rel_path=request.rel_path,
-            content_hash=request.content_hash,
-            division_plan_digest=division_plan.plan_digest,
-            reduction_tree_digest=reduction_tree.tree_digest,
-            provider_identity=provider_identity_value,
-            node=planned_node,
-        )
 
     for rel_path in graph.topological_order():
         if rel_path not in process_rels:
@@ -1050,7 +1064,7 @@ def _build_pipeline_plan_once(
             _route_execution_request(rel_path, descriptor, content_hash)
             continue
 
-        if rel_path in fresh_split_rels:
+        if rel_path in split_execution_rels:
             _route_execution_request(rel_path, descriptor, content_hash)
             continue
 
@@ -1093,12 +1107,13 @@ def _build_pipeline_plan_once(
         identical_reuse_rels=frozenset(identical_reuse),
         agent_rels=frozenset(agent_rels),
         division_plan_rels=frozenset(division_plans),
+        completed_split_reuse_rels=frozenset(completed_split_reuse_rels),
         division_blocked=dict(division_blocked),
         entry_rel=entry_rel,
         max_files=max_files,
         max_files_exceeded=max_files_exceeded,
         unpaid_action_rels=frozenset(agent_candidate_rels),
-        fresh_split_rels=frozenset(fresh_split_rels),
+        split_execution_rels=frozenset(split_execution_rels),
     )
     materials = PlanMaterials(
         identical_reuse_docs=identical_reuse_docs,
@@ -1108,7 +1123,10 @@ def _build_pipeline_plan_once(
         division_plans=division_plans,
         reduction_trees=reduction_trees,
         tree_states=tree_states,
+        carry_states=carry_states,
         division_blocked=dict(division_blocked),
         provider_identity=provider_identity,
+        reexecuted_nodes=reexecuted_nodes,
+        recovery_conflict_files=len(recovery_conflict_paths),
     )
     return plan, materials

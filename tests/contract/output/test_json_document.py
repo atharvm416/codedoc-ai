@@ -34,6 +34,24 @@ def test_completed_json_publishes_only_final_file_shape_for_split_records():
     assert record["description"] == "Large module."
     assert payload["last_run"]["unit_documentation_calls_planned"] == 2
     assert payload["last_run"]["split_blocked_files"] == 0
+    assert {
+        key: payload["last_run"][key]
+        for key in (
+            "split_completed_files_reused",
+            "split_partial_files_resumed",
+            "split_unpaid_nodes",
+            "split_reexecuted_nodes",
+            "split_quarantined_nodes",
+            "split_recovery_conflict_files",
+        )
+    } == {
+        "split_completed_files_reused": 0,
+        "split_partial_files_resumed": 0,
+        "split_unpaid_nodes": 3,
+        "split_reexecuted_nodes": 1,
+        "split_quarantined_nodes": 2,
+        "split_recovery_conflict_files": 1,
+    }
 
 def test_public_output_contains_tree_folders_and_dependency_graph(tmp_path):
     import json

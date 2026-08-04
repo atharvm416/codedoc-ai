@@ -8,7 +8,6 @@ from pathlib import Path
 
 import codedoc
 import codedoc.core
-from codedoc import __version__
 from codedoc.cli.cli import build_parser
 from codedoc.core.config_template import PUBLIC_CONFIG_KEYS
 from codedoc.core.file_division import (
@@ -36,20 +35,15 @@ def test_public_docs_and_help_use_canonical_command_spelling():
     template = ROOT / "codedoc" / "templates" / "github-actions-codedoc.yml"
     assert "\n            run\n" not in template.read_text(encoding="utf-8")
 
-def test_release_literals_and_narrative_are_allowlisted():
-    version_pattern = re.compile(r"\b\d+\.\d+\.\d+\b")
-    phrase_pattern = re.compile(
-        r"this release|current release|removed in 0\.\d+|not accepted in 0\.\d+",
-        re.IGNORECASE,
-    )
-    paths = [ROOT / "README.md", ROOT / "RUN_FLOW.md"]
-    paths.extend((ROOT / "codedoc").rglob("*.py"))
-    for path in paths:
-        text = path.read_text(encoding="utf-8")
-        if path == ROOT / "codedoc" / "__init__.py":
-            text = text.replace(__version__, "")
-        assert not version_pattern.search(text), path
-        assert not phrase_pattern.search(text), path
+def test_release_docs_frame_current_and_predecessor_versions_explicitly():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
+    for text in (readme, run_flow):
+        assert "0.14.2" in text
+        assert "0.14.1" in text
+        assert "fresh-only-v1" in text
+        assert "stale" in text
+        assert "Rolling back to `0.14.1`" in text
 
 def test_readme_documents_every_long_flag_and_environment_variable():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -82,7 +76,7 @@ def test_entry_help_matches_optional_resolution_and_all_files_fallback():
     assert "all scanned files are documented" in help_text
 
 
-def test_public_docs_explain_fresh_split_execution_and_optional_structure_extra():
+def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
     large_files = readme.split("### Large files", 1)[1].split(
@@ -99,33 +93,32 @@ def test_public_docs_explain_fresh_split_execution_and_optional_structure_extra(
     assert "4,096 planned lexical atoms" in normalized_large_files
     assert "`atom-cap` before any provider call" in normalized_large_files
     assert "optional package" in normalized_large_files
-    assert "fresh split execution" in normalized_large_files
-    assert "again on every real run" in normalized_large_files
-    assert "completed split reuse" in normalized_large_files
-    assert "partial split recovery are not active" in normalized_large_files
+    assert "Completed split reuse and node-level partial recovery begin in `0.14.2`" in normalized_large_files
+    assert "exactly compatible same-path completed split record" in normalized_large_files
+    assert "Cross-path identical-content split reuse remains unavailable" in normalized_large_files
+    assert "Schema-1 and schema-2 partial state" in normalized_large_files
+    assert "preserved but not resumed" in normalized_large_files
+    assert "Imports-only changes" in normalized_large_files
+    assert "Provider, model, or effective-endpoint changes invalidate partial nodes" in normalized_large_files
+    assert "completed cache reuse remains provider-agnostic" in normalized_large_files
     assert "Files at or below `max_content_chars`" in normalized_large_files
-    assert "held only in memory" in normalized_large_files
-    assert "repeats the failed logical call" in normalized_large_files
-    assert "never written to recovery" in normalized_large_files
     active_checks = large_files.split(
-        "#### Active split accounting, identity, and provider checks", 1
-    )[1].split("#### Later completed split reuse and node recovery", 1)[0]
+        "#### Split accounting, identity, and provider checks", 1
+    )[1].split("#### Completed split reuse and node recovery", 1)[0]
     normalized_active_checks = " ".join(active_checks.split())
-    assert "P = R + O + C + U + G + F" in normalized_active_checks
+    assert "P = R + O + (C - Hc) + (U - Hu) + (G - Hg) + (F - Hf)" in normalized_active_checks
     assert "private `_large_file_identity`" in normalized_active_checks
     assert "machine-readable JSON" in normalized_active_checks
     assert "Provider construction must attest" in normalized_active_checks
     assert "malformed HTTP(S) URL" in normalized_active_checks
-    future_recovery = large_files.split(
-        "#### Later completed split reuse and node recovery", 1
+    current_recovery = large_files.split(
+        "#### Completed split reuse and node recovery", 1
     )[1]
-    assert "P = R + O + (C - Hc)" in future_recovery
-    assert "Recovery is dependency-closed" in future_recovery
+    assert "Recovery is dependency-closed" in current_recovery
     normalized_recovery = " ".join(readme.split("## Crash recovery", 1)[1].split())
-    assert "whether ordinary or fresh split" in normalized_recovery
-    assert "Fresh split node progress remains process-local" in normalized_recovery
-    assert "completed ordinary-file records are resumed" in normalized_recovery
-    assert "completed fresh-split records are deliberately rerun" in normalized_recovery
+    assert "current schema-3 split container is validated in plan order" in normalized_recovery
+    assert "bounded non-executable quarantine" in normalized_recovery
+    assert "deletion is an explicit choice to discard" in normalized_recovery
     assert "default `large_file_strategy: truncate`" in run_flow
     assert "resolves to `split`" in run_flow
 
@@ -144,11 +137,11 @@ def test_public_docs_explain_fresh_split_execution_and_optional_structure_extra(
     assert "raising `max_content_chars` cannot clear it" in normalized_run_flow
     assert 'pip install "codedoc-ai[structure]"' in normalized_run_flow
     assert "fails during configuration validation before scanning" in normalized_run_flow
-    assert "always executes its full leaf" in normalized_run_flow
-    assert "does not reuse same-path or identical-content" in normalized_run_flow
-    assert "preserved and rejected" in normalized_run_flow
-    assert "process-local memory" in normalized_run_flow
-    assert "only the failed logical call is repeated" in normalized_run_flow
+    assert "same-path completed reuse" in normalized_run_flow
+    assert "dependency-valid node recovery" in normalized_run_flow
+    assert "Cross-path identical-content split reuse remains unavailable" in normalized_run_flow
+    assert "Schema-1 and schema-2 partials are preserved but not resumed" in normalized_run_flow
+    assert "preserved and blocked" in normalized_run_flow
 
 
 def test_model_help_scopes_provider_auto_detection_to_auto():
@@ -169,7 +162,7 @@ def test_release_documents_name_every_active_split_identity():
     # the repository and must never be a source of current identity truth.
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     current_sections = (
-        changelog.split("## 0.14.1", 1)[1].split("## 0.14.0", 1)[0],
+        changelog.split("## 0.14.2 (Unreleased)", 1)[1].split("## 0.14.1", 1)[0],
     )
     active = (
         STRUCTURE_SCHEMA_REVISION,
@@ -182,7 +175,7 @@ def test_release_documents_name_every_active_split_identity():
         REDUCER_PROMPT_REVISION,
         FINAL_SYNTHESIS_REVISION,
         EXECUTION_IDENTITY_SCHEMA_REVISION,
-        "large-file-v2",
+        "large-file-v3",
         ANALYSIS_REVISION,
     )
 

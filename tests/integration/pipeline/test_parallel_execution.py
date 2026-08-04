@@ -47,7 +47,7 @@ def test_parallel_split_files_finalize_without_leaking_partial_state(
     assert all("division" not in record for record in payload["files"])
     assert all("documentation_units" not in record for record in payload["files"])
     assert all(
-        record["_large_file_identity"].startswith("large-file-v2:")
+        record["_large_file_identity"].startswith("large-file-v3:")
         for record in payload["files"]
     )
     assert not (tmp_path / "docs" / "crash_recovery.json").exists()
@@ -261,6 +261,7 @@ def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatc
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [request], orch, queue, stats, error_reporter,
         max_workers=1, recorder=sw, profile=profile,
+        split_execution_mode="recovery",
     )
 
     assert len(retry_rate_limited) == 1, "Rate-limited file must be in retry list"
@@ -329,6 +330,7 @@ def test_keyboard_interrupt_stops_queued_parallel_work(tmp_path, monkeypatch):
             max_workers=1,
             recorder=recorder,
             max_consecutive_failures=100,
+            split_execution_mode="recovery",
         )
 
     assert started == ["file_0.py"]
@@ -430,6 +432,7 @@ def test_inner_triple_interrupt_prevents_correction_and_preserves_interrupt(
             ErrorReporter(),
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert caught.value is original_interrupt

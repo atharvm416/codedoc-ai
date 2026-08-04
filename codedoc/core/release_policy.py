@@ -30,14 +30,16 @@ class SplitReleasePolicy:
             )
 
 
-# Fresh release: real single+split execution is public, but every oversized split
-# target is paid fresh work.  Completed reuse, partial loading, and node-level
-# checkpoint writes remain unavailable until the recovery milestone.
+# Real single+split execution, same-path completed split reuse,
+# schema-versioned node-keyed partial recovery, and node-level checkpoint
+# writing are all public. An unchanged completed split file is reused with
+# zero provider calls; an interrupted split file resumes only its unpaid
+# leaf, reducer, and final nodes.
 CURRENT_SPLIT_RELEASE = SplitReleasePolicy(
     execution=True,
-    completed_reuse=False,
-    partial_recovery=False,
-    node_checkpoints=False,
+    completed_reuse=True,
+    partial_recovery=True,
+    node_checkpoints=True,
 )
 
 

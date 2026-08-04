@@ -22,7 +22,12 @@ from codedoc.core.execution_model import (
 )
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import AgentError, ResponseContractError
+from codedoc.utils.errors import (
+    AgentError,
+    CodeDocError,
+    ResponseContractError,
+    bounded_exception_summary,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -108,10 +113,10 @@ def _call_llm_counted(
 
     Records estimated input tokens before the call and a success (with estimated
     output tokens) or a failure after, isolating accounting errors from the call
-    outcome, and wraps provider exceptions as
-    ``AgentError(agent_name, "unknown", str(exc))``.  Both ``BaseAgent._call_llm``
-    and ``ResponseCorrectionAgent`` delegate here so provider/usage accounting is
-    never duplicated.
+    outcome, and wraps provider exceptions as an ``AgentError`` containing only
+    the bounded two-tier rendering of the failure.  Both
+    ``BaseAgent._call_llm`` and ``ResponseCorrectionAgent`` delegate here so
+    provider/usage accounting is never duplicated.
     """
     if call_tracker is not None:
         call_tracker.raise_if_cancelled()
@@ -127,7 +132,7 @@ def _call_llm_counted(
         try:
             usage.record_input(system, prompt)
         except Exception:
-            logger.debug("Usage accounting failed for input estimate", exc_info=True)
+            logger.debug("Usage accounting failed for input estimate")
     if call_tracker is not None:
         call_tracker.raise_if_cancelled()
     try:
@@ -143,13 +148,14 @@ def _call_llm_counted(
             try:
                 usage.record_failure()
             except Exception:
-                logger.debug("Usage accounting failed for failed call", exc_info=True)
-        raise AgentError(agent_name, "unknown", str(exc)) from exc
+                logger.debug("Usage accounting failed for failed call")
+        detail = str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
+        raise AgentError(agent_name, "unknown", detail) from exc
     if usage is not None:
         try:
             usage.record_success(raw)
         except Exception:
-            logger.debug("Usage accounting failed for successful call", exc_info=True)
+            logger.debug("Usage accounting failed for successful call")
     return raw
 
 
@@ -430,7 +436,10 @@ class BaseAgent(ABC):
         can distinguish an opt-out rejection from an exhausted correction.  Every
         other exception returns the historical ``{"error", "agent"}`` dict.
         """
-        result = {"error": str(exc), "agent": self.agent_name}
+        error_text = (
+            str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
+        )
+        result = {"error": error_text, "agent": self.agent_name}
         if isinstance(exc, ResponseContractError):
             result["response_contract_final"] = True
             result["response_contract_correction_attempted"] = exc.correction_attempted
@@ -481,5 +490,10 @@ class BaseAgent(ABC):
         except CancelledError:
             raise
         except Exception as exc:
-            logger.warning("%s unexpected error on %s: %s", self.agent_name, file_path, exc)
+            logger.warning(
+                "%s unexpected error on %s: %s",
+                self.agent_name,
+                file_path,
+                bounded_exception_summary(exc),
+            )
             return self._agent_error_result(exc)
