@@ -69,7 +69,7 @@ class UnrecoverableProviderError(LLMError):
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
     *safe*: crash_recovery.json is left intact. Compatible completed ordinary
-    and split records may be reused, and compatible current schema-3 split node
+    and split records may be reused, and compatible current schema-4 split node
     checkpoints may resume; forced, stale, identity-mismatched, legacy,
     foreign, or unsupported state is rerun or preserved and blocked according
     to the documented remedy. No stop path deletes the backup or overwrites it

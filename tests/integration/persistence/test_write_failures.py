@@ -116,7 +116,7 @@ def test_initialize_empty_raises_on_write_failure(tmp_path, monkeypatch):
     assert "persisted before this failed write remains preserved" in message
     assert "result being written is not guaranteed saved" in message
     assert "completed ordinary and split records may be reused" in message
-    assert "compatible current schema-3 split node checkpoints may resume" in message
+    assert "compatible current schema-4 split node checkpoints may resume" in message
     assert isinstance(excinfo.value.__cause__, OSError)
 
 def test_pipeline_initialization_failure_creates_no_provider(tmp_path, monkeypatch):

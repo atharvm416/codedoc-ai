@@ -180,6 +180,46 @@ def test_registered_synthetic_keys_are_carried_in_sorted_order(monkeypatch):
     record_meta.carry_private_keys({"_b_syn": "b", "_a_syn": "a"}, target)
     assert list(target) == ["_a_syn", "_b_syn"]
 
+def _large_file_identity_kwargs() -> dict:
+    return {
+        "source_chars": 5000,
+        "max_chars": 2000,
+        "rel_path": "src/large.py",
+        "division_plan_digest": "division-plan:" + "1" * 64,
+        "reduction_tree_digest": "reduction-tree:" + "2" * 64,
+        "structural_mode": "syntax",
+        "imports_digest": "imports:" + "3" * 64,
+    }
+
+
+def test_completed_large_file_identity_binds_leaf_capsule_revision_and_bound(
+    monkeypatch,
+):
+    """Section 5: the completed large-file identity changes whenever the
+    bound leaf-capsule revision or its derived canonical-character maximum
+    changes -- exactly the two inputs `0.14.3`'s section 2A correction
+    advances (`leaf-capsule-v5` -> `leaf-capsule-v6`, 150,656 -> 200,192) --
+    while the `large-file-v3:` prefix itself never changes, since split
+    completed identity is not versioned by the package release."""
+    kwargs = _large_file_identity_kwargs()
+    current_v6 = record_meta.expected_large_file_identity(**kwargs)
+    assert current_v6 is not None
+    assert current_v6.startswith("large-file-v3:")
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v6"
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
+
+    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v5")
+    revision_reverted = record_meta.expected_large_file_identity(**kwargs)
+    assert revision_reverted != current_v6
+    assert revision_reverted.startswith("large-file-v3:")
+
+    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 150656)
+    bound_also_reverted = record_meta.expected_large_file_identity(**kwargs)
+    assert bound_also_reverted != revision_reverted
+    assert bound_also_reverted != current_v6
+    assert bound_also_reverted.startswith("large-file-v3:")
+
+
 def test_patched_registry_excludes_unregistered_production_keys(private_key):
     # Ordering must never widen membership: the canonical production keys are
     # unregistered here and must not be carried.

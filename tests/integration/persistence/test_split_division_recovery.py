@@ -1,4 +1,4 @@
-"""Node-keyed split recovery (schema version 3 — D11/D12/section 9/section 12).
+"""Node-keyed split recovery (schema version 4 — D11/D12/section 9/section 12).
 
 Every leaf, unit-consolidation, general-reduction, and final-synthesis node is
 checkpointed independently and keyed by its own node ID; resuming a run
@@ -38,6 +38,7 @@ from codedoc.utils.errors import (
     UnrecoverableProviderError,
 )
 from tests.support.execution_requests import make_execution_request
+from tests.support.fixture_paths import FIXTURES_ROOT
 from tests.support.providers import SmartFake
 from tests.support.run_metadata_cases import _view as run_metadata_view
 
@@ -84,7 +85,7 @@ def test_split_partial_is_internal_to_recovery_metadata(tmp_path) -> None:
     assert "src/large.py" in text
 
 
-def test_schema_three_recovery_retains_valid_nodes_beside_malformed_siblings(
+def test_schema_four_recovery_retains_valid_nodes_beside_malformed_siblings(
     tmp_path,
 ) -> None:
     writer = SafeWriter(
@@ -126,6 +127,94 @@ def test_schema_three_recovery_retains_valid_nodes_beside_malformed_siblings(
     assert quarantine["chunk_" + "7" * 64].reason == "live-schema-mismatch"
 
 
+def test_released_schema_three_container_blocks_before_writer_or_provider(
+    tmp_path, monkeypatch,
+) -> None:
+    """Section 20A items 4 and 6: this module's own named schema-3
+    blocked-run assertion, proving the actual blocked pipeline/run boundary
+    -- not merely that `read_codedoc_document` alone raises -- alongside
+    `tests/integration/persistence/test_cross_version_split_state.py`'s own
+    fixture-driven coverage of the same boundary (not substituted for by
+    it: this file proves it independently, in this file's own established
+    idiom for a real blocked `run_pipeline` call, matching
+    `test_legacy_v1_split_partial_fails_closed_with_migration_guidance`
+    above). Uses the frozen, real released-`0.14.2`-produced container
+    (section 4A) via the canonical `FIXTURES_ROOT / "split_state"` path,
+    not a hand-built placeholder."""
+    fixture = json.loads(
+        (FIXTURES_ROOT / "split_state" / "partial_schema3_0_14_2.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert fixture["schema_version"] == 3
+
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "large.py").write_bytes(source.encode("utf-8"))
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    writer = SafeWriter(
+        recovery_path,
+        "json",
+        "src/large.py",
+        {},
+        build_recovery_identity(
+            project_root=tmp_path,
+            json_target=tmp_path / "docs" / "codedoc.json",
+            md_target=None,
+            entry_file="src/large.py",
+            documentation_scope="entry",
+            analysis_mode="single",
+            analysis_revision=ANALYSIS_REVISION,
+            large_file_strategy="split",
+        ),
+    )
+    writer.initialize_empty()
+    payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+    payload["_codedoc"]["partial_files"] = {"src/large.py": fixture}
+    recovery_path.write_text(json.dumps(payload), encoding="utf-8")
+    original = recovery_path.read_bytes()
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.build_pipeline_plan",
+        lambda *a, **k: pytest.fail(
+            "released schema-3 container reached build_pipeline_plan"
+        ),
+    )
+    monkeypatch.setattr(
+        "codedoc.pipeline.SafeWriter",
+        lambda *a, **k: pytest.fail(
+            "released schema-3 container reached SafeWriter construction"
+        ),
+    )
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _config: pytest.fail(
+            "released schema-3 container reached provider construction"
+        ),
+    )
+
+    with pytest.raises(ConfigError, match="unsupported"):
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "src/large.py",
+                "large_file_strategy": "split",
+                "max_content_chars": 2000,
+                "propagate_changes": False,
+                "output_dir": "docs",
+            },
+        )
+
+    assert recovery_path.read_bytes() == original
+    assert not (tmp_path / "docs" / "codedoc.json").exists()
+
+    # Direct proof that the reader itself never returns a recovery state
+    # for this document, independent of the full run_pipeline call chain.
+    with pytest.raises(ConfigError, match="unsupported"):
+        read_codedoc_document(recovery_path, include_partial_files=True)
+    assert recovery_path.read_bytes() == original
+
+
 def test_duplicate_key_json_is_fatal_and_preserves_the_recovery_bytes(tmp_path) -> None:
     writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
     writer.record_tree_node(
@@ -144,7 +233,7 @@ def test_duplicate_key_json_is_fatal_and_preserves_the_recovery_bytes(tmp_path) 
     assert writer.path.read_bytes() == before
 
 
-def test_unknown_schema_three_container_field_is_fatal(tmp_path) -> None:
+def test_unknown_schema_four_container_field_is_fatal(tmp_path) -> None:
     writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
     writer.record_tree_node(
         "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST
@@ -157,7 +246,7 @@ def test_unknown_schema_three_container_field_is_fatal(tmp_path) -> None:
         read_codedoc_document(writer.path)
 
 
-def test_duplicate_schema_three_node_id_is_fatal(tmp_path) -> None:
+def test_duplicate_schema_four_node_id_is_fatal(tmp_path) -> None:
     writer = SafeWriter(tmp_path / "crash_recovery.json", "json", None, {}, {"version": 1})
     writer.record_tree_node(
         "src/large.py", _leaf_node("src/large.py"), reduction_tree_digest=_TREE_DIGEST

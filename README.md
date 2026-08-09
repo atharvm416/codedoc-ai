@@ -414,13 +414,21 @@ Any `triple + split` request fails configuration validation before scanning,
 recovery inspection, output-directory creation, prompt review, or provider
 construction; it never silently falls back to truncation.
 
-Completed split reuse and node-level partial recovery begin in `0.14.2`. An
+Completed split reuse and node-level partial recovery begin in `0.14.2`. As of
+`0.14.3`, `single + split` execution, completed-record reuse, and node-level
+recovery are fully supported; `triple + split` remains unavailable. An
 exactly compatible same-path completed split record is reused without provider
 construction, review calls, documentation calls, partial writes, or paid-cap
 usage. Cross-path identical-content split reuse remains unavailable because the
 split plan and completed identity are path-bound. An explicit force bypasses
 reuse and recovery for that path while preserving prior stable output and
 recovery until replacement succeeds.
+
+Split leaf signatures are private, internal matching metadata only — never
+part of any public schema. They are bounded to the parser-aligned
+600-character ceiling; a model-returned signature over that bound fails
+through the normal correction/failure contract and is never silently
+truncated into a shortened accepted value.
 
 Each accepted leaf, reduction, and final-synthesis result is checkpointed only
 after it has been cleaned and validated. A compatible interrupted run resumes
@@ -429,6 +437,18 @@ recognized and preserved but not resumed; unknown, foreign, aliased, duplicate,
 or otherwise unsafe containers block with preserve-first guidance. Move an
 incompatible recovery file aside to retain it for diagnosis or a matching
 version; deletion is an explicit discard of that state.
+
+The current node-keyed recovery generation is schema 4 (`0.14.3`, bound to the
+current `leaf-capsule-v6` leaf identity). Released schema 3 (`0.14.2`,
+`leaf-capsule-v5`) is now an unsupported predecessor generation, preserved
+and blocked exactly like schema-1/schema-2 state: a real `0.14.3` run rejects
+it on its container schema version alone, before any node is read, before
+planning, `SafeWriter`, or provider construction, and leaves the recovery
+artifact byte-identical. Nothing from a released schema-3 partial is carried
+forward; a fresh `0.14.3` run performs complete v6 re-execution. An unfinished
+`0.14.2` split run has two supported remedies: finish it with `0.14.2`, which
+still owns that recovery generation; or move `crash_recovery.json` aside — or
+delete it as a deliberate discard — to start fresh under `0.14.3`.
 
 Imports-only changes preserve compatible leaves and reducers but invalidate
 final synthesis. Provider, model, or effective-endpoint changes invalidate
@@ -917,9 +937,11 @@ large-file strategy. It no longer binds a profile-wide digest: each recovered
 completed record is instead re-validated individually against the current
 per-file `_prompt_profile_digest`, so an unrelated profile edit or a newly added
 file no longer discards a resumable run. Compatible completed ordinary and split
-records may be reused. A current schema-3 split container is validated in plan
+records may be reused. A current schema-4 split container is validated in plan
 order; valid siblings remain reusable, rejected nodes are retained in bounded
-non-executable quarantine, and affected ancestors rerun. Provider changes
+non-executable quarantine, and affected ancestors rerun. A released schema-3
+container is unsupported predecessor recovery: it is rejected on its schema
+version before any node is read. Provider changes
 invalidate partial nodes but not a compatible completed record. Imports-only
 changes retain compatible leaves and reducers while rerunning final synthesis.
 A foreign, completed, unsupported, or identity-mismatched recovery file blocks

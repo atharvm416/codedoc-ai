@@ -43,7 +43,7 @@ from tests.support.execution_requests import make_execution_request
 
 def test_crash_recovery_banner_explains_reuse_and_recovery_boundary():
     assert "compatible completed ordinary and split records may be reused" in _CRASH_SAFETY_BANNER
-    assert "compatible current schema-3 split node checkpoints may resume" in _CRASH_SAFETY_BANNER
+    assert "compatible current schema-4 split node checkpoints may resume" in _CRASH_SAFETY_BANNER
     assert "deliberately re-documented" not in _CRASH_SAFETY_BANNER
     assert "re-run the same command to resume" not in _CRASH_SAFETY_BANNER
 
@@ -52,7 +52,7 @@ def test_generic_recovery_remedy_explains_reuse_and_recovery_boundary(tmp_path):
     message = _recovery_remedy(tmp_path / RECOVERY_FILENAME)
 
     assert "completed ordinary and split records may then be reused" in message
-    assert "compatible current schema-3 split node checkpoints may resume" in message
+    assert "compatible current schema-4 split node checkpoints may resume" in message
     assert "deliberately re-documented" not in message
     assert "resume that work" not in message
 

@@ -1,0 +1,11 @@
+{
+  "schema_version": 1,
+  "owner": "codedoc-ai",
+  "rel_path": "src/large.py",
+  "completed_chunks": [
+    [
+      "chunk_9999999999999999999999999999999999999999999999999999999999",
+      "{\"description\":\"legacy chunk\"}"
+    ]
+  ]
+}

@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.14.3 (Unreleased)
+
+### Split-leaf signature-bound correction
+
+- Raised the private split-leaf response-field signature bound
+  (`MAX_LEAF_SYMBOL_SIGNATURE_CHARS`) from `256` to exactly `600`, aliased to
+  the parser's existing `SemanticUnitIdentity.signature` ceiling
+  (`MAX_STRUCTURE_SIGNATURE_CHARS`) so the two bounds cannot drift apart. The
+  256-character value was a conservative internal short-item bound introduced
+  alongside the `0.14.0` split-planning implementation; it was narrower than
+  the parser contract, so a model that accurately echoed a 257-to-600
+  character declaration signature CodeDoc itself supplied could fail the
+  entire leaf response as `fixed_cap_exceeded`. A response signature over 600
+  characters is still rejected through the existing correction/failure
+  contract and is never silently truncated into a shortened accepted value;
+  parser-owned signatures continue to replace matching model-reported
+  signature text before ledger use. Signatures remain private: no signature
+  field reaches JSON, Markdown, embedded view, or converted output. The
+  derived `MAX_LEAF_CAPSULE_CANONICAL_CHARS` worst-case bound rises from
+  `150656` to exactly `200192` characters as a result.
+
+### Current split-partial recovery generation
+
+- Advanced `LEAF_CAPSULE_SCHEMA_REVISION` from `leaf-capsule-v5` to
+  `leaf-capsule-v6` (the fixed fragment prompt bytes versioned by this
+  revision changed alongside the signature bound, so a v5 leaf checkpoint
+  cannot validate as a current v6 checkpoint) and the current node-keyed
+  split-partial container schema from `3` to `4`. The wire fields are
+  unchanged; the bump makes the boundary early and uniform. No predecessor
+  constant was added: the existing current-schema equality check already
+  rejects every non-4 value, so a real `0.14.3` run rejects a released
+  schema-3 container on its schema version alone, before any node is
+  deserialized or quarantined, before planning, `SafeWriter`, or provider
+  construction, and leaves the recovery artifact byte-identical. Schema 1
+  remains recognized legacy preserve-and-block state and schema 2 remains
+  dormant preserve-and-block state, both unchanged. An unfinished `0.14.2`
+  split run must be finished with `0.14.2`, which still owns that recovery
+  generation, or have `crash_recovery.json` moved aside — or deleted as a
+  deliberate discard — before `0.14.3` will proceed.
+- A completed `0.14.2` split record (bound to `leaf-capsule-v5` and the
+  150,656-character capsule bound) is preserved but treated as stale under
+  the current `leaf-capsule-v6` / 200,192-character identity and
+  re-executes; ordinary compatible records are unaffected.
+- Unrelated active split identities are unchanged: `fact-ledger-v6`,
+  `division-execution-v6`, `large-file-v3`, and the current narrow
+  identities `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v1`, and
+  `file-synthesis-v3`. Ordinary `file-doc-v3` remains unchanged, and the
+  300-character reduction narrative bound is unaffected.
+
+### Support declaration
+
+- Declares `single + split` execution, completed-record reuse, and
+  node-level recovery fully supported, following the complete compatibility,
+  determinism, security, documentation, source, and installed-artifact
+  matrix. `triple + split` remains unavailable, and split never silently
+  falls back to truncate.
+
 ## 0.14.2 2026-08-04
 
 ### Logging privacy and redirected Windows safety

@@ -70,7 +70,7 @@ def test_cli_help_exposes_the_large_file_split_reuse_and_recovery_boundary():
         "triple plus split",
         "completed split reuse",
         "node recovery",
-        "current schema-3 checkpoints",
+        "current schema-4 checkpoints",
         "zero calls",
         "complete source coverage",
         "atom-cap",
@@ -589,7 +589,7 @@ def test_cli_prints_recovery_path_when_attached(tmp_path, monkeypatch, capsys):
     assert "crash_recovery.json" in err
     assert "left untouched" in err
     assert "completed ordinary and split records may be reused" in err
-    assert "compatible current schema-3 split node checkpoints may resume" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
 
 def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys):
     import codedoc.pipeline as pipeline_mod
@@ -607,7 +607,7 @@ def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys
     err = capsys.readouterr().err
     assert "crash-recovery file was created or confirmed" in err
     assert "completed ordinary and split records may be reused" in err
-    assert "compatible current schema-3 split node checkpoints may resume" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
     assert not list(tmp_path.glob("**/crash_recovery.json"))
 
 @pytest.mark.parametrize(
@@ -643,7 +643,7 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     assert "re-run" in err.lower()
     assert "crash_recovery.json" in err
     assert "completed ordinary and split records may be reused" in err
-    assert "compatible current schema-3 split node checkpoints may resume" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
     assert "resumes the unfinished files" not in err
 
 
@@ -687,7 +687,7 @@ def test_cli_locked_output_explains_fresh_split_recovery_boundary(
     assert "can also occur before one is created" in err
     assert "Completed work is preserved" not in err
     assert "completed ordinary and split records may be reused" in err
-    assert "compatible current schema-3 split node checkpoints may resume" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
 
 
 def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
@@ -708,4 +708,4 @@ def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
     assert "Choose a writable output directory" in err
     assert "failure can also occur before one exists" in err
     assert "completed ordinary and split records may be reused" in err
-    assert "compatible current schema-3 split node checkpoints may resume" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err

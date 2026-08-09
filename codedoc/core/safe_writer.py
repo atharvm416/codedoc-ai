@@ -21,7 +21,7 @@ All formats
     recovery file is then deleted by ``SafeWriter.delete()``.  On interrupt or
     failure the stable output is left intact and the recovery file is preserved
     so the next run can reuse compatible completed ordinary and split records
-    and resume compatible current schema-3 split node checkpoints. Forced,
+    and resume compatible current schema-4 split node checkpoints. Forced,
     stale, identity-mismatched, legacy, foreign, or unsupported state is rerun
     or preserved and blocked according to the documented remedy.
 
@@ -83,7 +83,7 @@ _CRASH_SAFETY_BANNER = (
     "This JSON is a crash-recovery backup containing only files that were "
     "successfully documented so far. Re-run the same command to continue: "
     "compatible completed ordinary and split records may be reused, and "
-    "compatible current schema-3 split node checkpoints may resume. Forced, "
+    "compatible current schema-4 split node checkpoints may resume. Forced, "
     "stale, identity-mismatched, legacy, foreign, or unsupported state is "
     "rerun or preserved and blocked according to the documented remedy."
 )
@@ -665,14 +665,14 @@ class SafeWriter:
                 "recovery data persisted before this failed write remains preserved, "
                 "but the result being written is not guaranteed saved. Compatible "
                 "completed ordinary and split records may be reused, and compatible "
-                "current schema-3 split node checkpoints may resume; forced, stale, "
+                "current schema-4 split node checkpoints may resume; forced, stale, "
                 "identity-mismatched, legacy, foreign, or unsupported state is rerun "
                 "or preserved and blocked according to the documented remedy.",
             ) from exc
 
 
 def _tree_state_to_json(state: SplitTreeState) -> dict:
-    """Serialize one node-keyed split-partial container (schema version 3).
+    """Serialize one node-keyed split-partial container (schema version 4).
 
     ``nodes`` is an ordered array (never a dict): the writer always appends
     node checkpoints in exact canonical plan order (one file's split

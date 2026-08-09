@@ -31,6 +31,30 @@ from tests.support.run_metadata_cases import _view as run_metadata_view
 from tests.support.run_metadata_cases import _partition_sum
 from tests.support.run_metadata_cases import _split_record, _split_stats
 from tests.support.json_document_cases import _view as json_contract_view
+from tests.support.fixture_paths import FIXTURES_ROOT
+
+_SPLIT_STATE_FIXTURES = FIXTURES_ROOT / "split_state"
+
+
+def _load_split_state_fixture(name: str) -> dict:
+    return json.loads((_SPLIT_STATE_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _recovery_json(tmp_path, partial_files: dict, name="crash_recovery.json"):
+    payload = {
+        "_crash_safety": "INCOMPLETE",
+        "_codedoc": {
+            "entry_file": "main.py",
+            "status": "in_progress",
+            "live_backup": True,
+            "schema_version": "1.4",
+            "partial_files": partial_files,
+        },
+        "files": [],
+    }
+    path = tmp_path / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 def _completed_json(tmp_path, schema="1.4", entry="main.py", files=None, name="codedoc.json"):
     payload = {
@@ -113,6 +137,94 @@ def test_partial_recovery_map_rejects_embedded_path_mismatch(tmp_path):
     document = read_codedoc_document(path)
 
     assert document.partial_files == ()
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["partial_schema3_0_14_2.json", "partial_schema3_many_nodes_0_14_2.json"],
+)
+def test_released_schema3_container_rejected_before_node_deserialization(
+    tmp_path, fixture_name, monkeypatch
+):
+    """Section 5: `_partial_files_from_meta` rejects a released schema-3
+    container on its schema version alone, before any of its nodes are
+    read -- including the more-than-32-node fixture, which must reach the
+    same early rejection rather than the bounded quarantine path.
+
+    This is this repository's unit-owner proof of that boundary (section
+    4A/20A item 1): the schema check alone is not enough evidence that node
+    reading never happens -- if the check ever moved to after node parsing,
+    the eventual `ConfigError` could still fire after every schema-3 node
+    had already been deserialized, and the assertion below would not catch
+    it. A fail-fast sentinel replacing `ReductionNodeState` with a callable
+    that raises `AssertionError` on any invocation closes that gap directly:
+    `AssertionError` is neither `TypeError` nor `ValueError` (the narrow
+    pair `document.py::_partial_files_from_meta` catches around its
+    `ReductionNodeState(...)` call site), so it is not silently absorbed
+    into quarantine -- it propagates to pytest as an unambiguous failure.
+    The `pytest.raises(ConfigError)` block below is itself the direct proof
+    that no recovery state is ever returned by the reader for this
+    document, for both fixtures. This unit-owner file does not rely on the
+    separate integration-level sentinel test in
+    `tests/integration/persistence/test_cross_version_split_state.py` as a
+    substitute -- the plan assigns this proof to this file."""
+    fixture = _load_split_state_fixture(fixture_name)
+    assert fixture["schema_version"] == 3
+    path = _recovery_json(tmp_path, {"main.py": fixture})
+    before = path.read_bytes()
+
+    def _fail_on_construction(*args, **kwargs):
+        raise AssertionError(
+            "ReductionNodeState constructed for "
+            f"{kwargs.get('rel_path')!r} while reading {fixture_name}: node "
+            "deserialization must never be reached for a rejected "
+            "schema-3 container"
+        )
+
+    monkeypatch.setattr(
+        "codedoc.core.document.ReductionNodeState", _fail_on_construction
+    )
+
+    with pytest.raises(ConfigError, match="unsupported"):
+        read_codedoc_document(path, include_partial_files=True)
+
+    assert path.read_bytes() == before
+
+
+def test_current_schema4_container_parses_normally(tmp_path):
+    """Section 5: the current schema-4 generation must still parse into a
+    real `SplitTreeState`, proving the schema-3 boundary did not disturb
+    same-version behavior."""
+    fixture = _load_split_state_fixture("partial_schema4_0_14_3.json")
+    assert fixture["schema_version"] == 4
+    path = _recovery_json(tmp_path, {fixture["rel_path"]: fixture})
+
+    document = read_codedoc_document(path, include_partial_files=True)
+
+    assert len(document.partial_files) == 1
+    assert document.partial_files[0].schema_version == 4
+
+
+def test_mixed_schema3_schema4_document_rejected_as_a_whole(tmp_path):
+    """Section 5: a document whose `partial_files` map holds both a
+    schema-3 and a schema-4 container is rejected on the first unsupported
+    entry -- the schema-4 sibling is never partially accepted."""
+    mixed = _load_split_state_fixture("partial_mixed_generations.json")["partial_files"]
+    path = _recovery_json(tmp_path, mixed)
+
+    with pytest.raises(ConfigError, match="unsupported"):
+        read_codedoc_document(path, include_partial_files=True)
+
+
+def test_malformed_current_schema_container_rejected(tmp_path):
+    """Section 5: a structurally malformed current-schema container (here,
+    an unknown extra field) fails closed like every other unsupported or
+    foreign container shape."""
+    fixture = _load_split_state_fixture("malformed_container.json")
+    path = _recovery_json(tmp_path, {"main.py": fixture})
+
+    with pytest.raises(ConfigError, match="unknown or missing field"):
+        read_codedoc_document(path, include_partial_files=True)
+
 
 def test_legacy_13_json_fixture(tmp_path):
     doc = read_codedoc_document(LEGACY_DOCUMENT_FIXTURES / "codedoc_13.json")

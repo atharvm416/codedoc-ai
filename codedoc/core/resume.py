@@ -335,7 +335,7 @@ def _recovery_remedy(recovery_path: Path) -> str:
     return (
         f"To return to that work, restore the prior run's configuration. "
         "Compatible completed ordinary and split records may then be reused, "
-        "and compatible current schema-3 split node checkpoints may resume; "
+        "and compatible current schema-4 split node checkpoints may resume; "
         "forced, stale, identity-mismatched, legacy, foreign, or unsupported "
         "state is rerun or preserved and blocked according to the documented "
         "remedy. To continue with the current configuration instead, move "

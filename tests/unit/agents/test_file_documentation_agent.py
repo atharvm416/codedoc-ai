@@ -21,6 +21,7 @@ from codedoc.agents.file_documentation_agent import (
 from codedoc.core.execution_model import UnitChunkExecutionRequest
 from codedoc.core.file_division import (
     MAX_LEAF_PROMPT_METADATA_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
     build_division_plan,
     render_leaf_prompt_metadata,
 )
@@ -515,6 +516,21 @@ def test_fragment_prompt_contains_exact_position_metadata_and_fixed_shape(tmp_pa
     assert request.payload in prompt
     assert '"description": "<required' in prompt
     assert "Synthesize one final file-level" not in prompt
+
+
+def test_fragment_prompt_advertises_the_shared_600_character_signature_bound(tmp_path):
+    """Section 2A: the fixed fragment prompt's hard-bounds sentence must
+    match `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (now 600, aliased from the
+    parser's own ceiling) rather than the retired 256-character literal, so
+    a model can never accurately echo a signature CodeDoc itself supplied
+    and still fail the whole leaf response."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == 600
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    assert "each symbol signature <= 600 characters" in prompt
+    assert "signature <= 256" not in prompt
 
 
 def test_fragment_prompt_reports_true_continuation_flags(tmp_path):

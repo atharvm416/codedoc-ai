@@ -227,7 +227,7 @@ def test_terminal_abort_names_only_the_matched_global_cause(message, expected, a
     assert expected in abort.reason
     assert absent not in abort.reason
     assert "reuses compatible completed ordinary and split records" in abort.reason
-    assert "resumes compatible current schema-3 split node checkpoints" in abort.reason
+    assert "resumes compatible current schema-4 split node checkpoints" in abort.reason
     assert "deliberately re-documented" not in abort.reason
     assert "resumes the unfinished files" not in abort.reason
 
@@ -236,7 +236,7 @@ def test_rate_limit_exhausted_abort_explains_reuse_and_recovery_boundary():
     abort = _build_rate_limit_exhausted_abort("openai")
 
     assert "reuses compatible completed ordinary and split records" in abort.reason
-    assert "resumes compatible current schema-3 split node checkpoints" in abort.reason
+    assert "resumes compatible current schema-4 split node checkpoints" in abort.reason
     assert "deliberately re-documented" not in abort.reason
     assert "resumes the unfinished files" not in abort.reason
 
@@ -251,7 +251,7 @@ def test_rate_limit_exhausted_warning_explains_reuse_and_recovery_boundary(capsy
 
     warning = capsys.readouterr().out
     assert "reuses compatible completed ordinary and split records" in warning
-    assert "resumes compatible current schema-3 split node checkpoints" in warning
+    assert "resumes compatible current schema-4 split node checkpoints" in warning
     assert "deliberately re-documented" not in warning
     assert "re-run the same command to resume" not in warning
 

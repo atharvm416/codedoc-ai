@@ -338,7 +338,7 @@ def _read_json(
 def _partial_files_from_meta(
     meta: dict,
 ) -> tuple[tuple[SplitTreeState, ...], tuple[str, ...]]:
-    """Parse `partial_files` into `(schema-3 tree states, legacy v1 rel_paths)`.
+    """Parse `partial_files` into `(schema-4 tree states, legacy v1 rel_paths)`.
 
     A predecessor (schema version 1) ordered-prefix payload is
     migration-readable only (D11): it is recognized structurally so the

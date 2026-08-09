@@ -135,6 +135,166 @@ def test_planning_preview_does_not_reuse_completed_split_output(
     assert stats["unit_documentation_calls_planned"] > 0
 
 
+class _SignedLeafFake(SmartFake):
+    """`SmartFake`, but the one leaf fragment response that actually
+    documents `fn_0` carries a bounded, deliberately-wrong model-returned
+    signature for it -- exercising the section 2A response-cap boundary,
+    and section 20A item 2's parser-authority proof, through a real split
+    execution with response correction disabled.
+
+    Checking for `"fn_0("` in the prompt (rather than reacting to every
+    fragment prompt alike) matters here: `_large_python_source` splits
+    into multiple leaf chunks, and `fn_0` is a real declaration living in
+    only one of them. A fake that claimed to be describing `fn_0` for
+    every chunk would make every *other* chunk's response an unmatched
+    claim (parser authority can only attribute a symbol within its own
+    chunk's scope), and `build_fact_ledger`'s cross-chunk merge would then
+    let one of those unmatched, wrong-scope claims silently overwrite the
+    one genuinely-matched, correctly-authoritative entry -- collapsing the
+    very distinction this test exists to prove, for a reason that has
+    nothing to do with parser authority itself."""
+
+    def __init__(self, signature_chars: int, verdict="SAFE") -> None:
+        super().__init__(verdict)
+        self._signature = "s" * signature_chars
+
+    def complete_json(self, prompt, system=""):
+        if "This is one bounded fragment of a larger" in prompt and "fn_0(" in prompt:
+            self.doc_calls += 1
+            return json.dumps({
+                "description": "A fragment.",
+                "functions": [
+                    {"name": "fn_0", "description": "does f", "signature": self._signature}
+                ],
+            })
+        return super().complete_json(prompt, system)
+
+
+def test_bounded_leaf_signature_survives_real_split_execution_and_stays_private(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 2A: with response correction disabled (the default), a real
+    split execution accepts a bounded 552-character model-returned leaf
+    signature -- the installed 0.14.2 TestPyPI observation -- and never
+    publishes it: the private signature is internal ledger/matching
+    metadata only and must not reach the final public JSON output.
+
+    Parser-independent: this holds regardless of structural mode (the
+    private-field bound and the public-output projection are the same in
+    lexical fallback and syntax mode), so unlike its sibling below it
+    carries no `@requires_structure_pack` and must run in a base install."""
+    source = _large_python_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    provider = _SignedLeafFake(552)
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "parallel_agents": False,
+            "propagate_changes": False,
+            "response_correction_enabled": False,
+        },
+    )
+
+    assert stats["checked"] == 1
+    assert stats["failed"] == 0
+    output = (tmp_path / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
+    assert "signature" not in output
+    assert "s" * 552 not in output
+
+
+@requires_structure_pack
+def test_bounded_leaf_signature_ledger_uses_parser_authority_not_the_model_hint(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 20A item 2: public-field absence alone (proven unconditionally
+    by the sibling test above) does not prove the internal ledger held
+    parser authority -- a `run_pipeline` regression that stopped passing
+    `division_plan.symbols` into `build_fact_ledger` (so the model's own
+    hint became authoritative by default) would still leave "signature" and
+    the 552-character string out of public JSON, since neither is ever a
+    public field regardless of which value won internally. This
+    instruments the exact `build_fact_ledger` seam
+    `execution.py::_execute_divided_file` calls during this real
+    `run_pipeline` execution -- wrapping, not stubbing, so the genuine
+    ledger the pipeline actually produces and uses is captured, not a
+    substitute computed separately -- and asserts the captured ledger's
+    `fn_0` fact carries the real parser-owned signature (independently
+    reconstructed from the same deterministic division plan `run_pipeline`
+    itself builds for this source/budget), not the fake provider's
+    552-character hint.
+
+    Presence-dependent, unlike its sibling: `SymbolFact` -- the
+    parser-owned fact parser authority allocates from -- is a real,
+    grammar-derived concept that lexical fallback does not produce, so
+    `reference_plan.symbols` is empty in a base install and this specific
+    proof has nothing to compare against there (confirmed directly: without
+    `@requires_structure_pack` this failed with `StopIteration` in a fresh
+    base-env, not a false pass -- the absence-simulation contract the
+    sibling test proves is unaffected)."""
+    source = _large_python_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    provider = _SignedLeafFake(552)
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+
+    captured_ledgers = []
+    real_build_fact_ledger = build_fact_ledger
+
+    def _capturing_build_fact_ledger(*args, **kwargs):
+        ledger = real_build_fact_ledger(*args, **kwargs)
+        captured_ledgers.append(ledger)
+        return ledger
+
+    monkeypatch.setattr(
+        "codedoc.core.execution.build_fact_ledger", _capturing_build_fact_ledger
+    )
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "parallel_agents": False,
+            "propagate_changes": False,
+            "response_correction_enabled": False,
+        },
+    )
+
+    assert stats["checked"] == 1
+    assert stats["failed"] == 0
+
+    # Deterministic division planning (a core design invariant of this
+    # codebase) means reconstructing the plan here, over the identical
+    # source and budget, byte-identically reproduces what run_pipeline
+    # itself built -- including division_plan.symbols, the parser-owned
+    # facts execution.py passes into build_fact_ledger.
+    reference_plan = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000,
+    )
+    assert reference_plan.structural_mode == "syntax"
+    real_signature = next(
+        symbol.signature
+        for symbol in reference_plan.symbols
+        if symbol.qualified_name == "fn_0"
+    )
+    assert real_signature != "s" * 552
+
+    assert captured_ledgers, "build_fact_ledger was never called by run_pipeline"
+    matching_facts = [
+        fact for ledger in captured_ledgers for fact in ledger.functions
+        if fact["name"] == "fn_0"
+    ]
+    assert matching_facts, "no captured ledger fact named fn_0"
+    for fact in matching_facts:
+        assert fact["signature"] == real_signature
+        assert fact["signature"] != "s" * 552
+
+
 def _reduction_total(tree) -> int:
     return len(tree.unit_consolidation_nodes) + len(tree.general_nodes)
 

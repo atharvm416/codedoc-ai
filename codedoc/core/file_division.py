@@ -10,7 +10,7 @@ This module owns every provider-free planning concern for split:
 - the lossless internal structured fact ledger merged from cleaned leaf
   capsules (:func:`build_fact_ledger` / :func:`merge_leaf_capsules`);
 - the bounded final-synthesis manifest (:func:`final_synthesis_input`);
-- node-keyed split-partial recovery state (schema version 3) and its
+- node-keyed split-partial recovery state (schema version 4) and its
   dependency-validated reuse predicate; and
 - the provider-free provider/model/effective-endpoint execution identity
   shared by every recoverable node.
@@ -45,6 +45,7 @@ from typing import Iterable, Literal, Mapping, Sequence
 
 from codedoc.parser.source_structure import (
     Atom,
+    MAX_STRUCTURE_SIGNATURE_CHARS,
     SourceRange,
     StructureResult,
     SymbolFact,
@@ -68,10 +69,11 @@ from codedoc.core.result_assembly import flat_combined_result
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
 PACKER_SCHEMA_REVISION = "division-packer-v5"
-# Advanced from v4: signature-aware matching became load-bearing after
-# leaf-capsule-v4 was already active, so a predecessor signatureless leaf
-# cannot validate as a current checkpoint.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v5"
+# Advanced from v5: the fixed leaf response signature ceiling now matches the
+# existing 600-character parser/semantic-unit ceiling, and the fixed fragment
+# prompt bytes versioned by this revision change with it, so a v5 leaf
+# checkpoint cannot validate as a current v6 checkpoint.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v6"
 # Advanced from v5. Bound into final-node execution identity, the final-node
 # exact input digest, and the completed split identity; a ledger revision
 # change alone reruns final synthesis but preserves compatible leaves and
@@ -115,7 +117,7 @@ MAX_LEAF_EXPORT_ITEM_CHARS = 256
 # ledger's semantic key uses it to keep same-named overloads distinct (D7/section 8).
 # Without it the cleaner would strip the only field that separates
 # `run(int)` from `run(str)`, and the ledger would silently publish one fact.
-MAX_LEAF_SYMBOL_SIGNATURE_CHARS = 256
+MAX_LEAF_SYMBOL_SIGNATURE_CHARS = MAX_STRUCTURE_SIGNATURE_CHARS
 
 # Parser-derived names are optional prompt grounding, not accepted response
 # facts. Bound that hint independently so declaration-heavy semantic units
@@ -209,10 +211,12 @@ SPLIT_COMPLEXITY_ADVISORY_REDUCTION_DEPTH = 2
 # Node-keyed split-partial container schema version.  Distinct from the
 # enclosing run-level `_RECOVERY_IDENTITY_VERSION` (resume.py), which stays 1
 # because the recovery-container contract is unchanged (D11/D12).  Advanced
-# from 2: the per-node `reduction_tree_digest` gate is removed (a topology-only
-# change must not invalidate an otherwise-compatible leaf), a per-node exact
-# stage-local input digest is added, and a bounded quarantine map is added.
-SPLIT_PARTIAL_SCHEMA_VERSION = 3
+# from 3 (released, now an unsupported predecessor generation): the wire
+# fields are unchanged, but the leaf-capsule-v6 boundary above requires an
+# early, uniform rejection of a released schema-3 container -- before this
+# bump it would parse successfully and only fail node-by-node under the new
+# leaf identity, quarantining every leaf instead of being rejected up front.
+SPLIT_PARTIAL_SCHEMA_VERSION = 4
 # Schema 2 (node-keyed, per-node tree-digest gated) remains recognizable for
 # preserve-first guidance but is dormant: never executable and never
 # automatically migrated (section 16).
@@ -277,7 +281,7 @@ class SplitCapacityBlocked(Exception):
 
 
 class SplitRecoveryStateError(ValueError):
-    """A current schema-3 recovery container cannot be safely executed.
+    """A current schema-4 recovery container cannot be safely executed.
 
     Planning translates this into preserve-first ``ConfigError`` guidance
     before writer initialization or provider construction.  It is distinct
@@ -438,7 +442,7 @@ class SemanticUnitIdentity:
         _id_text(self.unit_id, "unit_id", "unit")
         _bounded_text(self.kind, "unit kind", maximum=160)
         _bounded_text(self.qualified_name, "unit qualified_name", maximum=240)
-        _bounded_text(self.signature, "unit signature", maximum=600)
+        _bounded_text(self.signature, "unit signature", maximum=MAX_LEAF_SYMBOL_SIGNATURE_CHARS)
         atom_ids = tuple(self.atom_ids)
         if not atom_ids:
             raise ValueError("unit must own at least one atom.")
@@ -2848,7 +2852,7 @@ def final_input_digest(
 
 
 # ---------------------------------------------------------------------------
-# Node-keyed split-partial recovery (schema version 3) — section 9/section 12
+# Node-keyed split-partial recovery (schema version 4) — section 9/section 12
 # ---------------------------------------------------------------------------
 
 
@@ -2873,7 +2877,7 @@ class ReductionNodeState:
     """One recoverable, dependency-validated checkpoint: leaf, unit-
     consolidation, general reduction, or final synthesis.
 
-    ``reduction_tree_digest`` is deliberately NOT a field here (schema 3):
+    ``reduction_tree_digest`` is deliberately NOT a field here (schema 4):
     the writer-time tree digest is container-level provenance only, never a
     per-node reuse gate, so a topology-only change (compatible chunk payload,
     changed reduction shape) does not invalidate a compatible leaf.
@@ -2943,14 +2947,16 @@ class QuarantineEntry:
 
 @dataclass(frozen=True, slots=True)
 class SplitTreeState:
-    """Node-keyed split-partial container, schema version 3.
+    """Node-keyed split-partial container, schema version 4.
 
     Distinct from — and never interchangeable with — the predecessor
-    ordered-prefix payload (schema version 1) or the dormant per-node
-    tree-digest-gated payload (schema version 2); see D11 and section 9.
+    ordered-prefix payload (schema version 1), the dormant per-node
+    tree-digest-gated payload (schema version 2), or the released schema
+    version 3 payload (now an unsupported predecessor generation); see D11
+    and section 9.
     """
 
-    schema_version: Literal[3]
+    schema_version: Literal[4]
     owner: Literal["codedoc-ai"]
     rel_path: str
     content_hash: str
@@ -3211,7 +3217,7 @@ def validate_node_for_tree(
     a node whose stage-local input digest no longer matches -- the
     recompute-from-retained-children check for reducers/final (section 11).
 
-    Never compares a per-node ``reduction_tree_digest`` (schema 3, section
+    Never compares a per-node ``reduction_tree_digest`` (schema 4, section
     9): the container-level digest is writer-time provenance only, so a
     topology-only change never invalidates a compatible leaf through this
     function.  Coverage and child order are compared by ordered-tuple
@@ -3388,12 +3394,12 @@ def validate_recovered_tree(
     unplanned_nodes = sorted(set(raw_by_id) - planned_ids)
     if unplanned_nodes:
         raise SplitRecoveryStateError(
-            "schema-3 recovery contains an unplanned split node ID."
+            "schema-4 recovery contains an unplanned split node ID."
         )
     existing_by_id = {entry.node_id: entry for entry in existing_quarantine}
     if set(existing_by_id) - planned_ids:
         raise SplitRecoveryStateError(
-            "schema-3 recovery quarantine contains an unplanned split node ID."
+            "schema-4 recovery quarantine contains an unplanned split node ID."
         )
     retained: dict[str, ReductionNodeState] = {}
     retained_results: dict[str, dict] = {}
@@ -3407,7 +3413,7 @@ def validate_recovered_tree(
         )
         if len(quarantine_by_id) > MAX_QUARANTINE_ENTRIES_PER_FILE:
             raise SplitRecoveryStateError(
-                "schema-3 recovery quarantine exceeds its bounded entry count."
+                "schema-4 recovery quarantine exceeds its bounded entry count."
             )
 
     def _keep(

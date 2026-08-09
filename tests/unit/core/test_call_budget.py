@@ -188,7 +188,7 @@ class TestEmptyAndAllReusedRuns:
             )
         )
         restored = SplitTreeState(
-            schema_version=3,
+            schema_version=4,
             owner="codedoc-ai",
             rel_path=division.rel_path,
             content_hash=content_hash,

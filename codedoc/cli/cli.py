@@ -36,7 +36,7 @@ from codedoc.utils.errors import CodeDocError, bounded_exception_summary
 
 _RECOVERY_REUSE_BOUNDARY = (
     "Compatible completed ordinary and split records may be reused, and "
-    "compatible current schema-3 split node checkpoints may resume. Forced, "
+    "compatible current schema-4 split node checkpoints may resume. Forced, "
     "stale, identity-mismatched, legacy, foreign, or unsupported state is "
     "rerun or preserved and blocked according to the documented remedy."
 )
@@ -131,7 +131,7 @@ large-file split execution:
   atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
   reduction-fan-in-cap, reduction-depth-cap, or
   final-synthesis-envelope-cap. Exactly compatible same-path completed split
-  records are reused with zero calls; current schema-3 checkpoints resume only
+  records are reused with zero calls; current schema-4 checkpoints resume only
   unpaid nodes. Forced, stale, legacy, foreign, or unsupported state is rerun
   or preserved and blocked. Under-threshold files retain ordinary execution.
         """,
@@ -360,7 +360,7 @@ large-file split execution:
             "Oversized readable source handling: 'truncate' keeps the legacy "
             "head/tail behavior (default); 'split' enables provider-free "
             "planning, paid execution, same-path completed split reuse, and current "
-            "schema-3 node recovery in single mode."
+            "schema-4 node recovery in single mode."
         ),
     )
     parser.add_argument(

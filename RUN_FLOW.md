@@ -10,7 +10,11 @@ enrichment.
 The default `large_file_strategy: truncate` supports real `single` and `triple`
 runs. Beginning in `0.14.2`, `large_file_strategy: split` supports provider-free
 dry-run planning, paid execution, same-path completed reuse, and dependency-valid
-node recovery with `analysis_mode: single`.
+node recovery with `analysis_mode: single`. As of `0.14.3`, `single + split`
+execution, completed-record reuse, and node-level recovery are fully
+supported; `triple + split` remains unavailable. Split leaf signatures stay
+private, internal matching metadata bounded to the parser-aligned
+600-character ceiling; split never silently truncates an over-bound response.
 
 `triple + split` fails during configuration validation before scanning,
 recovery inspection, output-directory creation, prompt-customization review,
@@ -27,7 +31,17 @@ path while old stable output and recovery remain preserved until replacement.
 The predecessor `0.14.1` `fresh-only-v1` split record is stale by default under
 `0.14.2` and reruns once. Schema-1 and schema-2 partials are preserved but not
 resumed. Rolling back to `0.14.1` reruns `large-file-v3` split output fresh and
-blocks schema-3 recovery preserve-first.
+blocks schema-4 recovery preserve-first.
+
+The current node-keyed partial-recovery generation is schema 4 (`0.14.3`,
+bound to the current `leaf-capsule-v6` leaf identity). Released schema 3
+(`0.14.2`, `leaf-capsule-v5`) is now an unsupported predecessor generation,
+preserved and blocked before any node is read, before planning, `SafeWriter`,
+or provider construction — the recovery artifact stays byte-identical.
+Nothing from a released schema-3 partial is carried forward; a fresh
+`0.14.3` run performs complete v6 re-execution. Finish an unfinished `0.14.2`
+split run with `0.14.2`, or move `crash_recovery.json` aside (or delete it as
+a deliberate discard) to start fresh under `0.14.3`.
 
 ## Persistent-file allowlist
 
@@ -132,7 +146,7 @@ work.
    exact `<output_dir>/crash_recovery.json`. Compatible ordinary completed
    records may overlay stable output. Foreign, completed, unsupported,
    malformed, or run-identity-mismatched recovery blocks without mutation.
-   Current schema-3 split nodes are validated topologically; valid siblings are
+   Current schema-4 split nodes are validated topologically; valid siblings are
    retained, rejected nodes are quarantined, and their ancestors are pruned.
    Planning applies completed reuse, rejects insufficient source locally,
    divides oversized split files, and blocks any capacity failure before calls.
@@ -197,12 +211,12 @@ reuse is provider-agnostic. Partial node identity additionally binds provider,
 model, and effective endpoint; imports-only changes preserve leaves/reducers and
 rerun final synthesis. Cross-path split reuse remains unavailable.
 
-Schema-3 recovery stores container provenance, ordered node state, exact
-stage-local input digests, and bounded non-executable quarantine. Schema-1,
-schema-2, unknown, foreign, duplicate, aliased, or unsafe container state is
-preserved and blocked. The remedies are ordered preserve-first: restore the
-matching version/configuration or move the file aside; deletion is only an
-explicit discard.
+Schema-4 recovery stores container provenance, ordered node state, exact
+stage-local input digests, and bounded non-executable quarantine. Released
+schema-3, schema-1, schema-2, unknown, foreign, duplicate, aliased, or unsafe
+container state is preserved and blocked. The remedies are ordered
+preserve-first: restore the matching version/configuration or move the file
+aside; deletion is only an explicit discard.
 
 ## Call authorization and accounting
 
@@ -222,11 +236,12 @@ allowed partial completion, and terminal abort use the same accounting model.
 - Split dry-run performs no provider call and no persistent mutation.
 - Exactly compatible same-path completed split records authorize zero-call
   reuse; cross-path split records do not.
-- Current dependency-valid schema-3 nodes authorize only their own paid work;
+- Current dependency-valid schema-4 nodes authorize only their own paid work;
   invalid nodes never authorize an ancestor and remain quarantined until valid
   replacement or completed output succeeds.
-- Schema-1/schema-2, foreign, future, malformed, duplicate, or aliased recovery
-  is preserved and blocked before provider construction or mutation.
+- Released schema-3, schema-1/schema-2, foreign, future, malformed, duplicate,
+  or aliased recovery is preserved and blocked before provider construction or
+  mutation.
 - Stable output is not mutated during analysis.
 - Recovery is initialized only after read-only gates, caps, and any semantic
   review.

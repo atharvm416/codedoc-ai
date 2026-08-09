@@ -7,7 +7,13 @@ import pytest
 import codedoc.core.file_division as file_division
 from codedoc.core.file_division import (
     BLOCKED_REASON_ORDER,
+    DORMANT_SPLIT_PARTIAL_SCHEMA_VERSION,
+    LEGACY_SPLIT_PARTIAL_SCHEMA_VERSION,
+    MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+    SPLIT_PARTIAL_SCHEMA_VERSION,
     DivisionInternalDefect,
+    SemanticUnitIdentity,
     SplitCapacityBlocked,
     build_division_plan,
     build_fact_ledger,
@@ -33,6 +39,7 @@ from codedoc.core.file_division import (
     worst_case_final_synthesis_chars,
     worst_case_reduction_manifest_chars,
 )
+from codedoc.parser.source_structure import MAX_STRUCTURE_SIGNATURE_CHARS, SourceRange
 from codedoc.utils.errors import ConfigError
 from tests.support.structure_extra import requires_structure_pack
 
@@ -1100,6 +1107,68 @@ def test_overloads_survive_the_live_cleaner_into_the_ledger() -> None:
     ]
 
 
+@requires_structure_pack
+def test_ledger_stores_parser_signature_not_model_hint_at_the_600_boundary() -> None:
+    """Section 20A item 3: parser authority at the real 600-character
+    boundary, using a genuinely parsed declaration rather than a
+    hand-constructed `SymbolFact`.
+
+    A real function with 40 typed, defaulted parameters produces a raw
+    `def ...` line far longer than 600 characters; the real parser bounds
+    the captured `SymbolFact.signature` at exactly `MAX_STRUCTURE_SIGNATURE_CHARS`
+    (600), matching this release's leaf response ceiling. A distinct
+    552-character string simulates the model's own matching-hint signature
+    for the same declaration -- shorter, and different text, so a bug that
+    let the model's report win would be visible. `build_fact_ledger` must
+    store the parser-owned 600-character signature, never the 552-character
+    hint, and must do so identically on a repeated call over the same
+    inputs (allocation has no hidden non-determinism)."""
+    params = ", ".join(f"param_{i:03d}: int = {i}" for i in range(40))
+    source = f"def target_function({params}) -> None:\n    pass\n"
+    plan = build_division_plan(
+        rel_path="sample.py", language="python", content=source, source_budget_chars=100_000,
+    )
+    assert plan.structural_mode == "syntax"
+    assert len(plan.chunks) == 1
+    assert len(plan.symbols) == 1
+    real_signature = plan.symbols[0].signature
+    assert plan.symbols[0].qualified_name == "target_function"
+    assert len(real_signature) == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+
+    model_hint = (
+        "def target_function(" + ", ".join(f"p{i}: int" for i in range(70)) + ")"
+    )[:552]
+    assert len(model_hint) == 552
+    assert model_hint != real_signature
+
+    capsules = [
+        {
+            "description": "A function.",
+            "functions": [
+                {
+                    "name": "target_function",
+                    "signature": model_hint,
+                    "description": "does work",
+                }
+            ],
+        }
+    ]
+
+    ledger = build_fact_ledger(
+        capsules, language="python", chunks=plan.chunks, symbols=plan.symbols,
+    )
+    assert len(ledger.functions) == 1
+    stored_signature = ledger.functions[0]["signature"]
+    assert stored_signature == real_signature
+    assert stored_signature != model_hint
+
+    # Repeated allocation over the identical inputs is deterministic.
+    ledger_again = build_fact_ledger(
+        capsules, language="python", chunks=plan.chunks, symbols=plan.symbols,
+    )
+    assert ledger_again.functions == ledger.functions
+
+
 def test_ledger_uses_authoritative_unit_scope_for_same_named_packed_facts() -> None:
     from codedoc.agents.response_cleaning import clean_leaf_capsule_report
 
@@ -1971,7 +2040,7 @@ def test_final_synthesis_revision_prunes_only_recovered_final(
 
 
 # ---------------------------------------------------------------------------
-# Node-keyed recovery (schema version 3) and legacy (v1/v2) detection — section 12/D11
+# Node-keyed recovery (schema version 4) and legacy (v1/v2) detection — section 12/D11
 # ---------------------------------------------------------------------------
 
 
@@ -2446,3 +2515,68 @@ def test_distinct_units_preserves_first_seen_order() -> None:
     )
     units = distinct_units(plan.chunks)
     assert units == plan.units
+
+
+# ---------------------------------------------------------------------------
+# Section 2A: split-leaf signature bound aligned with the parser ceiling
+# ---------------------------------------------------------------------------
+
+
+def _source_range() -> SourceRange:
+    return SourceRange(
+        start_byte=0, end_byte=1, start_line=1, start_column=1, end_line=1, end_column=2
+    )
+
+
+def test_semantic_unit_identity_signature_bound_matches_the_parser_ceiling() -> None:
+    """`SemanticUnitIdentity.signature` keeps its existing 600-character
+    maximum, now sourced from the same shared `MAX_STRUCTURE_SIGNATURE_CHARS`
+    constant that also defines `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` -- so the two
+    bounds cannot drift apart -- rather than a separate literal `600`."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+
+    accepted = SemanticUnitIdentity(
+        unit_id="unit_" + "a" * 64,
+        kind="function",
+        qualified_name="q",
+        signature="s" * 600,
+        atom_ids=("atom_" + "b" * 64,),
+        source_range=_source_range(),
+    )
+    assert len(accepted.signature) == 600
+
+    with pytest.raises(ValueError, match="exceeds 600 characters"):
+        SemanticUnitIdentity(
+            unit_id="unit_" + "a" * 64,
+            kind="function",
+            qualified_name="q",
+            signature="s" * 601,
+            atom_ids=("atom_" + "b" * 64,),
+            source_range=_source_range(),
+        )
+
+
+def test_derived_leaf_capsule_maximum_is_exactly_200192() -> None:
+    """The capsule bound is derived from `MAX_LEAF_SYMBOL_SIGNATURE_CHARS`
+    (section 2A), not hard-coded: raising the signature bound from 256 to
+    600 raises the worst-case leaf capsule from 150,656 to exactly 200,192
+    canonical characters -- a 49,536-character increase from two signature
+    fields, each escaped 12 ways as `\\u0000` (6 canonical characters per
+    raw `\\x00`), across 12 items per kind: 2 * 12 * 6 * (600 - 256) = 49,536."""
+    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
+    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS - 150656 == 49536
+
+
+def test_split_partial_schema_generations_are_current4_legacy1_dormant2() -> None:
+    """`0.14.3` advances the current writable/executable split-partial
+    container generation from 3 to 4; released schema 3 becomes an
+    unsupported predecessor generation with no dedicated Python constant,
+    because the existing current-schema equality check already rejects
+    every non-4 value on its own (section 2A/16) -- adding one would have no
+    production consumer. Legacy schema 1 and dormant schema 2 are unchanged."""
+    assert SPLIT_PARTIAL_SCHEMA_VERSION == 4
+    assert LEGACY_SPLIT_PARTIAL_SCHEMA_VERSION == 1
+    assert DORMANT_SPLIT_PARTIAL_SCHEMA_VERSION == 2
+    assert not any(
+        "PREDECESSOR" in name and "SCHEMA" in name for name in dir(file_division)
+    )

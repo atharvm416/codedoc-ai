@@ -332,7 +332,7 @@ def _build_terminal_abort(
         "Completed file-level results were saved to crash_recovery.json in the "
         "output directory. Re-running the same command reuses compatible "
         "completed ordinary and split records and resumes compatible current "
-        "schema-3 split node checkpoints; forced, stale, identity-mismatched, "
+        "schema-4 split node checkpoints; forced, stale, identity-mismatched, "
         "legacy, foreign, or unsupported state is rerun or preserved and "
         "blocked according to the documented remedy."
     )
@@ -353,7 +353,7 @@ def _build_rate_limit_exhausted_abort(
         "Completed file-level results were saved to crash_recovery.json in the "
         "output directory. Re-running the same command reuses compatible "
         "completed ordinary and split records and resumes compatible current "
-        "schema-3 split node checkpoints; forced, stale, identity-mismatched, "
+        "schema-4 split node checkpoints; forced, stale, identity-mismatched, "
         "legacy, foreign, or unsupported state is rerun or preserved and "
         "blocked according to the documented remedy."
     )
@@ -372,7 +372,7 @@ def _raise_rate_limit_exhausted(
         f"[{provider_name}] Persistent rate limit / quota: no file made progress "
         "at the lowest concurrency. Stopping the run; completed files are saved "
         "in crash_recovery.json. Re-running reuses compatible completed ordinary "
-        "and split records and resumes compatible current schema-3 split node "
+        "and split records and resumes compatible current schema-4 split node "
         "checkpoints; forced, stale, identity-mismatched, legacy, foreign, or "
         "unsupported state is rerun or preserved and blocked according to the "
         "documented remedy."

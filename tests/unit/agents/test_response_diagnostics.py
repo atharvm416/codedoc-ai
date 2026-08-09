@@ -27,7 +27,9 @@ from codedoc.agents.response_diagnostics import (
 from codedoc.core.file_division import (
     MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
     MAX_LEAF_SYMBOL_NAME_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
 )
+from codedoc.parser.source_structure import MAX_STRUCTURE_SIGNATURE_CHARS
 from codedoc.utils.errors import AgentError, ResponseContractError
 
 def _reasons(removed):
@@ -219,6 +221,55 @@ def test_fixed_leaf_losslessness_survives_bounded_diagnostic_overflow():
     diagnostic = caught.value.diagnostic
     assert diagnostic.reason_code == "fixed_cap_exceeded"
     assert len(diagnostic.removed) <= MAX_REMOVAL_ENTRIES
+
+
+def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
+    """Section 2A: the private response-field bound now equals the parser's
+    600-character `SemanticUnitIdentity.signature` ceiling, not the prior
+    256-character short-item bound.  A 552-character model-returned signature
+    (the installed 0.14.2 TestPyPI observation) and the exact 600-character
+    boundary are both accepted; 601 is rejected as `fixed_cap_exceeded` and
+    the response is not silently truncated into a shortened accepted fact."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+
+    accepted_552 = _run_leaf_capsule(
+        {
+            "description": "visible facts",
+            "functions": [{"name": "f", "signature": "s" * 552}],
+        }
+    )
+    assert accepted_552["functions"][0]["signature"] == "s" * 552
+
+    accepted_600 = _run_leaf_capsule(
+        {
+            "description": "visible facts",
+            "functions": [{"name": "f", "signature": "s" * 600}],
+        }
+    )
+    assert accepted_600["functions"][0]["signature"] == "s" * 600
+
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(
+            {
+                "description": "visible facts",
+                "functions": [{"name": "f", "signature": "s" * 601}],
+            }
+        )
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    signature_removals = [
+        removal for removal in diagnostic.removed if removal.field.endswith("signature")
+    ]
+    assert signature_removals and signature_removals[0].reason_code == "response_cap"
+    # The over-bound signature must never appear anywhere in the diagnostic --
+    # not in the field path, not in the bounded `detail` summary, not
+    # anywhere in the complete cross-boundary-safe representation -- so this
+    # inspects the full `as_summary()` structure rather than only field names
+    # (a leak through `detail` would not have been caught by field names
+    # alone).
+    full_diagnostic_json = json.dumps(diagnostic.as_summary())
+    assert "s" * 601 not in full_diagnostic_json
+    assert "s" * 100 not in full_diagnostic_json
 
 
 def test_many_unknown_fixed_leaf_fields_do_not_fake_a_fact_cap_failure():

@@ -37,8 +37,8 @@ def test_version_flag_reports_canonical_identity(capsys):
     assert __version__ in capsys.readouterr().out
 
 
-def test_release_identity_is_0_14_2():
-    assert __version__ == "0.14.2"
+def test_release_identity_is_0_14_3():
+    assert __version__ == "0.14.3"
 
 
 def test_pep_639_license_form_declares_supported_setuptools_backend():

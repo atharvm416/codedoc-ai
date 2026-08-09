@@ -356,7 +356,7 @@ def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
         recovery_path = project / "docs" / "crash_recovery.json"
         recovery = json.loads(recovery_path.read_text(encoding="utf-8"))
         partial = recovery["_codedoc"]["partial_files"]["main.py"]
-        assert partial["schema_version"] == 3
+        assert partial["schema_version"] == 4
         leaf_nodes = [
             node for node in partial["nodes"] if node["node_type"] == "leaf"
         ]

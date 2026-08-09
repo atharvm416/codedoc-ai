@@ -1008,7 +1008,7 @@ def _build_pipeline_plan_once(
                     except SplitRecoveryStateError as exc:
                         raise ConfigError(
                             f"Recovery for {rel_path!r} cannot be safely bounded "
-                            "under the current schema-3 plan. The recovery file "
+                            "under the current schema-4 plan. The recovery file "
                             "and stable output were left untouched. Resume with "
                             "the CodeDoc version that created it, or move the "
                             "recovery file aside before starting fresh; delete "

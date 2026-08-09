@@ -109,7 +109,7 @@ def _leaf_node_state(plan, tree, content_hash, chunk) -> SplitTreeState:
 
 def _tree_state(plan, tree, content_hash, nodes) -> SplitTreeState:
     return SplitTreeState(
-        schema_version=3,
+        schema_version=4,
         owner="codedoc-ai",
         rel_path=plan.rel_path,
         content_hash=content_hash,

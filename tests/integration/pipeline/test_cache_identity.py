@@ -22,7 +22,7 @@ from tests.support.profiles import INLINE
 from tests.support.providers import SmartFake
 from tests.support.cross_format_runs import _config
 from tests.support.cross_format_runs import _first_run
-from codedoc.core.db import compute_file_hash
+from codedoc.core.db import compute_file_hash, read_source_text
 from codedoc.core.file_division import (
     build_division_plan,
     build_reduction_tree,
@@ -30,10 +30,13 @@ from codedoc.core.file_division import (
 )
 from codedoc.core.graph import DependencyGraph
 from codedoc.core.planning import build_pipeline_plan
+from codedoc.core import record_meta
 from codedoc.core.record_meta import (
     expected_large_file_identity,
     normalized_identity_value,
 )
+from tests.support.fixture_paths import FIXTURES_ROOT
+from tests.support.structure_extra import requires_structure_pack
 
 def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
     import json
@@ -663,7 +666,7 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
     """The frozen record was produced by the reviewed 0.14.1 commit, rather
     than reconstructed in this test. Both predecessor identity values must
     cause current planning to schedule the file as unpaid work."""
-    fixture_dir = Path(__file__).resolve().parents[2] / "fixtures" / "split_state"
+    fixture_dir = FIXTURES_ROOT / "split_state"
     predecessor = json.loads(
         (fixture_dir / "completed_0_14_1.json").read_text(encoding="utf-8")
     )
@@ -696,8 +699,139 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
     assert rel_path in plan_result.changed_rels
 
 
+@requires_structure_pack
+def test_actual_predecessor_completed_split_record_is_stale_under_v6(tmp_path, monkeypatch):
+    """The frozen record's ``_large_file_identity`` is not a placeholder: it
+    is the real value ``expected_large_file_identity`` produces for this
+    exact source under the genuine reconstructed division plan, reduction
+    tree, and deterministic-imports digest -- with ``LEAF_CAPSULE_SCHEMA_REVISION``
+    and ``MAX_LEAF_CAPSULE_CANONICAL_CHARS`` monkeypatched back to the
+    reviewed 0.14.2 values (``leaf-capsule-v5`` / 150,656) that produced it.
+    Every other bound/revision is genuinely unchanged.
+
+    This is section 20A item 2's two-direction proof, not merely a
+    single-direction staleness check: a fixture that fails to match
+    *either* mode would prove nothing, since any arbitrary wrong hash is
+    trivially "stale" under the current identity too. The plan/tree
+    reconstruction uses the real parser, so this depends on the optional
+    `structure` extra exactly as the frozen fixture does (recorded via
+    ``@requires_structure_pack``, matching section 20A item 1's treatment of
+    the sibling schema-4 fixture) -- the absence-simulation lexical-fallback
+    contract is proven elsewhere and is not weakened by this skip.
+
+    0.14.2 no longer stamps ``_split_reuse_contract`` (retired in the 0.14.2
+    completed-split-reuse work), so this fixture omits it, unlike the 0.14.1
+    fixture above."""
+    fixture_dir = FIXTURES_ROOT / "split_state"
+    predecessor = json.loads(
+        (fixture_dir / "completed_0_14_2.json").read_text(encoding="utf-8")
+    )
+    record = predecessor["files"][0]
+    assert record["_large_file_identity"].startswith("large-file-v3:")
+    assert "_split_reuse_contract" not in record
+
+    rel_path = record["path"]
+    source_bytes = (Path(__file__).with_name(rel_path)).read_bytes()
+    src = tmp_path / rel_path
+    src.write_bytes(source_bytes)
+    assert compute_file_hash(src) == record["hash"]
+
+    # The canonical pipeline encoding (utf-8-sig, universal newlines), not a
+    # raw-bytes decode -- read_source_text is what planning and execution
+    # actually feed into build_division_plan, so this must match it exactly
+    # or the reconstructed plan/tree digests silently diverge from a real run.
+    source = read_source_text(src)
+    plan = build_division_plan(
+        rel_path=rel_path, language="python", content=source, source_budget_chars=2500,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2500, language="python")
+    imports_digest = deterministic_imports_digest(tuple(record["imports"]))
+
+    # Section 20A item 5: the fixture's own last_run structural statistics
+    # must agree with this same reconstructed plan/tree, not merely its
+    # _large_file_identity. A fixture whose identity says "real syntax-mode
+    # plan" but whose last_run counts still describe a different (e.g.
+    # lexical-fallback) execution could not have been emitted by any single
+    # genuine run -- checked here so a future hand-edit or partial
+    # regeneration that touches one without the other fails loudly instead
+    # of silently drifting back into that incoherent state.
+    last_run = predecessor["last_run"]
+    assert (last_run["split_syntax_files"], last_run["split_lexical_files"]) == (
+        (1, 0) if plan.structural_mode == "syntax" else (0, 1)
+    )
+    assert last_run["split_units"] == len(plan.units)
+    assert last_run["split_chunks"] == len(plan.chunks)
+    assert last_run["split_unit_consolidation_levels"] == (
+        1 if tree.unit_consolidation_nodes else 0
+    )
+    assert last_run["split_general_reduction_levels"] == (
+        1 if tree.general_nodes else 0
+    )
+    assert last_run["split_final_synthesis_calls_planned"] == (
+        1 if tree.final_node is not None else 0
+    )
+
+    file_map = {
+        rel_path: {
+            "path": src, "rel_path": rel_path,
+            "language": "python", "extension": ".py",
+        }
+    }
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": 2500, "truncation_head_ratio": 0.70,
+    }
+
+    # First direction: with the module-level bound/revision monkeypatched
+    # back to the reviewed 0.14.2 values, both the identity computation AND
+    # current planning's own internal recomputation (build_pipeline_plan
+    # calls expected_large_file_identity again to compare) see v5 -- so the
+    # build_pipeline_plan call proving compatible reuse must happen while
+    # the patch is still active, not after it is undone.
+    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v5")
+    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 150656)
+    v5_identity = record_meta.expected_large_file_identity(
+        source_chars=len(source), max_chars=2500, rel_path=rel_path,
+        division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
+        structural_mode=plan.structural_mode, imports_digest=imports_digest,
+    )
+    assert v5_identity == record["_large_file_identity"], (
+        "fixture does not match a genuine predecessor v5/150,656 computation"
+    )
+
+    graph_v5 = DependencyGraph()
+    graph_v5.add_file(rel_path)
+    plan_result_v5, _ = build_pipeline_plan(
+        file_map, graph_v5, {rel_path}, rel_path, {rel_path: record}, [], config,
+    )
+    assert rel_path in plan_result_v5.unchanged_rels
+    assert rel_path not in plan_result_v5.changed_rels
+
+    # Second direction: undo the patch, restoring the real current (v6)
+    # bound/revision, and confirm the same record is now genuinely stale.
+    monkeypatch.undo()
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v6"
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
+
+    v6_identity = record_meta.expected_large_file_identity(
+        source_chars=len(source), max_chars=2500, rel_path=rel_path,
+        division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
+        structural_mode=plan.structural_mode, imports_digest=imports_digest,
+    )
+    assert v6_identity != v5_identity
+
+    graph_v6 = DependencyGraph()
+    graph_v6.add_file(rel_path)
+    plan_result_v6, _ = build_pipeline_plan(
+        file_map, graph_v6, {rel_path}, rel_path, {rel_path: record}, [], config,
+    )
+    assert rel_path not in plan_result_v6.unchanged_rels
+    assert rel_path in plan_result_v6.changed_rels
+
+
 def test_actual_predecessor_completed_split_recovery_has_no_partial_files():
-    fixture_dir = Path(__file__).resolve().parents[2] / "fixtures" / "split_state"
+    fixture_dir = FIXTURES_ROOT / "split_state"
     payload = json.loads(
         (fixture_dir / "recovery_0_14_1_completed_split.json").read_text(
             encoding="utf-8"
