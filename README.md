@@ -265,7 +265,7 @@ metadata and `files[]` for per-file documentation.
 | `files_unattempted` | Selected files not attempted after a bounded abort. |
 | `files_skipped_insufficient_source` | Empty or whitespace-only selected files rejected locally without a provider call. |
 | `files_reused_unchanged` | Files reused because content and analysis identity were unchanged. |
-| `files_reused_identical_content` | Files reused from another path with identical content. |
+| `files_reused_identical_content` | Files reused because their own same-path prior record has identical content and matching identity. |
 | `files_resumed_from_recovery` | Files restored from compatible crash-recovery state. |
 | `split_completed_files_reused` | Same-path completed split records reused with no split execution. |
 | `split_partial_files_resumed` | Split files with at least one validated retained node. |
@@ -290,6 +290,20 @@ The number of file records in the document may be less than
 was unattempted before any prior record existed.
 `files_resumed_from_recovery` is an overlapping provenance count, not a separate
 partition category: a restored completed record can be classified as reused.
+
+Ordinary identical-content reuse (`files_reused_identical_content`) is same-path
+only: a record documents exactly its own path, and CodeDoc never copies
+documentation from one path to a different path even when their content is
+byte-identical. The first run after upgrading to `0.14.4` regenerates every
+ordinary and truncate-strategy record once, under the corrected same-path-bound
+identity, which raises that run's `total_calls_planned`. `max_planned_calls` is
+evaluated against the complete selected run before usage accounting, provider
+creation, or any confirmation callback, so an exceeded cap blocks the entire run
+rather than throttling it — this one-time regeneration cannot be spread across
+runs under one unchanged cap. To span it across runs instead, select a smaller
+scope (a narrower `--entry`, additional `--ignore` paths, or a reduced
+`--documentation-scope`), or let individual file failures leave the remainder
+for a later run.
 
 Every key beginning with `_` inside a `files[]` record is internal to CodeDoc.
 External consumers should ignore those keys; they are persisted for cache,
@@ -347,7 +361,7 @@ instruction schema instead of copying a partial configuration.
 | `llm_mode` | Select the LLM mode; only `api` is supported. |
 | `llm_provider` | Select `auto`, `openai`, `anthropic`, or `gemini`. |
 | `model_name` | Select a model; an empty value uses the provider default. |
-| `api_base_url` | Set a custom OpenAI-compatible endpoint, or `null`. |
+| `api_base_url` | Set a custom OpenAI-compatible endpoint, or `null`. A non-null value also requires runtime endpoint-trust approval — see [Custom endpoints and endpoint-trust approval](#custom-endpoints-and-endpoint-trust-approval); this key alone never authorizes sending anything to that endpoint. |
 | `api_key` | Set a credential override; generated config keeps this `null`, and credentials should normally be supplied through environment variables. |
 | `entry_file` | Set a project-relative entry file, or `null` for recovery or auto-detection. |
 | `documentation_scope` | Select entry-reachable files with `entry` or all scanned files with `all`. |
@@ -403,6 +417,40 @@ map. New configurations should use `extension_language_map`. For list and map
 families, the base key replaces the default while matching `_add` and `_remove`
 keys adjust the resolved value.
 
+### Custom endpoints and endpoint-trust approval
+
+Setting `api_base_url` (in `codedoc.config.json`, `API_BASE_URL`, or an
+in-memory `config_overrides`) routes every provider call for that run to that
+endpoint instead of the default provider endpoint — which means your API key,
+your project's source, and every prompt built from it are sent there once the
+run is authorized. Because a project-controlled config file could otherwise
+redirect this traffic with no runtime decision by the user, a non-empty
+`api_base_url` additionally requires runtime endpoint-trust approval from
+exactly two sources, evaluated before any credential is read:
+
+- the `--trust-api-base-url URL` CLI option, or
+- the `CODEDOC_TRUST_API_BASE_URL` environment variable.
+
+`--trust-api-base-url` wins when both are set. Approval is compared to the
+configured `api_base_url` as a canonical identity — scheme, lowercased host,
+port (defaulted per scheme when omitted), and path with trailing slashes
+stripped — so the approval URL does not need to be byte-identical, only
+equivalent, and it must not carry a username, password, query string, or
+fragment (neither may `api_base_url` itself); any of those is rejected.
+Approving an endpoint while `api_base_url` is unset is also rejected, so a
+stale approval can never sit unnoticed in the environment.
+
+`codedoc.config.json` and `config_overrides` can never satisfy this gate —
+setting a `trust_api_base_url`-shaped key there is rejected outright — so
+approval is always a deliberate, runtime, per-invocation decision, and it
+applies identically to `--dry-run`. A refused run creates no provider, sends
+no request, and never prints the raw endpoint URL, the approval URL, or any
+credential; it identifies the endpoint only by its canonical digest.
+
+```bash
+codedoc --entry src/main.py --trust-api-base-url http://localhost:11434/v1
+```
+
 ### Large files
 
 #### Reuse and recovery boundary
@@ -439,7 +487,7 @@ incompatible recovery file aside to retain it for diagnosis or a matching
 version; deletion is an explicit discard of that state.
 
 The current node-keyed recovery generation is schema 4 (`0.14.3`, bound to the
-current `leaf-capsule-v6` leaf identity). Released schema 3 (`0.14.2`,
+`leaf-capsule-v6` leaf identity). Released schema 3 (`0.14.2`,
 `leaf-capsule-v5`) is now an unsupported predecessor generation, preserved
 and blocked exactly like schema-1/schema-2 state: a real `0.14.3` run rejects
 it on its container schema version alone, before any node is read, before
@@ -449,6 +497,19 @@ forward; a fresh `0.14.3` run performs complete v6 re-execution. An unfinished
 `0.14.2` split run has two supported remedies: finish it with `0.14.2`, which
 still owns that recovery generation; or move `crash_recovery.json` aside — or
 delete it as a deliberate discard — to start fresh under `0.14.3`.
+
+`0.14.4` advances the same schema-4 generation to the `leaf-capsule-v7` leaf
+identity and the `file-reduction-v2` reducer prompt; it makes no schema-version
+change. A node checkpointed under the predecessor `leaf-capsule-v6` /
+`file-reduction-v1` identity is stale, not rejected outright: it is quarantined
+and re-executed like any other stale node, including a node that was
+previously paid. The quarantine bound, `MAX_QUARANTINE_ENTRIES_PER_FILE`, is
+512 (twice the maximum leaf-chunk count), sized to cover every node of the
+largest valid plan quarantined at once — so an ordinary revision-driven
+re-execution never aborts the run. Every other schema-4 rejection stays
+fail-closed exactly as before: a malformed container, a foreign owner, an
+unsupported schema version, an unplanned or duplicate node ID, and a
+quarantine map that still exceeds the bound all raise and stop the run.
 
 Imports-only changes preserve compatible leaves and reducers but invalidate
 final synthesis. Provider, model, or effective-endpoint changes invalidate
@@ -590,10 +651,15 @@ Continuation chunks of the same qualified unit are always consolidated before
 their narrative mixes with any other unit's, and equal short names in different
 scopes are never merged. This internal chunk and reduction work is fixed and
 not user-configurable — leaf descriptions are required, optional fact lists
-have explicit prompt-visible bounds, and no separately parsed whole-file
-imports reach a leaf or reducer request. A response that exceeds a fixed leaf
-fact bound is rejected through the normal correction/failure contract instead
-of being silently truncated or published with facts removed. Every distinct
+have explicit prompt-visible bounds (a leaf accepts up to 32 functions and up
+to 32 classes, matching the same count of known-symbol names the leaf prompt
+may list), and no separately parsed whole-file imports reach a leaf or reducer
+request. A combined reduction narrative is capped at 300 characters, and the
+reducer prompt states that bound explicitly so a truthful longer narrative is
+never rejected without the model having been told the limit. A response that
+exceeds a fixed leaf or reduction fact bound is rejected through the normal
+correction/failure contract instead of being silently truncated or published
+with facts removed. Every distinct
 accepted structured fact (function, class, export) is retained losslessly in a
 local, deterministic fact ledger, independent of narrative reduction. Parser
 symbol IDs and ranges distinguish same-named declarations when available;
@@ -688,7 +754,11 @@ reuse remains provider-agnostic.
 Provider responses must satisfy a deterministic JSON contract: the requested
 keys, the requested types, a non-empty value for every required field, and at
 least one usable requested field. A response that fails the contract is rejected
-with a bounded, structured diagnostic.
+with a bounded, structured diagnostic. A final (non-retryable) response-contract
+failure names its closed reason code in the visible failure message, so the
+user-facing error states which contract failed, not merely that one did; it
+still includes no source text, prompt text, raw or truncated provider
+response, credential, endpoint, or per-field removal detail.
 
 Response correction is **disabled by default**. Set
 `"response_correction_enabled": true` to opt into at most **one** targeted
@@ -724,6 +794,7 @@ facts and inventing nothing.
 | `--documentation-scope {entry,all}` | Document entry-reachable files or all scanned files. |
 | `--provider NAME` | Select `auto`, `openai`, `anthropic`, or `gemini`. |
 | `--model MODEL` | Override the provider model. |
+| `--trust-api-base-url URL` | Runtime approval for a configured custom `api_base_url` — see [Custom endpoints and endpoint-trust approval](#custom-endpoints-and-endpoint-trust-approval). |
 | `--output PATH` | Select an output directory or exact `.json`/`.md` file. |
 | `--format {json,md,both}` | Select output format. |
 | `--ignore PATH` | Add a project-relative ignored path; repeatable. |
@@ -762,7 +833,8 @@ environment variables. CodeDoc does not read `.env` files.
 | `LLM_API_KEY` | Generic fallback credential. |
 | `LLM_PROVIDER` | `auto`, `openai`, `anthropic`, or `gemini`. |
 | `MODEL_NAME` | Provider model name. |
-| `API_BASE_URL` | OpenAI-compatible endpoint base URL. |
+| `API_BASE_URL` | OpenAI-compatible endpoint base URL. Requires runtime endpoint-trust approval — see [Custom endpoints and endpoint-trust approval](#custom-endpoints-and-endpoint-trust-approval). |
+| `CODEDOC_TRUST_API_BASE_URL` | Runtime endpoint-trust approval URL for a configured `api_base_url`; `--trust-api-base-url` wins when both are set. |
 | `OUTPUT_DIR` | Output directory or exact output file. |
 | `CODEDOC_OUTPUT_FORMAT` | `json`, `md`, or `both`. |
 | `LOG_LEVEL` | `DEBUG`, `INFO`, `WARNING`, or `ERROR`. |

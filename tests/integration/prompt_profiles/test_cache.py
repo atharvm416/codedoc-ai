@@ -20,7 +20,11 @@ from codedoc.core.prompt_profiles import (
 from tests.support.profiles import INLINE
 from tests.support.providers import SmartFake
 from tests.support.prompt_profile_runs import _run
-from codedoc.core.record_meta import CACHE_IDENTITY_KEYS, normalized_identity_value
+from codedoc.core.record_meta import (
+    CACHE_IDENTITY_KEYS,
+    expected_ordinary_path_identity,
+    normalized_identity_value,
+)
 
 _KNOWN = frozenset({".py", ".js", ".ts", ".rb"})
 
@@ -54,6 +58,7 @@ def _record(path, rel, resolved):
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
         "language": "generic",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity(rel),
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
     if digest != NO_PROMPT_PROFILE_DIGEST:
@@ -133,6 +138,7 @@ def test_identical_content_reuse_honours_destination_scope(tmp_path):
 def test_reuse_predicate_rejects_digest_mismatch():
     # _record_is_reusable / _identity_matches remain digest-sensitive.
     base = {
+        "path": "a.py",
         "hash": "h", "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
         "language": "generic",
         "_prompt_profile_digest": "pp-v1:aaa",
@@ -141,9 +147,12 @@ def test_reuse_predicate_rejects_digest_mismatch():
     expected_diff = {**base, "_prompt_profile_digest": "pp-v1:bbb"}
     assert _identity_matches(base, expected_same)
     assert not _identity_matches(base, expected_diff)
-    assert _record_is_reusable(base, "h", expected_same, "generic")
-    assert not _record_is_reusable(base, "h", expected_diff, "generic")
-    assert not _record_is_reusable(base, "h", expected_same, "python")
+    assert _record_is_reusable(base, "h", expected_same, "generic", rel_path="a.py")
+    assert not _record_is_reusable(base, "h", expected_diff, "generic", rel_path="a.py")
+    assert not _record_is_reusable(base, "h", expected_same, "python", rel_path="a.py")
+    # A record whose stored path differs from the destination is refused even
+    # when every other field (hash, language, cache identity) matches.
+    assert not _record_is_reusable(base, "h", expected_same, "generic", rel_path="b.py")
 
 def test_common_only_profile_matches_prior_no_extension_digest(tmp_path):
     # A profile with no per_extension yields the same digest for every file,

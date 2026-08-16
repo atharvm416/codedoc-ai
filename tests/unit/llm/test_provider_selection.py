@@ -172,7 +172,12 @@ class TestProviderFactory:
         """An OpenAI-compatible local/self-hosted endpoint stays reachable only
         through OpenAIProvider plus api_base_url — there is no separate
         local-provider choice."""
-        from codedoc.llm.factory import create_provider
+        from codedoc.core.loader import ResolvedConfig
+        from codedoc.llm.factory import (
+            EndpointTrustAttestation,
+            create_provider,
+            effective_endpoint_identity,
+        )
 
         captured = {}
 
@@ -184,15 +189,21 @@ class TestProviderFactory:
 
         monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)
 
-        provider = create_provider(
+        base_url = "http://localhost:11434/v1"
+        config = ResolvedConfig(
             {
                 "llm_mode": "api",
                 "llm_provider": "openai",
                 "model_name": "qwen2.5-coder:7b",
                 "api_key": "ollama",
-                "api_base_url": "http://localhost:11434/v1",
-            }
+                "api_base_url": base_url,
+            },
+            endpoint_trust=EndpointTrustAttestation(
+                digest=effective_endpoint_identity(base_url),
+                mechanism="--trust-api-base-url",
+            ),
         )
+        provider = create_provider(config)
 
         assert isinstance(provider, FakeOpenAIProvider)
         assert captured["base_url"] == "http://localhost:11434/v1"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+from tests.support.pipeline_identity import _prior_run_identity
 import json
 from pathlib import Path
 from tests.support.pipeline_scenarios import patch_provider
@@ -10,7 +10,7 @@ from tests.support.pipeline_scenarios import no_llm
 from tests.support.pipeline_scenarios import md_meta
 from tests.support.pipeline_scenarios import write_existing_json
 from tests.support.pipeline_scenarios import write_existing_md
-from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from tests.support.recovery_rate_limit_runs import _make_fake_provider
 from tests.support.recovery_rate_limit_runs import _patch_provider
 
@@ -41,7 +41,7 @@ def test_md_only_incremental_skips_unchanged_files(tmp_path, monkeypatch):
                 "language": "python",
                 "description": "The app module.",
             },
-            **_PRIOR_RUN_IDENTITY,
+            **_prior_run_identity("app.py"),
         }
     ]
     write_project_outputs(
@@ -232,7 +232,8 @@ def test_7_resume_skips_unchanged_files(tmp_path, monkeypatch):
     _codedoc_json(
         tmp_path / "codedoc" / "codedoc.json",
         [{"path": "main.py", "hash": h, "language": "python",
-          "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single"}],
+          "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+          "_ordinary_path_identity": expected_ordinary_path_identity("main.py")}],
         status="in_progress",
     )
     # Add _crash_safety to make it look like an in-progress run

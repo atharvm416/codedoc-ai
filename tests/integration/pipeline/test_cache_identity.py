@@ -6,7 +6,7 @@ import hashlib
 from pathlib import Path
 
 from codedoc.core.record_meta import expected_analysis_identity
-from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+from tests.support.pipeline_identity import _prior_run_identity
 import json
 from tests.support.pipeline_scenarios import make_fake_provider
 from tests.support.pipeline_scenarios import _cache_identity
@@ -33,12 +33,18 @@ from codedoc.core.planning import build_pipeline_plan
 from codedoc.core import record_meta
 from codedoc.core.record_meta import (
     expected_large_file_identity,
+    expected_ordinary_path_identity,
     normalized_identity_value,
 )
 from tests.support.fixture_paths import FIXTURES_ROOT
 from tests.support.structure_extra import requires_structure_pack
 
-def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatch):
+def test_pipeline_same_path_reuse_free_but_cross_path_content_match_is_not(
+    tmp_path, monkeypatch
+):
+    """Same-path records (entry.py, first.py) reuse for free; second.py has
+    byte-identical content to first.py but is a different path, so ordinary
+    cross-path reuse is refused (0.14.4) and it is documented fresh."""
     import json
 
     from codedoc.core.db import compute_file_hash
@@ -52,8 +58,9 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
     second.write_text(content, encoding="utf-8")
     entry.write_text("import first\nimport second\n", encoding="utf-8")
 
-    # Pre-write the public JSON with first.py and entry.py docs and their hashes,
-    # so that second.py (identical content to first.py) can be reused by hash.
+    # Pre-write the public JSON with first.py and entry.py docs and their
+    # hashes, so both are same-path reusable. second.py (identical content to
+    # first.py, but a different path) has no prior record of its own.
     docs_output = tmp_path / "docs_output"
     docs_output.mkdir()
     first_hash = compute_file_hash(first)
@@ -69,7 +76,7 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
                     "language": "python",
                     "format": "py",
                     "imports": ["first", "second"],
-                    **_PRIOR_RUN_IDENTITY,
+                    **_prior_run_identity("entry.py"),
                 },
                 {
                     "path": "first.py",
@@ -77,17 +84,15 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
                     "description": "Shared helper.",
                     "language": "python",
                     "format": "py",
-                    **_PRIOR_RUN_IDENTITY,
+                    **_prior_run_identity("first.py"),
                 },
             ],
         }),
         encoding="utf-8",
     )
 
-    def fail_if_llm_is_created(config):
-        raise AssertionError("LLM should not be created for identical cached content")
-
-    monkeypatch.setattr("codedoc.pipeline.create_provider", fail_if_llm_is_created)
+    fake = make_fake_provider("Second helper, freshly documented.")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda config: fake)
 
     stats = run_pipeline(
         tmp_path,
@@ -99,14 +104,20 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
         },
     )
 
-    assert stats["checked"] == 0
-    assert stats["reused"] == 1
+    assert stats["checked"] == 1
+    assert stats["reused"] == 0
     output = (tmp_path / "docs_output" / "codedoc.json").read_text(encoding="utf-8")
     assert '"path": "first.py"' in output
     assert '"path": "second.py"' in output
     assert '"description": "Shared helper."' in output
+    assert '"description": "Second helper, freshly documented."' in output
 
-    # Second run: public JSON still exists, all files are up-to-date, nothing to reuse
+    # Second run: public JSON now covers second.py under its own path, so
+    # every file is same-path unchanged and nothing is reprocessed.
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda config: pytest.fail("provider must not be created; nothing changed"),
+    )
     stats = run_pipeline(
         tmp_path,
         {
@@ -121,12 +132,14 @@ def test_pipeline_reuses_identical_file_content_without_llm(tmp_path, monkeypatc
     assert stats["reused"] == 0
     assert (tmp_path / "docs_output" / "codedoc.json").exists()
 
-def test_H1_identical_content_files_reuse_docs(tmp_path, monkeypatch):
-    """H1: two files with byte-for-byte identical content — the second reuses the
-    documented output of the first without an LLM call (docs_by_hash dedup).
+def test_H1_identical_content_cross_path_is_not_reused(tmp_path, monkeypatch):
+    """H1 (corrected for 0.14.4): two files with byte-for-byte identical
+    content no longer share documentation across paths.
 
-    main.py imports both helper_a and helper_b.  helper_a is pre-documented in the
-    JSON; helper_b is new this run but has identical content to helper_a → reused."""
+    main.py imports both helper_a and helper_b. helper_a is pre-documented in
+    the JSON and unchanged, so it is reused for free; helper_b is new this
+    run and has identical content to helper_a, but ordinary cross-path reuse
+    is refused, so it is documented by a fresh provider call."""
     from codedoc.core.db import compute_file_hash
     from codedoc.pipeline import run_pipeline
 
@@ -144,13 +157,13 @@ def test_H1_identical_content_files_reuse_docs(tmp_path, monkeypatch):
     (tmp_path / "codedoc" / "codedoc.json").write_text(json.dumps({
         "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
         "files": [
-            {"path": "main.py",     "hash": main_hash,   "language": "python", "description": "Entry.", **_cache_identity()},
-            {"path": "helper_a.py", "hash": shared_hash, "language": "python", "description": "Shared helper.", **_cache_identity()},
+            {"path": "main.py",     "hash": main_hash,   "language": "python", "description": "Entry.", **_cache_identity("main.py")},
+            {"path": "helper_a.py", "hash": shared_hash, "language": "python", "description": "Shared helper.", **_cache_identity("helper_a.py")},
         ],
     }), encoding="utf-8")
 
     call_count = {"n": 0}
-    original = make_fake_provider("Shared helper.")
+    original = make_fake_provider("Freshly documented helper_b.")
     orig_complete = original.complete_json
     def counting_complete(prompt, system=""):
         call_count["n"] += 1
@@ -159,11 +172,19 @@ def test_H1_identical_content_files_reuse_docs(tmp_path, monkeypatch):
     monkeypatch.setattr("codedoc.pipeline.create_provider", lambda c: original)
 
     # main + helper_a: hashes match → skipped (not in process_rels)
-    # helper_b: new → in process_rels → content hash matches helper_a in docs_by_hash → reused
+    # helper_b: new → in process_rels → byte-identical to helper_a in
+    # docs_by_hash, but a different path, so ordinary cross-path reuse is
+    # refused and it is documented fresh.
     stats = run_pipeline(tmp_path, {"entry_file": "main.py", "output_format": "json",
                                      "propagate_changes": False, "parallel_agents": False})
-    assert stats.get("reused", 0) >= 1
-    assert call_count["n"] == 0  # LLM never called
+    assert stats.get("reused", 0) == 0
+    assert stats.get("checked", 0) == 1
+    assert call_count["n"] == 1  # LLM called exactly once, for helper_b only
+    record = json.loads(
+        (tmp_path / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    helper_b = next(f for f in record["files"] if f["path"] == "helper_b.py")
+    assert helper_b["description"] == "Freshly documented helper_b."
 
 def _pipeline_provider(monkeypatch):
     provider = _CountingProvider()
@@ -295,6 +316,117 @@ def test_legacy_record_without_identity_reprocessed_once(tmp_path, monkeypatch):
     assert rec["_analysis_revision"] == ANALYSIS_REVISION
     assert rec["_analysis_mode"] == "single"
 
+def test_pre_0_14_4_record_stays_invalid_until_successfully_replaced(tmp_path, monkeypatch):
+    """A pre-0.14.4 record with every other cache-identity field matching
+    (hash, _analysis_revision, _analysis_mode, language) but no
+    _ordinary_path_identity is invalid and is regenerated exactly once; once
+    regenerated, same-path reuse costs zero calls on the next run, and the
+    regenerated _ordinary_path_identity round-trips unchanged into the
+    Markdown embedded view without a provider call."""
+    from codedoc.core.db import compute_file_hash
+    from codedoc.core.project_view import read_embedded_view
+    from codedoc.core.record_meta import expected_ordinary_path_identity
+    from codedoc.pipeline import run_pipeline
+
+    main = tmp_path / "main.py"
+    main.write_text("x = 1\n", encoding="utf-8")
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    out.joinpath("codedoc.json").write_text(json.dumps({
+        "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
+        "files": [{
+            "path": "main.py", "hash": compute_file_hash(main),
+            "language": "python", "description": "pre-0.14.4",
+            "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        }],
+    }), encoding="utf-8")
+
+    provider = _pipeline_provider(monkeypatch)
+    first = run_pipeline(tmp_path, {"entry_file": "main.py", "analysis_mode": "single",
+                                     "propagate_changes": False})
+    assert first["checked"] == 1
+    assert provider.calls == 1
+    rec = json.loads(out.joinpath("codedoc.json").read_text(encoding="utf-8"))["files"][0]
+    assert rec["_ordinary_path_identity"] == expected_ordinary_path_identity("main.py")
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda config: pytest.fail("second run must not create a provider"),
+    )
+    second = run_pipeline(tmp_path, {"entry_file": "main.py", "analysis_mode": "single",
+                                      "propagate_changes": False, "output_format": "md"})
+    assert second["checked"] == 0
+    md_text = (out / "codedoc.md").read_text(encoding="utf-8")
+    embedded = read_embedded_view(md_text)
+    embedded_rec = next(f for f in embedded["files"] if f["path"] == "main.py")
+    assert embedded_rec["_ordinary_path_identity"] == expected_ordinary_path_identity("main.py")
+
+    # Convert back MD -> JSON: still zero calls, and _ordinary_path_identity
+    # round-trips unchanged into the freshly written JSON too.
+    third = run_pipeline(tmp_path, {"entry_file": "main.py", "analysis_mode": "single",
+                                     "propagate_changes": False, "output_format": "json"})
+    assert third["checked"] == 0
+    rec_after_round_trip = json.loads(
+        out.joinpath("codedoc.json").read_text(encoding="utf-8")
+    )["files"][0]
+    assert rec_after_round_trip["_ordinary_path_identity"] == expected_ordinary_path_identity(
+        "main.py"
+    )
+
+def test_pre_0_14_4_record_stays_invalid_after_a_failed_regeneration_attempt(
+    tmp_path, monkeypatch
+):
+    """0.14.4 audit fix: the test above never actually proves 'stays invalid
+    until successfully replaced' -- its one regeneration attempt always
+    succeeds. Here the regeneration's write fails, so the stale legacy
+    record must not be mistaken for a successful replacement: it stays on
+    disk exactly as it was, and a following run must regenerate it fully
+    from scratch rather than skip it as already fixed."""
+    from codedoc.core.db import compute_file_hash
+    import codedoc.core.safe_writer as safe_writer_mod
+    from codedoc.utils.errors import LiveBackupWriteError
+
+    main = tmp_path / "main.py"
+    main.write_text("x = 1\n", encoding="utf-8")
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    out.joinpath("codedoc.json").write_text(json.dumps({
+        "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
+        "files": [{
+            "path": "main.py", "hash": compute_file_hash(main),
+            "language": "python", "description": "pre-0.14.4",
+            "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        }],
+    }), encoding="utf-8")
+    before_bytes = out.joinpath("codedoc.json").read_bytes()
+
+    _pipeline_provider(monkeypatch)
+    original_atomic_write_text = safe_writer_mod.atomic_write_text
+
+    def boom(path, text):
+        raise OSError("simulated disk failure during regeneration")
+
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", boom)
+    with pytest.raises(LiveBackupWriteError):
+        run_pipeline(tmp_path, {"entry_file": "main.py", "analysis_mode": "single",
+                                 "propagate_changes": False})
+
+    # The failed attempt must not silently persist a stamped replacement.
+    assert out.joinpath("codedoc.json").read_bytes() == before_bytes
+    after_failure = json.loads(before_bytes)["files"][0]
+    assert "_ordinary_path_identity" not in after_failure
+
+    # Write path healthy again: the record is still invalid, so a following
+    # run regenerates it fully -- never skips it as if already replaced.
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", original_atomic_write_text)
+    provider = _pipeline_provider(monkeypatch)
+    second = run_pipeline(tmp_path, {"entry_file": "main.py", "analysis_mode": "single",
+                                      "propagate_changes": False})
+    assert second["checked"] == 1
+    assert provider.calls == 1
+    rec = json.loads(out.joinpath("codedoc.json").read_text(encoding="utf-8"))["files"][0]
+    assert rec["_ordinary_path_identity"] == expected_ordinary_path_identity("main.py")
+
 @pytest.mark.parametrize("source", ["same_path", "identical"])
 @pytest.mark.parametrize("stored_language", ["python", "javascript", None])
 @pytest.mark.parametrize(
@@ -313,13 +445,20 @@ def test_every_reuse_source_requires_complete_matching_identity_and_language(
     from codedoc.core.db import compute_file_hash
     from codedoc.core.graph import DependencyGraph
     from codedoc.core.planning import build_pipeline_plan
+    from codedoc.core.record_meta import expected_ordinary_path_identity
 
     target = tmp_path / "main.py"
     target.write_text("x = 1\n", encoding="utf-8")
     content_hash = compute_file_hash(target)
+    # The stored record's own path must match its destination for same_path
+    # reuse to even be eligible for consideration; "identical" stores it under
+    # a genuinely different path, since that is what cross-path candidate
+    # selection actually looks like.
+    stored_path = "main.py" if source == "same_path" else "cached.py"
     identity = {
         "_analysis_revision": ANALYSIS_REVISION,
         "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity(stored_path),
     }
     if identity_change is not None:
         if identity_value is None:
@@ -328,7 +467,7 @@ def test_every_reuse_source_requires_complete_matching_identity_and_language(
             identity[identity_change] = identity_value
 
     record = {
-        "path": "cached.py",
+        "path": stored_path,
         "hash": content_hash,
         "description": "cached",
         **identity,
@@ -367,9 +506,11 @@ def test_every_reuse_source_requires_complete_matching_identity_and_language(
     reuse_matches = identity_change is None and stored_language == "python"
     if reuse_matches and source == "same_path":
         assert plan.unchanged_rels == frozenset({"main.py"})
-    elif reuse_matches:
-        assert plan.identical_reuse_rels == frozenset({"main.py"})
     else:
+        # A same-path record with any mismatched identity/language field is
+        # reprocessed. A cross-path candidate (source == "identical") is
+        # always refused regardless of identity/language match: ordinary
+        # identical-content reuse is same-path only (0.14.4).
         assert plan.agent_rels == frozenset({"main.py"})
 
 def test_cache_identity_is_v2():
@@ -406,6 +547,7 @@ def test_v1_record_is_invalidated_once_under_v2(tmp_path):
                     "language": "python",
                     "_analysis_revision": revision,
                 "_analysis_mode": "single",
+                "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
             }
         }
         plan, _ = build_pipeline_plan(
@@ -528,6 +670,7 @@ def _oversized_plan(tmp_path, stored_mcr, *, max_chars=1000, head_ratio=0.70):
         "language": "python",
         "_analysis_revision": "file-doc-v3",
         "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
     }
     if stored_mcr is not _OMIT:
         record["_max_context_revision"] = stored_mcr
@@ -556,6 +699,7 @@ def _small_plan(tmp_path, *, max_chars, head_ratio=0.70):
         "path": "main.py", "hash": compute_file_hash(src), "description": "cached",
         "language": "python",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
     }
     config = {
         "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
@@ -700,7 +844,7 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
 
 
 @requires_structure_pack
-def test_actual_predecessor_completed_split_record_is_stale_under_v6(tmp_path, monkeypatch):
+def test_actual_predecessor_completed_split_record_is_stale_under_v7(tmp_path, monkeypatch):
     """The frozen record's ``_large_file_identity`` is not a placeholder: it
     is the real value ``expected_large_file_identity`` produces for this
     exact source under the genuine reconstructed division plan, reduction
@@ -808,26 +952,26 @@ def test_actual_predecessor_completed_split_record_is_stale_under_v6(tmp_path, m
     assert rel_path in plan_result_v5.unchanged_rels
     assert rel_path not in plan_result_v5.changed_rels
 
-    # Second direction: undo the patch, restoring the real current (v6)
+    # Second direction: undo the patch, restoring the real current (v7)
     # bound/revision, and confirm the same record is now genuinely stale.
     monkeypatch.undo()
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v6"
-    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
 
-    v6_identity = record_meta.expected_large_file_identity(
+    v7_identity = record_meta.expected_large_file_identity(
         source_chars=len(source), max_chars=2500, rel_path=rel_path,
         division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
         structural_mode=plan.structural_mode, imports_digest=imports_digest,
     )
-    assert v6_identity != v5_identity
+    assert v7_identity != v5_identity
 
-    graph_v6 = DependencyGraph()
-    graph_v6.add_file(rel_path)
-    plan_result_v6, _ = build_pipeline_plan(
-        file_map, graph_v6, {rel_path}, rel_path, {rel_path: record}, [], config,
+    graph_v7 = DependencyGraph()
+    graph_v7.add_file(rel_path)
+    plan_result_v7, _ = build_pipeline_plan(
+        file_map, graph_v7, {rel_path}, rel_path, {rel_path: record}, [], config,
     )
-    assert rel_path not in plan_result_v6.unchanged_rels
-    assert rel_path in plan_result_v6.changed_rels
+    assert rel_path not in plan_result_v7.unchanged_rels
+    assert rel_path in plan_result_v7.changed_rels
 
 
 def test_actual_predecessor_completed_split_recovery_has_no_partial_files():

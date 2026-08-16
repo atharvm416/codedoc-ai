@@ -30,6 +30,7 @@ def _records() -> list[dict]:
             "_prompt_profile_digest": "no-profile",
             "_large_file_identity": PREDECESSOR_LARGE_FILE_IDENTITY,
             "_split_reuse_contract": FRESH_SPLIT_REUSE_CONTRACT,
+            "_ordinary_path_identity": "ordinary-path-v1:test",
             "documentation": {
                 "description": "Entry point.",
                 "dependencies_analysis": {"external": ["requests"]},

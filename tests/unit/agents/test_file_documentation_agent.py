@@ -21,11 +21,12 @@ from codedoc.agents.file_documentation_agent import (
 from codedoc.core.execution_model import UnitChunkExecutionRequest
 from codedoc.core.file_division import (
     MAX_LEAF_PROMPT_METADATA_CHARS,
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
     MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
     build_division_plan,
     render_leaf_prompt_metadata,
 )
-from codedoc.utils.errors import AgentError
+from codedoc.utils.errors import AgentError, LLMError, ResponseContractError
 from tests.support.execution_requests import make_execution_request
 
 class _Provider:
@@ -40,6 +41,43 @@ class _Provider:
     def complete_json(self, prompt, system=""):
         self.calls += 1
         return self._raw
+
+    def complete(self, prompt, system="", temperature=0.1):
+        return self.complete_json(prompt, system)
+
+
+class _CorrectingProvider:
+    """Returns *first_response* on the first call.
+
+    On the second call, either returns *corrected_response* or raises
+    *corrected_error* (mutually exclusive) -- simulating a correction call
+    that itself fails with a provider fault.
+    """
+
+    provider_name = "fake"
+
+    def __init__(
+        self,
+        *,
+        first_response: dict,
+        corrected_response: dict | None = None,
+        corrected_error: Exception | None = None,
+    ) -> None:
+        assert (corrected_response is None) != (corrected_error is None), (
+            "exactly one of corrected_response/corrected_error must be set"
+        )
+        self.calls = 0
+        self.first_response = first_response
+        self.corrected_response = corrected_response
+        self.corrected_error = corrected_error
+
+    def complete_json(self, prompt, system=""):
+        self.calls += 1
+        if self.calls == 1:
+            return json.dumps(self.first_response)
+        if self.corrected_error is not None:
+            raise self.corrected_error
+        return json.dumps(self.corrected_response)
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt, system)
@@ -613,3 +651,156 @@ def test_run_fragment_retry_reissues_a_byte_identical_prompt(tmp_path, monkeypat
 
     assert provider.calls == 2
     assert prompts[0] == prompts[1]
+
+
+def _over_cap_functions() -> list[dict]:
+    """One more function than MAX_LEAF_SYMBOL_ITEMS_PER_KIND allows."""
+    return [
+        {"name": f"f{index}"} for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND + 1)
+    ]
+
+
+def test_run_fragment_at_cap_is_accepted(tmp_path) -> None:
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    functions = [
+        {"name": f"f{index}"} for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND)
+    ]
+    provider = _Provider(json.dumps({"description": "ok", "functions": functions}))
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    result = agent.run_fragment(request)
+
+    assert result["functions"] == functions
+    assert provider.calls == 1
+
+
+def test_run_fragment_over_cap_is_rejected_without_correction(tmp_path) -> None:
+    """With correction disabled (the FileDocumentationAgent default, no
+    ``_correction`` attached), an over-cap leaf capsule is rejected in full
+    with the closed REASON_FIXED_CAP_EXCEEDED/REMOVAL_ITEM_LIMIT codes and
+    makes exactly one provider call -- no correction call."""
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    provider = _Provider(
+        json.dumps({"description": "ok", "functions": _over_cap_functions()})
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    assert agent._correction is None
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    assert caught.value.diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.reason_code == "item_limit"
+        for removal in caught.value.diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+def test_run_fragment_correction_valid_response_succeeds(tmp_path) -> None:
+    """With correction enabled, a rejected over-cap capsule consumes exactly
+    one correction call; a valid corrected response succeeds."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    provider = _CorrectingProvider(
+        first_response={"description": "ok", "functions": _over_cap_functions()},
+        corrected_response={"description": "Corrected leaf.", "functions": [{"name": "alpha"}]},
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+    result = agent.run_fragment(request)
+
+    assert result == {"description": "Corrected leaf.", "functions": [{"name": "alpha"}]}
+    assert provider.calls == 2
+
+
+def test_run_fragment_correction_still_invalid_fails_the_file(tmp_path) -> None:
+    """With correction enabled, a corrected response that is itself still
+    over the per-kind cap fails the file (not a second correction call)."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    provider = _CorrectingProvider(
+        first_response={"description": "ok", "functions": _over_cap_functions()},
+        corrected_response={"description": "still bad", "functions": _over_cap_functions()},
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    assert caught.value.correction_attempted is True
+    assert "still failed the schema contract" in str(caught.value)
+    assert provider.calls == 2
+
+
+def test_run_fragment_correction_nonterminal_fault_fails_the_file_without_retry(
+    tmp_path,
+) -> None:
+    """With correction enabled, a correction call that fails with a
+    nonterminal provider fault fails the file without a second correction
+    call -- it is not converted into a retry."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    provider = _CorrectingProvider(
+        first_response={"description": "ok", "functions": _over_cap_functions()},
+        corrected_error=LLMError("test-provider", "temporary provider outage"),
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    assert caught.value.correction_attempted is True
+    assert "correction provider call failed" in str(caught.value)
+    assert provider.calls == 2
+
+
+def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
+    tmp_path,
+) -> None:
+    """With correction enabled, a correction call that fails with a
+    terminal-billing provider fault is re-raised unchanged (as the AgentError
+    the shared provider-call accounting path wraps it in, with the original
+    LLMError as its cause) -- preserving the existing whole-run abort -- and
+    is never converted into a per-file response-contract failure."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
+    provider = _CorrectingProvider(
+        first_response={"description": "ok", "functions": _over_cap_functions()},
+        corrected_error=LLMError(
+            "test-provider", "Your credit balance is too low to continue"
+        ),
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+    with pytest.raises(AgentError) as caught:
+        agent.run_fragment(request)
+
+    assert not isinstance(caught.value, ResponseContractError)
+    assert "credit balance is too low" in str(caught.value)
+    assert isinstance(caught.value.__cause__, LLMError)
+    assert provider.calls == 2

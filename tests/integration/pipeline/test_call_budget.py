@@ -48,6 +48,61 @@ def test_split_call_cap_counts_every_chunk_and_synthesis_before_side_effects(
     assert not (tmp_path / "docs").exists()
 
 
+def test_ordinary_path_identity_regeneration_counts_toward_max_planned_calls(
+    tmp_path, monkeypatch
+):
+    """A pre-0.14.4 legacy record lacking _ordinary_path_identity is
+    regenerated once; that regeneration is an ordinary planned documentation
+    call like any other, so it counts toward max_planned_calls and an
+    exceeded cap blocks the whole run before any provider is created --
+    regeneration cannot silently bypass the cap."""
+    from codedoc.core.db import compute_file_hash
+    from codedoc.core.record_meta import ANALYSIS_REVISION
+
+    (tmp_path / "main.py").write_text("import helper\n", encoding="utf-8")
+    (tmp_path / "helper.py").write_text("x = 1\n", encoding="utf-8")
+    out = tmp_path / "codedoc"
+    out.mkdir()
+    # Two pre-0.14.4 records: hash/revision/mode/language all match; neither
+    # carries _ordinary_path_identity, so both must be regenerated.
+    records = [
+        {
+            "path": rel, "hash": compute_file_hash(tmp_path / rel),
+            "language": "python", "description": "legacy",
+            "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        }
+        for rel in ("main.py", "helper.py")
+    ]
+    out.joinpath("codedoc.json").write_text(
+        json.dumps({
+            "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
+            "files": records,
+        }),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda config: pytest.fail("cap failure created provider"),
+    )
+    confirm_calls = []
+
+    with pytest.raises(ConfigError, match="max_planned_calls"):
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "main.py",
+                "documentation_scope": "all",
+                "propagate_changes": False,
+                "max_planned_calls": 1,
+            },
+            confirm_risky=lambda warnings: confirm_calls.append(warnings) or True,
+        )
+
+    assert confirm_calls == []
+    assert not out.joinpath("crash_recovery.json").exists()
+
+
 def test_cap_failure_touches_no_provider_usage_writer_or_callback(tmp_path, monkeypatch):
     """A max_planned_calls failure occurs before any provider-side effect —
     mirrors the equivalent max_files proof."""

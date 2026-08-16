@@ -177,6 +177,7 @@ def test_ordinary_truncate_accounting_still_uses_initial_calls_per_file(tmp_path
 def test_max_files_counts_only_agent_files(tmp_path):
     from codedoc.core.db import compute_file_hash
     from codedoc.core.planning import build_pipeline_plan
+    from codedoc.core.record_meta import expected_ordinary_path_identity
 
     for rel, content in (("cached.py", "x = 1\n"), ("new.py", "y = 2\n")):
         write_py(tmp_path / rel, content)
@@ -189,14 +190,21 @@ def test_max_files_counts_only_agent_files(tmp_path):
         }
         for rel in ("cached.py", "new.py")
     }
-    graph = make_graph(*file_map)
+    # "cached.py" imports "new.py", so it is pulled into process_rels by
+    # propagation from new.py's change even though its own same-path record
+    # is unchanged -- it resolves for free through the content-hash index
+    # (identical_reuse_rels) rather than the unchanged_rels fast path. Ordinary
+    # reuse is same-path only (0.14.4): the stored record must be indexed at
+    # "cached.py" itself, not some other path with matching content.
+    graph = make_graph(*file_map, edges=(("cached.py", "new.py"),))
     existing = {
-        "old-name.py": {
-            "path": "old-name.py",
+        "cached.py": {
+            "path": "cached.py",
             "hash": compute_file_hash(tmp_path / "cached.py"),
             "language": "python",
             "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
+            "_ordinary_path_identity": expected_ordinary_path_identity("cached.py"),
         }
     }
     plan, _ = build_pipeline_plan(
@@ -206,7 +214,7 @@ def test_max_files_counts_only_agent_files(tmp_path):
         None,
         existing,
         [],
-        {"propagate_changes": False, "max_files": 1},
+        {"propagate_changes": True, "max_files": 1},
     )
     assert len(plan.process_rels) == 2
     assert len(plan.identical_reuse_rels) == 1

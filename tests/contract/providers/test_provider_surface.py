@@ -64,7 +64,12 @@ def test_missing_or_invalid_provider_raises_config_error():
 
 
 def test_openai_compatible_base_url_reaches_openai_provider(monkeypatch):
-    from codedoc.llm.factory import create_provider
+    from codedoc.core.loader import ResolvedConfig
+    from codedoc.llm.factory import (
+        EndpointTrustAttestation,
+        create_provider,
+        effective_endpoint_identity,
+    )
 
     captured = {}
 
@@ -74,15 +79,21 @@ def test_openai_compatible_base_url_reaches_openai_provider(monkeypatch):
 
     monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)
 
-    provider = create_provider(
+    base_url = "http://localhost:11434/v1"
+    config = ResolvedConfig(
         {
             "llm_mode": "api",
             "llm_provider": "openai",
             "model_name": "local-model",
             "api_key": "sk-local",
-            "api_base_url": "http://localhost:11434/v1",
-        }
+            "api_base_url": base_url,
+        },
+        endpoint_trust=EndpointTrustAttestation(
+            digest=effective_endpoint_identity(base_url),
+            mechanism="--trust-api-base-url",
+        ),
     )
+    provider = create_provider(config)
 
     assert isinstance(provider, FakeOpenAIProvider)
     assert captured["base_url"] == "http://localhost:11434/v1"

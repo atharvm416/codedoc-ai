@@ -110,7 +110,8 @@ class ResponseCorrectionAgent:
         if not self._enabled:
             raise ResponseContractError(
                 agent, file_path,
-                "response correction is disabled; response-contract failure is final",
+                "response correction is disabled; response-contract failure is "
+                f"final ({diagnostic.reason_code})",
                 diagnostic=diagnostic, correction_attempted=False,
             )
 
@@ -139,7 +140,8 @@ class ResponseCorrectionAgent:
             self._ledger.record_failure()
             wrapped = ResponseContractError(
                 agent, file_path,
-                f"correction provider call failed ({verdict}); response-contract failure is final",
+                f"correction provider call failed ({verdict}); response-contract "
+                f"failure is final ({diagnostic.reason_code})",
                 diagnostic=diagnostic, correction_attempted=True,
             )
             wrapped.__cause__ = exc
@@ -151,7 +153,8 @@ class ResponseCorrectionAgent:
             self._ledger.record_failure()
             raise ResponseContractError(
                 agent, file_path,
-                "corrected response still failed the schema contract",
+                "corrected response still failed the schema contract "
+                f"({exc.diagnostic.reason_code})",
                 diagnostic=exc.diagnostic, correction_attempted=True,
             ) from exc
 

@@ -9,7 +9,7 @@ from tests.support.record_metadata_cases import private_key  # noqa: F401, F811
 import json
 from pathlib import Path
 import pytest
-from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from tests.support.recovery_rate_limit_runs import _make_fake_provider
 from tests.support.recovery_rate_limit_runs import _patch_provider
 from tests.support.recovery_rate_limit_runs import _run as recovery_rate_limit_run
@@ -306,6 +306,7 @@ def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, m
                         "description": "Recovered.",
                         "_analysis_revision": ANALYSIS_REVISION,
                         "_analysis_mode": mode,
+                        "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
                     }
                 ],
             }

@@ -5,11 +5,22 @@ import json
 import re
 from pathlib import Path
 
-def _cache_identity(analysis_mode: str = "single") -> dict:
-    """0.10.0 cache-identity keys a prior CodeDoc run would have persisted."""
-    from codedoc.core.record_meta import expected_analysis_identity
+def _cache_identity(rel_path: str = "main.py", analysis_mode: str = "single") -> dict:
+    """Cache-identity keys a prior CodeDoc run would have persisted for *rel_path*.
 
-    return expected_analysis_identity(analysis_mode)
+    Includes ``_ordinary_path_identity`` (0.14.4) so a fixture record built
+    with this helper is same-path reusable, not merely revision/mode-matched;
+    ordinary cross-path reuse is refused regardless of this key.
+    """
+    from codedoc.core.record_meta import (
+        expected_analysis_identity,
+        expected_ordinary_path_identity,
+    )
+
+    return {
+        **expected_analysis_identity(analysis_mode),
+        "_ordinary_path_identity": expected_ordinary_path_identity(rel_path),
+    }
 
 def make_fake_provider(description="Documented."):
     """Return a provider instance whose complete_json always succeeds."""
@@ -64,7 +75,7 @@ def write_existing_json(
     file_record = {
         "path": "main.py", "hash": file_hash,
         "language": "python", "description": description,
-        **_cache_identity(analysis_mode),
+        **_cache_identity("main.py", analysis_mode),
     }
     path.write_text(json.dumps({
         "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
@@ -95,7 +106,7 @@ def write_existing_md(
         "files": [{
             "path": "main.py", "hash": file_hash,
             "language": "python", "description": description,
-            **_cache_identity(analysis_mode),
+            **_cache_identity("main.py", analysis_mode),
         }],
     }
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -180,6 +180,22 @@ large-file split execution:
         ),
     )
     parser.add_argument(
+        "--trust-api-base-url",
+        metavar="URL",
+        default=None,
+        dest="trust_api_base_url",
+        help=(
+            "Runtime approval for a custom api_base_url configured in "
+            "codedoc.config.json — required before codedoc will send your API "
+            "key, source, or prompts to it. Must canonicalize to exactly the "
+            "configured api_base_url (scheme, host, port, path; no username, "
+            "password, query string, or fragment). Never settable through "
+            "codedoc.config.json or config_overrides. The "
+            "CODEDOC_TRUST_API_BASE_URL environment variable is the other "
+            "accepted source; this option wins when both are set."
+        ),
+    )
+    parser.add_argument(
         "--output",
         metavar="PATH",
         default=None,
@@ -811,6 +827,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.documentation_scope is not None,
                 args.provider is not None,
                 args.model is not None,
+                args.trust_api_base_url is not None,
                 args.output is not None,
                 args.format is not None,
                 bool(args.ignore),
@@ -912,6 +929,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             root,
             config_overrides=overrides,
             confirm_risky=_confirm_risky_prompt_customization,
+            trust_api_base_url=args.trust_api_base_url,
         )
 
         if stats.get("dry_run"):

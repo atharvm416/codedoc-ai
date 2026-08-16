@@ -1,5 +1,163 @@
 # Changelog
 
+## 0.14.4 2026-08-16
+
+### Endpoint-trust authorization for a custom `api_base_url`
+
+- A project-controlled `codedoc.config.json` can set `api_base_url` and, before
+  this release, silently sent the resolved `OPENAI_API_KEY`/`LLM_API_KEY`
+  credential plus the project's source and prompts to that endpoint with no
+  runtime decision by the user. A non-empty `api_base_url` now additionally
+  requires runtime endpoint-trust approval, accepted from exactly two
+  sources: the new `--trust-api-base-url URL` CLI option and the
+  `CODEDOC_TRUST_API_BASE_URL` environment variable (the CLI value wins when
+  both are present). Approval is compared to the configured `api_base_url` as
+  a canonical identity (scheme, lowercased host, port defaulted per scheme,
+  path with trailing slashes stripped) via the existing
+  `effective_endpoint_identity` SHA-256 digest contract in
+  `codedoc/llm/factory.py`; either URL carrying a username, password, query
+  string, or fragment is rejected outright, since those components fall
+  outside the compared identity and must never appear approved.
+- `codedoc.config.json` and programmatic `config_overrides` can never satisfy
+  this gate: the keys `trust_api_base_url`, `trusted_api_base_url`, and
+  `_endpoint_trust` are rejected wherever ordinary configuration is read, with
+  an error naming the two real runtime mechanisms. An approval supplied while
+  `api_base_url` is empty is also rejected, so a stale approval can never sit
+  unnoticed in the environment.
+- Authorization is resolved, in `codedoc/core/loader.py`, before any
+  credential is read or selected: the config-file and `config_overrides`
+  `api_key` candidates are retained in loader-local variables only, and
+  `LLM_API_KEY` is not read, until the gate succeeds or the endpoint is the
+  default provider endpoint. Once resolved, credential precedence is
+  unchanged (config-file `api_key` lowest, `LLM_API_KEY` next, programmatic
+  `config_overrides` `api_key` highest; provider-specific fallbacks apply only
+  when none of those three is present). The gate applies identically to
+  `--dry-run`, so a dry run never reports a plan a real run would refuse. On
+  any refusal, the error names only the configured endpoint's canonical
+  digest and the two approval mechanisms -- never the raw endpoint URL, the
+  approval URL, or any credential.
+- `load_config()` now returns `ResolvedConfig`, a dict-compatible mapping
+  behaving exactly as the existing configuration dict for every current
+  reader, carrying one additional non-serialized `endpoint_trust` attribute
+  (an `EndpointTrustAttestation`) that is excluded from iteration, `dict()`
+  conversion, JSON serialization, persistence, cache identity, recovery
+  identity, and provider identity by construction. `create_provider()` in
+  `codedoc/llm/factory.py` verifies this attestation before any credential
+  lookup when `api_base_url` is non-empty, and rejects a plain dictionary
+  carrying a non-empty `api_base_url` with the same error -- a hand-built
+  config can no longer bypass authorization by calling `create_provider()`
+  directly.
+- `validate_config_data()` remains a static syntax validator: it checks
+  `api_base_url` syntax (including the new forbidden-component rule) and
+  rejects the trust keys, but never performs runtime authorization and can
+  never itself satisfy this gate.
+
+### Ordinary identical-content reuse is now same-path only
+
+- Ordinary identical-content reuse previously matched by content hash alone,
+  so it could copy model-authored, path-specific documentation from one
+  relative path to a different path with byte-identical content. A new
+  private cache-identity key, `_ordinary_path_identity`
+  (`codedoc/core/record_meta.py`), binds every ordinary and oversized
+  truncate-path record to its own path; `_record_is_reusable()` in
+  `codedoc/core/planning.py` now takes a keyword-only `rel_path` and requires
+  both that a candidate's stored `path` equals the destination and that its
+  `_ordinary_path_identity` matches the expected value for that destination.
+  Ordinary cross-path reuse is refused for every record, legacy or
+  regenerated; split reuse was already path-bound and is unaffected.
+- Every record written before `0.14.4` lacks `_ordinary_path_identity` and is
+  therefore treated as invalid until it is successfully replaced by a freshly
+  generated record carrying the new identity for its own path; a record that
+  is not replaced in a given run stays invalid. After successful replacement,
+  same-path reuse, dependency-propagated same-path reuse, and both
+  JSON-to-Markdown and Markdown-to-JSON cross-format directions resolve with
+  zero provider calls again. The first run after upgrading to `0.14.4`
+  therefore regenerates every ordinary and truncate-strategy record once,
+  which raises that run's `total_calls_planned`; `max_planned_calls` is
+  still evaluated against the complete selected run before usage accounting,
+  provider creation, or any confirmation callback, so an exceeded cap blocks
+  the entire run rather than throttling it, exactly as before.
+- The public `files_reused_identical_content` counter and the published
+  `last_run` partition invariant are unchanged; only their documented
+  semantics are corrected, from reuse "from another path with identical
+  content" to same-path identical-content reuse.
+
+### Split leaf and reducer prompt-contract corrections
+
+- A split leaf prompt could list up to `MAX_KNOWN_SYMBOLS_PER_CHUNK` (32)
+  known symbol names per kind while the rendered response contract accepted
+  only 12 functions and 12 classes, so a truthful response naming every known
+  symbol was rejected in full. `MAX_LEAF_SYMBOL_ITEMS_PER_KIND` is now
+  derived from `MAX_KNOWN_SYMBOLS_PER_CHUNK` (`codedoc/core/file_division.py`)
+  instead of restating the literal, raising it to 32 and raising the derived
+  `MAX_LEAF_CAPSULE_CANONICAL_CHARS` worst-case bound from `200192` to
+  exactly `448672`. `LEAF_CAPSULE_SCHEMA_REVISION` advances from
+  `leaf-capsule-v6` to `leaf-capsule-v7`.
+- Split reduction responses are capped at 300 characters
+  (`MAX_REDUCTION_NARRATIVE_CHARS`), but neither the initial reducer prompt
+  nor the correction prompt stated that limit, so a truthful longer narrative
+  was rejected in full. The reducer shape block in
+  `codedoc/agents/file_synthesis_agent.py` now states the bound explicitly,
+  covering both the initial and correction routes (they share one shape
+  block). `REDUCER_PROMPT_REVISION` advances from `file-reduction-v1` to
+  `file-reduction-v2`.
+- Advancing these two revisions invalidates every node of an existing
+  schema-4 checkpoint at once. The per-file quarantine bound,
+  `MAX_QUARANTINE_ENTRIES_PER_FILE`, was `32` -- far below the number of
+  checkpoint IDs a valid plan can contain -- so an ordinary stale checkpoint
+  raised a recovery error that aborted the whole run. It is now derived as
+  `2 * MAX_CHUNKS_PER_FILE` (512), which covers every plannable node: a valid
+  plan over `n` leaf chunks contains at most `n` leaves, at most `n - 1`
+  intermediate reducers (`_pack_level` promotes a trailing singleton group
+  unchanged rather than wrapping it in a unary reducer), and exactly one
+  final node. `SPLIT_PARTIAL_SCHEMA_VERSION` stays `4`; a stale but planned
+  schema-4 node -- including one that was previously paid -- is quarantined
+  and re-executed within the new bound instead of aborting. Every other
+  recovery rejection stays fail-closed exactly as before: a malformed
+  container, a foreign owner, an unsupported schema version, an unplanned or
+  duplicate node ID, and a quarantine map that still exceeds the bound all
+  raise and stop the run.
+- Unrelated active split identities are unchanged: `source-structure-v2`,
+  `semantic-unit-v3`, `division-packer-v5`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-synthesis-v3`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v3`.
+  `MAX_LEDGER_SYNOPSIS_CHARS` (3000) and `MAX_QUARANTINE_ENTRY_CHARS` (4096)
+  are unaffected; the increased leaf bound creates no new capacity failure,
+  since `worst_case_final_synthesis_chars` reserves the fixed ledger-synopsis
+  bound rather than measuring a ledger.
+- The fixed-capsule correction and failure contract is now pinned by test for
+  both the leaf and reducer routes: with correction enabled, a valid
+  corrected response succeeds and the node is checkpointed; a still-invalid
+  corrected response fails that file; a correction call that fails with a
+  nonterminal provider fault fails that file without a second correction
+  call; and a correction call that fails with a terminal-billing or global
+  provider fault preserves the existing whole-run abort rather than becoming
+  a per-file response-contract failure. With correction disabled, a rejected
+  fixed capsule fails the file immediately and makes no correction call.
+
+### Closed reason codes in final response-contract failures
+
+- A final (non-retryable) response-contract error previously stated that a
+  contract failed without stating which one. `codedoc/agents/
+  response_correction_agent.py` now includes the closed diagnostic reason
+  code in the message raised on the correction-disabled path, the
+  correction-provider-fault path, and the still-invalid-after-correction
+  path (the corrected response's own reason code). These messages reach the
+  user unchanged through `_bounded_reason` in `codedoc/core/execution.py`.
+  They carry no source text, prompt text, raw or truncated provider
+  response, credential, endpoint, or per-field removal detail -- only the
+  closed code.
+
+### Documentation
+
+- `README.md` and `RUN_FLOW.md` now describe the endpoint-trust authorization
+  rule and its source-egress consequence, the corrected leaf and reducer
+  bounds, the raised quarantine bound, the closed reason code carried by a
+  final response-contract failure, and same-path-only ordinary reuse.
+- The `api_base_url` entry in `PUBLIC_CONFIG_KEYS`
+  (`codedoc/core/config_template.py`) and the generated configuration template
+  state the runtime authorization requirement.
+
 ## 0.14.3 (Unreleased)
 
 ### Split-leaf signature-bound correction

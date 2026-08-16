@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY, _prior_run_identity
 import json
 from tests.support.pipeline_scenarios import no_llm
 from tests.support.pipeline_scenarios import write_existing_md
@@ -181,7 +181,7 @@ def test_stale_0_14_2_split_identity_reprocesses_while_ordinary_sibling_converts
             "documentation": {
                 "file_path": "helper.py", "language": "python", "description": "Helper.",
             },
-            **_PRIOR_RUN_IDENTITY,
+            **_prior_run_identity("helper.py"),
         },
         {
             "hash": main_hash,

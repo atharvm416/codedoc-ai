@@ -35,6 +35,7 @@ import hashlib
 import json
 
 from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
+from codedoc.parser.source_structure import normalize_rel_path
 from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
     LEAF_CAPSULE_SCHEMA_REVISION,
@@ -109,6 +110,7 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
         "_prompt_profile_digest",
         "_large_file_identity",
         "_split_reuse_contract",
+        "_ordinary_path_identity",
     }
 )
 
@@ -116,6 +118,11 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
 # here compares as its default value when absent from a record, so an omitted key
 # and an explicitly stored default are equivalent.  Keys not listed here default
 # to ``None`` when absent (the historical behaviour for the other identity keys).
+# ``_ordinary_path_identity`` is deliberately unregistered here: every pre-0.14.4
+# ordinary/truncate-path record lacks it, so an absent key must normalize to
+# ``None`` and compare unequal to any expected (non-``None``) value -- leaving
+# every such legacy record invalid until it is regenerated under the current
+# path-bound contract (see ``_record_is_reusable``'s ``rel_path`` keyword).
 _CACHE_KEY_ABSENT_DEFAULTS: dict[str, str] = {
     "_prompt_profile_digest": NO_PROMPT_PROFILE_DIGEST,
 }
@@ -128,6 +135,8 @@ _CACHE_KEY_ABSENT_DEFAULTS: dict[str, str] = {
 # order and keeps run-level identity ahead of per-file identity.  Plain
 # ``sorted()`` would also be deterministic but would gratuitously reorder every
 # freshly generated record; do not "simplify" this to alphabetical order.
+# ``_ordinary_path_identity`` is appended last so every existing record's key
+# order is preserved.
 PRIVATE_KEY_ORDER: tuple[str, ...] = (
     "_analysis_revision",
     "_analysis_mode",
@@ -135,6 +144,7 @@ PRIVATE_KEY_ORDER: tuple[str, ...] = (
     "_prompt_profile_digest",
     "_large_file_identity",
     "_split_reuse_contract",
+    "_ordinary_path_identity",
 )
 
 # Registered private record keys: persisted through JSON / Markdown / live
@@ -277,6 +287,34 @@ def expected_large_file_identity(
     return "large-file-v3:" + hashlib.sha256(
         json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def expected_ordinary_path_identity(rel_path: str) -> str:
+    """Return the ordinary-only path-bound cache identity for *rel_path*.
+
+    Ordinary identical-content reuse (same content hash, same cache identity)
+    must never copy model-authored, path-specific documentation from one
+    relative path to another: only *this exact path*'s prior record may ever
+    satisfy it.  ``_record_is_reusable``'s ``rel_path`` keyword compares this
+    value against the record's own stored ``_ordinary_path_identity``, so a
+    record whose stored ``path`` and stamped identity do not both match the
+    destination path is never reusable there.
+
+    Deliberately serializes with ``ensure_ascii=True`` -- unlike
+    :func:`codedoc.core.file_division.canonical_json`, which uses
+    ``ensure_ascii=False`` -- so a non-ASCII path always escapes to the same
+    bytes regardless of platform or Python version; do not switch this to the
+    shared ``canonical_json`` helper.
+    """
+    payload = {"revision": "ordinary-path-v1", "path": normalize_rel_path(rel_path)}
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return "ordinary-path-v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _ordered_private_keys(registered: frozenset[str]) -> list[str]:

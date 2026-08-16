@@ -21,6 +21,7 @@ from codedoc.core.execution_model import (
 )
 from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
+    MAX_REDUCTION_NARRATIVE_CHARS,
     REDUCTION_ENVELOPE_OVERHEAD_CHARS,
     DivisionInternalDefect,
     render_reduction_child_manifest,
@@ -47,7 +48,8 @@ _REDUCTION_SYSTEM = (
 
 _REDUCTION_SHAPE_BLOCK = (
     "Return exactly this fixed internal JSON shape:\n"
-    '{\n  "narrative": "<required, non-empty refined narrative>"\n}'
+    '{\n  "narrative": "<required, non-empty refined narrative>"\n}\n'
+    f"Hard bounds: narrative <= {MAX_REDUCTION_NARRATIVE_CHARS} characters."
 )
 
 _REDUCTION_PROMPT_TEMPLATE = """Refine one combined narrative from {child_count} already-reviewed \

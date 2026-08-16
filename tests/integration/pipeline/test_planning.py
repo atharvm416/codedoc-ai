@@ -13,7 +13,7 @@ from tests.support.pipeline_scenarios import write_existing_md
 import logging
 from pathlib import Path
 import pytest
-from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from tests.support.pipeline_usage import write_py
 from tests.support.pipeline_usage import make_graph
 from dataclasses import asdict, fields
@@ -569,9 +569,9 @@ def test_I1_propagate_changes_true_reimports_updated(tmp_path, monkeypatch):
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
             {"path": "a.py", "hash": "old_a_hash", "language": "python",
-             "description": "Old A.", **_cache_identity()},
+             "description": "Old A.", **_cache_identity("a.py")},
             {"path": "b.py", "hash": b_hash, "language": "python",
-             "description": "Old B.", **_cache_identity()},
+             "description": "Old B.", **_cache_identity("b.py")},
         ],
     }), encoding="utf-8")
 
@@ -599,8 +599,8 @@ def test_I2_propagate_changes_false_only_changed(tmp_path, monkeypatch):
     (out / "codedoc.json").write_text(json.dumps({
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
-            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A.", **_cache_identity()},
-            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B.", **_cache_identity()},
+            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A.", **_cache_identity("a.py")},
+            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B.", **_cache_identity("b.py")},
         ],
     }), encoding="utf-8")
 
@@ -633,6 +633,7 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
                 "language": "python",
                 "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
+            "_ordinary_path_identity": expected_ordinary_path_identity(rel),
         }
         for rel in file_map
     }

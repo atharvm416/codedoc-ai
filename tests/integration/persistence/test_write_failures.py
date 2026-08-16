@@ -7,6 +7,12 @@ import time
 import pytest
 import codedoc.core.execution as ex
 import codedoc.core.safe_writer as safe_writer_mod
+from codedoc.core.file_division import (
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    QuarantineEntry,
+    SplitTreeState,
+    tree_node_state,
+)
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.utils.errors import (
     ErrorReporter,
@@ -203,6 +209,94 @@ def test_failed_record_preserves_previously_persisted_records(tmp_path, monkeypa
     on_disk = (tmp_path / "codedoc.json").read_text(encoding="utf-8")
     assert "a.py" in on_disk
     assert "b.py" not in on_disk
+
+
+def _quarantined_prior_state() -> SplitTreeState:
+    """One retained leaf node plus one quarantined sibling for 'main.py'."""
+    content_hash = "a" * 64
+    division_plan_digest = "division-plan:" + "b" * 64
+    reduction_tree_digest = "reduction-tree:" + "c" * 64
+    retained = tree_node_state(
+        node_id="chunk_" + "1" * 58,
+        node_type="leaf",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division_plan_digest,
+        input_digest="leaf-input:" + "d" * 64,
+        execution_identity_digest="division-execution:" + "e" * 64,
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=("chunk_" + "1" * 58,),
+        result={"description": "leaf 1"},
+    )
+    quarantined = QuarantineEntry(
+        node_id="chunk_" + "2" * 58, reason="stale-revision", raw_json="{}"
+    )
+    return SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division_plan_digest,
+        reduction_tree_digest=reduction_tree_digest,
+        nodes=(retained,),
+        quarantine=(quarantined,),
+    )
+
+
+def test_record_tree_node_flush_failure_restores_prior_quarantine_container(
+    tmp_path, monkeypatch
+):
+    """0.14.4 regression: checkpointing a valid replacement node removes any
+    quarantine entry with the same node ID in the same write, and restores
+    the prior container -- quarantine entry included -- when the flush
+    fails, so a transient write failure can never silently drop a bounded
+    quarantine record or fabricate an unpersisted node checkpoint."""
+    sw = SafeWriter(tmp_path / "docs" / "crash_recovery.json", "json", None, {})
+    prior = _quarantined_prior_state()
+    sw.load(preloaded_partials={"main.py": prior})
+    sw.initialize_empty()
+    on_disk_before = (tmp_path / "docs" / "crash_recovery.json").read_text(
+        encoding="utf-8"
+    )
+    assert "stale-revision" in on_disk_before  # the quarantine entry is on disk
+
+    def boom(path, text):
+        raise OSError("no space")
+
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", boom)
+
+    replacement = tree_node_state(
+        node_id="chunk_" + "2" * 58,
+        node_type="leaf",
+        rel_path="main.py",
+        content_hash="a" * 64,
+        division_plan_digest="division-plan:" + "b" * 64,
+        input_digest="leaf-input:" + "f" * 64,
+        execution_identity_digest="division-execution:" + "9" * 64,
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=("chunk_" + "2" * 58,),
+        result={"description": "leaf 2 (corrected)"},
+    )
+    with pytest.raises(LiveBackupWriteError):
+        sw.record_tree_node(
+            "main.py", replacement, reduction_tree_digest="reduction-tree:" + "c" * 64
+        )
+
+    # In-memory state is exactly the pre-call container: the replacement was
+    # never adopted and the quarantine entry it would have cleared is intact.
+    restored = sw.get_tree_state("main.py")
+    assert restored == prior
+    assert len(restored.nodes) == 1
+    assert len(restored.quarantine) == 1
+    assert restored.quarantine[0].node_id == "chunk_" + "2" * 58
+
+    # The on-disk container is untouched by the failed write.
+    on_disk_after = (tmp_path / "docs" / "crash_recovery.json").read_text(
+        encoding="utf-8"
+    )
+    assert on_disk_after == on_disk_before
 
 def test_discard_removes_record_and_recorded_marker(tmp_path):
     sw = _writer(tmp_path)

@@ -18,6 +18,7 @@ from codedoc.core.resume import (
     build_recovery_identity,
     load_recovery_records_if_compatible,
 )
+from codedoc.core.record_meta import expected_ordinary_path_identity
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.utils.errors import ConfigError
 
@@ -65,6 +66,7 @@ def _record(path, rel, resolved):
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
         "language": "generic",
         "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity(rel),
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())
     if digest != NO_PROMPT_PROFILE_DIGEST:

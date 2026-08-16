@@ -64,6 +64,7 @@ from codedoc.core.record_meta import (
     expected_analysis_identity,
     expected_large_file_identity,
     expected_max_context_revision,
+    expected_ordinary_path_identity,
     normalized_identity_value,
 )
 from codedoc.core.release_policy import current_split_release_policy
@@ -97,20 +98,42 @@ def _record_is_reusable(
     content_hash: str,
     expected: dict,
     expected_language: str,
+    *,
+    rel_path: str,
 ) -> bool:
     """The single centralized reuse predicate.
 
-    A stored record may be reused only when its content hash matches *and* every
+    A stored record may be reused only when its content hash matches, every
     cache-identity key and its stored language match the current effective
-    language and expected revision/mode.  Language is a compatibility guard,
-    not persisted identity material, so this check does not change ordinary
-    cache-identity bytes.
+    language and expected revision/mode, and the record's own stored ``path``
+    and stamped ``_ordinary_path_identity`` both match *rel_path* exactly.
+    Language is a compatibility guard, not persisted identity material, so
+    this check does not change ordinary cache-identity bytes.
+
+    The path and ``_ordinary_path_identity`` checks are explicit here in
+    addition to ``_ordinary_path_identity`` being a member of
+    ``CACHE_IDENTITY_KEYS`` (compared generically below by
+    ``_identity_matches``): refusing ordinary cross-path reuse is a closed
+    security boundary (a stored record must never document a different path
+    than the one it would be reused into), so its enforcement does not rely
+    solely on set membership that an unrelated future change could alter.  A
+    record whose stored ``_ordinary_path_identity`` is absent (every
+    pre-0.14.4 ordinary/truncate-path record) normalizes to ``None`` and
+    compares unequal to the expected non-``None`` value, so it is refused
+    until regenerated; a split (non-ordinary) record and expectation both
+    normalize to ``None`` here and rely on ``_large_file_identity`` instead.
     """
     if not isinstance(stored, dict):
         return False
     if stored.get("hash", "") != content_hash:
         return False
     if stored.get("language") != expected_language:
+        return False
+    if stored.get("path") != rel_path:
+        return False
+    if normalized_identity_value(
+        "_ordinary_path_identity", stored
+    ) != normalized_identity_value("_ordinary_path_identity", expected):
         return False
     return _identity_matches(stored, expected)
 
@@ -826,10 +849,17 @@ def _build_pipeline_plan_once(
             )
             if large_identity is not None:
                 identity["_large_file_identity"] = large_identity
-        elif mcr is not None:
-            # Effective split records never carry `_max_context_revision`
-            # (D12/section 13): only an ordinary oversized truncate-path record does.
-            identity["_max_context_revision"] = mcr
+        else:
+            # No split outcome: an ordinary record (source fits max_content_chars)
+            # or an oversized truncate-path record, covered identically here.
+            # `_large_file_identity` already binds the path for a split record
+            # (D12/section 13), so `_ordinary_path_identity` is stamped only on
+            # this branch — never alongside `_large_file_identity` above.
+            identity["_ordinary_path_identity"] = expected_ordinary_path_identity(rel)
+            if mcr is not None:
+                # Effective split records never carry `_max_context_revision`
+                # (D12/section 13): only an ordinary oversized truncate-path record does.
+                identity["_max_context_revision"] = mcr
         # An active prompt-customization profile contributes a per-file digest
         # keyed on the file's basename (extension scope).  The basename is derived
         # from the ``rel`` key itself — no descriptor field is needed.  Omitted
@@ -866,6 +896,7 @@ def _build_pipeline_plan_once(
             routing_hashes[rel],
             _expected_identity_for(rel),
             file_map[rel].get("language", "generic"),
+            rel_path=rel,
         )
     }
     changed_rels |= effective_forced
@@ -1083,6 +1114,7 @@ def _build_pipeline_plan_once(
                         content_hash,
                         _expected_identity_for(rel_path),
                         descriptor.get("language", "generic"),
+                        rel_path=rel_path,
                     )
                 ),
                 None,

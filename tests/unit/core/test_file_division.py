@@ -9,12 +9,19 @@ from codedoc.core.file_division import (
     BLOCKED_REASON_ORDER,
     DORMANT_SPLIT_PARTIAL_SCHEMA_VERSION,
     LEGACY_SPLIT_PARTIAL_SCHEMA_VERSION,
+    MAX_CHUNKS_PER_FILE,
+    MAX_KNOWN_SYMBOLS_PER_CHUNK,
     MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
     MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+    MAX_QUARANTINE_ENTRIES_PER_FILE,
     SPLIT_PARTIAL_SCHEMA_VERSION,
     DivisionInternalDefect,
+    QuarantineEntry,
     SemanticUnitIdentity,
     SplitCapacityBlocked,
+    SplitRecoveryStateError,
+    SplitTreeState,
     build_division_plan,
     build_fact_ledger,
     build_reduction_tree,
@@ -1744,14 +1751,48 @@ def test_provider_execution_identity_changes_with_endpoint() -> None:
     base = {"llm_provider": "openai", "model_name": "gpt-4o-mini"}
     default_endpoint = provider_execution_identity({**base, "api_base_url": None})
     custom_endpoint = provider_execution_identity(
-        {**base, "api_base_url": "https://user:pw@Example.com:9000/v1?x=1#frag"}
+        {**base, "api_base_url": "https://Example.com:9000/v1"}
     )
     assert default_endpoint != custom_endpoint
     # Re-deriving from an equivalent URL (case/whitespace only) matches.
     again = provider_execution_identity(
-        {**base, "api_base_url": "https://other:pw2@EXAMPLE.com:9000/v1?y=2#other"}
+        {**base, "api_base_url": "  HTTPS://EXAMPLE.com:9000/v1  "}
     )
-    assert custom_endpoint == again  # user info/query/fragment never participate
+    assert custom_endpoint == again
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:pw@example.com:9000/v1",
+        "https://user@example.com:9000/v1",
+        "https://example.com:9000/v1?x=1",
+        "https://example.com:9000/v1#frag",
+    ],
+)
+def test_provider_execution_identity_rejects_username_password_query_fragment(
+    endpoint: str,
+) -> None:
+    """A username, password, query string, or fragment falls outside the
+    four-field canonical identity (scheme/host/port/path) and would otherwise
+    silently canonicalize identically to a "clean" URL missing it -- letting an
+    endpoint-trust approval cover a differently-behaving endpoint. Rejected
+    instead of dropped, for both the configured api_base_url and a runtime
+    approval URL, since both share this same identity function."""
+    with pytest.raises(ConfigError) as blocked:
+        provider_execution_identity(
+            {
+                "llm_provider": "openai",
+                "model_name": "gpt-4o-mini",
+                "api_base_url": endpoint,
+            }
+        )
+    message = str(blocked.value)
+    assert "username" in message
+    assert "password" in message
+    assert "query" in message
+    assert "fragment" in message
+    assert endpoint not in message
 
 
 @pytest.mark.parametrize(
@@ -2271,6 +2312,120 @@ def test_recovered_reducer_and_final_nodes_require_dependency_closure() -> None:
     assert dependency_closed_nodes((orphan,), plan=plan, tree=tree) == ()
 
 
+# ---------------------------------------------------------------------------
+# 0.14.4: quarantine bound raised to 2 * MAX_CHUNKS_PER_FILE (512), so a
+# revision advance that invalidates every node of an existing schema-4
+# checkpoint quarantines the whole plan instead of aborting. Tested in three
+# separate layers because they raise different exception types, and without
+# constructing an impossible (over-bound) real plan.
+# ---------------------------------------------------------------------------
+
+
+def test_quarantine_bound_equals_2x_max_chunks_per_file() -> None:
+    assert MAX_QUARANTINE_ENTRIES_PER_FILE == 2 * MAX_CHUNKS_PER_FILE == 512
+
+
+def _quarantine_entries(count: int) -> tuple:
+    return tuple(
+        QuarantineEntry(
+            node_id=f"chunk_{index:04d}".ljust(64, "0"),
+            reason="stale-revision",
+            raw_json="{}",
+        )
+        for index in range(count)
+    )
+
+
+def _empty_tree_state(*, quarantine: tuple) -> SplitTreeState:
+    return SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash="a" * 64,
+        division_plan_digest="division-plan:" + "b" * 64,
+        reduction_tree_digest="reduction-tree:" + "c" * 64,
+        nodes=(),
+        quarantine=quarantine,
+    )
+
+
+def test_split_tree_state_accepts_exactly_the_bounded_quarantine_count() -> None:
+    """Container layer: exactly MAX_QUARANTINE_ENTRIES_PER_FILE entries is
+    accepted."""
+    state = _empty_tree_state(quarantine=_quarantine_entries(MAX_QUARANTINE_ENTRIES_PER_FILE))
+    assert len(state.quarantine) == MAX_QUARANTINE_ENTRIES_PER_FILE
+
+
+def test_split_tree_state_rejects_one_over_the_bound_with_plain_value_error() -> None:
+    """Container layer: one entry over the bound raises ValueError from the
+    dataclass's own __post_init__ bound check -- not SplitRecoveryStateError,
+    even though that type is itself a ValueError subclass."""
+    with pytest.raises(ValueError) as caught:
+        _empty_tree_state(quarantine=_quarantine_entries(MAX_QUARANTINE_ENTRIES_PER_FILE + 1))
+
+    assert type(caught.value) is ValueError
+    assert not isinstance(caught.value, SplitRecoveryStateError)
+    assert "quarantine map exceeds" in str(caught.value)
+
+
+def test_validate_recovered_tree_rejects_over_bound_quarantine_with_recovery_state_error(
+    monkeypatch,
+) -> None:
+    """Validation layer: driving validate_recovered_tree with a synthetic
+    planned node set past a (monkeypatched small) bound raises
+    SplitRecoveryStateError, distinct from the container layer's plain
+    ValueError."""
+    plan = build_division_plan(
+        rel_path="a.py",
+        language="unknown",
+        content=_large_source(90),
+        source_budget_chars=200,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000)
+    assert len(plan.chunks) >= 2
+    content_hash = "a" * 64
+    provider_identity = "provider-execution:" + "b" * 64
+
+    # Every leaf carries a deliberately wrong execution identity, so every
+    # one of them is quarantined as stale.
+    nodes = [
+        tree_node_state(
+            node_id=chunk.chunk_id,
+            node_type="leaf",
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            input_digest=file_division.leaf_input_digest(
+                rel_path=plan.rel_path,
+                language="unknown",
+                chunk=chunk,
+                unit_indexes=plan.unit_positions(chunk),
+                unit_count=len(plan.units),
+            ),
+            execution_identity_digest="division-execution:" + "9" * 64,
+            unit_id=None,
+            child_ids=(),
+            coverage_leaf_ids=(chunk.chunk_id,),
+            result={"description": "stale", "chunk_id": chunk.chunk_id, "unit_id": chunk.unit_id},
+        )
+        for chunk in plan.chunks
+    ]
+
+    monkeypatch.setattr(file_division, "MAX_QUARANTINE_ENTRIES_PER_FILE", 1)
+
+    with pytest.raises(SplitRecoveryStateError, match="quarantine exceeds its bounded"):
+        validate_recovered_tree(
+            nodes,
+            plan=plan,
+            tree=tree,
+            content_hash=content_hash,
+            provider_identity=provider_identity,
+            prompt_profile_digest="no-prompt-profile-v1",
+            imports_digest=file_division.deterministic_imports_digest(()),
+            language="unknown",
+        )
+
+
 def test_validate_recovered_tree_prunes_a_reducer_whose_child_narrative_changed() -> None:
     """Section 11: a reducer's execution identity never binds its children's
     actual result content (only structure/provenance), so an individually-
@@ -2556,15 +2711,42 @@ def test_semantic_unit_identity_signature_bound_matches_the_parser_ceiling() -> 
         )
 
 
-def test_derived_leaf_capsule_maximum_is_exactly_200192() -> None:
-    """The capsule bound is derived from `MAX_LEAF_SYMBOL_SIGNATURE_CHARS`
-    (section 2A), not hard-coded: raising the signature bound from 256 to
-    600 raises the worst-case leaf capsule from 150,656 to exactly 200,192
-    canonical characters -- a 49,536-character increase from two signature
-    fields, each escaped 12 ways as `\\u0000` (6 canonical characters per
-    raw `\\x00`), across 12 items per kind: 2 * 12 * 6 * (600 - 256) = 49,536."""
-    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
-    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS - 150656 == 49536
+def test_derived_leaf_capsule_maximum_is_exactly_448672() -> None:
+    """The capsule bound is derived from shared constants, not hard-coded.
+
+    `0.14.3` raised `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` from 256 to 600,
+    raising the worst-case leaf capsule from 150,656 to 200,192 canonical
+    characters. `0.14.4` raises `MAX_LEAF_SYMBOL_ITEMS_PER_KIND` from 12 to
+    `MAX_KNOWN_SYMBOLS_PER_CHUNK` (32), raising it again to exactly 448,672 --
+    a 248,480-character increase from 20 additional items in each of the two
+    per-kind arrays (functions, classes): each additional item's canonical
+    JSON (128+300+600 raw characters, each escaped 6-fold as `\\u0000`) plus
+    its array-separator comma is 6,212 characters, and
+    2 * 20 * 6,212 = 248,480."""
+    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
+    assert MAX_LEAF_CAPSULE_CANONICAL_CHARS - 200192 == 248480
+
+
+def test_leaf_symbol_per_kind_cap_matches_known_symbols_prompt_bound() -> None:
+    """A split leaf prompt can list up to `MAX_KNOWN_SYMBOLS_PER_CHUNK` known
+    symbol names per kind (parser-derived prompt grounding); the rendered
+    response contract's per-kind cap must accept at least that many, or a
+    truthful response naming every known symbol would be rejected in full.
+    `MAX_LEAF_SYMBOL_ITEMS_PER_KIND` is derived from the shared constant so
+    the two bounds cannot silently diverge again, and the rendered prompt
+    text (`_FRAGMENT_SHAPE_BLOCK`) states that same number for both
+    `functions` and `classes`."""
+    from codedoc.agents.file_documentation_agent import _FRAGMENT_SHAPE_BLOCK
+
+    assert MAX_LEAF_SYMBOL_ITEMS_PER_KIND == MAX_KNOWN_SYMBOLS_PER_CHUNK == 32
+    assert (
+        f"functions <= {MAX_LEAF_SYMBOL_ITEMS_PER_KIND} items"
+        in _FRAGMENT_SHAPE_BLOCK
+    )
+    assert (
+        f"classes <= {MAX_LEAF_SYMBOL_ITEMS_PER_KIND} items"
+        in _FRAGMENT_SHAPE_BLOCK
+    )
 
 
 def test_split_partial_schema_generations_are_current4_legacy1_dormant2() -> None:

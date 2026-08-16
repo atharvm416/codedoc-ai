@@ -66,7 +66,14 @@ class ProviderExecutionDescriptor:
 
 
 def effective_endpoint_identity(api_base_url: object) -> str:
-    """Return a non-secret identity for one effective OpenAI endpoint."""
+    """Return a non-secret identity for one effective OpenAI endpoint.
+
+    Shared by the configured ``api_base_url`` and by a runtime endpoint-trust
+    approval URL (see ``codedoc.core.loader``'s authorization gate) — both are
+    canonicalized and rejected under exactly the same syntax rules, so an
+    approval can never cover a differently-shaped URL than the one actually
+    used.
+    """
     if not isinstance(api_base_url, str) or not api_base_url.strip():
         return _ENDPOINT_DEFAULT_SENTINEL
     try:
@@ -74,6 +81,10 @@ def effective_endpoint_identity(api_base_url: object) -> str:
         scheme = (parts.scheme or "").lower()
         host = parts.hostname
         port = parts.port
+        username = parts.username
+        password = parts.password
+        query = parts.query
+        fragment = parts.fragment
     except ValueError:
         raise ConfigError(
             "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
@@ -87,6 +98,16 @@ def effective_endpoint_identity(api_base_url: object) -> str:
     ):
         raise ConfigError(
             "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
+        )
+    if username is not None or password is not None or query or fragment:
+        # These components fall outside the four-field canonical identity
+        # (scheme/host/port/path) below, so a URL carrying one would silently
+        # canonicalize identically to a "clean" URL missing it -- letting an
+        # approval cover a differently-behaving endpoint. Reject instead of
+        # silently dropping them.
+        raise ConfigError(
+            "api_base_url must not include a username, password, query string, "
+            "or fragment."
         )
     if port is None:
         if scheme == "https":
@@ -110,6 +131,34 @@ def effective_endpoint_identity(api_base_url: object) -> str:
         allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# Attribute name ``ResolvedConfig`` (``codedoc.core.loader``) uses to carry an
+# ``EndpointTrustAttestation``.  Read here via ``getattr()`` rather than an
+# ``isinstance`` check against ``ResolvedConfig``, so this module never needs to
+# import ``codedoc.core.loader`` (which imports this module for
+# ``effective_endpoint_identity`` and this attestation type) -- a plain
+# ``dict`` simply has no such attribute and is therefore always unattested.
+ENDPOINT_TRUST_ATTRIBUTE = "endpoint_trust"
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointTrustAttestation:
+    """Records that a custom ``api_base_url`` was authorized, and how.
+
+    Constructed only by :func:`codedoc.core.loader.load_config` once its
+    runtime endpoint-authorization gate succeeds, and carried as a
+    non-serialized ``endpoint_trust`` attribute on the ``ResolvedConfig`` it
+    returns -- never a dict key, so it cannot be forged through configuration
+    and never appears in iteration, ``dict()`` conversion, serialization,
+    persistence, cache identity, recovery identity, or provider identity.
+    ``digest`` is the canonical :func:`effective_endpoint_identity` of the
+    authorized endpoint; ``mechanism`` names which runtime approval source
+    supplied it (``"--trust-api-base-url"`` or ``"CODEDOC_TRUST_API_BASE_URL"``).
+    """
+
+    digest: str
+    mechanism: str
 
 
 def describe_provider_selection(config: dict) -> tuple[str, str]:
@@ -176,8 +225,31 @@ def create_provider(config: dict) -> LLMProvider:
     provider = config.get("llm_provider", "auto")
     model = config.get("model_name", "")
     provider_prefixes: dict[str, list[str]] = config.get("provider_prefixes") or {}
-    api_key = config.get("api_key") or _provider_api_key(provider, model, provider_prefixes)
     base_url = config.get("api_base_url") or None
+
+    # Endpoint-authorization verification -- resolved before any credential is
+    # read or selected.  A non-empty api_base_url requires a present
+    # EndpointTrustAttestation whose digest matches this exact endpoint;
+    # config is a plain dict for every legacy/test caller, which simply has no
+    # ``endpoint_trust`` attribute and is therefore always rejected here when it
+    # carries a custom endpoint -- create_provider(custom_plain_dict) cannot
+    # bypass authorization.  An empty api_base_url is the default provider
+    # endpoint and requires no attestation.
+    if base_url:
+        expected_digest = effective_endpoint_identity(base_url)
+        attestation = getattr(config, ENDPOINT_TRUST_ATTRIBUTE, None)
+        if (
+            not isinstance(attestation, EndpointTrustAttestation)
+            or attestation.digest != expected_digest
+        ):
+            raise ProviderInitError(
+                "api_base_url is set to a custom endpoint that was not authorized "
+                "at runtime. Approve the exact endpoint using --trust-api-base-url "
+                "or CODEDOC_TRUST_API_BASE_URL, then load configuration through "
+                "load_config() so the authorization can be verified."
+            )
+
+    api_key = config.get("api_key") or _provider_api_key(provider, model, provider_prefixes)
 
     if mode == "api":
         # Provider-initialization error boundary.  Construction, import,

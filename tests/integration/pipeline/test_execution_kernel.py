@@ -81,8 +81,9 @@ class _LLM:
 
 class TestRequestConstructionScope:
     def test_execution_requests_built_only_for_agent_rels(self, tmp_path, monkeypatch):
-        """Unchanged same-path files and identical-content reuse never receive
-        an execution request; only genuinely agent-routed files do."""
+        """Unchanged same-path files never receive an execution request; a
+        cross-path content match is no longer reused either (0.14.4), so it
+        also receives one -- only genuinely agent-routed files do."""
         write_py(tmp_path / "changed.py", "original\n")
         write_py(tmp_path / "unchanged.py", "stable content\n")
 
@@ -105,7 +106,8 @@ class TestRequestConstructionScope:
         run_pipeline(tmp_path, dict(base_config))
 
         # Second run: "changed.py" is edited; "twin.py" is a brand-new file whose
-        # content is identical to "unchanged.py"'s (identical-content reuse).
+        # content is identical to "unchanged.py"'s, but a different path -- no
+        # longer reused across paths (0.14.4), so it is documented fresh.
         write_py(tmp_path / "changed.py", "modified\n")
         write_py(tmp_path / "twin.py", "stable content\n")
 
@@ -123,10 +125,10 @@ class TestRequestConstructionScope:
 
         plan = captured["plan"]
         materials = captured["materials"]
-        assert plan.agent_rels == frozenset({"changed.py"})
+        assert plan.agent_rels == frozenset({"changed.py", "twin.py"})
         assert plan.unchanged_rels == frozenset({"unchanged.py"})
-        assert plan.identical_reuse_rels == frozenset({"twin.py"})
-        assert set(materials.execution_requests) == {"changed.py"}
+        assert plan.identical_reuse_rels == frozenset()
+        assert set(materials.execution_requests) == {"changed.py", "twin.py"}
 
 
 # ---------------------------------------------------------------------------

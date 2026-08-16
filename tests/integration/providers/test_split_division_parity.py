@@ -189,6 +189,7 @@ def test_real_provider_adapters_have_identical_split_prompts_outputs_and_counts(
         stats = run_pipeline(
             project,
             _config(provider_name=provider_name, model=model, base_url=base_url),
+            trust_api_base_url=base_url,
         )
         payload = json.loads(
             (project / "docs" / "codedoc.json").read_text(encoding="utf-8")
@@ -268,6 +269,7 @@ def test_split_retry_and_correction_are_provider_adapter_neutral(
                 response_correction_enabled=scenario == "correction",
             ),
             confirm_risky=lambda warnings: callback_calls.append(warnings) or True,
+            trust_api_base_url=base_url,
         )
         prompts = _prompts(provider_name, calls)
 
@@ -351,6 +353,7 @@ def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
                 project,
                 _config(provider_name=provider_name, model=model, base_url=base_url),
                 confirm_risky=lambda warnings: callback_calls.append(warnings) or True,
+                trust_api_base_url=base_url,
             )
 
         recovery_path = project / "docs" / "crash_recovery.json"
@@ -373,6 +376,7 @@ def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
             project,
             _config(provider_name=provider_name, model=model, base_url=base_url),
             confirm_risky=lambda warnings: callback_calls.append(warnings) or True,
+            trust_api_base_url=base_url,
         )
         expected_remaining = planned - 1
         assert stats["resumed"] == 1

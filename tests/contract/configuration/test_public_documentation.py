@@ -15,6 +15,7 @@ from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
     LEAF_CAPSULE_SCHEMA_REVISION,
     LEDGER_SCHEMA_REVISION,
+    MAX_QUARANTINE_ENTRIES_PER_FILE,
     PACKER_SCHEMA_REVISION,
     REDUCER_PROMPT_REVISION,
     REDUCTION_CAPSULE_SCHEMA_REVISION,
@@ -86,6 +87,7 @@ def test_readme_documents_every_long_flag_and_environment_variable():
         "GEMINI_API_KEY",
         "GOOGLE_API_KEY",
         "LLM_API_KEY",
+        "CODEDOC_TRUST_API_BASE_URL",
     }
     assert not {name for name in env_vars if name not in readme}
 
@@ -128,6 +130,11 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     assert "Provider, model, or effective-endpoint changes invalidate partial nodes" in normalized_large_files
     assert "completed cache reuse remains provider-agnostic" in normalized_large_files
     assert "Files at or below `max_content_chars`" in normalized_large_files
+    assert "up to 32 functions and up to 32 classes" in normalized_large_files
+    assert "reduction narrative is capped at 300 characters" in normalized_large_files
+    assert (
+        "reducer prompt states that bound explicitly" in normalized_large_files
+    )
     active_checks = large_files.split(
         "#### Split accounting, identity, and provider checks", 1
     )[1].split("#### Completed split reuse and node recovery", 1)[0]
@@ -168,6 +175,9 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     assert "Cross-path identical-content split reuse remains unavailable" in normalized_run_flow
     assert "Schema-1 and schema-2 partials are preserved but not resumed" in normalized_run_flow
     assert "preserved and blocked" in normalized_run_flow
+    assert "up to 32 functions and up to 32 classes" in normalized_run_flow
+    assert "reduction narrative is capped at 300 characters" in normalized_run_flow
+    assert "reducer prompt states that bound explicitly" in normalized_run_flow
 
 
 def test_model_help_scopes_provider_auto_detection_to_auto():
@@ -254,6 +264,58 @@ def test_readme_and_run_flow_declare_split_fully_supported_without_qualifiers():
             ), f"{path.name} support claim carries a disqualifying qualifier: {sentence!r}"
 
 
+def test_readme_and_run_flow_declare_ordinary_reuse_same_path_only():
+    """0.14.4: ordinary identical-content reuse (`files_reused_identical_content`)
+    is same-path only -- CodeDoc never copies documentation across paths, even
+    for byte-identical content. README must no longer claim reuse "from
+    another path"; RUN_FLOW's existing cross-path *split* sentence is a
+    separate, unrelated claim and must stay exactly as it is."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
+
+    assert "another path with identical content" not in readme
+
+    readme_paragraph = _locate_paragraph(
+        readme, "Ordinary identical-content reuse (`files_reused_identical_content`)"
+    )
+    normalized_readme_paragraph = " ".join(readme_paragraph.split())
+    assert "same-path only" in normalized_readme_paragraph
+    assert "never copies documentation from one path" in normalized_readme_paragraph
+
+    run_flow_paragraph = _locate_paragraph(
+        run_flow, "Ordinary identical-content reuse is same-path only"
+    )
+    normalized_run_flow_paragraph = " ".join(run_flow_paragraph.split())
+    assert "same-path only" in normalized_run_flow_paragraph
+    assert "never copies documentation from one path" in normalized_run_flow_paragraph
+    assert "_ordinary_path_identity" in normalized_run_flow_paragraph
+
+    # The unrelated split cross-path sentence is untouched by this correction.
+    assert "Cross-path split reuse remains unavailable." in run_flow
+
+
+def test_readme_and_run_flow_state_reason_codes_and_endpoint_authorization():
+    """0.14.4: a final response-contract failure names its closed reason
+    code, and a custom api_base_url requires runtime endpoint-trust approval
+    that configuration can never satisfy -- both facts must be publicly
+    documented, not just true internally."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
+
+    response_correction = readme.split("### Response correction", 1)[1].split(
+        "## Command-line options", 1
+    )[0]
+    normalized_response_correction = " ".join(response_correction.split())
+    assert "names its closed reason code" in normalized_response_correction
+    assert "no source text, prompt text, raw or truncated" in normalized_response_correction
+
+    normalized_run_flow = " ".join(run_flow.split())
+    assert "names its closed reason code" in normalized_run_flow
+    assert "runtime endpoint-trust approval bound to" in normalized_run_flow
+    assert "can never satisfy this gate" in normalized_run_flow
+    assert "resolved before any credential is read" in normalized_run_flow
+
+
 def test_security_md_recovery_sensitivity_wording_is_present_and_unchanged():
     """Gate 17.13, assertion 4: the inherited `0.14.2` SECURITY.md wording
     about `crash_recovery.json` sensitivity is present and untouched --
@@ -286,6 +348,29 @@ def test_readme_and_run_flow_name_schema4_current_and_schema3_predecessor():
         assert "finish" in paragraph.lower() and "0.14.2" in paragraph
         assert "move" in paragraph.lower() and "crash_recovery.json" in paragraph
         assert "deliberate discard" in paragraph or "explicit discard" in paragraph
+
+
+def test_readme_and_run_flow_declare_0_14_4_quarantines_stale_schema4_nodes():
+    """0.14.4 advances the same schema-4 generation's leaf/reducer identity
+    (v6->v7, file-reduction-v1->v2) with no schema-version change; a stale
+    node is quarantined and re-executed -- bounded by the raised
+    MAX_QUARANTINE_ENTRIES_PER_FILE -- rather than the whole container being
+    rejected, and every other schema-4 rejection stays fail-closed."""
+    assert LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
+    assert REDUCER_PROMPT_REVISION == "file-reduction-v2"
+    assert MAX_QUARANTINE_ENTRIES_PER_FILE == 512
+
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        text = path.read_text(encoding="utf-8")
+        paragraph = _locate_paragraph(text, "`0.14.4` advances the same schema-4")
+        assert "leaf-capsule-v7" in paragraph
+        assert "file-reduction-v2" in paragraph
+        assert "leaf-capsule-v6" in paragraph
+        assert "file-reduction-v1" in paragraph
+        assert "no schema-version" in paragraph
+        assert "quarantined" in paragraph
+        assert "512" in paragraph
+        assert "fail-closed" in paragraph
 
 
 def test_readme_configuration_reference_matches_generated_public_keys():

@@ -23,6 +23,9 @@ CANONICAL_PRIVATE_KEYS = [
     "_analysis_mode",
     "_max_context_revision",
     "_prompt_profile_digest",
+    "_large_file_identity",
+    "_split_reuse_contract",
+    "_ordinary_path_identity",
 ]
 
 # Fixed seeds, each of which produces a distinct non-canonical frozenset order
@@ -41,7 +44,10 @@ def _scrambled_private_key_record() -> dict:
         "hash": "h-main",
         "file_path": "main.py",
         "language": "python",
+        "_ordinary_path_identity": "ordinary-path-v1:test",
+        "_split_reuse_contract": "fresh-only-v1",
         "_prompt_profile_digest": "profile-digest",
+        "_large_file_identity": "large-file-v3:test",
         "_max_context_revision": "truncate-v1:max=10:head=0.7000",
         "_analysis_mode": "single",
         "_analysis_revision": "file-doc-v3",
@@ -70,7 +76,10 @@ record = {
     "hash": "h-main",
     "file_path": "main.py",
     "language": "python",
+    "_ordinary_path_identity": "ordinary-path-v1:test",
+    "_split_reuse_contract": "fresh-only-v1",
     "_prompt_profile_digest": "profile-digest",
+    "_large_file_identity": "large-file-v3:test",
     "_max_context_revision": "truncate-v1:max=10:head=0.7000",
     "_analysis_mode": "single",
     "_analysis_revision": "file-doc-v3",

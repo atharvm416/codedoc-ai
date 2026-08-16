@@ -163,6 +163,7 @@ def run_pipeline(
     config_overrides: dict | None = None,
     *,
     confirm_risky: Callable[[tuple[str, ...]], bool] | None = None,
+    trust_api_base_url: str | None = None,
 ) -> dict:
     """Run the full documentation pipeline on a project."""
     if isinstance(project_root, dict) and config_overrides is None:
@@ -178,7 +179,7 @@ def run_pipeline(
     if config_overrides is None:
         config_overrides = {}
 
-    config = load_config(root, config_overrides)
+    config = load_config(root, config_overrides, trust_api_base_url=trust_api_base_url)
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)

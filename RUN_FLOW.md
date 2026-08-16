@@ -15,6 +15,9 @@ execution, completed-record reuse, and node-level recovery are fully
 supported; `triple + split` remains unavailable. Split leaf signatures stay
 private, internal matching metadata bounded to the parser-aligned
 600-character ceiling; split never silently truncates an over-bound response.
+A leaf accepts up to 32 functions and up to 32 classes (matching the known-symbol
+count the leaf prompt may list); a combined reduction narrative is capped at
+300 characters, and the reducer prompt states that bound explicitly.
 
 `triple + split` fails during configuration validation before scanning,
 recovery inspection, output-directory creation, prompt-customization review,
@@ -34,7 +37,7 @@ resumed. Rolling back to `0.14.1` reruns `large-file-v3` split output fresh and
 blocks schema-4 recovery preserve-first.
 
 The current node-keyed partial-recovery generation is schema 4 (`0.14.3`,
-bound to the current `leaf-capsule-v6` leaf identity). Released schema 3
+bound to the `leaf-capsule-v6` leaf identity). Released schema 3
 (`0.14.2`, `leaf-capsule-v5`) is now an unsupported predecessor generation,
 preserved and blocked before any node is read, before planning, `SafeWriter`,
 or provider construction — the recovery artifact stays byte-identical.
@@ -42,6 +45,19 @@ Nothing from a released schema-3 partial is carried forward; a fresh
 `0.14.3` run performs complete v6 re-execution. Finish an unfinished `0.14.2`
 split run with `0.14.2`, or move `crash_recovery.json` aside (or delete it as
 a deliberate discard) to start fresh under `0.14.3`.
+
+`0.14.4` advances the same schema-4 generation to the `leaf-capsule-v7` leaf
+identity and the `file-reduction-v2` reducer prompt, with no schema-version
+change. A node checkpointed under the predecessor `leaf-capsule-v6` /
+`file-reduction-v1` identity is stale, not rejected outright: it is
+quarantined and re-executed like any other stale node, including a node that
+was previously paid. `MAX_QUARANTINE_ENTRIES_PER_FILE` is 512 (twice the
+maximum leaf-chunk count), sized to cover every node of the largest valid
+plan quarantined at once, so an ordinary revision-driven re-execution never
+aborts the run. Every other schema-4 rejection stays fail-closed exactly as
+before: a malformed container, a foreign owner, an unsupported schema
+version, an unplanned or duplicate node ID, and a quarantine map that still
+exceeds the bound all raise and stop the run.
 
 ## Persistent-file allowlist
 
@@ -195,8 +211,16 @@ effective language, and the registered cache identity:
 
 - `_analysis_revision`;
 - `_analysis_mode`;
-- `_max_context_revision`; and
-- `_prompt_profile_digest`.
+- `_max_context_revision`;
+- `_prompt_profile_digest`; and
+- `_ordinary_path_identity`.
+
+Ordinary identical-content reuse is same-path only: the predicate also
+requires the stored record's own path to equal the destination path, so
+CodeDoc never copies documentation from one path to a different path even
+when their content is byte-identical. A record written before `0.14.4` lacks
+`_ordinary_path_identity` and is therefore invalid until it is successfully
+regenerated under the current path-bound identity.
 
 The run-level ordinary recovery identity additionally binds project root, exact
 targets, entry, documentation scope, analysis mode/revision, and the effective
@@ -257,3 +281,11 @@ allowed partial completion, and terminal abort use the same accounting model.
   authentication, HTTP-client, or transport floors. Provider errors and public
   output never expose credentials, raw prompts, source text, or raw provider
   responses.
+- A final (non-retryable) response-contract failure names its closed reason
+  code in the visible failure message; it still exposes no source, prompt,
+  raw or truncated provider response, credential, endpoint, or per-field
+  removal detail.
+- A custom `api_base_url` requires runtime endpoint-trust approval bound to
+  its exact canonicalized identity; `codedoc.config.json` and
+  `config_overrides` can never satisfy this gate, which is resolved before
+  any credential is read and applies identically to a dry run.

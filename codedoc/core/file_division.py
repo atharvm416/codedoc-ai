@@ -69,11 +69,13 @@ from codedoc.core.result_assembly import flat_combined_result
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
 PACKER_SCHEMA_REVISION = "division-packer-v5"
-# Advanced from v5: the fixed leaf response signature ceiling now matches the
-# existing 600-character parser/semantic-unit ceiling, and the fixed fragment
-# prompt bytes versioned by this revision change with it, so a v5 leaf
-# checkpoint cannot validate as a current v6 checkpoint.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v6"
+# Advanced from v6: MAX_LEAF_SYMBOL_ITEMS_PER_KIND now equals
+# MAX_KNOWN_SYMBOLS_PER_CHUNK (32, up from 12), and the fixed fragment prompt
+# bytes versioned by this revision change with it, so a v6 leaf checkpoint
+# cannot validate as a current v7 checkpoint. v6 had advanced from v5: the
+# fixed leaf response signature ceiling matched the existing 600-character
+# parser/semantic-unit ceiling.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v7"
 # Advanced from v5. Bound into final-node execution identity, the final-node
 # exact input digest, and the completed split identity; a ledger revision
 # change alone reruns final synthesis but preserves compatible leaves and
@@ -81,7 +83,11 @@ LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v6"
 LEDGER_SCHEMA_REVISION = "fact-ledger-v6"
 REDUCTION_CAPSULE_SCHEMA_REVISION = "reduction-capsule-v1"
 REDUCTION_PACKING_REVISION = "reduction-packing-v4"
-REDUCER_PROMPT_REVISION = "file-reduction-v1"
+# Advanced from v1: the rendered reduction shape block now states the
+# MAX_REDUCTION_NARRATIVE_CHARS bound explicitly (initial and correction
+# routes alike), so a v1 reducer checkpoint cannot validate as a current v2
+# checkpoint.
+REDUCER_PROMPT_REVISION = "file-reduction-v2"
 FINAL_SYNTHESIS_REVISION = "file-synthesis-v3"
 # Advanced from v5 to division-execution-v6 alongside the leaf/ledger bumps
 # above.
@@ -100,6 +106,12 @@ MAX_UNITS_PER_FILE = 4096
 MAX_CHUNKS_PER_FILE = 256
 MAX_STRUCTURE_DIAGNOSTICS = 32
 
+# Parser-derived names are optional prompt grounding, not accepted response
+# facts. Bound that hint independently so declaration-heavy semantic units
+# cannot make prompt metadata grow without limit. Source coverage and fixed
+# leaf response bounds are enforced independently.
+MAX_KNOWN_SYMBOLS_PER_CHUNK = 32
+
 # Fixed internal leaf-capsule schema bounds. Symbol and export fields use the
 # corresponding established whole-file limits; the leaf description is capped
 # at the 300-character child-narrative ceiling because it can feed a reducer
@@ -110,7 +122,12 @@ MAX_STRUCTURE_DIAGNOSTICS = 32
 MAX_LEAF_DESCRIPTION_CHARS = 300
 MAX_LEAF_SYMBOL_NAME_CHARS = 128
 MAX_LEAF_SYMBOL_DESCRIPTION_CHARS = 300
-MAX_LEAF_SYMBOL_ITEMS_PER_KIND = 12
+# Equal to MAX_KNOWN_SYMBOLS_PER_CHUNK: a leaf prompt can list up to that many
+# known symbol names per kind, so the rendered response contract must accept
+# at least that many per kind, or a truthful response above a lower cap would
+# be rejected in full. Derived from the shared constant so the two bounds
+# cannot silently diverge again.
+MAX_LEAF_SYMBOL_ITEMS_PER_KIND = MAX_KNOWN_SYMBOLS_PER_CHUNK
 MAX_LEAF_EXPORT_ITEMS = 32
 MAX_LEAF_EXPORT_ITEM_CHARS = 256
 # An optional bounded signature is part of the fixed leaf capsule because the
@@ -119,11 +136,6 @@ MAX_LEAF_EXPORT_ITEM_CHARS = 256
 # `run(int)` from `run(str)`, and the ledger would silently publish one fact.
 MAX_LEAF_SYMBOL_SIGNATURE_CHARS = MAX_STRUCTURE_SIGNATURE_CHARS
 
-# Parser-derived names are optional prompt grounding, not accepted response
-# facts. Bound that hint independently so declaration-heavy semantic units
-# cannot make prompt metadata grow without limit. Source coverage and fixed
-# leaf response bounds are enforced independently.
-MAX_KNOWN_SYMBOLS_PER_CHUNK = 32
 MAX_LEAF_PROMPT_METADATA_CHARS = 32 * 1024
 
 # Worst-case canonical (cleaned, compact-JSON) sizes. Leaf capsule size remains
@@ -2868,7 +2880,16 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
         "live-schema-mismatch",
     }
 )
-MAX_QUARANTINE_ENTRIES_PER_FILE = 32
+# Covers every plannable node: _pack_level promotes a trailing singleton group
+# unchanged instead of wrapping it in a unary reducer, so every intermediate
+# reduction node has at least two children. A valid plan over n leaf chunks
+# therefore contains at most n leaves, at most n - 1 intermediate reducers,
+# and exactly one final node -- at most 2n checkpoint IDs, with n bounded by
+# MAX_CHUNKS_PER_FILE. Sized to survive a revision advance (leaf-capsule,
+# reducer-prompt, or execution-identity) invalidating every node of an
+# existing checkpoint at once, which quarantines the whole plan in one pass
+# rather than a handful of individually-stale nodes.
+MAX_QUARANTINE_ENTRIES_PER_FILE = 2 * MAX_CHUNKS_PER_FILE
 MAX_QUARANTINE_ENTRY_CHARS = 4096
 
 

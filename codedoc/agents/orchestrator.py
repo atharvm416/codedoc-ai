@@ -43,6 +43,7 @@ from codedoc.core.file_division import FactLedger, refine_narrative_inputs
 from codedoc.core.record_meta import (
     expected_analysis_identity,
     expected_max_context_revision,
+    expected_ordinary_path_identity,
 )
 from codedoc.core.prompt_profiles import (
     NO_PROMPT_PROFILE_DIGEST,
@@ -391,6 +392,14 @@ class Orchestrator:
                 result["_max_context_revision"] = mcr
             if bundle is not None and bundle.digest != NO_PROMPT_PROFILE_DIGEST:
                 result["_prompt_profile_digest"] = bundle.digest
+            # Ordinary-only path identity: refuses ordinary cross-path
+            # identical-content reuse (a stored record must never document a
+            # different path than the one it is reused into). Covers both a
+            # truly ordinary file and an oversized truncate-path file alike --
+            # never stamped by the split final-result assembly
+            # (assemble_final_result), whose _large_file_identity already
+            # binds the path.
+            result["_ordinary_path_identity"] = expected_ordinary_path_identity(file_path)
         return result
 
     # ------------------------------------------------------------------

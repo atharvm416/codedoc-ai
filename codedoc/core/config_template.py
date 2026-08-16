@@ -71,7 +71,13 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("llm_mode", "LLM mode. Only 'api' is supported."),
     ("llm_provider", "Provider: 'auto', 'openai', 'anthropic', or 'gemini'."),
     ("model_name", "Model identifier; empty selects the provider default."),
-    ("api_base_url", "Custom OpenAI-compatible base URL, or null."),
+    (
+        "api_base_url",
+        "Custom OpenAI-compatible base URL, or null. A non-null value also "
+        "requires runtime endpoint-trust approval (--trust-api-base-url or "
+        "CODEDOC_TRUST_API_BASE_URL); this key alone never authorizes sending "
+        "anything to that endpoint.",
+    ),
     ("api_key", "Never stored here; set an API key via environment variable."),
     ("entry_file", "Entry file relative to the project root, or null to auto-detect."),
     ("documentation_scope", "'entry' (reachable from entry) or 'all' scanned files."),

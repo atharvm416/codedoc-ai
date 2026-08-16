@@ -167,10 +167,71 @@ def test_retired_split_contract_stays_registered_without_an_absent_default():
     assert record_meta.FRESH_SPLIT_REUSE_CONTRACT == "fresh-only-v1"
     assert key in record_meta.CACHE_IDENTITY_KEYS
     assert key in record_meta.PRIVATE_RECORD_KEYS
-    assert record_meta.PRIVATE_KEY_ORDER[-1] == key
+    # _ordinary_path_identity was appended after this key (0.14.4), so
+    # _split_reuse_contract is now second-to-last rather than last.
+    assert record_meta.PRIVATE_KEY_ORDER[-2] == key
     assert key not in record_meta._CACHE_KEY_ABSENT_DEFAULTS
     assert record_meta.normalized_identity_value(key, {}) is None
     assert key not in record_meta.expected_analysis_identity("single")
+
+
+def test_ordinary_path_identity_appended_last_with_no_absent_default():
+    key = "_ordinary_path_identity"
+    assert record_meta.PRIVATE_KEY_ORDER[-1] == key
+    assert key in record_meta.CACHE_IDENTITY_KEYS
+    assert key in record_meta.PRIVATE_RECORD_KEYS
+    assert key not in record_meta._CACHE_KEY_ABSENT_DEFAULTS
+    # An absent key normalizes to None and compares unequal to any expected
+    # (non-None) value, so a pre-0.14.4 record lacking it stays invalid.
+    assert record_meta.normalized_identity_value(key, {}) is None
+    assert key not in record_meta.expected_analysis_identity("single")
+
+
+def test_ordinary_path_identity_ascii_fixed_vector():
+    assert (
+        record_meta.expected_ordinary_path_identity("src/app/main.py")
+        == "ordinary-path-v1:"
+        "fac2a67645b6e215e0a3e0ce32ef161b9034798b829f35fc7aadc2b0b45a4de5"
+    )
+
+
+def test_ordinary_path_identity_unicode_fixed_vector():
+    assert (
+        record_meta.expected_ordinary_path_identity("src/café/naïve.py")
+        == "ordinary-path-v1:"
+        "6dfaad6c5c469d25a74be483f6d468120b08d70637c70bce1cf8d4fa337f2d7d"
+    )
+
+
+def test_ordinary_path_identity_differs_by_path():
+    assert record_meta.expected_ordinary_path_identity(
+        "a.py"
+    ) != record_meta.expected_ordinary_path_identity("b.py")
+
+
+def test_ordinary_path_identity_carried_last_when_present():
+    target: dict = {}
+    record_meta.carry_private_keys(
+        {
+            "_split_reuse_contract": "fresh-only-v1",
+            "_ordinary_path_identity": "ordinary-path-v1:test",
+            "_analysis_revision": "file-doc-v3",
+            "_analysis_mode": "single",
+            "_max_context_revision": "truncate-v1:max=10:head=0.7000",
+            "_prompt_profile_digest": "profile-digest",
+            "_large_file_identity": "large-file-v1:test",
+        },
+        target,
+    )
+    assert list(target) == [
+        "_analysis_revision",
+        "_analysis_mode",
+        "_max_context_revision",
+        "_prompt_profile_digest",
+        "_large_file_identity",
+        "_split_reuse_contract",
+        "_ordinary_path_identity",
+    ]
 
 def test_registered_synthetic_keys_are_carried_in_sorted_order(monkeypatch):
     monkeypatch.setattr(
@@ -197,26 +258,26 @@ def test_completed_large_file_identity_binds_leaf_capsule_revision_and_bound(
 ):
     """Section 5: the completed large-file identity changes whenever the
     bound leaf-capsule revision or its derived canonical-character maximum
-    changes -- exactly the two inputs `0.14.3`'s section 2A correction
-    advances (`leaf-capsule-v5` -> `leaf-capsule-v6`, 150,656 -> 200,192) --
+    changes -- exactly the two inputs `0.14.4`'s leaf per-kind cap correction
+    advances (`leaf-capsule-v6` -> `leaf-capsule-v7`, 200,192 -> 448,672) --
     while the `large-file-v3:` prefix itself never changes, since split
     completed identity is not versioned by the package release."""
     kwargs = _large_file_identity_kwargs()
-    current_v6 = record_meta.expected_large_file_identity(**kwargs)
-    assert current_v6 is not None
-    assert current_v6.startswith("large-file-v3:")
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v6"
-    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 200192
+    current_v7 = record_meta.expected_large_file_identity(**kwargs)
+    assert current_v7 is not None
+    assert current_v7.startswith("large-file-v3:")
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
 
-    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v5")
+    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v6")
     revision_reverted = record_meta.expected_large_file_identity(**kwargs)
-    assert revision_reverted != current_v6
+    assert revision_reverted != current_v7
     assert revision_reverted.startswith("large-file-v3:")
 
-    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 150656)
+    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 200192)
     bound_also_reverted = record_meta.expected_large_file_identity(**kwargs)
     assert bound_also_reverted != revision_reverted
-    assert bound_also_reverted != current_v6
+    assert bound_also_reverted != current_v7
     assert bound_also_reverted.startswith("large-file-v3:")
 
 
