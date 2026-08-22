@@ -6,13 +6,75 @@ Callers provide skip rules, extension mappings, and entry candidates. The
 
 from __future__ import annotations
 
+import os
 import stat as stat_module
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from codedoc.utils.errors import ConfigError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# Bounded per-scan logging (section 5.6): the first this-many unreadable
+# files each get their own warning line; beyond that, one aggregate line.
+MAX_UNREADABLE_FILE_WARNINGS = 20
+
+
+def exclude_path_key(path: Path | str) -> str:
+    """Shared normalization key for exact generated-target exclusion.
+
+    Resolved non-strictly (a generated target need not exist yet) and
+    OS-case-folded so both the caller building an ``exclude_paths`` set and
+    the scanner checking each candidate file use the identical key. Equality
+    only -- never used for basename or prefix matching, and deliberately not
+    the lower-casing scheme ``_normalise_ignore_paths`` uses below (that
+    scheme is for portable relative-path prefixes; this one is for exact
+    resolved absolute paths).
+    """
+    return os.path.normcase(str(Path(path).resolve(strict=False)))
+
+
+@dataclass
+class ScanDiagnostics:
+    """Optional keyword-only out-parameter for :func:`scan_files`.
+
+    Mutated in place so ``scan_files``'s return type (``list[dict]``) never
+    changes shape. Surfaced only in ``run_pipeline`` stats and the CLI
+    summary -- never persisted to codedoc.json/codedoc.md schemas.
+
+    One instance is shared across every ``scan_files`` call (and any other
+    caller recording a read failure, e.g. planning) within a single
+    ``run_pipeline`` invocation, including a rescan triggered by a detected
+    stale source revision. ``record_large``/``record_unreadable`` dedup by
+    ``exclude_path_key`` against this instance's own lifetime, not any one
+    call's, so the same physical file is counted at most once per run no
+    matter how many times it is rescanned.
+    """
+
+    files_skipped_large: int = 0
+    files_skipped_unreadable: int = 0
+    _large_seen: set = field(default_factory=set, repr=False, compare=False)
+    _unreadable_seen: set = field(default_factory=set, repr=False, compare=False)
+
+    def record_large(self, key: str) -> bool:
+        """Count *key* as skipped-large; return True the first time this
+        run sees it, False on a repeat (e.g. a rescan)."""
+        if key in self._large_seen:
+            return False
+        self._large_seen.add(key)
+        self.files_skipped_large += 1
+        return True
+
+    def record_unreadable(self, key: str) -> bool:
+        """Count *key* as skipped-unreadable; return True the first time
+        this run sees it, False on a repeat (e.g. a rescan)."""
+        if key in self._unreadable_seen:
+            return False
+        self._unreadable_seen.add(key)
+        self.files_skipped_unreadable += 1
+        return True
 
 # ---------------------------------------------------------------------------
 # Module-level fallbacks retained only for backward compatibility with direct
@@ -67,6 +129,13 @@ def scan_files(
     # When provided without extension_language_map, a map is built from
     # _FALLBACK_LANGUAGE_MAP for the listed extensions.
     supported_extensions: list[str] | None = None,
+    # Exact generated-target protection (section 5.6).  Keys built with
+    # exclude_path_key() -- equality only, never basename or prefix
+    # matching, so a source file that merely shares the output directory's
+    # name is never excluded (co-located source/output stays supported).
+    exclude_paths: "frozenset[str] | set[str] | None" = None,
+    # Optional out-parameter, mutated in place; return type stays list[dict].
+    diagnostics: "ScanDiagnostics | None" = None,
 ) -> list[dict]:
     """
     Walk root recursively and return a list of file descriptors.
@@ -84,9 +153,9 @@ def scan_files(
         Files larger than this are skipped (default 500 KB).
     skip_dirs:
         Directory names to skip (case-insensitive).  Typically resolved from
-        ``config["skip_dirs"]`` by the pipeline, which also auto-appends the
-        output directory.  Directories whose names begin with ``.`` are always
-        skipped regardless of this list.
+        ``config["skip_dirs"]`` by the pipeline; generated targets are
+        protected separately through ``exclude_paths``. Directories whose
+        names begin with ``.`` are always skipped regardless of this list.
     ignore_paths:
         Project-relative paths (files or directory subtrees) to exclude.
     follow_symlinks:
@@ -98,6 +167,16 @@ def scan_files(
         **Deprecated.** Kept for callers that do not supply
         ``extension_language_map``.  Language is set to the fallback map value
         or ``"generic"`` for unknown extensions.
+    exclude_paths:
+        Exact resolved generated-target keys (built with
+        :func:`exclude_path_key`) to protect from ever being treated as
+        source -- e.g. the active and opposite-format output files and the
+        crash-recovery file.  Matched by equality only, so co-located
+        source/output directories remain supported: a source file merely
+        sharing the output directory's name is never excluded.
+    diagnostics:
+        Optional :class:`ScanDiagnostics` out-parameter, mutated in place
+        with ``files_skipped_large`` and ``files_skipped_unreadable`` counts.
 
     Returns
     -------
@@ -126,8 +205,30 @@ def scan_files(
     ext_map = {e.lower(): lang for e, lang in extension_language_map.items()}
     skip_set = {d.lower() for d in (skip_dirs or [])}
     ignore_prefixes = _normalise_ignore_paths(ignore_paths or [])
+    exclude_keys = frozenset(exclude_paths or ())
     results: list[dict] = []
-    skipped_large = 0
+    # Dedup/count against the caller's own ScanDiagnostics when supplied, so
+    # a rescan sharing the same instance (section 12.1 C5) never double-counts
+    # a file this scan already recorded; a throwaway instance otherwise, so
+    # the counting logic below is uniform either way.
+    _diagnostics = diagnostics if diagnostics is not None else ScanDiagnostics()
+    skipped_large_this_scan = 0
+    unreadable_warned = 0
+    unreadable_total_this_scan = 0
+
+    def _record_unreadable(path: Path) -> None:
+        nonlocal unreadable_warned, unreadable_total_this_scan
+        key = exclude_path_key(path)
+        # The shared diagnostics object owns run-wide deduplication. Its
+        # boolean result must gate warnings as well as counters, otherwise a
+        # rescan emits the same path again and can exceed the per-run warning
+        # bound despite keeping the numeric counter stable.
+        if not _diagnostics.record_unreadable(key):
+            return
+        unreadable_total_this_scan += 1
+        if unreadable_warned < MAX_UNREADABLE_FILE_WARNINGS:
+            logger.warning("Skipping unreadable file: %s", path)
+            unreadable_warned += 1
 
     walker = _Walker(
         scan_root=root,
@@ -140,14 +241,19 @@ def scan_files(
         if ext not in ext_map:
             continue
 
+        if exclude_keys and exclude_path_key(file_path) in exclude_keys:
+            continue
+
         # Skip files that are too large
         try:
             size_kb = file_path.stat().st_size / 1024
         except OSError:
+            _record_unreadable(file_path)
             continue
         if size_kb > max_file_size_kb:
             logger.warning("Skipping large file (%dkb): %s", int(size_kb), file_path)
-            skipped_large += 1
+            skipped_large_this_scan += 1
+            _diagnostics.record_large(exclude_path_key(file_path))
             continue
 
         language = ext_map.get(ext, "generic")
@@ -160,13 +266,30 @@ def scan_files(
             "extension": ext,
         })
 
+    # Walker-level unreadable items (a genuine OSError classifying the path
+    # itself, distinguished from "exists but is neither a file nor a
+    # directory" -- see _classify) only count if their extension is one of
+    # the supported ones; an unreadable file the scan would have ignored
+    # anyway is not worth warning about.
+    for path in walker.unreadable_files:
+        if path.suffix.lower() in ext_map:
+            _record_unreadable(path)
+
+    if unreadable_total_this_scan > unreadable_warned:
+        logger.warning(
+            "%d more unreadable file(s) not shown",
+            unreadable_total_this_scan - unreadable_warned,
+        )
+
     skipped_dirs = walker.skipped_dirs
     logger.info(
-        "Scanner found %d supported file(s) in %s (skipped %d directorie(s), %d large file(s))",
+        "Scanner found %d supported file(s) in %s (skipped %d directorie(s), "
+        "%d large file(s), %d unreadable file(s))",
         len(results),
         root,
         skipped_dirs,
-        skipped_large,
+        skipped_large_this_scan,
+        unreadable_total_this_scan,
     )
     return results
 
@@ -199,6 +322,7 @@ class _Walker:
         self.ignore_prefixes = ignore_prefixes
         self.follow_symlinks = follow_symlinks
         self.skipped_dirs = 0
+        self.unreadable_files: list[Path] = []
         self._resolved_root: Path = scan_root
         self._visited_dirs: set = set()
         self._visited_files: set = set()
@@ -299,6 +423,13 @@ class _Walker:
                         self._visited_files.add(file_identity)
                 yield item
 
+            elif kind == "unreadable":
+                # A genuine OSError (e.g. permission denied) probing this
+                # path's type -- distinct from _classify's None case, which
+                # means the path exists but is neither a file nor a
+                # directory (a broken symlink target, socket, or device).
+                self.unreadable_files.append(item)
+
             elif is_link:
                 # Broken or inaccessible link: skip without aborting the scan.
                 logger.debug("Skipping broken or inaccessible symlink %s", item)
@@ -346,14 +477,26 @@ class _Walker:
 
 
 def _classify(path: Path) -> str | None:
-    """Classify *path* as ``"dir"``, ``"file"`` or ``None`` (following links)."""
+    """Classify *path* as ``"dir"``, ``"file"``, ``"unreadable"``, or
+    ``None`` (following links).
+
+    ``Path.is_dir()``/``Path.is_file()`` only swallow the "doesn't
+    exist"-shaped errno set (ENOENT/ENOTDIR) internally and re-raise
+    everything else (notably EACCES, permission denied) -- so an ``OSError``
+    reaching here is a genuine read failure, distinguished from the ``None``
+    case, which means the path exists but is neither a file nor a directory
+    (a broken symlink target, socket, or device) with no error at all.
+    """
     try:
         if path.is_dir():
             return "dir"
+    except OSError:
+        return "unreadable"
+    try:
         if path.is_file():
             return "file"
     except OSError:
-        return None
+        return "unreadable"
     return None
 
 
@@ -439,14 +582,39 @@ def detect_entry_file(
 
     if hint:
         candidate = root / hint
-        if candidate.exists():
+        # Section 5.6 / 12.1 C5: ``Path.exists()`` swallows only the
+        # "doesn't exist"-shaped errno set (ENOENT/ENOTDIR/EBADF/ELOOP) and
+        # re-raises everything else, notably EACCES.  An explicitly requested
+        # entry whose own metadata cannot be read must fail as an actionable
+        # ConfigError here -- before provider construction, recovery
+        # initialization, or any output mutation -- never as a raw
+        # PermissionError/OSError escaping the scan.  This is the
+        # stat-inspection counterpart to the post-stat read failure that
+        # ``codedoc.core.planning`` already reports.
+        try:
+            found = candidate.exists()
+        except OSError as exc:
+            raise ConfigError(
+                f"Entry file '{hint}' could not be read: {exc}. Check the "
+                "path and its file permissions."
+            ) from exc
+        if found:
             return candidate
         logger.warning("Specified entry file '%s' not found in %s", hint, root)
         return None
 
     for name in auto_entries:
         candidate = root / name
-        if candidate.exists():
+        # An auto-detection candidate is a guess, not a user request: an
+        # unreadable one is skipped like a missing one so a single
+        # permission-restricted file never aborts a run the user never
+        # asked to centre on it.
+        try:
+            found = candidate.exists()
+        except OSError:
+            logger.debug("Skipping unreadable auto-entry candidate %s", candidate)
+            continue
+        if found:
             logger.info("Auto-detected entry file: %s", candidate)
             return candidate
 

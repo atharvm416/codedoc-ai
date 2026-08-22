@@ -97,6 +97,13 @@ class ProcessingQueue:
             logger.debug("Checked: %s", rel_path)
 
     def mark_failed(self, rel_path: str, reason: str = "") -> None:
+        """Store and render an already-bounded caller-owned failure reason.
+
+        Provider/user-derived exceptions are projected by the execution
+        boundary before reaching this queue. The queue deliberately neither
+        reclassifies nor expands the reason, so its WARNING log and
+        :meth:`iter_failed` expose the same bounded text.
+        """
         if rel_path in self._state:
             self._state[rel_path]["status"] = STATUS_FAILED
             self._state[rel_path]["error"] = reason

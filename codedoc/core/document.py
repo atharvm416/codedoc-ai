@@ -44,12 +44,24 @@ import json
 from dataclasses import dataclass
 from pathlib import Path
 
+from codedoc.core.file_division import (
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    DuplicateCanonicalKeyError,
+    QuarantineEntry,
+    ReductionNodeState,
+    SplitTreeState,
+    canonical_json,
+    is_legacy_split_partial,
+    load_canonical_json_object,
+    node_state_public_json,
+)
 from codedoc.core.markdown_view import (
     _CODEDOC_META_COMMENT_RE,
     markdown_to_view,
     read_embedded_view_result,
 )
-from codedoc.core.project_view import SCHEMA_VERSION
+from codedoc.core.project_view import SCHEMA_VERSION, sanitize_public_view
+from codedoc.parser.source_structure import normalize_rel_path
 from codedoc.utils.errors import ConfigError
 
 # Accepted schema versions, parsed as integer components rather than floats.
@@ -76,6 +88,49 @@ _LAST_RUN_INTEGER_FIELDS = {
 _LAST_RUN_OPTIONAL_INTEGER_FIELDS = {
     "files_skipped_insufficient_source",
 }
+_LAST_RUN_SPLIT_INTEGER_FIELDS = {
+    "split_ordinary_files",
+    "split_syntax_files",
+    "split_lexical_files",
+    "split_blocked_files",
+    "split_divided_files",
+    "split_units",
+    "split_chunks",
+    "split_continuation_groups",
+    "split_unit_consolidation_levels",
+    "split_unit_consolidation_calls_planned",
+    "split_general_reduction_levels",
+    "split_general_reduction_calls_planned",
+    "split_final_synthesis_calls_planned",
+    "split_restored_complete_chunks",
+    "split_restored_unit_consolidation_calls",
+    "split_restored_general_reduction_calls",
+    "split_restored_final_synthesis_calls",
+    "file_documentation_calls_planned",
+    "unit_documentation_calls_planned",
+    "file_reduction_calls_planned",
+    "synthesis_calls_planned",
+}
+_LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS = {
+    "split_completed_files_reused",
+    "split_partial_files_resumed",
+    "split_unpaid_nodes",
+    "split_reexecuted_nodes",
+    "split_quarantined_nodes",
+    "split_recovery_conflict_files",
+}
+# The frozen capacity-block reasons (design decision D6). There is no
+# "capacity fallback": a blocked file has no provider action at all (D8).
+_BLOCKED_REASONS = {
+    "atom-cap",
+    "symbol-cap",
+    "unit-cap",
+    "chunk-cap",
+    "reduction-envelope-cap",
+    "reduction-fan-in-cap",
+    "reduction-depth-cap",
+    "final-synthesis-envelope-cap",
+}
 
 
 @dataclass(frozen=True)
@@ -91,17 +146,27 @@ class CodedocDocument:
     files: tuple[dict, ...]
     in_progress: bool
     view: dict
+    partial_files: tuple[SplitTreeState, ...] = ()
+    # rel_paths whose stored split partial structurally matches the
+    # predecessor (schema version 1) ordered-prefix payload.  Migration-
+    # readable only: D11 requires callers to fail closed with the
+    # preserve-or-move-aside remedy rather than resume or execute these.
+    legacy_split_partial_rels: tuple[str, ...] = ()
 
 
 def read_codedoc_document(
     path: Path,
     *,
     legacy_role: str | None = None,
+    include_partial_files: bool = True,
 ) -> CodedocDocument:
     """Parse and validate a CodeDoc document at *path* (read-only).
 
     ``legacy_role`` must be ``None`` or ``"stale_build"``.  Only the stale-build
     migration call site passes ``"stale_build"``; any other value is rejected.
+    ``include_partial_files=False`` leaves split-only partial recovery metadata
+    out of the normalized document while retaining the ordinary recovery
+    ownership and completed-record envelope.
 
     Raises
     ------
@@ -131,7 +196,12 @@ def read_codedoc_document(
 
     suffix = path.suffix.lower()
     if suffix == ".json":
-        return _read_json(path, content, legacy_role)
+        return _read_json(
+            path,
+            content,
+            legacy_role,
+            include_partial_files=include_partial_files,
+        )
     if suffix == ".md":
         return _read_markdown(path, content)
 
@@ -145,10 +215,27 @@ def read_codedoc_document(
 # JSON
 # ---------------------------------------------------------------------------
 
-def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocument:
+def _read_json(
+    path: Path,
+    content: str,
+    legacy_role: str | None,
+    *,
+    include_partial_files: bool,
+) -> CodedocDocument:
     try:
-        data = json.loads(content)
-    except json.JSONDecodeError as exc:
+        # Duplicate-aware: a duplicate key anywhere in the document (recovery
+        # or completed) fails closed rather than silently keeping the last
+        # value, matching the split-partial container's own strictness
+        # (section 9/14). This does not require canonical (sorted/compact)
+        # form -- the recovery file is written pretty-printed -- so the
+        # underlying pairs hook is reused directly rather than the stricter
+        # `load_canonical_json_object`.
+        data = load_canonical_json_object(content, require_canonical=False)
+    except DuplicateCanonicalKeyError as exc:
+        raise ConfigError(
+            f"'{path}' is not a valid CodeDoc file: duplicate JSON key {exc}."
+        ) from exc
+    except ValueError as exc:
         raise ConfigError(
             f"'{path}' is not a valid CodeDoc file: JSON parse error."
         ) from exc
@@ -220,18 +307,246 @@ def _read_json(path: Path, content: str, legacy_role: str | None) -> CodedocDocu
         for k, v in data.items()
         if k not in ("_codedoc", "_crash_safety")
     }
+    if not in_progress:
+        view = sanitize_public_view(view)
+        files = _extract_files(path, view.get("files"))
+
+    metadata = copy.deepcopy(meta)
+    if not include_partial_files:
+        metadata.pop("partial_files", None)
+
+    partial_files: tuple[SplitTreeState, ...] = ()
+    legacy_split_partial_rels: tuple[str, ...] = ()
+    if include_partial_files:
+        partial_files, legacy_split_partial_rels = _partial_files_from_meta(meta)
 
     return CodedocDocument(
         path=path,
         format="json",
-        metadata=copy.deepcopy(meta),
+        metadata=metadata,
         schema_version=str(schema) if schema is not None else None,
         entry_file=entry_file,
         file_hashes=file_hashes,
         files=tuple(files),
         in_progress=in_progress,
         view=view,
+        partial_files=partial_files,
+        legacy_split_partial_rels=legacy_split_partial_rels,
     )
+
+
+def _partial_files_from_meta(
+    meta: dict,
+) -> tuple[tuple[SplitTreeState, ...], tuple[str, ...]]:
+    """Parse `partial_files` into `(schema-4 tree states, legacy v1 rel_paths)`.
+
+    A predecessor (schema version 1) ordered-prefix payload is
+    migration-readable only (D11): it is recognized structurally so the
+    caller can fail closed with the preserve-or-move-aside remedy, but it is
+    never parsed into a usable `SplitTreeState` and never silently dropped.
+    A dormant schema-2 (or any other unsupported) container fails the exact
+    ``schema_version`` check below and is likewise never migrated or
+    executed (section 16) -- the caller's ConfigError is the preserve-first
+    block.
+    """
+    if "partial_files" not in meta:
+        return (), ()
+    raw = meta["partial_files"]
+    if not isinstance(raw, dict):
+        raise ConfigError("CodeDoc recovery partial_files must be an object.")
+    partials: list[SplitTreeState] = []
+    legacy_rel_paths: list[str] = []
+    normalized_rel_paths: set[str] = set()
+    container_required = {
+        "schema_version",
+        "owner",
+        "rel_path",
+        "content_hash",
+        "division_plan_digest",
+        "reduction_tree_digest",
+        "nodes",
+    }
+    container_allowed = container_required | {"quarantine"}
+    node_required = {
+        "node_id",
+        "node_type",
+        "rel_path",
+        "content_hash",
+        "division_plan_digest",
+        "execution_identity_digest",
+        "input_digest",
+        "unit_id",
+        "child_ids",
+        "coverage_leaf_ids",
+        "result_json",
+    }
+    quarantine_required = {"node_id", "reason", "raw_json"}
+
+    for rel_path in sorted(raw):
+        value = raw[rel_path]
+        if not isinstance(value, dict):
+            raise ConfigError("CodeDoc recovery contains a malformed split-partial container.")
+        try:
+            normalized_rel_path = normalize_rel_path(rel_path)
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "CodeDoc recovery contains a split-partial container with an invalid path."
+            ) from exc
+        if normalized_rel_path in normalized_rel_paths:
+            raise ConfigError(
+                "CodeDoc recovery contains split-partial containers with aliased paths."
+            )
+        normalized_rel_paths.add(normalized_rel_path)
+        if is_legacy_split_partial(value):
+            legacy_rel_paths.append(normalized_rel_path)
+            continue
+        if value.get("schema_version") != SPLIT_PARTIAL_SCHEMA_VERSION:
+            raise ConfigError(
+                "CodeDoc recovery contains an unsupported split-partial schema version."
+            )
+        if set(value) - container_allowed or container_required - set(value):
+            raise ConfigError(
+                "CodeDoc recovery contains a split-partial container with an unknown "
+                "or missing field."
+            )
+        raw_nodes = value.get("nodes")
+        if not isinstance(raw_nodes, list):
+            raise ConfigError("CodeDoc recovery contains a malformed split-partial container.")
+        nodes: list[ReductionNodeState] = []
+        nodes_quarantine: list[QuarantineEntry] = []
+        seen_node_ids: set[str] = set()
+        for node_value in raw_nodes:
+            if not isinstance(node_value, dict):
+                raise ConfigError("CodeDoc recovery contains a malformed split-partial node.")
+            node_id = node_value.get("node_id")
+            if not isinstance(node_id, str) or not node_id:
+                raise ConfigError(
+                    "CodeDoc recovery contains a split-partial node without an ID."
+                )
+            if node_id in seen_node_ids:
+                raise ConfigError(
+                    "CodeDoc recovery contains a duplicate split-partial node ID."
+                )
+            seen_node_ids.add(node_id)
+            raw_node_json = canonical_json(node_value)
+            if set(node_value) - node_required or node_required - set(node_value):
+                # Strictly reject this object as executable while preserving a
+                # bounded copy beside valid siblings (section 9/14). A
+                # per-node reduction_tree_digest follows this exact path.
+                nodes_quarantine.append(
+                    QuarantineEntry(
+                        node_id=node_id,
+                        reason="live-schema-mismatch",
+                        raw_json=raw_node_json,
+                    )
+                )
+                continue
+            try:
+                node = ReductionNodeState(
+                    node_id=node_id,
+                    node_type=node_value.get("node_type"),
+                    rel_path=node_value.get("rel_path"),
+                    content_hash=node_value.get("content_hash", ""),
+                    division_plan_digest=node_value.get("division_plan_digest", ""),
+                    execution_identity_digest=node_value.get("execution_identity_digest", ""),
+                    input_digest=node_value.get("input_digest", ""),
+                    unit_id=node_value.get("unit_id"),
+                    child_ids=tuple(node_value.get("child_ids", ())),
+                    coverage_leaf_ids=tuple(node_value.get("coverage_leaf_ids", ())),
+                    result_json=node_value.get("result_json", ""),
+                )
+            except (TypeError, ValueError):
+                nodes_quarantine.append(
+                    QuarantineEntry(
+                        node_id=node_id,
+                        reason="live-schema-mismatch",
+                        raw_json=raw_node_json,
+                    )
+                )
+                continue
+            nodes.append(node)
+
+        raw_quarantine = value.get("quarantine", [])
+        if not isinstance(raw_quarantine, list):
+            raise ConfigError(
+                "CodeDoc recovery contains a malformed split-partial quarantine map."
+            )
+        quarantine: list[QuarantineEntry] = []
+        for entry_value in raw_quarantine:
+            if not isinstance(entry_value, dict):
+                raise ConfigError("CodeDoc recovery contains a malformed quarantine entry.")
+            if set(entry_value) != quarantine_required:
+                raise ConfigError(
+                    "CodeDoc recovery contains a quarantine entry with an unknown "
+                    "or missing field."
+                )
+            try:
+                quarantine.append(
+                    QuarantineEntry(
+                        node_id=entry_value.get("node_id"),
+                        reason=entry_value.get("reason"),
+                        raw_json=entry_value.get("raw_json", ""),
+                    )
+                )
+            except (TypeError, ValueError) as exc:
+                raise ConfigError(
+                    "CodeDoc recovery contains a malformed quarantine entry."
+                ) from exc
+
+        quarantine.extend(nodes_quarantine)
+
+        try:
+            partial_header = SplitTreeState(
+                schema_version=value.get("schema_version"),
+                owner=value.get("owner"),
+                rel_path=value.get("rel_path"),
+                content_hash=value.get("content_hash", ""),
+                division_plan_digest=value.get("division_plan_digest", ""),
+                reduction_tree_digest=value.get("reduction_tree_digest", ""),
+                nodes=(),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "CodeDoc recovery contains a malformed split-partial container."
+            ) from exc
+        if partial_header.rel_path != normalized_rel_path:
+            raise ConfigError(
+                "CodeDoc recovery contains a split-partial container with a mismatched path."
+            )
+        matching_nodes_list: list[ReductionNodeState] = []
+        for node in nodes:
+            if (
+                node.rel_path == partial_header.rel_path
+                and node.content_hash == partial_header.content_hash
+                and node.division_plan_digest == partial_header.division_plan_digest
+            ):
+                matching_nodes_list.append(node)
+            else:
+                quarantine.append(
+                    QuarantineEntry(
+                        node_id=node.node_id,
+                        reason="stale-identity",
+                        raw_json=canonical_json(node_state_public_json(node)),
+                    )
+                )
+        matching_nodes = tuple(matching_nodes_list)
+        try:
+            partial = SplitTreeState(
+                schema_version=partial_header.schema_version,
+                owner=partial_header.owner,
+                rel_path=partial_header.rel_path,
+                content_hash=partial_header.content_hash,
+                division_plan_digest=partial_header.division_plan_digest,
+                reduction_tree_digest=partial_header.reduction_tree_digest,
+                nodes=matching_nodes,
+                quarantine=tuple(quarantine),
+            )
+        except (TypeError, ValueError) as exc:
+            raise ConfigError(
+                "CodeDoc recovery contains a malformed split-partial container."
+            ) from exc
+        partials.append(partial)
+    return tuple(partials), tuple(legacy_rel_paths)
 
 
 def _validate_json_schema(
@@ -313,7 +628,7 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
         )
 
     lw_schema = lightweight_meta.get("schema_version") if lightweight_meta else None
-    emb_schema = emb_view.get("schema_version") if emb_view else None
+    emb_schema = embedded.source_schema_version
     lw_entry = lightweight_meta.get("entry_file") if lightweight_meta else None
     emb_last_run = emb_view.get("last_run") if isinstance(emb_view, dict) else None
     emb_entry = None
@@ -357,6 +672,7 @@ def _read_markdown(path: Path, content: str) -> CodedocDocument:
         view = copy.deepcopy(emb_view)
     else:
         view = markdown_to_view(content)
+    view = sanitize_public_view(view)
 
     files = _extract_files(path, view.get("files"))
 
@@ -624,6 +940,118 @@ def _validate_last_run(path: Path, last_run: object) -> None:
         value = last_run[field]
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise ConfigError(f"'{path}' has a malformed last_run field '{field}'.")
+
+    split_strategy = last_run.get("large_file_strategy")
+    present_split_fields = (
+        _LAST_RUN_SPLIT_INTEGER_FIELDS
+        | _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS
+    ) & set(last_run)
+    if split_strategy is None and present_split_fields:
+        raise ConfigError(f"'{path}' has split statistics without split strategy.")
+    if split_strategy is not None:
+        if split_strategy != "split":
+            raise ConfigError(f"'{path}' has a malformed large_file_strategy.")
+        # Split is valid only in single mode (D2); a document claiming split
+        # statistics under triple mode is internally contradictory.
+        if last_run.get("analysis_mode") != "single":
+            raise ConfigError(
+                f"'{path}' has split statistics with a non-single analysis_mode."
+            )
+        missing_split_fields = _LAST_RUN_SPLIT_INTEGER_FIELDS - set(last_run)
+        if missing_split_fields:
+            raise ConfigError(
+                f"'{path}' has incomplete split statistics: "
+                f"missing {sorted(missing_split_fields)}."
+            )
+        for field in _LAST_RUN_SPLIT_INTEGER_FIELDS:
+            value = last_run[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigError(
+                    f"'{path}' has a malformed last_run field '{field}'."
+                )
+        for field in _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS:
+            if field not in last_run:
+                continue
+            value = last_run[field]
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigError(
+                    f"'{path}' has a malformed last_run field '{field}'."
+                )
+        reasons = last_run.get("split_blocked_by_reason")
+        if not isinstance(reasons, dict) or any(
+            reason not in _BLOCKED_REASONS
+            or isinstance(count, bool)
+            or not isinstance(count, int)
+            or count <= 0
+            for reason, count in reasons.items()
+        ):
+            raise ConfigError(f"'{path}' has malformed split-blocked statistics.")
+        if sum(reasons.values()) != last_run["split_blocked_files"]:
+            raise ConfigError(f"'{path}' has contradictory split-blocked statistics.")
+        if (
+            last_run["split_syntax_files"] + last_run["split_lexical_files"]
+            != last_run["split_divided_files"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory split file-count statistics.")
+        # Every restored count is <= its total, and each "*_calls_planned"
+        # remainder plus its restored count equals its total (the frozen
+        # run-statistics definitions).
+        restored_pairs = (
+            ("split_restored_complete_chunks", "split_chunks"),
+            ("split_restored_unit_consolidation_calls", "split_unit_consolidation_calls_planned"),
+            ("split_restored_general_reduction_calls", "split_general_reduction_calls_planned"),
+            ("split_restored_final_synthesis_calls", "split_final_synthesis_calls_planned"),
+        )
+        for restored_field, total_field in restored_pairs:
+            if last_run[restored_field] > last_run[total_field]:
+                raise ConfigError(
+                    f"'{path}' has a restored split count exceeding its total "
+                    f"('{restored_field}' > '{total_field}')."
+                )
+        if (
+            last_run["unit_documentation_calls_planned"]
+            != last_run["split_chunks"] - last_run["split_restored_complete_chunks"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory leaf call-count statistics.")
+        expected_reduction_remaining = (
+            last_run["split_unit_consolidation_calls_planned"]
+            - last_run["split_restored_unit_consolidation_calls"]
+        ) + (
+            last_run["split_general_reduction_calls_planned"]
+            - last_run["split_restored_general_reduction_calls"]
+        )
+        if last_run["file_reduction_calls_planned"] != expected_reduction_remaining:
+            raise ConfigError(f"'{path}' has contradictory reduction call-count statistics.")
+        if (
+            last_run["synthesis_calls_planned"]
+            != last_run["split_final_synthesis_calls_planned"]
+            - last_run["split_restored_final_synthesis_calls"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory synthesis call-count statistics.")
+        if "split_unpaid_nodes" in last_run and last_run["split_unpaid_nodes"] != (
+            last_run["unit_documentation_calls_planned"]
+            + last_run["file_reduction_calls_planned"]
+            + last_run["synthesis_calls_planned"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory split unpaid-node statistics.")
+        if (
+            "split_reexecuted_nodes" in last_run
+            and "split_unpaid_nodes" in last_run
+            and last_run["split_reexecuted_nodes"] > last_run["split_unpaid_nodes"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory split reexecution statistics.")
+        if (
+            "split_completed_files_reused" in last_run
+            and last_run["split_completed_files_reused"]
+            > last_run["files_reused_unchanged"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory completed-split reuse statistics.")
+        if (
+            "split_partial_files_resumed" in last_run
+            and last_run["split_partial_files_resumed"]
+            > last_run["files_resumed_from_recovery"]
+        ):
+            raise ConfigError(f"'{path}' has contradictory split recovery statistics.")
 
     partition_total = (
         last_run["files_reused_unchanged"]

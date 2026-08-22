@@ -8,8 +8,10 @@ from tests.support.agent_fakes import mock_llm  # noqa: F401, F811
 
 import json
 import pytest
-from codedoc.agents.orchestrator import Orchestrator
+from codedoc.agents.orchestrator import Orchestrator, assemble_final_result
+from codedoc.agents.response_cleaning import MAX_SYMBOL_ITEMS_PER_KIND
 from codedoc.core.execution import _agent_errors
+from codedoc.core.file_division import FactLedger
 from tests.support.execution_requests import make_execution_request
 from tests.support.one_call_cases import _COMBINED
 from tests.support.one_call_cases import _COMBINED_JSON as ONE_CALL_COMBINED_JSON
@@ -185,3 +187,89 @@ def test_orchestrator_omits_revision_for_small_file(tmp_path):
     result = _process(tmp_path, "x = 1\n")
     assert result["state"] == "checked"
     assert "_max_context_revision" not in result
+
+
+def test_orchestrator_owns_the_single_file_synthesis_call(tmp_path):
+    provider = _CountingProvider()
+    orchestrator = Orchestrator(provider, analysis_mode="single")
+    request = make_execution_request(tmp_path, "pkg/large.py")
+
+    result = orchestrator.synthesize_divided_file(
+        request,
+        "division-plan:" + "0" * 64,
+        '{"division":{"complete_source_coverage":true},"units":[]}',
+    )
+
+    assert provider.calls == 1
+    assert result["file_path"] == "pkg/large.py"
+    assert result["language"] == "python"
+    assert result["description"] == "A documented module."
+
+
+def test_split_final_assembly_uses_the_ordinary_bounded_public_schema(tmp_path):
+    request = make_execution_request(tmp_path, "pkg/large.py")
+    functions = tuple(
+        {
+            "name": f"function_{index}",
+            "description": f"Function {index}.",
+            "signature": f"function_{index}()",
+            "_provenance": [
+                {
+                    "chunk_id": "chunk_" + f"{index:064x}",
+                    "source_order": index,
+                }
+            ],
+        }
+        for index in range(MAX_SYMBOL_ITEMS_PER_KIND + 5)
+    )
+    ledger = FactLedger(
+        functions=functions,
+        classes=(
+            {
+                "name": "Service",
+                "signature": "class Service",
+                "_provenance": [{"chunk_id": "chunk_" + "f" * 64}],
+            },
+        ),
+        exports=("Service",),
+    )
+
+    result = assemble_final_result(
+        request,
+        {"description": "A large module."},
+        ledger,
+        ("description", "functions", "classes", "exports"),
+        "large-file-v2:" + "a" * 64,
+    )
+
+    assert len(result["functions"]) == MAX_SYMBOL_ITEMS_PER_KIND
+    assert all(
+        set(item) <= {"name", "description"}
+        for item in result["functions"] + result["classes"]
+    )
+    assert result["structure"]["functions"] == result["functions"]
+    assert result["structure"]["classes"] == result["classes"]
+    assert result["exports"] == ["Service"]
+
+
+def test_split_final_assembly_discards_unrequested_structural_fields(tmp_path):
+    request = make_execution_request(tmp_path, "pkg/large.py")
+    result = assemble_final_result(
+        request,
+        {
+            "description": "A large module.",
+            "functions": [{"name": "forged"}],
+            "classes": [{"name": "Forged"}],
+            "exports": ["forged"],
+        },
+        FactLedger(),
+        ("description",),
+        "large-file-v2:" + "a" * 64,
+    )
+
+    assert result["functions"] == []
+    assert result["classes"] == []
+    assert result["exports"] == []
+    assert result["structure"]["functions"] == []
+    assert result["structure"]["classes"] == []
+    assert result["structure"]["exports"] == []

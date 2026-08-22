@@ -10,7 +10,7 @@ from codedoc.core.markdown_view import (
     markdown_from_view,
     read_embedded_view,
 )
-from codedoc.core.project_view import json_from_view
+from codedoc.core.project_view import build_project_view, json_from_view, read_codedoc_meta
 from tests.support.versionless_documents import _assert_versionless
 from tests.support.versionless_documents import _view as versionless_view
 from codedoc.core.document import records_by_path
@@ -23,6 +23,26 @@ from tests.support.cross_format_runs import _forbid_provider
 from codedoc.core.markdown_view import markdown_to_view
 from tests.support.run_metadata_cases import _view as run_metadata_view
 from codedoc.core.markdown_view import markdown_from_json
+from tests.support.run_metadata_cases import _split_record, _split_stats
+
+
+def test_split_record_round_trips_without_internal_division_content():
+    """An effective-split record round-trips JSON -> Markdown -> JSON with only
+    the ordinary supported file-level shape plus private identity: no public
+    `division` or `documentation_units` field ever appears (D9/D14)."""
+    view = build_project_view([_split_record()], _split_stats())
+    direct = json.loads(json_from_view(view))
+    markdown = markdown_from_view(view)
+    regenerated = json.loads(json_from_markdown(markdown))
+
+    for payload in (direct, regenerated):
+        file_record = payload["files"][0]
+        assert "division" not in file_record
+        assert "documentation_units" not in file_record
+    assert regenerated["files"][0]["_large_file_identity"] == direct["files"][0][
+        "_large_file_identity"
+    ]
+    assert regenerated["files"][0]["description"] == direct["files"][0]["description"]
 
 def test_public_output_converts_json_and_markdown_without_llm():
     import json
@@ -398,3 +418,308 @@ def test_json_markdown_round_trip_preserves_profile_shaped_record():
     # Private cache keys survive the embedded-view round-trip.
     assert rec["_prompt_profile_digest"] == "pp-v1:abc"
     assert rec["_analysis_mode"] == "single"
+
+
+def test_every_completed_conversion_boundary_strips_predecessor_split_internals(
+    tmp_path,
+):
+    raw = run_metadata_view()
+    raw["schema_version"] = "1.3"
+    raw["generated_at"] = "never-publish"
+    raw["run"] = {"split_fallback_files": 99}
+    raw["project"] = {
+        "entry_file": "ghost.py",
+        "file_count": 99,
+        "languages": ["ghost"],
+        "folders": ["ghost"],
+    }
+    raw["division"] = {"chunks": [{"payload": "secret source"}]}
+    raw["documentation_units"] = [{"description": "internal capsule"}]
+    raw["_codedoc"] = {
+        "partial_files": {
+            "main.py": {
+                "completed_chunks": [{"payload": "secret source"}],
+            }
+        }
+    }
+    raw["files"][0].update(
+        {
+            "division": {"chunks": [{"payload": "secret source"}]},
+            "documentation_units": [{"description": "internal capsule"}],
+            "chunk_id": "chunk-secret",
+            "unit_id": "unit-secret",
+            "node_id": "node-secret",
+            "plan_digest": "plan-secret",
+            "tree_digest": "tree-secret",
+            "capsule": {"description": "internal capsule"},
+            "start_byte": 0,
+            "end_byte": 12,
+            "_unregistered_private": "must not survive",
+        }
+    )
+    raw["files"].append("malformed-file-entry")
+
+    direct = json.loads(json_from_view(raw))
+    markdown_from_raw_json = markdown_from_json(raw)
+    embedded = read_embedded_view(markdown_from_raw_json)
+    reversed_json = json.loads(json_from_markdown(markdown_from_raw_json))
+    markdown_direct = markdown_from_view(raw)
+    embedded_direct = read_embedded_view(markdown_direct)
+    current_markdown_path = tmp_path / "current.md"
+    current_markdown_path.write_text(markdown_direct, encoding="utf-8")
+    lightweight_meta = read_codedoc_meta(current_markdown_path)
+
+    assert len(direct["files"]) == 2
+    assert embedded_direct["files"] == direct["files"]
+    assert lightweight_meta["entry_file"] == "main.py"
+    assert set(lightweight_meta["file_hashes"]) == {"main.py", "utils.py"}
+    assert "- Entry file: `main.py`" in markdown_direct
+    assert "- Files documented: 2" in markdown_direct
+    assert "ghost.py" not in markdown_direct
+
+    raw["files"].pop()
+    # Exercise a predecessor Markdown artifact whose embedded payload itself is
+    # raw/unsanitized; generating Markdown through current helpers would clean
+    # it before the read boundary and would not prove the reader/reverse path.
+    import base64
+    import re
+
+    raw_base64 = base64.b64encode(
+        json.dumps(raw, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+    raw_markdown = re.sub(
+        r"<!--\s*codedoc-ai-view-base64\s*[\s\S]*?\s*-->",
+        f"<!-- codedoc-ai-view-base64\n{raw_base64}\n-->",
+        markdown_direct,
+        count=1,
+    )
+    raw_markdown_embedded = read_embedded_view(raw_markdown)
+    raw_markdown_reversed = json.loads(json_from_markdown(raw_markdown))
+
+    raw_json_path = tmp_path / "codedoc.json"
+    raw_json_path.write_text(json.dumps(raw), encoding="utf-8")
+    read_boundary = read_codedoc_document(raw_json_path).view
+    raw_markdown_path = tmp_path / "codedoc.md"
+    raw_markdown_path.write_text(raw_markdown, encoding="utf-8")
+    markdown_read_boundary = read_codedoc_document(raw_markdown_path).view
+
+    forbidden = {
+        "schema_version",
+        "generated_at",
+        "run",
+        "project",
+        "division",
+        "documentation_units",
+        "completed_chunks",
+        "partial_files",
+        "chunk_id",
+        "unit_id",
+        "node_id",
+        "plan_digest",
+        "tree_digest",
+        "capsule",
+        "start_byte",
+        "end_byte",
+        "_unregistered_private",
+    }
+
+    def assert_clean(value):
+        if isinstance(value, dict):
+            assert forbidden.isdisjoint(value)
+            for item in value.values():
+                assert_clean(item)
+        elif isinstance(value, list):
+            for item in value:
+                assert_clean(item)
+
+    for payload in (
+        direct,
+        embedded,
+        reversed_json,
+        embedded_direct,
+        raw_markdown_embedded,
+        raw_markdown_reversed,
+        read_boundary,
+        markdown_read_boundary,
+    ):
+        assert_clean(payload)
+        assert payload["files"][0]["description"] == "Entry point."
+        assert payload["files"][0]["_analysis_revision"] == "file-doc-v3"
+
+
+def test_nested_public_records_are_schema_projected_without_deleting_user_values(
+    tmp_path,
+):
+    raw = run_metadata_view()
+    nested = {
+        "signature": "INTERNAL-SIGNATURE",
+        "_provenance": [{"payload": "INTERNAL-PROVENANCE"}],
+        "division": {"payload": "INTERNAL-DIVISION"},
+        "documentation_units": [{"payload": "INTERNAL-UNIT"}],
+        "chunk_id": "INTERNAL-CHUNK",
+        "unit_id": "INTERNAL-UNIT-ID",
+        "node_id": "INTERNAL-NODE",
+        "plan_digest": "INTERNAL-PLAN",
+        "tree_digest": "INTERNAL-TREE",
+        "capsule": {"payload": "INTERNAL-CAPSULE"},
+        "start_byte": 1,
+        "end_byte": 2,
+    }
+    file_record = raw["files"][0]
+    file_record.update(nested)
+    file_record.update(
+        {
+            "imports": ["signature", "_provenance", nested],
+            "functions": [
+                {
+                    "name": "signature",
+                    "description": "Legitimate function.",
+                    **nested,
+                }
+            ],
+            "classes": [
+                {
+                    "name": "_provenance",
+                    "description": "Legitimate class.",
+                    **nested,
+                }
+            ],
+            "exports": ["signature", "_provenance", nested],
+            "key_concepts": ["signature", "_provenance", nested],
+            "_deps": {
+                "external": ["signature", "_provenance", nested],
+                "catalog_updates": [
+                    {
+                        "name": "signature",
+                        "type": "external",
+                        "used_for": "Legitimate dependency.",
+                        **nested,
+                    }
+                ],
+                "usage_notes": [
+                    {
+                        "import": "_provenance",
+                        "used_for": "Legitimate usage.",
+                        **nested,
+                    }
+                ],
+                **nested,
+            },
+            "links": {
+                "external_dependencies": [
+                    "signature",
+                    "_provenance",
+                    nested,
+                ],
+                **nested,
+            },
+            "_prompt_profile_digest": nested,
+        }
+    )
+    raw["last_run"].update(nested)
+    raw["tree"] = {
+        "signature": {
+            "_provenance": {
+                "type": "file",
+                "path": "signature/_provenance",
+                **nested,
+            }
+        }
+    }
+    raw["folders"][0].update(nested)
+    raw["folders"][0]["files"] = ["signature", "_provenance", nested]
+    raw["dependency_catalog"] = [
+        {
+            "name": "signature",
+            "type": "external",
+            "used_for": "Legitimate dependency.",
+            "files": ["_provenance", nested],
+            "file_count": 1,
+            **nested,
+        }
+    ]
+    raw["dependency_graph"] = [
+        {
+            "from": "_provenance",
+            "to": "signature",
+            "type": "internal_import",
+            **nested,
+        }
+    ]
+
+    markdown = markdown_from_view(raw)
+    markdown_path = tmp_path / "codedoc.md"
+    markdown_path.write_text(markdown, encoding="utf-8")
+    direct = json.loads(json_from_view(raw))
+    payloads = (
+        direct,
+        read_embedded_view(markdown),
+        markdown_to_view(markdown),
+        json.loads(json_from_markdown(markdown)),
+        read_codedoc_document(markdown_path).view,
+    )
+
+    for payload in payloads:
+        assert payload == direct
+        serialized = json.dumps(payload, sort_keys=True)
+        assert "INTERNAL-" not in serialized
+        projected = payload["files"][0]
+        assert projected["imports"] == ["signature", "_provenance"]
+        assert projected["functions"] == [
+            {"name": "signature", "description": "Legitimate function."}
+        ]
+        assert projected["classes"] == [
+            {"name": "_provenance", "description": "Legitimate class."}
+        ]
+        assert projected["exports"] == ["signature", "_provenance"]
+        assert projected["key_concepts"] == ["signature", "_provenance"]
+        assert projected["_deps"] == {
+            "external": ["signature", "_provenance"],
+            "catalog_updates": [
+                {
+                    "name": "signature",
+                    "type": "external",
+                    "used_for": "Legitimate dependency.",
+                }
+            ],
+            "usage_notes": [
+                {
+                    "import": "_provenance",
+                    "used_for": "Legitimate usage.",
+                }
+            ],
+        }
+        assert projected["links"] == {
+            "external_dependencies": ["signature", "_provenance"]
+        }
+        assert "_prompt_profile_digest" not in projected
+        assert payload["tree"] == {
+            "signature": {
+                "_provenance": {
+                    "type": "file",
+                    "path": "signature/_provenance",
+                }
+            }
+        }
+        assert payload["folders"][0]["files"] == ["signature", "_provenance"]
+        assert payload["dependency_catalog"] == [
+            {
+                "name": "signature",
+                "type": "external",
+                "used_for": "Legitimate dependency.",
+                "files": ["_provenance"],
+                "file_count": 1,
+            }
+        ]
+        assert payload["dependency_graph"] == [
+            {
+                "from": "_provenance",
+                "to": "signature",
+                "type": "internal_import",
+            }
+        ]
+        assert not set(nested) & set(payload["last_run"])
+
+    assert "signature" in markdown
+    assert "_provenance" in markdown
+    assert "INTERNAL-" not in markdown

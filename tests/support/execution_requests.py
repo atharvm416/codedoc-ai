@@ -19,6 +19,7 @@ def make_execution_request(
     analysis_mode: str = "single",
     max_content_chars: int = 12000,
     truncation_head_ratio: float = 0.70,
+    resolved_profile: ResolvedProfile | None = None,
     write: bool = True,
 ) -> FileExecutionRequest:
     """Build one frozen ``FileExecutionRequest`` for direct orchestrator/
@@ -33,7 +34,8 @@ def make_execution_request(
     if write:
         absolute.parent.mkdir(parents=True, exist_ok=True)
         absolute.write_text(content, encoding="utf-8", newline="")
-    bundle = ResolvedProfile(analysis_mode, None).resolve_bundle(
+    profile = resolved_profile or ResolvedProfile(analysis_mode, None)
+    bundle = profile.resolve_bundle(
         FileScope(basename=Path(rel_path).name.lower())
     )
     return FileExecutionRequest(

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY, _prior_run_identity
 import json
 from tests.support.pipeline_scenarios import no_llm
 from tests.support.pipeline_scenarios import write_existing_md
@@ -20,6 +20,212 @@ from tests.support.providers import SmartFake
 from tests.support.cross_format_runs import _config
 from tests.support.cross_format_runs import _first_run
 from tests.support.cross_format_runs import _forbid_provider
+
+
+@pytest.mark.parametrize(
+    ("first_format", "second_format", "first_name", "second_name"),
+    [
+        ("json", "md", "codedoc.json", "codedoc.md"),
+        ("md", "json", "codedoc.md", "codedoc.json"),
+    ],
+)
+def test_split_fields_survive_provider_free_cross_format_conversion(
+    tmp_path, monkeypatch, first_format, second_format, first_name, second_name
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    first_config = {
+        **_config(first_format),
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+    }
+    provider = SmartFake()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+    first_stats = run_pipeline(tmp_path, first_config)
+    assert first_stats["checked"] == 1
+
+    _forbid_provider(monkeypatch)
+    second_stats = run_pipeline(
+        tmp_path,
+        {
+            **_config(second_format),
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+        },
+    )
+
+    output_dir = tmp_path / "docs"
+    first_record = records_by_path(
+        read_codedoc_document(output_dir / first_name)
+    )["main.py"]
+    second_record = records_by_path(
+        read_codedoc_document(output_dir / second_name)
+    )["main.py"]
+    assert second_stats["checked"] == 0
+    # Internal division/reduction content is never public (D9/D14); only the
+    # final documentation and its provider-free large-file identity round-trip.
+    assert "division" not in first_record
+    assert "division" not in second_record
+    assert "documentation_units" not in first_record
+    assert "documentation_units" not in second_record
+    assert first_record["description"] == second_record["description"]
+    assert first_record["_large_file_identity"] == second_record[
+        "_large_file_identity"
+    ]
+    assert not (output_dir / RECOVERY_FILENAME).exists()
+
+
+def test_stale_0_14_2_split_identity_reprocesses_while_ordinary_sibling_converts_free(
+    tmp_path, monkeypatch
+):
+    """Section 6: the cross-format matrix must treat a preserved `0.14.2`
+    completed split record (bound to the retired `leaf-capsule-v5` /
+    150,656-char payload) as stale under the current v6 identity and
+    reprocess it, while an ordinary compatible sibling in the very same
+    conversion still reuses with zero provider calls."""
+    from codedoc.core.db import compute_file_hash
+    from codedoc.core.output import write_project_outputs
+    from codedoc.core.record_meta import ANALYSIS_REVISION, expected_large_file_identity
+
+    large_source = "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(large_source, encoding="utf-8", newline="")
+    (tmp_path / "helper.py").write_text("def helper(): pass\n", encoding="utf-8")
+    main_hash = compute_file_hash(tmp_path / "main.py")
+    helper_hash = compute_file_hash(tmp_path / "helper.py")
+
+    current_identity = expected_large_file_identity(
+        source_chars=len(large_source),
+        max_chars=2000,
+        rel_path="main.py",
+        division_plan_digest="division-plan:" + "1" * 64,
+        reduction_tree_digest="reduction-tree:" + "2" * 64,
+        structural_mode="syntax",
+        imports_digest="imports:" + "3" * 64,
+    )
+    # Reproduce exactly what a preserved 0.14.2 record's identity payload
+    # would hash to: identical inputs, but leaf_capsule/leaf_capsule_chars
+    # reverted to their retired 0.14.2 values (section 5).
+    import hashlib
+    import json as _json
+
+    from codedoc.core.file_division import (
+        FINAL_SYNTHESIS_REVISION,
+        LEDGER_SCHEMA_REVISION,
+        MAX_ATOMS_PER_FILE,
+        MAX_CHUNKS_PER_FILE,
+        MAX_KNOWN_SYMBOLS_PER_CHUNK,
+        MAX_LEAF_PROMPT_METADATA_CHARS,
+        MAX_LEDGER_SYNOPSIS_CHARS,
+        MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+        MAX_REDUCTION_NARRATIVE_CHARS,
+        MAX_REDUCTION_TREE_DEPTH,
+        MAX_SYMBOLS_PER_FILE,
+        MAX_UNITS_PER_FILE,
+        PACKER_SCHEMA_REVISION,
+        REDUCER_PROMPT_REVISION,
+        REDUCTION_CAPSULE_SCHEMA_REVISION,
+        REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+        REDUCTION_PACKING_REVISION,
+        STRUCTURE_SCHEMA_REVISION,
+        UNIT_SCHEMA_REVISION,
+    )
+    from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
+
+    stale_payload = {
+        "revision": "large-file-identity-v3",
+        "requested_strategy": "split",
+        "effective_strategy": "split",
+        "source_budget": 2000,
+        "path": "main.py",
+        "division_plan_digest": "division-plan:" + "1" * 64,
+        "reduction_tree_digest": "reduction-tree:" + "2" * 64,
+        "structural_mode": "syntax",
+        "imports_digest": "imports:" + "3" * 64,
+        "parser_package_version": PARSER_PACKAGE_VERSION,
+        "grammar_availability_mode": "bundled-grammar-or-complete-lexical-fallback-v1",
+        "bounds": {
+            "atoms": MAX_ATOMS_PER_FILE, "symbols": MAX_SYMBOLS_PER_FILE,
+            "units": MAX_UNITS_PER_FILE, "chunks": MAX_CHUNKS_PER_FILE,
+            "known_symbols_per_chunk": MAX_KNOWN_SYMBOLS_PER_CHUNK,
+            "leaf_prompt_metadata_chars": MAX_LEAF_PROMPT_METADATA_CHARS,
+        },
+        "reduction_bounds": {
+            "leaf_capsule_chars": 150656,
+            "reduction_capsule_chars": MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+            "reduction_envelope_overhead": REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+            "final_narrative_chars": MAX_REDUCTION_NARRATIVE_CHARS,
+            "final_ledger_synopsis_chars": MAX_LEDGER_SYNOPSIS_CHARS,
+            "final_envelope": "exact-worst-case-v2",
+            "max_tree_depth": MAX_REDUCTION_TREE_DEPTH,
+        },
+        "revisions": {
+            "structure": STRUCTURE_SCHEMA_REVISION, "units": UNIT_SCHEMA_REVISION,
+            "packer": PACKER_SCHEMA_REVISION, "leaf_capsule": "leaf-capsule-v5",
+            "ledger": LEDGER_SCHEMA_REVISION,
+            "reduction_capsule": REDUCTION_CAPSULE_SCHEMA_REVISION,
+            "reduction_packing": REDUCTION_PACKING_REVISION,
+            "reducer_prompt": REDUCER_PROMPT_REVISION,
+            "final_synthesis": FINAL_SYNTHESIS_REVISION,
+        },
+    }
+    stale_identity = "large-file-v3:" + hashlib.sha256(
+        _json.dumps(stale_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+    assert stale_identity != current_identity
+
+    records = [
+        {
+            "hash": helper_hash,
+            "file_path": "helper.py",
+            "language": "python",
+            "documentation": {
+                "file_path": "helper.py", "language": "python", "description": "Helper.",
+            },
+            **_prior_run_identity("helper.py"),
+        },
+        {
+            "hash": main_hash,
+            "file_path": "main.py",
+            "language": "python",
+            "documentation": {
+                "file_path": "main.py", "language": "python",
+                "description": "0.14.2-produced split documentation.",
+                "_analysis_revision": ANALYSIS_REVISION,
+                "_analysis_mode": "single",
+                "_large_file_identity": stale_identity,
+            },
+        },
+    ]
+    docs_dir = tmp_path / "docs"
+    write_project_outputs(records, {"checked": 2, "failed": 0, "skipped": 0}, docs_dir, output_format="json")
+
+    provider = SmartFake()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _cfg: provider)
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "helper.py",
+            "documentation_scope": "all",
+            "output_dir": "docs",
+            "output_format": "md",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "parallel_agents": False,
+            "propagate_changes": False,
+        },
+    )
+
+    # helper.py: ordinary compatible reuse, zero calls (skipped as
+    # unchanged). main.py: stale split identity, reprocessed under the
+    # current v6 leaf identity.
+    assert stats["checked"] == 1
+    assert stats["skipped"] == 1
+    assert provider.doc_calls > 0
+    record = records_by_path(
+        read_codedoc_document(tmp_path / "docs" / "codedoc.md")
+    )["main.py"]
+    assert record["_large_file_identity"] != stale_identity
+
 
 def test_cross_format_sibling_is_used_for_zero_call_conversion(tmp_path, monkeypatch):
     """--output docs/claude.json after a previous --format md run that wrote

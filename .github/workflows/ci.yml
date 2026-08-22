@@ -149,7 +149,7 @@ jobs:
         run: python -m ruff check .
 
   package:
-    name: Build, twine check, installed-wheel smoke
+    name: Build, twine check, installed-artifact smoke
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -159,18 +159,55 @@ jobs:
       - name: Install build tooling
         run: |
           python -m pip install --upgrade pip
-          python -m pip install build twine
+          python -m pip install build twine pytest
       - name: Build sdist and wheel
         run: python -m build
       - name: Twine check
         run: python -m twine check dist/*
+      - name: Artifact-content contract
+        run: CODEDOC_ARTIFACT_DIR="$PWD/dist" python -m pytest tests/contract/package/test_packaged_workflow.py -q
       - name: Install wheel into a clean environment
         run: |
-          python -m venv /tmp/clean-env
-          /tmp/clean-env/bin/python -m pip install --upgrade pip
-          /tmp/clean-env/bin/python -m pip install dist/*.whl
-      - name: Smoke-test the installed console script
+          python -m venv /tmp/clean-env-wheel
+          /tmp/clean-env-wheel/bin/python -m pip install --upgrade pip
+          /tmp/clean-env-wheel/bin/python -m pip install dist/*.whl
+      - name: Install sdist into a clean environment
         run: |
-          /tmp/clean-env/bin/python -c "import codedoc; print(codedoc.__version__)"
-          /tmp/clean-env/bin/codedoc --version
-          /tmp/clean-env/bin/codedoc --help
+          python -m venv /tmp/clean-env-sdist
+          /tmp/clean-env-sdist/bin/python -m pip install --upgrade pip
+          /tmp/clean-env-sdist/bin/python -m pip install dist/*.tar.gz
+      # Both smoke steps must run from OUTSIDE the checkout with the candidate
+      # environment's own bin directory first on PATH (plan section 6.2, ledger
+      # A16).  Two failure modes this deliberately avoids, both verified
+      # locally against real built distributions:
+      #   * `python -c` sets sys.path[0] to the cwd, so running the origin
+      #     assertion from the checkout imports the SOURCE TREE, not the
+      #     installed package, and the site-packages assertion fails.
+      #   * the harness resolves the console script with shutil.which(), which
+      #     without this PATH finds any other `codedoc` on the runner and
+      #     aborts with console-script-environment-mismatch.
+      # The expected version is read from pyproject.toml while still in the
+      # checkout and passed through the environment, so no step needs both the
+      # repository cwd and the installed import at the same time.
+      - name: Smoke-test the wheel-installed distribution
+        run: |
+          CODEDOC_EXPECTED_VERSION="$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")"
+          HARNESS="$PWD/tests/contract/package/installed_artifact_smoke.py"
+          export PATH="/tmp/clean-env-wheel/bin:$PATH"
+          export CODEDOC_EXPECTED_VERSION
+          cd /tmp
+          /tmp/clean-env-wheel/bin/python -c "import os, pathlib, site, codedoc; expected = os.environ['CODEDOC_EXPECTED_VERSION']; origin = pathlib.Path(codedoc.__file__).resolve(); roots = [pathlib.Path(v).resolve() for v in (*site.getsitepackages(), site.getusersitepackages()) if v]; assert any(origin.is_relative_to(r) for r in roots), f'not installed from site-packages: {origin}'; assert codedoc.__version__ == expected, (codedoc.__version__, expected)"
+          /tmp/clean-env-wheel/bin/codedoc --version
+          /tmp/clean-env-wheel/bin/codedoc --help
+          /tmp/clean-env-wheel/bin/python "$HARNESS" --scenario all
+      - name: Smoke-test the sdist-installed distribution
+        run: |
+          CODEDOC_EXPECTED_VERSION="$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")"
+          HARNESS="$PWD/tests/contract/package/installed_artifact_smoke.py"
+          export PATH="/tmp/clean-env-sdist/bin:$PATH"
+          export CODEDOC_EXPECTED_VERSION
+          cd /tmp
+          /tmp/clean-env-sdist/bin/python -c "import os, pathlib, site, codedoc; expected = os.environ['CODEDOC_EXPECTED_VERSION']; origin = pathlib.Path(codedoc.__file__).resolve(); roots = [pathlib.Path(v).resolve() for v in (*site.getsitepackages(), site.getusersitepackages()) if v]; assert any(origin.is_relative_to(r) for r in roots), f'not installed from site-packages: {origin}'; assert codedoc.__version__ == expected, (codedoc.__version__, expected)"
+          /tmp/clean-env-sdist/bin/codedoc --version
+          /tmp/clean-env-sdist/bin/codedoc --help
+          /tmp/clean-env-sdist/bin/python "$HARNESS" --scenario all

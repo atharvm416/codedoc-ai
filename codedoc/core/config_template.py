@@ -71,7 +71,13 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("llm_mode", "LLM mode. Only 'api' is supported."),
     ("llm_provider", "Provider: 'auto', 'openai', 'anthropic', or 'gemini'."),
     ("model_name", "Model identifier; empty selects the provider default."),
-    ("api_base_url", "Custom OpenAI-compatible base URL, or null."),
+    (
+        "api_base_url",
+        "Custom OpenAI-compatible base URL, or null. A non-null value also "
+        "requires runtime endpoint-trust approval (--trust-api-base-url or "
+        "CODEDOC_TRUST_API_BASE_URL); this key alone never authorizes sending "
+        "anything to that endpoint.",
+    ),
     ("api_key", "Never stored here; set an API key via environment variable."),
     ("entry_file", "Entry file relative to the project root, or null to auto-detect."),
     ("documentation_scope", "'entry' (reachable from entry) or 'all' scanned files."),
@@ -114,7 +120,25 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ("rate_limit_signals_add", "Extra rate-limit signal strings to add."),
     ("rate_limit_signals_remove", "Rate-limit signal strings to remove."),
     ("ignore_paths", "Project-relative paths to ignore."),
-    ("max_content_chars", "Maximum source characters sent to the LLM per file."),
+    (
+        "max_content_chars",
+        "Hard character ceiling for ordinary source input and each planned "
+        "split leaf, reduction manifest, and final-synthesis manifest.",
+    ),
+    (
+        "large_file_strategy",
+        "Large-file handling. 'truncate' (default) keeps the byte-compatible "
+        "legacy head/tail path. 'split' supports provider-free dry-run planning, "
+        "paid execution, same-path completed-record reuse, and node-level "
+        "partial recovery with analysis_mode 'single'. It divides oversized "
+        "source at deterministic semantic or lexical boundaries, proves "
+        "complete coverage, builds the reduction topology, and reports call "
+        "and capacity estimates before provider calls. An exact unchanged "
+        "completed split file is reused with zero provider calls; an "
+        "interrupted split file resumes only its unpaid leaf, reducer, and "
+        "final nodes. Triple plus split is rejected before scanning or other "
+        "side effects.",
+    ),
     ("dry_run", "Plan only: no writes and no provider calls."),
     ("max_files", "Safety cap on files that may make LLM calls (0 = unlimited)."),
     (
@@ -130,6 +154,10 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     (
         "truncation_head_ratio",
         "Head fraction (0<r<1) of the head+tail truncation split.",
+    ),
+    (
+        "provider_request_timeout_s",
+        "Per-phase provider request transport timeout in seconds (1-600).",
     ),
     (
         "response_correction_enabled",
@@ -197,6 +225,12 @@ def init_config(project_root: Path | str, force: bool = False) -> InitResult:
             message=(
                 f"Created {target} with every public default and editable "
                 "single/triple prompt instructions. Edit it, then run codedoc.\n"
+                # The generated file is strict JSON, so it cannot carry inline
+                # comments explaining each key. Point config-first users at the
+                # per-key guidance instead of leaving them with bare values.
+                "Every key is documented in the README configuration section; "
+                "'codedoc --help' additionally describes large-file split "
+                "planning, fresh execution, and capacity reasons.\n"
                 + _CREDENTIAL_NOTE
             ),
         )

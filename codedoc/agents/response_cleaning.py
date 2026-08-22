@@ -43,6 +43,23 @@ from codedoc.agents.response_diagnostics import (
     scalar_removal_reason,
     type_detail,
 )
+from codedoc.core.file_division import (
+    MAX_LEAF_DESCRIPTION_CHARS,
+    MAX_LEAF_EXPORT_ITEM_CHARS,
+    MAX_LEAF_EXPORT_ITEMS,
+    MAX_LEAF_SYMBOL_DESCRIPTION_CHARS,
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
+    MAX_LEAF_SYMBOL_NAME_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+    MAX_REDUCTION_NARRATIVE_CHARS,
+)
+from codedoc.core.result_assembly import (
+    MAX_PUBLIC_EXPORT_ITEM_CHARS,
+    MAX_PUBLIC_EXPORT_ITEMS,
+    MAX_PUBLIC_SYMBOL_DESCRIPTION_CHARS,
+    MAX_PUBLIC_SYMBOL_ITEMS_PER_KIND,
+    MAX_PUBLIC_SYMBOL_NAME_CHARS,
+)
 from codedoc.utils.errors import AgentError
 
 # ---------------------------------------------------------------------------
@@ -53,10 +70,11 @@ MAX_COMBINED_RESPONSE_CHARS = 12000
 MAX_DESCRIPTION_CHARS = 1200
 MAX_ROLE_CHARS = 800
 MAX_USAGE_EXAMPLE_CHARS = 2000
-MAX_SYMBOL_ITEMS_PER_KIND = 12
-MAX_SYMBOL_NAME_CHARS = 128
-MAX_SYMBOL_DESCRIPTION_CHARS = 300
-MAX_EXPORT_ITEMS = 32
+MAX_SYMBOL_ITEMS_PER_KIND = MAX_PUBLIC_SYMBOL_ITEMS_PER_KIND
+MAX_SYMBOL_NAME_CHARS = MAX_PUBLIC_SYMBOL_NAME_CHARS
+MAX_SYMBOL_DESCRIPTION_CHARS = MAX_PUBLIC_SYMBOL_DESCRIPTION_CHARS
+MAX_EXPORT_ITEMS = MAX_PUBLIC_EXPORT_ITEMS
+MAX_EXPORT_ITEM_CHARS = MAX_PUBLIC_EXPORT_ITEM_CHARS
 MAX_DEPENDENCY_ITEMS_PER_LIST = 32
 MAX_LIST_ITEM_CHARS = 256
 MAX_CATALOG_UPDATE_ITEMS = 16
@@ -506,7 +524,7 @@ def _clean_combined_fields(raw_obj: dict, collector=None) -> dict:
     _put_scalar(cleaned, "role_in_system", raw_obj, MAX_ROLE_CHARS, collector)
     _put_symbols(cleaned, "functions", raw_obj, collector)
     _put_symbols(cleaned, "classes", raw_obj, collector)
-    _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_SYMBOL_NAME_CHARS, collector)
+    _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_EXPORT_ITEM_CHARS, collector)
     _put_dependencies(cleaned, raw_obj, collector)
     _put_str_list(cleaned, "key_concepts", raw_obj, MAX_KEY_CONCEPT_ITEMS, MAX_KEY_CONCEPT_CHARS, collector)
     _put_scalar(cleaned, "usage_example", raw_obj, MAX_USAGE_EXAMPLE_CHARS, collector)
@@ -521,7 +539,7 @@ def _clean_structure_fields(raw_obj: dict, collector=None) -> dict:
     _put_scalar(cleaned, "role_in_system", raw_obj, MAX_ROLE_CHARS, collector)
     _put_symbols(cleaned, "functions", raw_obj, collector)
     _put_symbols(cleaned, "classes", raw_obj, collector)
-    _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_SYMBOL_NAME_CHARS, collector)
+    _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_EXPORT_ITEM_CHARS, collector)
     return cleaned
 
 
@@ -659,4 +677,249 @@ def clean_documentation_report(raw_obj: object, file_path: str) -> CleanResult:
         value=cleaned,
         removed=collector.finalize(),
         valid_empty_paths=_explicit_empty_list_paths(source, ("key_concepts",)),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Fixed internal split leaf-capsule / reduction-capsule cleaning (D5/D6/sections 7 and 9)
+# ---------------------------------------------------------------------------
+#
+# These schemas are fixed, developer-owned, and never derived from a
+# prompt-profile registry: split internal work is not user-configurable.  A
+# leaf capsule's only required field is ``description``; a reduction capsule
+# carries a single refined ``narrative`` field. Symbol/export leaf bounds align
+# with the corresponding whole-file fields; the leaf description and reduction
+# narrative share the exact child-narrative ceiling. Reducer fan-in is sized
+# from the rendered narratives, independently of leaf capsule JSON size (see
+# ``codedoc.core.file_division``).
+
+_LEAF_CAPSULE_KEYS = ("description", "functions", "classes", "exports")
+_REDUCTION_CAPSULE_KEYS = ("narrative",)
+
+
+def _clean_fixed_scalar(
+    value: object,
+    max_chars: int,
+    *,
+    collector=None,
+    path: str,
+) -> str | None:
+    """Clean a fixed-capsule scalar without silently truncating facts."""
+    if isinstance(value, bool) or not isinstance(value, str):
+        _report(
+            collector,
+            path,
+            scalar_removal_reason(value),
+            type_detail(value),
+        )
+        return None
+    trimmed = value.strip()
+    if not trimmed:
+        _report(
+            collector,
+            path,
+            scalar_removal_reason(value),
+            type_detail(value),
+        )
+        return None
+    if len(trimmed) > max_chars:
+        _report(
+            collector,
+            path,
+            REMOVAL_RESPONSE_CAP,
+            f"{len(trimmed)} chars over cap {max_chars}",
+        )
+        return None
+    return trimmed
+
+
+def _clean_fixed_str_list(
+    value: object,
+    max_items: int,
+    max_item_chars: int,
+    *,
+    collector=None,
+    path: str,
+) -> list[str]:
+    """Clean a fixed-capsule string list without truncating any item."""
+    if not isinstance(value, list):
+        return []
+    out: list[str] = []
+    seen: set[str] = set()
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        cleaned = _clean_fixed_scalar(
+            item,
+            max_item_chars,
+            collector=collector,
+            path=item_path,
+        )
+        if cleaned is None:
+            continue
+        if cleaned in seen:
+            _report(
+                collector,
+                item_path,
+                REMOVAL_DUPLICATE,
+                type_detail(item),
+            )
+            continue
+        if len(out) >= max_items:
+            _report(
+                collector,
+                item_path,
+                REMOVAL_ITEM_LIMIT,
+                f"index {index} over cap {max_items}",
+            )
+            continue
+        seen.add(cleaned)
+        out.append(cleaned)
+    return out
+
+
+def _clean_leaf_symbols(value: object, collector=None, path: str = "") -> list[dict]:
+    """Clean a leaf-capsule function/class list under its fixed bounds."""
+    if not isinstance(value, list):
+        return []
+    out: list[dict] = []
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        if not isinstance(item, dict):
+            _report(collector, item_path, REMOVAL_WRONG_TYPE, type_detail(item))
+            continue
+        for field, field_value in item.items():
+            if field not in ("name", "description", "signature"):
+                _report(collector, f"{item_path}.{field}", REMOVAL_UNKNOWN_FIELD, type_detail(field_value))
+        name = _clean_fixed_scalar(
+            item.get("name"),
+            MAX_LEAF_SYMBOL_NAME_CHARS,
+            collector=collector,
+            path=f"{item_path}.name",
+        )
+        if name is None:
+            continue
+        cleaned: dict = {"name": name}
+        if "description" in item:
+            desc = _clean_fixed_scalar(
+                item["description"],
+                MAX_LEAF_SYMBOL_DESCRIPTION_CHARS,
+                collector=collector,
+                path=f"{item_path}.description",
+            )
+            if desc is not None:
+                cleaned["description"] = desc
+        # Optional, but load-bearing: the ledger's semantic key uses the
+        # signature to keep same-named overloads distinct (D7/section 8). Dropping it
+        # here would silently collapse `run(int)` and `run(str)` into one fact.
+        if "signature" in item:
+            signature = _clean_fixed_scalar(
+                item["signature"],
+                MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+                collector=collector,
+                path=f"{item_path}.signature",
+            )
+            if signature is not None:
+                cleaned["signature"] = signature
+        if len(out) >= MAX_LEAF_SYMBOL_ITEMS_PER_KIND:
+            _report(collector, item_path, REMOVAL_ITEM_LIMIT,
+                    f"index {index} over cap {MAX_LEAF_SYMBOL_ITEMS_PER_KIND}")
+            continue
+        out.append(cleaned)
+    return out
+
+
+def _clean_leaf_capsule_fields(raw_obj: dict, collector=None) -> dict:
+    _report_unknown_keys(collector, raw_obj, _LEAF_CAPSULE_KEYS)
+    cleaned: dict = {}
+    if "description" in raw_obj:
+        description = _clean_fixed_scalar(
+            raw_obj["description"],
+            MAX_LEAF_DESCRIPTION_CHARS,
+            collector=collector,
+            path="description",
+        )
+        if description is not None:
+            cleaned["description"] = description
+    for key in ("functions", "classes"):
+        raw_value = raw_obj.get(key)
+        if collector is not None and key in raw_obj and not isinstance(raw_value, list):
+            _report(collector, key, REMOVAL_WRONG_TYPE, type_detail(raw_value))
+        symbols = _clean_leaf_symbols(raw_value, collector=collector, path=key)
+        if symbols:
+            cleaned[key] = symbols
+    raw_exports = raw_obj.get("exports")
+    if (
+        collector is not None
+        and "exports" in raw_obj
+        and not isinstance(raw_exports, list)
+    ):
+        _report(
+            collector,
+            "exports",
+            REMOVAL_WRONG_TYPE,
+            type_detail(raw_exports),
+        )
+    exports = _clean_fixed_str_list(
+        raw_exports,
+        MAX_LEAF_EXPORT_ITEMS,
+        MAX_LEAF_EXPORT_ITEM_CHARS,
+        collector=collector,
+        path="exports",
+    )
+    if exports:
+        cleaned["exports"] = exports
+    return cleaned
+
+
+def clean_leaf_capsule_report(raw_obj: object, file_path: str) -> CleanResult:
+    """Clean one fixed internal leaf-fragment capsule.
+
+    Never raises for an empty or non-object input: the shared response path
+    owns the top-level-object and required-field decisions.  Unlike the
+    whole-file cleaners, this never includes ``role_in_system``,
+    ``dependencies_analysis``, ``key_concepts``, or ``usage_example`` — those
+    are whole-file inferences a fragment must never make (D5).
+    """
+    collector = RemovalCollector()
+    source = raw_obj if isinstance(raw_obj, dict) else {}
+    cleaned = _clean_leaf_capsule_fields(source, collector)
+    valid_empty_paths = _explicit_empty_list_paths(source, ("functions", "classes", "exports"))
+    return CleanResult(
+        value=cleaned,
+        removed=collector.finalize(),
+        valid_empty_paths=valid_empty_paths,
+        removal_reason_codes=collector.reason_codes(),
+    )
+
+
+def _clean_reduction_capsule_fields(raw_obj: dict, collector=None) -> dict:
+    _report_unknown_keys(collector, raw_obj, _REDUCTION_CAPSULE_KEYS)
+    cleaned: dict = {}
+    if "narrative" in raw_obj:
+        narrative = _clean_fixed_scalar(
+            raw_obj["narrative"],
+            MAX_REDUCTION_NARRATIVE_CHARS,
+            collector=collector,
+            path="narrative",
+        )
+        if narrative is not None:
+            cleaned["narrative"] = narrative
+    return cleaned
+
+
+def clean_reduction_capsule_report(raw_obj: object, file_path: str) -> CleanResult:
+    """Clean one fixed internal reduction (narrative-only) capsule.
+
+    A reduction call refines prose only (section 9): it never carries — and can
+    never reintroduce — functions/classes/exports; those live solely in the
+    locally maintained fact ledger.
+    """
+    collector = RemovalCollector()
+    source = raw_obj if isinstance(raw_obj, dict) else {}
+    cleaned = _clean_reduction_capsule_fields(source, collector)
+    return CleanResult(
+        value=cleaned,
+        removed=collector.finalize(),
+        valid_empty_paths=(),
+        removal_reason_codes=collector.reason_codes(),
     )

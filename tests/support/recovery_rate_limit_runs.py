@@ -12,7 +12,7 @@ def _make_fake_provider(description: str = "Documented.", fail_after: int = -1):
         after the first *fail_after* successful calls.  -1 = always succeed.
     """
     import json as _json
-    from codedoc.utils.errors import LLMError
+    from tests.support.provider_failures import provider_failure_error
 
     call_count = {"n": 0}
 
@@ -22,7 +22,9 @@ def _make_fake_provider(description: str = "Documented.", fail_after: int = -1):
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if fail_after >= 0 and call_count["n"] > fail_after:
-                raise LLMError("fake", "429 rate_limit_exceeded tokens per min")
+                raise provider_failure_error(
+                    "openai", "provider-rate-limited", status=429, limit_type="tpm"
+                )
             if "key_concepts" in prompt:
                 return _json.dumps({
                     "description": description,

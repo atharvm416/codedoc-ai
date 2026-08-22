@@ -18,6 +18,21 @@ from tests.support.record_metadata_cases import _view_with_secret
 from tests.support.dependency_view_cases import _record as dependency_view_record
 from codedoc.core.output import write_project_outputs
 from tests.support.reachability_cases import _record as reachability_record
+from tests.support.run_metadata_cases import _split_record, _split_stats
+
+
+def test_markdown_renders_split_run_summary_without_internal_unit_content():
+    view = build_project_view([_split_record()], _split_stats())
+
+    markdown = markdown_from_view(view)
+
+    assert "Semantic units / leaf chunks" in markdown
+    assert "Completed split files reused / partial files resumed: 0 / 0" in markdown
+    assert "Unpaid / reexecuted / quarantined nodes: 3 / 1 / 2" in markdown
+    assert "Recovery conflict files: 1" in markdown
+    assert "**Source coverage:**" not in markdown
+    assert "Documentation Unit" not in markdown
+    assert markdown_to_view(markdown) == view
 
 def test_md_output_embeds_file_hashes_in_metadata_comment(tmp_path):
     """file_hashes must appear in the <!-- codedoc-ai: ... --> comment so that

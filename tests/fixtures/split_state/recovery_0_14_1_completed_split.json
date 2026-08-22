@@ -1,0 +1,51 @@
+{
+  "_crash_safety": "INCOMPLETE RUN - codedoc is still generating or stopped before completion. This JSON is a crash-recovery backup containing only files that were successfully documented so far. Re-run the same command to continue: compatible completed ordinary files can resume, while completed fresh-split files are deliberately re-documented from scratch.",
+  "_codedoc": {
+    "entry_file": "test_config_precedence.py",
+    "created_at": "2026-08-03T18:59:40.711475+00:00",
+    "updated_at": "2026-08-03T18:59:40.716143+00:00",
+    "status": "in_progress",
+    "live_backup": true,
+    "recovery_identity": {
+      "version": 1,
+      "project_root": "d:\\coding_materials\\library_creation\\codedoc\\tests\\integration\\pipeline",
+      "json_target": "d:\\coding_materials\\library_creation\\codedoc\\tests\\integration\\pipeline\\__fixture_capture_only__\\completed_0_14_1.json",
+      "md_target": null,
+      "entry_file": "test_config_precedence.py",
+      "documentation_scope": "entry",
+      "analysis_mode": "single",
+      "analysis_revision": "file-doc-v3",
+      "large_file_strategy": "split"
+    }
+  },
+  "files": [
+    {
+      "hash": "f4cdd10b2d2d0cdc6e7239d1552c3dcac319a27be2176ab73b3a9703e62696bb",
+      "path": "test_config_precedence.py",
+      "language": "python",
+      "description": "A file.",
+      "role_in_system": "core",
+      "imports": [
+        "__future__",
+        "json",
+        "codedoc.core.loader",
+        "codedoc.pipeline",
+        "tests.support.configuration_cases"
+      ],
+      "functions": [
+        {
+          "name": "f",
+          "description": "does f"
+        }
+      ],
+      "key_concepts": [
+        "kc"
+      ],
+      "usage_example": "import x",
+      "_analysis_revision": "file-doc-v3",
+      "_analysis_mode": "single",
+      "_large_file_identity": "large-file-v2:66808c4f103ee04e27633faee25a0de30beb09d9a2289eaafe200f058375ddbf",
+      "_split_reuse_contract": "fresh-only-v1"
+    }
+  ]
+}

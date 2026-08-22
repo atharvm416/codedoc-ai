@@ -43,8 +43,9 @@ def test_both_modes_produce_identical_top_level_keys(tmp_path):
             tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",), analysis_mode="triple"
         )
     )
-    assert set(single) - {"_analysis_revision", "_analysis_mode"} == _FLAT_KEYS
-    assert set(triple) - {"_analysis_revision", "_analysis_mode"} == _FLAT_KEYS
+    _identity_keys = {"_analysis_revision", "_analysis_mode", "_ordinary_path_identity"}
+    assert set(single) - _identity_keys == _FLAT_KEYS
+    assert set(triple) - _identity_keys == _FLAT_KEYS
 
 def test_single_mode_compatibility_views(tmp_path):
     result = Orchestrator(_CountingProvider(), analysis_mode="single").process(

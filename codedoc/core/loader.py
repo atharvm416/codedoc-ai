@@ -17,8 +17,85 @@ from codedoc.utils.json_utils import (
     loads_no_duplicate_keys,
 )
 from codedoc.utils.logger import get_logger
+from codedoc.core.release_policy import current_split_release_policy
+from codedoc.llm.factory import (
+    EndpointTrustAttestation,
+    effective_endpoint_identity,
+)
 
 logger = get_logger(__name__)
+
+
+class ResolvedConfig(dict):
+    """Dict-compatible configuration mapping returned by :func:`load_config`.
+
+    Behaves exactly as the plain configuration ``dict`` every current reader
+    already expects -- construction, ``dict()`` conversion, ``.get()``,
+    iteration, membership, and JSON serialization are all unchanged, so no
+    call site needs to change shape. The sole addition is the ``endpoint_trust``
+    attribute, an ``EndpointTrustAttestation | None`` recording the canonical
+    endpoint digest authorized for this config's ``api_base_url`` (if any) and
+    the runtime mechanism that authorized it.
+
+    ``endpoint_trust`` is deliberately a plain instance attribute, never a dict
+    key: ``__slots__`` below is the only place it is stored, so it is excluded
+    from iteration, ``dict()`` conversion, JSON serialization, persistence,
+    cache identity, recovery identity, and provider identity by construction --
+    it can be neither forged through configuration nor leaked into an
+    artifact. :func:`codedoc.llm.factory.create_provider` reads it via
+    ``getattr(config, "endpoint_trust", None)`` so a plain ``dict`` (which has
+    no such attribute) is always treated as unattested.
+    """
+
+    __slots__ = ("endpoint_trust",)
+
+    def __init__(self, *args: Any, endpoint_trust: EndpointTrustAttestation | None = None, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.endpoint_trust = endpoint_trust
+
+
+# Environment variable naming the runtime endpoint-trust approval URL. Read
+# directly by the authorization gate inside load_config() -- deliberately not
+# part of _ENV_KEY_MAP, because it never becomes a config key: it is compared
+# against api_base_url and then discarded, never merged into the returned
+# config.
+_TRUST_API_BASE_URL_ENV = "CODEDOC_TRUST_API_BASE_URL"
+
+# Keys that can only ever express endpoint-trust approval at runtime (CLI
+# option or environment variable above). Rejected wherever ordinary
+# configuration is read, with a message naming the two actual mechanisms,
+# because a project-controlled codedoc.config.json or a programmatic
+# config_overrides dict must never be able to satisfy this gate.
+_ENDPOINT_TRUST_KEYS: tuple[str, ...] = (
+    "trust_api_base_url",
+    "trusted_api_base_url",
+    "_endpoint_trust",
+)
+
+
+def _reject_endpoint_trust_keys(data: dict[str, Any], *, source: str) -> None:
+    """Raise :class:`ConfigError` when *data* sets an endpoint-trust key.
+
+    Detected before generic unknown-key rejection so the error names the two
+    actual runtime approval mechanisms instead of a generic "unknown key"
+    message.
+    """
+    if not isinstance(data, dict):
+        return
+    offending = [key for key in _ENDPOINT_TRUST_KEYS if key in data]
+    if not offending:
+        return
+    details = "\n".join(f"  - '{key}'" for key in offending)
+    plural = "keys" if len(offending) > 1 else "key"
+    raise ConfigError(
+        f"{source} sets {len(offending)} endpoint-trust configuration {plural}:\n"
+        f"{details}\n"
+        "Endpoint-trust approval for a custom api_base_url can never be granted "
+        "through codedoc.config.json or config_overrides. Approve the exact "
+        "endpoint at runtime instead, using the --trust-api-base-url CLI option "
+        f"or the {_TRUST_API_BASE_URL_ENV} environment variable."
+    )
+
 
 DEFAULTS: dict[str, Any] = {
     "llm_mode": "api",
@@ -171,6 +248,9 @@ DEFAULTS: dict[str, Any] = {
     "ignore_paths": [],
     # Configurable per-file content limit sent to the LLM.
     "max_content_chars": 12000,
+    # Large-file handling strategy. "truncate" is the byte-compatible default;
+    # "split" opts into deterministic local source division before provider calls.
+    "large_file_strategy": "truncate",
     # -----------------------------------------------------------------------
     # Planning / CI safety
     # -----------------------------------------------------------------------
@@ -200,6 +280,13 @@ DEFAULTS: dict[str, Any] = {
     # produces a ~70/30 head/tail split.
     # Must be a float strictly between 0.0 and 1.0 (exclusive).
     "truncation_head_ratio": 0.70,
+    # -----------------------------------------------------------------------
+    # Provider request transport timeout
+    # -----------------------------------------------------------------------
+    # Per connect/read/write/pool phase transport timeout (seconds) passed to
+    # the provider SDK client, not a wall-clock deadline for the whole call.
+    # Must be a number in the inclusive range 1-600.
+    "provider_request_timeout_s": 120,
     # -----------------------------------------------------------------------
     # Targeted response correction (opt-in, disabled by default)
     # -----------------------------------------------------------------------
@@ -272,6 +359,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_FILE_RETRY_ATTEMPTS": "file_retry_attempts",
     "CODEDOC_MAX_CONSECUTIVE_FAILURES": "max_consecutive_failures",
     "CODEDOC_MAX_CONTENT_CHARS": "max_content_chars",
+    "CODEDOC_LARGE_FILE_STRATEGY": "large_file_strategy",
     "CODEDOC_DRY_RUN": "dry_run",
     "CODEDOC_MAX_FILES": "max_files",
     "CODEDOC_MAX_PLANNED_CALLS": "max_planned_calls",
@@ -279,10 +367,14 @@ _ENV_KEY_MAP = {
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
     "CODEDOC_ANALYSIS_MODE": "analysis_mode",
     "CODEDOC_TRUNCATION_HEAD_RATIO": "truncation_head_ratio",
+    "CODEDOC_PROVIDER_REQUEST_TIMEOUT_S": "provider_request_timeout_s",
 }
 
 # Allowed values for the selectable per-file analysis mode.
 VALID_ANALYSIS_MODES = ("single", "triple")
+
+# Allowed values for oversized readable source handling.
+VALID_LARGE_FILE_STRATEGIES = ("truncate", "split")
 
 # Config keys whose environment values are parsed as semicolon-separated lists.
 _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
@@ -293,7 +385,42 @@ _ENV_LIST_KEYS = {"ignore_paths", "force_files"}
 # ---------------------------------------------------------------------------
 
 
-def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str, Any]:
+def _resolve_endpoint_trust_approval(
+    trust_api_base_url: str | None,
+) -> tuple[str | None, str | None]:
+    """Return ``(approval_url, mechanism)`` from the two runtime-only sources.
+
+    *trust_api_base_url* (the CLI's ``--trust-api-base-url``) wins when both it
+    and ``CODEDOC_TRUST_API_BASE_URL`` are present. Selection is on presence
+    (``is not None``), not truthiness: once the caller has explicitly supplied
+    *trust_api_base_url*, the environment variable is never consulted, even if
+    that value turns out to be blank or the wrong type -- a present higher-
+    precedence candidate must fail on its own terms, never silently defer to a
+    lower one. Neither source is ever read from configuration.
+    """
+    if trust_api_base_url is not None:
+        if not _non_empty_string(trust_api_base_url):
+            # Never render the supplied value: a non-string container may hold
+            # an approval URL with embedded credentials, and every
+            # authorization failure must emit no approval URL and no
+            # credential.  Name the type only.
+            raise ConfigError(
+                "--trust-api-base-url must be a non-empty string when supplied "
+                f"(received a value of type {type(trust_api_base_url).__name__})."
+            )
+        return trust_api_base_url.strip(), "--trust-api-base-url"
+    env_value = os.environ.get(_TRUST_API_BASE_URL_ENV)
+    if env_value and env_value.strip():
+        return env_value.strip(), _TRUST_API_BASE_URL_ENV
+    return None, None
+
+
+def load_config(
+    root: Path,
+    overrides: dict[str, Any] | None = None,
+    *,
+    trust_api_base_url: str | None = None,
+) -> ResolvedConfig:
     """Load and merge config from the exact config file, environment, and defaults.
 
     CodeDoc automatically reads exactly one persistent configuration file,
@@ -301,9 +428,23 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     loaded, and there is no ``--config FILE`` selector.  Programmatic callers may
     still pass in-memory *overrides*; that does not create a second persistent
     source.
+
+    A non-empty ``api_base_url`` additionally requires runtime endpoint-trust
+    approval from exactly two sources -- the *trust_api_base_url* keyword (the
+    CLI's ``--trust-api-base-url``) and the ``CODEDOC_TRUST_API_BASE_URL``
+    environment variable -- and can never be satisfied by
+    ``codedoc.config.json`` or *overrides* (see ``_reject_endpoint_trust_keys``).
+    The gate is resolved, and any credential environment variable is read, only
+    after that decision (two-phase credential resolution, below), and applies
+    identically to a dry run.
     """
     config: dict[str, Any] = dict(DEFAULTS)
 
+    # Phase 1: merge every ordinary key from every source. ``api_key`` is
+    # deliberately excluded from these merges -- its file/overrides candidates
+    # are retained in local variables only, and no credential environment
+    # variable is read, until the endpoint-authorization gate below resolves.
+    file_api_key_candidate: Any = None
     candidate = root / _CONFIG_FILENAME
     if candidate.exists():
         try:
@@ -316,8 +457,10 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
                     f"'{_CONFIG_FILENAME}' must be a JSON object, got {type(data).__name__}"
                 )
             _reject_removed_keys(data, source=_CONFIG_FILENAME)
+            _reject_endpoint_trust_keys(data, source=_CONFIG_FILENAME)
             _reject_unknown_keys(data, source=_CONFIG_FILENAME)
-            config.update(data)
+            file_api_key_candidate = data.get("api_key")
+            config.update({k: v for k, v in data.items() if k != "api_key"})
             logger.info("Config loaded from %s", candidate)
         except DuplicateJSONKeyError as exc:
             raise ConfigError(
@@ -331,6 +474,8 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
         logger.info("No %s found in %s; using defaults.", _CONFIG_FILENAME, root)
 
     for env_key, config_key in _ENV_KEY_MAP.items():
+        if env_key == "LLM_API_KEY":
+            continue  # credential env var: deferred to phase 2, below the gate
         val = os.environ.get(env_key)
         if val:
             if config_key in _ENV_LIST_KEYS:
@@ -339,15 +484,69 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
                 config[config_key] = val
             logger.debug("Config override from env: %s", env_key)
 
+    overrides_api_key_candidate: Any = None
     if overrides:
         _reject_removed_keys(overrides, source="config_overrides")
+        _reject_endpoint_trust_keys(overrides, source="config_overrides")
         _reject_unknown_keys(overrides, source="config_overrides")
-        config.update(overrides)
+        overrides_api_key_candidate = overrides.get("api_key")
+        config.update({k: v for k, v in overrides.items() if k != "api_key"})
 
     # Validate values before merge helpers iterate or coerce them. This ensures
     # malformed collections and scalar paths produce ConfigError rather than a
-    # raw TypeError/AttributeError.
+    # raw TypeError/AttributeError. api_key's own shape is validated in phase 2
+    # below, once its value is resolved.
     _validate_pre_resolution(config)
+
+    # --- Endpoint-authorization gate --------------------------------------
+    # Resolved before any credential is read or selected, and applied on the
+    # same terms to a dry run. An empty api_base_url is the default provider
+    # endpoint and needs no approval; a non-empty one requires the approval URL
+    # to canonicalize to exactly the same digest.
+    approval_url, approval_mechanism = _resolve_endpoint_trust_approval(trust_api_base_url)
+    configured_base_url = config.get("api_base_url") or None
+    endpoint_trust: EndpointTrustAttestation | None = None
+    if approval_url and not configured_base_url:
+        raise ConfigError(
+            "An endpoint-trust approval was supplied (via --trust-api-base-url "
+            f"or {_TRUST_API_BASE_URL_ENV}) but no api_base_url is configured. "
+            "Remove the approval, or set api_base_url to the endpoint it approves."
+        )
+    if configured_base_url:
+        configured_digest = effective_endpoint_identity(configured_base_url)
+        if not approval_url:
+            raise ConfigError(
+                "api_base_url is set to a custom endpoint (digest "
+                f"{configured_digest}) but no runtime approval was supplied. "
+                "Approve the exact endpoint using --trust-api-base-url or "
+                f"{_TRUST_API_BASE_URL_ENV}, or remove api_base_url to use the "
+                "default provider endpoint."
+            )
+        approval_digest = effective_endpoint_identity(approval_url)
+        if approval_digest != configured_digest:
+            raise ConfigError(
+                "The supplied endpoint-trust approval does not match the "
+                f"configured api_base_url (digest {configured_digest}). Approve "
+                "exactly this endpoint using --trust-api-base-url or "
+                f"{_TRUST_API_BASE_URL_ENV}."
+            )
+        endpoint_trust = EndpointTrustAttestation(
+            digest=configured_digest, mechanism=approval_mechanism
+        )
+
+    # --- Phase 2: credential resolution, now that authorization is settled.
+    # Precedence, last present source wins: config-file api_key (lowest),
+    # LLM_API_KEY (overrides it), programmatic config_overrides api_key
+    # (overrides both). Provider-specific fallbacks (OPENAI_API_KEY, etc.) stay
+    # in create_provider(), applied only when this resolves to nothing.
+    llm_api_key_env = os.environ.get("LLM_API_KEY")
+    resolved_api_key: Any = None
+    for source_value in (file_api_key_candidate, llm_api_key_env, overrides_api_key_candidate):
+        if source_value is not None:
+            resolved_api_key = source_value
+    if resolved_api_key is not None and not _non_empty_string(resolved_api_key):
+        raise ConfigError("api_key must be a non-empty string or null.")
+    config["api_key"] = resolved_api_key
 
     # Resolve <key> / <key>_add / <key>_remove overrides for configurable
     # default keys.  Must run after all sources are merged so the final
@@ -359,18 +558,29 @@ def load_config(root: Path, overrides: dict[str, Any] | None = None) -> dict[str
     _resolve_output_spec(config, overrides or {})
 
     _validate(config)
-    return config
+    return ResolvedConfig(config, endpoint_trust=endpoint_trust)
 
 
 def validate_config_data(data: dict[str, Any], *, source: str = "configuration") -> None:
-    """Validate one config object without reading environment variables or files."""
+    """Validate one config object's syntax without reading environment variables
+    or files, and without performing runtime endpoint authorization.
+
+    Checks that ``api_base_url`` (if present) is syntactically a valid
+    HTTP/HTTPS URL carrying no username, password, query string, or fragment --
+    the same syntax rule ``load_config()``'s authorization gate applies -- and
+    rejects the endpoint-trust keys under the same message as ``load_config()``.
+    It never resolves or requires an endpoint-trust approval and can never by
+    itself authorize a run: only ``load_config()``'s runtime gate does that.
+    """
     if not isinstance(data, dict):
         raise ConfigError(f"{source} must be a JSON object.")
     _reject_removed_keys(data, source=source)
+    _reject_endpoint_trust_keys(data, source=source)
     _reject_unknown_keys(data, source=source)
     config = dict(DEFAULTS)
     config.update(data)
     _validate_pre_resolution(config)
+    effective_endpoint_identity(config.get("api_base_url"))
     _apply_config_overrides(config)
     _resolve_output_spec(config, data)
     _validate(config, warn_missing_api_key=False)
@@ -850,6 +1060,9 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
             "'triple' (the three-agent path)."
         )
 
+    if config.get("large_file_strategy", "truncate") not in VALID_LARGE_FILE_STRATEGIES:
+        raise ConfigError("large_file_strategy must be exactly 'truncate' or 'split'.")
+
     config["log_level"] = config["log_level"].upper()
     if config["log_level"] not in ("DEBUG", "INFO", "WARNING", "ERROR"):
         raise ConfigError("log_level must be DEBUG, INFO, WARNING, or ERROR.")
@@ -868,6 +1081,28 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
         "response_correction_enabled",
     ):
         config[key] = _coerce_strict_bool(config[key], key)
+
+    if (
+        config.get("analysis_mode", "single") == "triple"
+        and config.get("large_file_strategy", "truncate") == "split"
+    ):
+        raise ConfigError(
+            "large_file_strategy 'split' is unavailable with analysis_mode "
+            "'triple'; use analysis_mode 'single' for split planning, or use "
+            "large_file_strategy 'truncate' for triple mode."
+        )
+
+    if (
+        config.get("large_file_strategy", "truncate") == "split"
+        and not config["dry_run"]
+        and not current_split_release_policy().execution
+    ):
+        raise ConfigError(
+            "Real large_file_strategy 'split' execution is disabled by this "
+            "build's release policy. Set dry_run=true or pass --dry-run to "
+            "inspect the split plan; use large_file_strategy 'truncate' for a "
+            "real run."
+        )
 
     if (
         warn_missing_api_key
@@ -1056,6 +1291,37 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
             f"(exclusive); got {ratio_val!r}."
         )
     config["truncation_head_ratio"] = ratio_val
+
+    # provider_request_timeout_s — a per connect/read/write/pool phase
+    # transport timeout (seconds), inclusive range 1-600, default 120.
+    # Strictly ASCII decimal strings or non-boolean numeric values only:
+    # no sign, no exponent, no underscore digit grouping, no non-ASCII
+    # digits, no NaN/infinity. Never echoes the rejected input (section
+    # 5.5). Section 12.1 C3: the key is absent only when nothing overwrote
+    # DEFAULTS' own 120, which this dict.get default matches -- an explicit
+    # JSON/Python null (config-file or config_overrides) or an empty string
+    # (config-file or CLI text) must fail boundedly instead of silently
+    # defaulting; an empty environment variable remains absent, handled
+    # generically upstream by the "only truthy env values override" rule.
+    raw_timeout = config.get("provider_request_timeout_s", 120)
+    _timeout_error = ConfigError(
+        "provider_request_timeout_s must be a number between 1 and 600 (inclusive)."
+    )
+    if raw_timeout is None:
+        raise _timeout_error
+    if isinstance(raw_timeout, bool):
+        raise _timeout_error
+    if isinstance(raw_timeout, (int, float)):
+        timeout_val = float(raw_timeout)
+    elif isinstance(raw_timeout, str):
+        if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", raw_timeout):
+            raise _timeout_error
+        timeout_val = float(raw_timeout)
+    else:
+        raise _timeout_error
+    if not math.isfinite(timeout_val) or not (1 <= timeout_val <= 600):
+        raise _timeout_error
+    config["provider_request_timeout_s"] = timeout_val
 
     # Inline prompt-customization profile. Structural profile validation happens
     # later in prompt_profiles.resolve_profile_source; here we only enforce that

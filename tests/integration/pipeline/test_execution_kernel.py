@@ -17,7 +17,57 @@ from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ErrorReporter, LLMError, UnrecoverableProviderError
 from tests.support.execution_requests import make_execution_requests
 from tests.support.pipeline_usage import write_py
+from tests.support.provider_failures import provider_failure_error
 from tests.support.providers import SmartFake
+
+
+def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
+    from codedoc.core.execution import _process_divided_file
+    from codedoc.core.file_division import build_division_plan, build_reduction_tree
+    from tests.support.execution_requests import make_execution_request
+
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    request = make_execution_request(
+        tmp_path,
+        "large.py",
+        source,
+        max_content_chars=2000,
+    )
+    plan = build_division_plan(
+        rel_path=request.rel_path,
+        language=request.language,
+        content=request.content,
+        source_budget_chars=2000,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000)
+    (tmp_path / "large.py").unlink()
+    writer = SafeWriter(
+        tmp_path / "docs" / "crash_recovery.json",
+        "json",
+        None,
+        {"large.py": {}},
+    )
+
+    class FrozenOrchestrator:
+        def process_leaf_chunk(self, _request):
+            return {"description": "chunk"}
+
+        def process_reduction_node(self, _request):
+            return {"narrative": "combined"}
+
+        def synthesize_divided_file(self, _request, _digest, _manifest):
+            return {"description": "frozen"}
+
+    result = _process_divided_file(
+        request, plan, tree, "test-provider", FrozenOrchestrator(), writer
+    )
+
+    assert result["description"] == "frozen"
+    assert "division" not in result
+    assert "documentation_units" not in result
+    assert result["_large_file_identity"].startswith("large-file-v3:")
+    tree_state = writer.get_tree_state("large.py")
+    assert tree.final_node.node_id in tree_state.by_id()
 
 
 class _LLM:
@@ -32,8 +82,9 @@ class _LLM:
 
 class TestRequestConstructionScope:
     def test_execution_requests_built_only_for_agent_rels(self, tmp_path, monkeypatch):
-        """Unchanged same-path files and identical-content reuse never receive
-        an execution request; only genuinely agent-routed files do."""
+        """Unchanged same-path files never receive an execution request; a
+        cross-path content match is no longer reused either (0.14.4), so it
+        also receives one -- only genuinely agent-routed files do."""
         write_py(tmp_path / "changed.py", "original\n")
         write_py(tmp_path / "unchanged.py", "stable content\n")
 
@@ -56,7 +107,8 @@ class TestRequestConstructionScope:
         run_pipeline(tmp_path, dict(base_config))
 
         # Second run: "changed.py" is edited; "twin.py" is a brand-new file whose
-        # content is identical to "unchanged.py"'s (identical-content reuse).
+        # content is identical to "unchanged.py"'s, but a different path -- no
+        # longer reused across paths (0.14.4), so it is documented fresh.
         write_py(tmp_path / "changed.py", "modified\n")
         write_py(tmp_path / "twin.py", "stable content\n")
 
@@ -74,10 +126,10 @@ class TestRequestConstructionScope:
 
         plan = captured["plan"]
         materials = captured["materials"]
-        assert plan.agent_rels == frozenset({"changed.py"})
+        assert plan.agent_rels == frozenset({"changed.py", "twin.py"})
         assert plan.unchanged_rels == frozenset({"unchanged.py"})
-        assert plan.identical_reuse_rels == frozenset({"twin.py"})
-        assert set(materials.execution_requests) == {"changed.py"}
+        assert plan.identical_reuse_rels == frozenset()
+        assert set(materials.execution_requests) == {"changed.py", "twin.py"}
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +272,7 @@ class TestConcurrencyIsolation:
                 "auto_entry_candidates": [],
                 "documentation_scope": "all",
                 "max_parallel_files": 2,
-                "max_content_chars": 1000,
+                "max_content_chars": 2000,
                 "file_retry_attempts": 0,
                 "propagate_changes": False,
                 "prompt_profiles": {
@@ -376,6 +428,48 @@ class TestPlannedIdReconciliation:
         assert stats["planned_calls_not_attempted"] == 0
         assert stats["additional_attempts"] == 1
 
+    def test_triple_mode_fail_then_success_reruns_all_three_siblings(
+        self, tmp_path, monkeypatch
+    ):
+        """Section 5.5's second accounting proof: unlike single mode, a triple
+        mode retry reruns all three siblings (structure, dependency,
+        documentation) together -- never just the one that failed. One
+        initial pass (1 failure + 2 successes) plus one full retry pass (3
+        successes) gives 3 unique logical calls but 6 total attempts."""
+        from tests.support.one_call_cases import _COMBINED_JSON, _CountingProvider
+
+        write_py(tmp_path / "main.py")
+
+        class _TripleFlakyOnce(_CountingProvider):
+            def complete_json(self, prompt, system=""):
+                self.calls += 1
+                if self.calls == 1:
+                    raise LLMError("openai", "temporary provider outage")
+                return self._raw
+
+        provider = _TripleFlakyOnce(raw=_COMBINED_JSON)
+        monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _cfg: provider)
+        stats = run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "main.py",
+                "analysis_mode": "triple",
+                "parallel_agents": False,
+                "file_retry_attempts": 1,
+                "max_parallel_files": 1,
+                "propagate_changes": False,
+            },
+        )
+
+        assert stats["checked"] == 1
+        assert stats["failed"] == 0
+        assert provider.calls == 6
+        assert stats["total_calls_planned"] == 3
+        assert stats["attempted_logical_calls"] == 3
+        assert stats["planned_calls_not_attempted"] == 0
+        assert stats["attempted_calls"] == 6
+        assert stats["additional_attempts"] == 3
+
     def test_allow_partial_completion_reconciles_with_nothing_unattempted(
         self, tmp_path, monkeypatch
     ):
@@ -435,7 +529,7 @@ class TestPlannedIdReconciliation:
                         raise LLMError("openai", "temporary provider outage")
                     return {"file_path": rel, "language": "python"}
                 if rel == "f1.py":
-                    raise LLMError("openai", "Your credit balance is too low to continue")
+                    raise provider_failure_error("openai", "provider-quota-exhausted", status=429)
                 return {"file_path": rel, "language": "python"}
 
         orch = _RetryThenTerminalOrch()
@@ -462,6 +556,7 @@ class TestPlannedIdReconciliation:
                 max_consecutive_failures=5,
                 new_results={},
                 recorder=recorder,
+                split_execution_mode="recovery",
             )
         assert excinfo.value.category == "terminal"
 
@@ -506,8 +601,8 @@ class TestPlannedIdReconciliation:
                 if rel == "f0.py" and self.calls_by_file[rel] == 1:
                     raise LLMError("openai", "temporary provider outage")
                 if rel == "f1.py":
-                    raise LLMError(
-                        "openai", "Your credit balance is too low to continue"
+                    raise provider_failure_error(
+                        "openai", "provider-quota-exhausted", status=429
                     )
                 return json.dumps({"description": "d"})
 

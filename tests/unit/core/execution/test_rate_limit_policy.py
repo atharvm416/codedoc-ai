@@ -2,58 +2,7 @@
 
 from __future__ import annotations
 
-import pytest
-from codedoc.core.execution import _is_rate_limit_error
-from codedoc.utils.errors import LLMError
-from tests.support.providers import _install_anthropic, _install_gemini, _install_openai
-from tests.support.provider_contract_cases import _make
-
-def test_10_rate_limit_detector_openai(tmp_path):
-    """Test 10a: OpenAI 429 / TPM signals detected."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    assert _is_rate_limit_error(LLMError("openai", "429 rate_limit_exceeded tokens per min"))
-    assert _is_rate_limit_error(LLMError("openai", "Error code: 429 - quota exceeded"))
-    assert _is_rate_limit_error(LLMError("openai", "Rate limit reached for tpm"))
-
-def test_10_rate_limit_detector_anthropic(tmp_path):
-    """Test 10b: Anthropic overloaded/529 signals detected."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    assert _is_rate_limit_error(LLMError("anthropic", "529 overloaded"))
-    assert _is_rate_limit_error(LLMError("anthropic", "rate_limit quota exceeded"))
-    assert _is_rate_limit_error(LLMError("anthropic", "overloaded try again"))
-
-def test_10_rate_limit_detector_gemini(tmp_path):
-    """Test 10c: Gemini RESOURCE_EXHAUSTED / quota signals detected."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    assert _is_rate_limit_error(LLMError("gemini", "RESOURCE_EXHAUSTED quota exceeded"))
-    assert _is_rate_limit_error(LLMError("gemini", "429 too many requests"))
-    assert _is_rate_limit_error(LLMError("gemini", "resource_exhausted"))
-
-def test_10_rate_limit_detector_false_positives(tmp_path):
-    """Test 10d: ordinary errors are NOT rate-limit signals."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError, ParseError
-
-    assert not _is_rate_limit_error(LLMError("openai", "JSON parse error invalid format"))
-    assert not _is_rate_limit_error(ParseError("main.py", "syntax error"))
-    assert not _is_rate_limit_error(ValueError("bad value"))
-
-def test_10_rate_limit_detector_walks_cause_chain(tmp_path):
-    """Test 10e: detector walks __cause__ chain so wrapper doesn't hide signal."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    inner = LLMError("openai", "429 rate_limit_exceeded")
-    outer = RuntimeError("wrapper error")
-    outer.__cause__ = inner
-
-    assert _is_rate_limit_error(outer)
+from codedoc.utils.errors import ProviderFailureEnvelope
 
 def test_15_parallel_ladder_invalid_non_decreasing_raises(tmp_path):
     """Test 15a: non-decreasing parallel_ladder raises ConfigError."""
@@ -108,71 +57,13 @@ def test_build_default_ladder():
         assert ladder[-1] == 1, f"Ladder for {n} must end with 1: {ladder}"
         assert ladder[0] == n, f"Ladder for {n} must start with {n}: {ladder}"
 
-def test_D1_openai_profile_classifies_429():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    profile = get_rate_limit_profile("openai")
-    assert _is_rate_limit_error(LLMError("openai", "429 rate_limit_exceeded"), profile)
-    assert _is_rate_limit_error(LLMError("openai", "tokens per min exceeded"), profile)
-    assert _is_rate_limit_error(LLMError("openai", "quota exceeded"), profile)
-
-def test_D1_anthropic_profile_classifies_529():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    profile = get_rate_limit_profile("anthropic")
-    assert _is_rate_limit_error(LLMError("anthropic", "529 overloaded"), profile)
-    assert _is_rate_limit_error(LLMError("anthropic", "overloaded try again"), profile)
-    assert _is_rate_limit_error(LLMError("anthropic", "rate_limit exceeded"), profile)
-
-def test_D1_gemini_profile_classifies_resource_exhausted():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    profile = get_rate_limit_profile("gemini")
-    assert _is_rate_limit_error(LLMError("gemini", "RESOURCE_EXHAUSTED"), profile)
-    assert _is_rate_limit_error(LLMError("gemini", "quota exceeded"), profile)
-    assert _is_rate_limit_error(LLMError("gemini", "503 service unavailable"), profile)
-
-def test_D1_default_profile_classifies_all_provider_signals():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    profile = get_rate_limit_profile("unknown_gateway")
-    assert _is_rate_limit_error(LLMError("x", "429"), profile)
-    assert _is_rate_limit_error(LLMError("x", "529 overloaded"), profile)
-    assert _is_rate_limit_error(LLMError("x", "resource_exhausted"), profile)
-    assert _is_rate_limit_error(LLMError("x", "tokens per min exceeded"), profile)
-
-def test_D2_json_parse_error_not_rate_limit():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError, ParseError
-
-    profile = get_rate_limit_profile("openai")
-    assert not _is_rate_limit_error(LLMError("openai", "JSON parse error"), profile)
-    assert not _is_rate_limit_error(ParseError("main.py", "syntax error"), profile)
-    assert not _is_rate_limit_error(ValueError("bad value"), profile)
-
-def test_D2_anthropic_profile_does_not_match_openai_only_signals():
-    from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    # Anthropic profile does NOT include "tokens per min" or "too many requests"
-    profile = get_rate_limit_profile("anthropic")
-    assert not _is_rate_limit_error(LLMError("anthropic", "tokens per min exceeded"), profile)
-    assert not _is_rate_limit_error(LLMError("anthropic", "too many requests"), profile)
-
 def test_D3_signals_add_appended_to_profile(tmp_path):
+    """D3, rewritten against section 5.3's adapter-boundary signal evaluation:
+    a configured added signal reaches the promotion helper the real adapter
+    calls at its own exception boundary, and the profile's original signals
+    still work alongside it."""
     from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
+    from codedoc.llm.api_provider import _promote_via_configured_signals
     from codedoc.core.loader import load_config
 
     cfg = load_config(tmp_path, {
@@ -180,10 +71,19 @@ def test_D3_signals_add_appended_to_profile(tmp_path):
         "rate_limit_signals_add": ["capacity exceeded", "throttled"],
     })
     profile = get_rate_limit_profile("openai", cfg)
-    assert _is_rate_limit_error(LLMError("openai", "capacity exceeded"), profile)
-    assert _is_rate_limit_error(LLMError("openai", "throttled"), profile)
+    unmapped = ProviderFailureEnvelope(provider_kind="openai", reason_code="provider-request-failed")
+    signals = tuple(profile.signals)
+
+    assert _promote_via_configured_signals(
+        RuntimeError("capacity exceeded"), unmapped, signals
+    ).reason_code == "provider-rate-limited"
+    assert _promote_via_configured_signals(
+        RuntimeError("throttled"), unmapped, signals
+    ).reason_code == "provider-rate-limited"
     # Original signals still present
-    assert _is_rate_limit_error(LLMError("openai", "429"), profile)
+    assert _promote_via_configured_signals(
+        RuntimeError("429"), unmapped, signals
+    ).reason_code == "provider-rate-limited"
 
 def test_D3_signals_add_no_duplicates(tmp_path):
     from codedoc.llm.rate_limit_profile import get_rate_limit_profile
@@ -198,9 +98,11 @@ def test_D3_signals_add_no_duplicates(tmp_path):
     assert "new_signal" in profile.signals
 
 def test_D4_signals_remove_drops_from_profile(tmp_path):
+    """D4, rewritten against section 5.3's adapter-boundary signal evaluation:
+    a removed signal no longer promotes at the adapter boundary, while other
+    signals from the same profile are unaffected."""
     from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
+    from codedoc.llm.api_provider import _promote_via_configured_signals
     from codedoc.core.loader import load_config
 
     cfg = load_config(tmp_path, {
@@ -209,8 +111,16 @@ def test_D4_signals_remove_drops_from_profile(tmp_path):
     })
     profile = get_rate_limit_profile("gemini", cfg)
     assert "503" not in profile.signals
+    unmapped = ProviderFailureEnvelope(provider_kind="gemini", reason_code="provider-request-failed")
+    signals = tuple(profile.signals)
+
     # Other gemini signals still present
-    assert _is_rate_limit_error(LLMError("gemini", "RESOURCE_EXHAUSTED"), profile)
+    assert _promote_via_configured_signals(
+        RuntimeError("RESOURCE_EXHAUSTED"), unmapped, signals
+    ).reason_code == "provider-rate-limited"
+    assert _promote_via_configured_signals(
+        RuntimeError("503 service unavailable"), unmapped, signals
+    ).reason_code == "provider-request-failed"
 
 def test_D4_module_defaults_not_mutated(tmp_path):
     """D4: Removing a signal via config must not mutate PROVIDER_PROFILES."""
@@ -281,22 +191,12 @@ def test_D15_none_provider_falls_back_to_default():
     profile = get_rate_limit_profile("")
     assert profile.signals == PROVIDER_PROFILES["default"].signals
 
-def test_D16_is_rate_limit_error_without_profile_backward_compat():
-    """D16: _is_rate_limit_error(exc) without a profile still uses _RATE_LIMIT_SIGNALS."""
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
-
-    # All the original signals from _RATE_LIMIT_SIGNALS must still work
-    assert _is_rate_limit_error(LLMError("openai", "429 rate_limit_exceeded tokens per min"))
-    assert _is_rate_limit_error(LLMError("anthropic", "529 overloaded"))
-    assert _is_rate_limit_error(LLMError("gemini", "RESOURCE_EXHAUSTED quota exceeded"))
-    assert not _is_rate_limit_error(LLMError("openai", "JSON parse error"))
-
 def test_P2_signals_add_uppercase_detected(tmp_path):
-    """P2 regression: rate_limit_signals_add=['Throttled'] must match 'THROTTLED' in error."""
+    """P2 regression, rewritten against the adapter-boundary promotion:
+    rate_limit_signals_add=['Throttled'] must promote regardless of the
+    matched message's case."""
     from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
+    from codedoc.llm.api_provider import _promote_via_configured_signals
     from codedoc.core.loader import load_config
 
     cfg = load_config(tmp_path, {
@@ -304,20 +204,27 @@ def test_P2_signals_add_uppercase_detected(tmp_path):
         "rate_limit_signals_add": ["Throttled"],  # mixed case user input
     })
     profile = get_rate_limit_profile("openai", cfg)
+    unmapped = ProviderFailureEnvelope(provider_kind="openai", reason_code="provider-request-failed")
+    signals = tuple(profile.signals)
 
     # Error message has DIFFERENT case than the user-supplied signal
-    assert _is_rate_limit_error(LLMError("openai", "THROTTLED by gateway"), profile), (
+    assert _promote_via_configured_signals(
+        RuntimeError("THROTTLED by gateway"), unmapped, signals
+    ).reason_code == "provider-rate-limited", (
         "Custom signal 'Throttled' must match 'THROTTLED' in error message"
     )
-    assert _is_rate_limit_error(LLMError("openai", "throttled"), profile), (
+    assert _promote_via_configured_signals(
+        RuntimeError("throttled"), unmapped, signals
+    ).reason_code == "provider-rate-limited", (
         "Custom signal 'Throttled' must match 'throttled' in error message"
     )
 
 def test_P2_signals_remove_uppercase_removes_lowercase_default(tmp_path):
-    """P2 regression: rate_limit_signals_remove=['RESOURCE_EXHAUSTED'] removes default 'resource_exhausted'."""
+    """P2 regression, rewritten against the adapter-boundary promotion:
+    rate_limit_signals_remove=['RESOURCE_EXHAUSTED'] removes default
+    'resource_exhausted' so it no longer promotes."""
     from codedoc.llm.rate_limit_profile import get_rate_limit_profile
-    from codedoc.pipeline import _is_rate_limit_error
-    from codedoc.utils.errors import LLMError
+    from codedoc.llm.api_provider import _promote_via_configured_signals
     from codedoc.core.loader import load_config
 
     cfg = load_config(tmp_path, {
@@ -329,9 +236,12 @@ def test_P2_signals_remove_uppercase_removes_lowercase_default(tmp_path):
     assert "resource_exhausted" not in profile.signals, (
         "Uppercase 'RESOURCE_EXHAUSTED' in remove list must strip lowercase default"
     )
-    # The error must no longer be detected via resource_exhausted
-    assert not _is_rate_limit_error(LLMError("gemini", "RESOURCE_EXHAUSTED"), profile), (
-        "After removing 'resource_exhausted', errors with that signal must not match"
+    unmapped = ProviderFailureEnvelope(provider_kind="gemini", reason_code="provider-request-failed")
+    # The error must no longer promote via resource_exhausted
+    assert _promote_via_configured_signals(
+        RuntimeError("RESOURCE_EXHAUSTED"), unmapped, tuple(profile.signals)
+    ).reason_code == "provider-request-failed", (
+        "After removing 'resource_exhausted', errors with that signal must not promote"
     )
 
 def test_P2_signals_add_stored_lowercase_in_profile():
@@ -372,21 +282,3 @@ def test_P3_detect_limit_type_uptime_not_tpm():
     assert result is None, (
         f"'uptime' must not trigger tpm classification, got {result!r}"
     )
-
-@pytest.mark.parametrize(
-    "installer, cls",
-    [
-        (_install_openai, "OpenAIProvider"),
-        (_install_anthropic, "AnthropicProvider"),
-        (_install_gemini, "GeminiProvider"),
-    ],
-)
-def test_rate_limit_error_is_classifiable_after_wrapping(monkeypatch, installer, cls):
-    rec = {}
-    installer(monkeypatch, rec, error=RuntimeError("429 rate limit exceeded"))
-    provider = _make(cls)(api_key="k")
-    with pytest.raises(LLMError) as excinfo:
-        provider.complete_json("p", "s")
-    # The shared classifier must still see the rate-limit signal through the
-    # LLMError wrapper (message text and/or cause chain).
-    assert _is_rate_limit_error(excinfo.value)

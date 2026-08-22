@@ -101,3 +101,60 @@ def test_correction_preserves_usable_facts(tmp_path):
     res = _process_one_file(_request(tmp_path), _orch(prov, enabled=True))
     assert res["description"] == "Filled."
     assert res["role_in_system"] == "kept role"
+
+
+# ---------------------------------------------------------------------------
+# 0.14.4: every final response-contract error names its closed reason code,
+# and leaks nothing else (source, prompt, raw response, or per-field detail).
+# ---------------------------------------------------------------------------
+
+def test_disabled_path_message_carries_reason_code_and_leaks_no_detail(tmp_path):
+    prov = RoutingProvider(fail_agents={"combined"})
+    orch = _orch(prov, enabled=False)
+
+    with pytest.raises(ResponseContractError) as caught:
+        _process_one_file(_request(tmp_path), orch)
+
+    message = str(caught.value)
+    assert caught.value.diagnostic["reason_code"] in message
+    assert "disabled" in message
+    # No per-field removal detail, no raw provider response text.
+    assert "role_in_system" not in message
+    assert '"r"' not in message
+
+
+def test_provider_fault_path_message_carries_original_reason_code_and_leaks_no_detail(
+    tmp_path,
+):
+    prov = RoutingProvider(
+        fail_agents={"combined"},
+        raise_on_correction=RuntimeError("temporary provider outage"),
+    )
+    orch = _orch(prov, enabled=True)
+
+    with pytest.raises(ResponseContractError) as caught:
+        _process_one_file(_request(tmp_path), orch)
+
+    message = str(caught.value)
+    assert caught.value.diagnostic["reason_code"] in message
+    assert "correction provider call failed" in message
+    assert "role_in_system" not in message
+    assert '"r"' not in message
+
+
+def test_still_invalid_path_message_carries_corrected_reason_code_and_leaks_no_detail(
+    tmp_path,
+):
+    prov = RoutingProvider(
+        fail_agents={"combined"}, correction_response={"role_in_system": "still bad"}
+    )
+    orch = _orch(prov, enabled=True)
+
+    with pytest.raises(ResponseContractError) as caught:
+        _process_one_file(_request(tmp_path), orch)
+
+    message = str(caught.value)
+    assert caught.value.diagnostic["reason_code"] in message
+    assert "still failed the schema contract" in message
+    assert "role_in_system" not in message
+    assert "still bad" not in message

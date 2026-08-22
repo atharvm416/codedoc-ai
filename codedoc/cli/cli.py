@@ -11,8 +11,8 @@ Behaviour notes
   printed to stdout.
 - On interrupt, the dedicated crash-recovery file path attached by the pipeline
   (``KeyboardInterrupt.recovery_path``) is named so the user knows the stable
-  output was preserved and which file enables resume; if no recovery file was
-  confirmed, a truthful generic message is printed instead.
+  output was preserved, together with the ordinary-versus-fresh reuse boundary;
+  if no recovery file was confirmed, a truthful generic message is printed.
 - When an entry is excluded by reachability, ``stats["entry_excluded"]`` is
   reported in the run summary.
 
@@ -31,6 +31,67 @@ from __future__ import annotations
 import argparse
 import sys
 from pathlib import Path
+
+from codedoc.utils.errors import CodeDocError, bounded_exception_summary
+
+_RECOVERY_REUSE_BOUNDARY = (
+    "Compatible completed ordinary and split records may be reused, and "
+    "compatible current schema-4 split node checkpoints may resume. Forced, "
+    "stale, identity-mismatched, legacy, foreign, or unsupported state is "
+    "rerun or preserved and blocked according to the documented remedy."
+)
+
+
+def _bounded_reason(exc: BaseException) -> str:
+    """Rendering-boundary two-tier check shared by every CLI error branch."""
+    return str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
+
+
+def _bounded_traceback(exc: BaseException) -> str:
+    """Render a ``--verbose`` diagnostic trace bounded to CodeDoc frames and
+    exception categories only.
+
+    Never renders an exception message, chained-cause text, request/response
+    body, prompt, source, credential, or local-variable value -- only each
+    frame's file/line/function location (filtered to CodeDoc's own package)
+    and bounded exception categories.  This replaces
+    ``traceback.print_exc()``, whose default rendering includes the full
+    chained exception message text.
+    """
+    import traceback as _traceback
+
+    import codedoc as _codedoc_pkg
+
+    codedoc_dir = Path(_codedoc_pkg.__file__).resolve().parent
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        chain.append(current)
+        current = current.__cause__ or current.__context__
+
+    lines = [
+        "Bounded diagnostic trace (--verbose): CodeDoc frames and exception "
+        "categories only."
+    ]
+    for level, node in enumerate(reversed(chain)):
+        indent = "  " * level
+        category = (
+            type(node).__name__
+            if isinstance(node, CodeDocError)
+            else bounded_exception_summary(node).split(" (", 1)[0]
+        )
+        lines.append(f"{indent}[{category}]")
+        for frame in _traceback.extract_tb(node.__traceback__):
+            try:
+                Path(frame.filename).resolve().relative_to(codedoc_dir)
+                frame_in_codedoc = True
+            except (OSError, ValueError):
+                frame_in_codedoc = False
+            if frame_in_codedoc:
+                lines.append(f"{indent}  {Path(frame.filename).name}:{frame.lineno} in {frame.name}")
+    return "\n".join(lines)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -56,6 +117,23 @@ examples:
   codedoc --provider gemini --entry src/main.py
   codedoc --provider anthropic --model claude-haiku-4-5-20251001 --entry src/main.py
   codedoc --ignore /myenv --entry src/main.py          ignore a project-root path
+
+large-file split execution:
+  split supports dry-run planning, paid execution, same-path completed split reuse,
+  and node recovery in analysis-mode single. triple plus split is rejected
+  during configuration validation before scanning or other side effects.
+  Oversized files are divided at local semantic or lexical boundaries with
+  complete source coverage and a bounded reduction topology.
+
+  max_content_chars bounds each planned leaf, reducer manifest, and complete
+  final manifest. Planning never truncates split source or silently falls back
+  to truncate. It reports the first named provider-free capacity reason:
+  atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
+  reduction-fan-in-cap, reduction-depth-cap, or
+  final-synthesis-envelope-cap. Exactly compatible same-path completed split
+  records are reused with zero calls; current schema-4 checkpoints resume only
+  unpaid nodes. Forced, stale, legacy, foreign, or unsupported state is rerun
+  or preserved and blocked. Under-threshold files retain ordinary execution.
         """,
     )
 
@@ -97,7 +175,24 @@ examples:
         default=None,
         help=(
             "Model name to use — e.g. gpt-4o-mini, claude-haiku-4-5-20251001, "
-            "gemini-2.5-flash. When set, provider is auto-detected from the model name."
+            "gemini-2.5-flash. The provider is auto-detected from this name only "
+            "when --provider is auto (the default); an explicit --provider always wins."
+        ),
+    )
+    parser.add_argument(
+        "--trust-api-base-url",
+        metavar="URL",
+        default=None,
+        dest="trust_api_base_url",
+        help=(
+            "Runtime approval for a custom api_base_url configured in "
+            "codedoc.config.json — required before codedoc will send your API "
+            "key, source, or prompts to it. Must canonicalize to exactly the "
+            "configured api_base_url (scheme, host, port, path; no username, "
+            "password, query string, or fragment). Never settable through "
+            "codedoc.config.json or config_overrides. The "
+            "CODEDOC_TRUST_API_BASE_URL environment variable is the other "
+            "accepted source; this option wins when both are set."
         ),
     )
     parser.add_argument(
@@ -273,6 +368,31 @@ examples:
         ),
     )
     parser.add_argument(
+        "--provider-request-timeout-s",
+        type=str,
+        default=None,
+        metavar="SECONDS",
+        dest="provider_request_timeout_s",
+        help=(
+            "Per connect/read/write/pool phase transport timeout for a single "
+            "provider request, in seconds (1-600 inclusive, default: 120). "
+            "Not a wall-clock deadline for the whole call. Must be a plain "
+            "ASCII decimal number (no sign, exponent, or digit grouping)."
+        ),
+    )
+    parser.add_argument(
+        "--large-file-strategy",
+        choices=["truncate", "split"],
+        default=None,
+        dest="large_file_strategy",
+        help=(
+            "Oversized readable source handling: 'truncate' keeps the legacy "
+            "head/tail behavior (default); 'split' enables provider-free "
+            "planning, paid execution, same-path completed split reuse, and current "
+            "schema-4 node recovery in single mode."
+        ),
+    )
+    parser.add_argument(
         "--verbose",
         "-v",
         action="store_true",
@@ -356,15 +476,101 @@ def _print_prompt_profile_run(stats: dict) -> None:
     _print_feasibility_advisories(stats)
 
 
+def _print_split_observability(
+    stats: dict, *, include_synthesis_estimate: bool = False
+) -> None:
+    """Print split-only counts without changing default truncate output."""
+    if stats.get("large_file_strategy") != "split":
+        return
+    print("\n  Large-file split plan:")
+    print(f"    Ordinary files          : {stats.get('split_ordinary_files', 0)}")
+    print(f"    Syntax-divided files    : {stats.get('split_syntax_files', 0)}")
+    print(f"    Lexical-divided files   : {stats.get('split_lexical_files', 0)}")
+    print(f"    Blocked files           : {stats.get('split_blocked_files', 0)}")
+    reasons = stats.get("split_blocked_by_reason", {})
+    if isinstance(reasons, dict) and reasons:
+        print(
+            "    Blocked reasons         : "
+            + ", ".join(
+                f"{reason}={count}" for reason, count in sorted(reasons.items())
+            )
+        )
+    pairs = stats.get("split_blocked_pairs", ())
+    if isinstance(pairs, (list, tuple)) and pairs:
+        print("    Blocked path/reason pairs:")
+        for pair in pairs:
+            if isinstance(pair, (list, tuple)) and len(pair) == 2:
+                print(f"      {pair[0]} ({pair[1]})")
+    print(
+        f"    Semantic units / chunks : {stats.get('split_units', 0)} / "
+        f"{stats.get('split_chunks', 0)}"
+    )
+    print(f"    Continuation groups     : {stats.get('split_continuation_groups', 0)}")
+    print(
+        "    Unit-consolidation levels/calls: "
+        f"{stats.get('split_unit_consolidation_levels', 0)} / "
+        f"{stats.get('split_unit_consolidation_calls_planned', 0)}"
+    )
+    print(
+        "    General reduction levels/calls : "
+        f"{stats.get('split_general_reduction_levels', 0)} / "
+        f"{stats.get('split_general_reduction_calls_planned', 0)}"
+    )
+    print(
+        "    Final synthesis calls   : "
+        f"{stats.get('split_final_synthesis_calls_planned', 0)}"
+    )
+    print(
+        "    Completed reused / partial resumed: "
+        f"{stats.get('split_completed_files_reused', 0)} / "
+        f"{stats.get('split_partial_files_resumed', 0)}"
+    )
+    print(
+        "    Unpaid/reexecuted/quarantined nodes: "
+        f"{stats.get('split_unpaid_nodes', 0)} / "
+        f"{stats.get('split_reexecuted_nodes', 0)} / "
+        f"{stats.get('split_quarantined_nodes', 0)}"
+    )
+    print(
+        "    Recovery conflict files : "
+        f"{stats.get('split_recovery_conflict_files', 0)}"
+    )
+    print(
+        "    Planned call categories: "
+        f"{stats.get('file_documentation_calls_planned', 0)} file / "
+        f"{stats.get('unit_documentation_calls_planned', 0)} leaf / "
+        f"{stats.get('file_reduction_calls_planned', 0)} reduction / "
+        f"{stats.get('synthesis_calls_planned', 0)} synthesis"
+    )
+    if include_synthesis_estimate and stats.get("split_synthesis_input_estimate"):
+        print(
+            "    Synthesis input estimate: "
+            f"{stats['split_synthesis_input_estimate']} from configured ceiling"
+        )
+    advisory = stats.get("split_complexity_advisory")
+    if include_synthesis_estimate and advisory:
+        print(f"\n  Advisory (non-blocking): {advisory}")
+
+
 def _print_dry_run_summary(stats: dict) -> None:
     """Print the planning summary for a --dry-run invocation."""
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
     print(f"  Files scanned          : {stats.get('scanned', 0)}")
     print(f"  Files selected         : {stats.get('selected', 0)}")
+    if stats.get("files_skipped_large", 0):
+        print(f"  Files skipped (too large): {stats['files_skipped_large']}")
+    if stats.get("files_skipped_unreadable", 0):
+        print(f"  Files skipped (unreadable): {stats['files_skipped_unreadable']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
     print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
-    print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
+    if stats.get("large_file_strategy") == "split":
+        print(
+            "  Calls per under-threshold file: "
+            f"{stats.get('initial_calls_per_file', 1)}"
+        )
+    else:
+        print(f"  Initial calls per file : {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable        : {stats.get('entry_reachable', 0)}")
     print(f"  Entry disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -414,16 +620,22 @@ def _print_dry_run_summary(stats: dict) -> None:
             f"{stats['disconnected_paid_files']} "
             f"({stats.get('disconnected_planned_calls', 0)} planned initial calls)"
         )
-    estimate_qualifier = (
-        "approximate lower bound"
-        if stats.get("estimate_is_lower_bound", False)
-        else "approximate"
-    )
+    if stats.get("large_file_strategy") == "split":
+        estimate_qualifier = (
+            "approximate mixed bound; synthesis uses the configured ceiling"
+        )
+    else:
+        estimate_qualifier = (
+            "approximate lower bound"
+            if stats.get("estimate_is_lower_bound", False)
+            else "approximate"
+        )
     print(
         f"  Estimated input tokens : ~{stats.get('estimated_input_tokens', 0)} "
         f"({estimate_qualifier} — character heuristic, not a tokenizer)"
     )
     print(f"  Output directory       : {stats.get('output_dir', '')}")
+    _print_split_observability(stats, include_synthesis_estimate=True)
     _print_prompt_profile_dry_run(stats)
 
     if stats.get("max_files_exceeded"):
@@ -439,12 +651,27 @@ def _print_dry_run_summary(stats: dict) -> None:
         )
 
     if stats.get("max_planned_calls_exceeded"):
+        if stats.get("large_file_strategy") == "split":
+            category_detail = (
+                f"{stats.get('file_documentation_calls_planned', 0)} "
+                "file documentation, "
+                f"{stats.get('unit_documentation_calls_planned', 0)} "
+                "leaf documentation, "
+                f"{stats.get('file_reduction_calls_planned', 0)} "
+                "file reduction, "
+                f"{stats.get('synthesis_calls_planned', 0)} file synthesis"
+            )
+        else:
+            category_detail = (
+                f"{stats.get('documentation_calls_planned', 0)} "
+                "file documentation"
+            )
         print(
             "\n  WARNING: the plan has "
             f"{stats.get('total_calls_planned', 0)} initially planned LLM call(s) "
             f"({stats.get('prompt_customization_security_review_calls_planned', 0)} "
             "prompt-customization review, "
-            f"{stats.get('documentation_calls_planned', 0)} initial documentation), "
+            f"{category_detail}), "
             f"exceeding --max-planned-calls {stats.get('max_planned_calls', 0)}. "
             "The corresponding real run would stop with exit code 2 before "
             "writing anything or calling any provider."
@@ -475,11 +702,21 @@ def _print_run_summary(stats: dict) -> None:
         )
     if stats.get("resumed", 0):
         print(f"  Files resumed from recovery   : {stats['resumed']}")
+    if stats.get("files_skipped_large", 0):
+        print(f"  Files skipped (too large)     : {stats['files_skipped_large']}")
+    if stats.get("files_skipped_unreadable", 0):
+        print(f"  Files skipped (unreadable)    : {stats['files_skipped_unreadable']}")
     print(f"  Files failed     : {stats['failed']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
     print(f"  Analysis mode    : {stats.get('analysis_mode', 'single')}")
-    print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
+    if stats.get("large_file_strategy") == "split":
+        print(
+            "  Calls/under-threshold file: "
+            f"{stats.get('initial_calls_per_file', 1)}"
+        )
+    else:
+        print(f"  Initial calls/file: {stats.get('initial_calls_per_file', 1)}")
     print(f"  Entry reachable  : {stats.get('entry_reachable', 0)}")
     print(f"  Disconnected     : {stats.get('entry_disconnected', 0)}")
     # Derive the excluded count from the clearer reachable/disconnected
@@ -504,6 +741,7 @@ def _print_run_summary(stats: dict) -> None:
     print(f"  Output directory : {stats['output_dir']}")
     for output_file in stats.get("output_files", []):
         print(f"  Output file      : {output_file}")
+    _print_split_observability(stats)
 
     # Approximate usage accounting — only when LLM work was planned.
     if stats.get("planned_calls", 0) or stats.get("attempted_calls", 0):
@@ -610,6 +848,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.documentation_scope is not None,
                 args.provider is not None,
                 args.model is not None,
+                args.trust_api_base_url is not None,
                 args.output is not None,
                 args.format is not None,
                 bool(args.ignore),
@@ -623,8 +862,10 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.allow_partial,
                 args.no_parallel,
                 args.analysis_mode is not None,
+                args.large_file_strategy is not None,
                 args.max_parallel_files is not None,
                 args.truncation_head_ratio is not None,
+                args.provider_request_timeout_s is not None,
                 args.verbose,
             )
         )
@@ -644,7 +885,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         except SystemExit as exc:
             return int(exc.code or 2)
         except Exception as exc:
-            print(f"Error: {exc}", file=sys.stderr)
+            print(f"Error: {_bounded_reason(exc)}", file=sys.stderr)
             return 2
 
     if args.force:
@@ -684,10 +925,14 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["parallel_agents"] = False
     if args.analysis_mode is not None:
         overrides["analysis_mode"] = args.analysis_mode
+    if args.large_file_strategy is not None:
+        overrides["large_file_strategy"] = args.large_file_strategy
     if args.max_parallel_files is not None:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.truncation_head_ratio is not None:
         overrides["truncation_head_ratio"] = args.truncation_head_ratio
+    if args.provider_request_timeout_s is not None:
+        overrides["provider_request_timeout_s"] = args.provider_request_timeout_s
     if args.verbose:
         overrides["log_level"] = "DEBUG"
     if args.dry_run:
@@ -708,6 +953,7 @@ def run_cli(argv: list[str] | None = None) -> int:
             root,
             config_overrides=overrides,
             confirm_risky=_confirm_risky_prompt_customization,
+            trust_api_base_url=args.trust_api_base_url,
         )
 
         if stats.get("dry_run"):
@@ -739,27 +985,27 @@ def run_cli(argv: list[str] | None = None) -> int:
         return 0
 
     except FileNotFoundError as exc:
-        print(f"Error: {exc}", file=sys.stderr)
+        print(f"Error: {_bounded_reason(exc)}", file=sys.stderr)
         return 2
     except KeyboardInterrupt as exc:
         # The pipeline attaches the exact selected crash-recovery path to
         # the interrupt as ``recovery_path`` only when that file exists on disk.
         # The stable output is never touched mid-run, so it is always preserved;
-        # we just report which file enables resume (or that none was created).
+        # we report the recovery path and the release-specific reuse boundary.
         recovery_path = getattr(exc, "recovery_path", None)
         if recovery_path:
             print(
                 "\nRun interrupted. Your previous stable output was left untouched. "
                 "Files completed before the interrupt are saved in the crash-recovery "
                 f"file:\n  {recovery_path}\n"
-                "Re-run the same command to resume from it.",
+                f"Re-run the same command. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
         else:
             print(
                 "\nRun interrupted before any crash-recovery file was created or "
                 "confirmed. Your previous stable output (if any) was left untouched. "
-                "Re-run the same command to start or resume.",
+                f"Re-run the same command to start. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
         return 130
@@ -771,8 +1017,9 @@ def run_cli(argv: list[str] | None = None) -> int:
         )
 
         if isinstance(exc, UnrecoverableProviderError):
-            # A doomed-run safe stop — not an unexpected crash.  Completed files
-            # are in the crash-recovery file and re-running resumes.  A *terminal*
+            # A doomed-run safe stop — not an unexpected crash. Completed
+            # file-level results are in recovery, subject to the release-specific
+            # reuse boundary below. A *terminal*
             # abort (billing/credentials/model/access) is a setup/credentials
             # class problem → exit 2 (consistent
             # with ConfigError/ProviderInitError).  A *bounded rate-limit / quota*
@@ -781,14 +1028,11 @@ def run_cli(argv: list[str] | None = None) -> int:
             print(f"Error: {exc}", file=sys.stderr)
             print(
                 "\nCompleted files are saved in crash_recovery.json in your output "
-                "directory. Re-run the same command to resume — only the "
-                "unfinished files will be re-documented.",
+                f"directory. Re-run the same command. {_RECOVERY_REUSE_BOUNDARY}",
                 file=sys.stderr,
             )
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 2 if getattr(exc, "category", None) == "terminal" else 1
         if isinstance(exc, ConfigError):
             # Includes ProviderInitError (provider initialization failures),
@@ -812,9 +1056,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 )
             print(f"Error: {exc}", file=sys.stderr)
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 2
         if isinstance(exc, OutputError):
             # The OutputError message already carries the sanitized OS
@@ -828,31 +1070,29 @@ def run_cli(argv: list[str] | None = None) -> int:
             category = classify_os_error(exc)
             if category == "locked":
                 print(
-                    "\nThis looks like a transient file lock. Completed work is "
-                    "preserved in the named crash-recovery file. Close any program "
-                    "that may be viewing the file and rerun the same command to "
-                    "resume. CodeDoc cannot identify the locking process unless the "
+                    "\nThis looks like a transient file lock. Any crash-recovery "
+                    "file already created by this run remains preserved; a lock "
+                    "can also occur before one is created. Close any program that "
+                    "may be viewing the file and rerun the same command to "
+                    f"continue. {_RECOVERY_REUSE_BOUNDARY} CodeDoc cannot identify "
+                    "the locking process unless the "
                     "operating system reports it.",
                     file=sys.stderr,
                 )
             else:
                 print(
                     "\nChoose a writable output directory or correct local "
-                    "permissions, then rerun the same command. When the failure "
-                    "occurred during preflight or recovery initialization, no "
-                    "provider was contacted.",
+                    "permissions, then rerun the same command. Any crash-recovery "
+                    "file already created remains preserved; the failure can also "
+                    f"occur before one exists. {_RECOVERY_REUSE_BOUNDARY}",
                     file=sys.stderr,
                 )
             if args.verbose:
-                import traceback
-
-                traceback.print_exc()
+                print(_bounded_traceback(exc), file=sys.stderr)
             return 1
-        print(f"Fatal error: {exc}", file=sys.stderr)
+        print(f"Fatal error: {_bounded_reason(exc)}", file=sys.stderr)
         if args.verbose:
-            import traceback
-
-            traceback.print_exc()
+            print(_bounded_traceback(exc), file=sys.stderr)
         return 1
 
 

@@ -69,6 +69,20 @@ _VALID = {
     "documentation": {"description": "A file.", "key_concepts": ["kc"]},
 }
 
+def fake_provider_exception(module: str, class_name: str, message: str) -> Exception:
+    """Build a minimal exception whose ``(__module__, __name__)`` matches one
+    row of ``codedoc.utils.errors``'s frozen provider-exception reason-code
+    table, without needing a real SDK exception's constructor (which requires
+    an ``httpx.Response``).  Since ``bounded_exception_summary`` classifies by
+    type only, a test that wants a specific bounded reason code must raise
+    something shaped like the real SDK exception, not a bare exception
+    carrying magic text -- magic text is exactly what bounding is designed to
+    discard.
+    """
+    cls = type(class_name, (RuntimeError,), {"__module__": module})
+    return cls(message)
+
+
 def _agent_of(prompt: str) -> str:
     m = re.search(r"The previous (single|triple)/(\w+) response", prompt)
     if m:

@@ -134,6 +134,35 @@ def test_empty_file_skips_without_agent_calls_and_reconciles_last_run(
         )
     )
 
+
+def test_oversized_whitespace_split_is_skipped_in_dry_run_and_real(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "empty.py").write_text(" " * 300_000, encoding="utf-8")
+    config = {
+        "entry_file": "empty.py",
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "max_parallel_files": 1,
+    }
+
+    dry_stats = run_pipeline(tmp_path, {**config, "dry_run": True})
+
+    assert dry_stats["would_skip_insufficient_source"] == 1
+    assert dry_stats["would_call_llm_for"] == 0
+    assert dry_stats["split_blocked_files"] == 0
+    assert dry_stats["split_blocked_by_reason"] == {}
+
+    stats, fake = _run(monkeypatch, tmp_path, config)
+
+    assert fake.doc_calls == 0
+    assert stats["skipped_insufficient_source"] == 1
+    assert stats["split_blocked_files"] == 0
+    assert stats["split_blocked_by_reason"] == {}
+    assert _document(tmp_path).get("files", []) == []
+
+
 def test_parallel_batch_routes_empty_and_normal_files_independently(
     tmp_path, monkeypatch
 ):
@@ -279,5 +308,34 @@ def test_stale_documentation_is_removed_when_source_becomes_whitespace(
     )
     assert second_fake.doc_calls == 0
     assert second["skipped_insufficient_source"] == 1
+    assert _document(tmp_path).get("files", []) == []
+    assert not (tmp_path / "codedoc" / "crash_recovery.json").exists()
+
+
+def test_oversized_whitespace_split_removes_stale_documentation(
+    tmp_path, monkeypatch
+):
+    source = tmp_path / "main.py"
+    source.write_text("VALUE = 1\n", encoding="utf-8")
+    config = {
+        "entry_file": "main.py",
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "max_parallel_files": 1,
+    }
+
+    first, first_fake = _run(monkeypatch, tmp_path, config)
+
+    assert first["checked"] == 1
+    assert first_fake.doc_calls == 1
+    assert [record["path"] for record in _document(tmp_path)["files"]] == ["main.py"]
+
+    source.write_text(" " * 300_000, encoding="utf-8")
+    second, second_fake = _run(monkeypatch, tmp_path, config)
+
+    assert second_fake.doc_calls == 0
+    assert second["skipped_insufficient_source"] == 1
+    assert second["split_blocked_files"] == 0
     assert _document(tmp_path).get("files", []) == []
     assert not (tmp_path / "codedoc" / "crash_recovery.json").exists()

@@ -1,0 +1,25 @@
+{
+  "schema_version": 4,
+  "owner": "codedoc-ai",
+  "rel_path": "src/large.py",
+  "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+  "division_plan_digest": "division-plan:f20f9151ac80dbde25d30781d8e09b429017da1d719fa7e091ae8edd9949ca3e",
+  "reduction_tree_digest": "reduction-tree:9b4e988d7f89a763dc46e1ffd8f1ba6b9712ea73d6a72b8776468bddfcbe2c40",
+  "nodes": [
+    {
+      "node_id": "chunk_75cb73ce230daff8033deceaca008d776729aefa289d3e684006c25cde65a175",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:f20f9151ac80dbde25d30781d8e09b429017da1d719fa7e091ae8edd9949ca3e",
+      "execution_identity_digest": "division-execution:fbf98cd0e13b484ef8da13170dd37cd78a0e6d3f1341239de5dbe6532f39e3cc",
+      "input_digest": "leaf-input:f164555bf51fc753d6fb2d6e5e54a0610c8eea486169308b75d6af15d7979b26",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_75cb73ce230daff8033deceaca008d776729aefa289d3e684006c25cde65a175"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_75cb73ce230daff8033deceaca008d776729aefa289d3e684006c25cde65a175\",\"description\":\"leaf ok\",\"unit_id\":\"unit_14ee0c2b624f79307f4b5f0ae5d60c91f4ed49b12c29e89c71dbc71e1c6f1ea7\"}"
+    }
+  ]
+}

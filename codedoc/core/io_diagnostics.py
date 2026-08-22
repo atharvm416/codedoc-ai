@@ -17,8 +17,10 @@ import errno
 from pathlib import Path
 
 # Windows sharing/lock violation codes: ERROR_SHARING_VIOLATION (32) and
-# ERROR_LOCK_VIOLATION (33).  These are the only transient-lock codes the
-# bounded atomic-replace retry will act on.
+# ERROR_LOCK_VIOLATION (33). These are genuine lock diagnostics. WinError 5
+# (ERROR_ACCESS_DENIED) remains a permission diagnostic here: the atomic
+# replacement implementation may retry it *in that narrow operation context*,
+# but a persistent access denial must not be globally mislabeled as a lock.
 WINDOWS_TRANSIENT_LOCK_ERRORS: frozenset[int] = frozenset({32, 33})
 
 # Stable private failure categories (messages/tests only).
@@ -79,8 +81,9 @@ def classify_os_error(exc: BaseException | None) -> str:
             return CATEGORY_SERIALIZATION
         return CATEGORY_IO
 
-    # Windows raises a sharing violation as PermissionError with winerror 32/33,
-    # so the lock check must precede the generic permission check.
+    # Windows raises sharing/lock violations as PermissionError with winerror
+    # 32/33, so the lock check must precede the generic permission check.
+    # WinError 5 intentionally falls through to CATEGORY_PERMISSION.
     winerror = getattr(os_err, "winerror", None)
     if winerror in WINDOWS_TRANSIENT_LOCK_ERRORS:
         return CATEGORY_LOCKED

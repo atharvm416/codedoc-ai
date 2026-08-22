@@ -14,6 +14,7 @@ from codedoc.utils.errors import (
     ErrorReporter,
     LLMError,
 )
+from tests.support.provider_failures import provider_failure_error
 
 def test_parallel_contract_failures_do_not_enter_sequential_retry(
     tmp_path, monkeypatch
@@ -42,11 +43,11 @@ def test_parallel_contract_failures_do_not_enter_sequential_retry(
     assert stats["attempted_calls"] == 2
     assert stats["response_contract_failures"] == 2
 
-TERMINAL_BILLING = LLMError("openai", "Your credit balance is too low to continue")
+TERMINAL_BILLING = provider_failure_error("openai", "provider-quota-exhausted", status=429)
 
-GLOBAL_PERMANENT = LLMError("openai", "Incorrect API key provided")
+GLOBAL_PERMANENT = provider_failure_error("openai", "provider-authentication-rejected", status=401)
 
-INPUT_PERMANENT = LLMError("anthropic", "prompt is too long: 250000 tokens > 200000")
+INPUT_PERMANENT = provider_failure_error("anthropic", "provider-input-rejected", status=400)
 
 class _LLM:
     def __init__(self, name="openai"):
@@ -84,7 +85,7 @@ def _terminal_provider():
 
         def complete_json(self, prompt, system=""):
             # Route (a): the phrase is folded into the agent error message.
-            raise LLMError("openai", "Your credit balance is too low to continue")
+            raise provider_failure_error("openai", "provider-quota-exhausted", status=429)
 
         def complete(self, prompt, system="", temperature=0.1):
             return self.complete_json(prompt)
@@ -113,6 +114,7 @@ def test_sequential_abort_without_retry(tmp_path, exc):
             max_consecutive_failures=5,
             new_results={},
             recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+            split_execution_mode="recovery",
         )
 
     assert excinfo.value.category == "terminal"
@@ -152,6 +154,7 @@ def test_sequential_input_permanent_marks_failed_without_retry_and_continues(tmp
         max_consecutive_failures=5,
         new_results=new_results,
         recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+        split_execution_mode="recovery",
     )
 
     # f0 failed with exactly one attempt (no retry); f1 succeeded; run continued.
@@ -190,6 +193,7 @@ def test_sequential_transient_error_still_retries_and_succeeds(tmp_path):
         max_consecutive_failures=5,
         new_results={},
         recorder=SafeWriter(tmp_path / "codedoc.json", "json", "f0.py", {}),
+        split_execution_mode="recovery",
     )
 
     assert stats["checked"] == 1
@@ -217,6 +221,7 @@ def test_parallel_abort_without_retry(tmp_path, exc):
             reporter,
             max_workers=2,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert excinfo.value.category == "terminal"
@@ -251,6 +256,7 @@ def test_parallel_abort_cancels_pending_work(tmp_path):
             reporter,
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # At most one extra task may already be running when the abort is observed;
@@ -286,6 +292,7 @@ def test_parallel_input_permanent_is_recorded_without_sequential_retry(tmp_path)
         reporter,
         max_workers=2,
         recorder=recorder,
+        split_execution_mode="recovery",
     )
 
     assert set(succeeded) == {"f1.py"}

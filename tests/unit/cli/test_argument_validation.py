@@ -15,9 +15,11 @@ from codedoc.cli.cli import (
 from tests.support.feasibility_cases import _cross_file_profile
 from tests.support.feasibility_cases import _ReviewFake
 from codedoc.core.loader import load_config
-from codedoc.utils.errors import (
-    UnrecoverableProviderError,
+from tests.support.logging_sentinels import (
+    assert_no_sentinels_leaked,
+    sentinel_bearing_exception,
 )
+from tests.support.provider_failures import provider_failure_error
 
 @pytest.mark.parametrize(
     "argv",
@@ -55,12 +57,76 @@ def test_removed_utilities_are_absent_from_help():
     assert "--describe-prompt-schema" not in help_text
     assert "--init-instructions" not in help_text
 
+
+def test_cli_help_exposes_the_large_file_split_reuse_and_recovery_boundary():
+    help_text = " ".join(build_parser().format_help().split())
+
+    for required in (
+        "large-file split execution:",
+        "analysis-mode single",
+        "paid execution",
+        "triple plus split",
+        "completed split reuse",
+        "node recovery",
+        "current schema-4 checkpoints",
+        "zero calls",
+        "complete source coverage",
+        "atom-cap",
+        "symbol-cap",
+        "unit-cap",
+        "chunk-cap",
+        "reduction-envelope-cap",
+        "reduction-fan-in-cap",
+        "reduction-depth-cap",
+        "final-synthesis-envelope-cap",
+    ):
+        assert required in help_text
+
 def test_cli_confirmation_is_default_no_and_requires_tty(monkeypatch):
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     assert _confirm_risky_prompt_customization(("warning",)) is False
     monkeypatch.setattr("sys.stdin.isatty", lambda: True)
     monkeypatch.setattr("builtins.input", lambda _prompt: "yes")
     assert _confirm_risky_prompt_customization(("warning",)) is True
+
+def test_cli_large_file_strategy_flag_reaches_run_pipeline(monkeypatch, tmp_path):
+    """``--large-file-strategy split`` must arrive as a config override.
+
+    The flag defaults to ``None`` so an unset flag never overrides config or
+    environment; only an explicit value is forwarded.
+    """
+    captured = {}
+
+    def fake_run_pipeline(root, config_overrides=None, **_kwargs):
+        captured["config"] = config_overrides
+        return {
+            "checked": 0,
+            "failed": 0,
+            "reused": 0,
+            "output_dir": "docs",
+            "output_files": [],
+        }
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_run_pipeline)
+
+    assert (
+        run_cli(
+            [
+                str(tmp_path),
+                "--dry-run",
+                "--large-file-strategy",
+                "split",
+            ]
+        )
+        == 0
+    )
+    assert captured["config"]["large_file_strategy"] == "split"
+    assert captured["config"]["dry_run"] is True
+
+    captured.clear()
+    assert run_cli([str(tmp_path)]) == 0
+    assert "large_file_strategy" not in captured["config"]
+
 
 def test_cli_run_alias_passes_current_directory_and_overrides(monkeypatch):
 
@@ -125,6 +191,84 @@ def test_cli_exit_code_contract(tmp_path, monkeypatch, exception, expected):
 
     monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
     assert run_cli([str(tmp_path)]) == expected
+
+
+@pytest.mark.parametrize(
+    ("detail", "expected_contact_note"),
+    [
+        (
+            "No documentation call was made, but the prompt-customization "
+            "review already ran and was billed.",
+            "review already ran and was billed",
+        ),
+        ("No provider was contacted.", "No provider was contacted"),
+    ],
+)
+def test_cli_preserves_output_error_contact_truth_without_appending_a_claim(
+    tmp_path, monkeypatch, capsys, detail, expected_contact_note
+):
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        raise OutputError(str(tmp_path / "docs"), detail)
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    stderr = capsys.readouterr().err
+    assert expected_contact_note in stderr
+    assert stderr.count("No provider was contacted") == (
+        1 if expected_contact_note == "No provider was contacted" else 0
+    )
+    assert "Choose a writable output directory" in stderr
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://user:cli-secret@example.com:notaport/v1",
+        "ftp://user:cli-secret@example.com/v1",
+        "https://[::1/v1?token=cli-secret",
+    ],
+)
+def test_cli_malformed_api_base_url_returns_two_without_leaking_url(
+    tmp_path, monkeypatch, capsys, endpoint
+):
+    (tmp_path / "main.py").write_text("value = 1\n", encoding="utf-8")
+    monkeypatch.setenv("API_BASE_URL", endpoint)
+
+    assert run_cli(
+        [str(tmp_path), "--entry", "main.py", "--dry-run", "--verbose"]
+    ) == 2
+
+    stderr = capsys.readouterr().err
+    assert "valid HTTP or HTTPS URL" in stderr
+    assert "cli-secret" not in stderr
+    assert endpoint not in stderr
+
+
+def test_cli_persistent_winerror_5_reports_permission_guidance(
+    tmp_path, monkeypatch, capsys
+):
+    """A bounded atomic-replace retry may act on WinError 5, but if it still
+    escapes, the CLI must describe a permission problem rather than claiming
+    another process temporarily locked the file."""
+    from codedoc.cli.cli import run_cli
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        root = PermissionError("Access is denied")
+        root.winerror = 5
+        root.errno = 13
+        root.strerror = "Access is denied"
+        raise OutputError("out.json", "write failed") from root
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    stderr = capsys.readouterr().err
+    assert "Choose a writable output directory" in stderr
+    assert "transient file lock" not in stderr
 
 def test_cli_missing_root_and_provider_init_return_two(tmp_path, monkeypatch):
     from codedoc.cli.cli import run_cli
@@ -327,6 +471,103 @@ def test_single_dry_run_summary_does_not_claim_lower_bound(capsys):
     assert "(approximate — character heuristic" in output
     assert "approximate lower bound" not in output
 
+def test_split_cli_summary_uses_category_counts_and_synthesis_bound(capsys):
+    from codedoc.cli.cli import _print_dry_run_summary
+
+    _print_dry_run_summary(
+        {
+            "analysis_mode": "single",
+            "initial_calls_per_file": 1,
+            "large_file_strategy": "split",
+            "split_ordinary_files": 1,
+            "split_syntax_files": 1,
+            "split_lexical_files": 0,
+            "split_blocked_files": 1,
+            "split_blocked_by_reason": {"chunk-cap": 1},
+            "split_blocked_pairs": (("src/huge.py", "chunk-cap"),),
+            "split_units": 2,
+            "split_chunks": 4,
+            "split_continuation_groups": 1,
+            "split_unit_consolidation_levels": 1,
+            "split_unit_consolidation_calls_planned": 2,
+            "split_general_reduction_levels": 0,
+            "split_general_reduction_calls_planned": 0,
+            "split_final_synthesis_calls_planned": 1,
+            "split_restored_complete_chunks": 1,
+            "split_restored_unit_consolidation_calls": 0,
+            "split_restored_general_reduction_calls": 0,
+            "split_restored_final_synthesis_calls": 0,
+            "file_documentation_calls_planned": 6,
+            "unit_documentation_calls_planned": 9,
+            "file_reduction_calls_planned": 2,
+            "synthesis_calls_planned": 1,
+            "split_synthesis_input_estimate": "upper-bound",
+            "estimated_input_tokens": 100,
+            "max_planned_calls_exceeded": True,
+            "total_calls_planned": 18,
+            "max_planned_calls": 15,
+        }
+    )
+
+    output = capsys.readouterr().out
+    assert "Calls per under-threshold file: 1" in output
+    assert "Initial calls per file" not in output
+    assert (
+        "Planned call categories: 6 file / 9 leaf / 2 reduction / 1 synthesis"
+        in output
+    )
+    assert "Synthesis input estimate: upper-bound from configured ceiling" in output
+    assert "Blocked path/reason pairs:" in output
+    assert "src/huge.py (chunk-cap)" in output
+    assert (
+        "6 file documentation, 9 leaf documentation, 2 file reduction, "
+        "1 file synthesis" in output
+    )
+    assert "approximate mixed bound; synthesis uses the configured ceiling" in output
+
+
+def test_cli_prints_split_complexity_advisory_only_when_present(capsys):
+    from codedoc.cli.cli import _print_dry_run_summary
+
+    base_stats = {
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "split_ordinary_files": 0,
+        "split_syntax_files": 1,
+        "split_lexical_files": 0,
+        "split_blocked_files": 0,
+        "split_blocked_by_reason": {},
+        "split_units": 1,
+        "split_chunks": 30,
+        "split_continuation_groups": 1,
+        "split_unit_consolidation_levels": 0,
+        "split_unit_consolidation_calls_planned": 0,
+        "split_general_reduction_levels": 4,
+        "split_general_reduction_calls_planned": 14,
+        "split_final_synthesis_calls_planned": 1,
+        "split_restored_complete_chunks": 0,
+        "split_restored_unit_consolidation_calls": 0,
+        "split_restored_general_reduction_calls": 0,
+        "split_restored_final_synthesis_calls": 0,
+        "file_documentation_calls_planned": 0,
+        "unit_documentation_calls_planned": 30,
+        "file_reduction_calls_planned": 14,
+        "synthesis_calls_planned": 1,
+        "split_synthesis_input_estimate": "deterministic-worst-case-envelope",
+        "estimated_input_tokens": 100,
+    }
+
+    _print_dry_run_summary(
+        {**base_stats, "split_complexity_advisory": "A higher-capability model may help."}
+    )
+    with_advisory = capsys.readouterr().out
+    assert "Advisory (non-blocking): A higher-capability model may help." in with_advisory
+
+    _print_dry_run_summary({**base_stats, "split_complexity_advisory": None})
+    without_advisory = capsys.readouterr().out
+    assert "Advisory (non-blocking):" not in without_advisory
+
+
 def test_cli_prints_recovery_path_when_attached(tmp_path, monkeypatch, capsys):
     import codedoc.pipeline as pipeline_mod
 
@@ -345,6 +586,8 @@ def test_cli_prints_recovery_path_when_attached(tmp_path, monkeypatch, capsys):
     err = capsys.readouterr().err
     assert "crash_recovery.json" in err
     assert "left untouched" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
 
 def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys):
     import codedoc.pipeline as pipeline_mod
@@ -361,6 +604,8 @@ def test_cli_generic_message_when_no_recovery_path(tmp_path, monkeypatch, capsys
     assert exc_info.value.code == 130
     err = capsys.readouterr().err
     assert "crash-recovery file was created or confirmed" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
     assert not list(tmp_path.glob("**/crash_recovery.json"))
 
 @pytest.mark.parametrize(
@@ -371,9 +616,19 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     tmp_path, monkeypatch, capsys, category, expected_code
 ):
     from codedoc.cli.cli import run_cli
+    from codedoc.core.error_classifier import (
+        _build_rate_limit_exhausted_abort,
+        _build_terminal_abort,
+    )
 
     def fake_pipeline(*args, **kwargs):
-        raise UnrecoverableProviderError("openai", "stopped: doomed run", category)
+        if category == "terminal":
+            raise _build_terminal_abort(
+                provider_failure_error("openai", "provider-quota-exhausted", status=429),
+                "openai",
+                "terminal_billing",
+            )
+        raise _build_rate_limit_exhausted_abort("openai")
 
     monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
 
@@ -385,3 +640,70 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     # Resume hint is always printed.
     assert "re-run" in err.lower()
     assert "crash_recovery.json" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
+    assert "resumes the unfinished files" not in err
+
+
+def test_verbose_bounded_trace_never_renders_foreign_type_or_message() -> None:
+    from codedoc.cli.cli import _bounded_traceback
+
+    try:
+        raise sentinel_bearing_exception("foreign-provider-exception")
+    except RuntimeError as cause:
+        try:
+            raise ConfigError("bounded outer reason") from cause
+        except ConfigError as outer:
+            rendered = _bounded_traceback(outer)
+
+    assert "Bounded diagnostic trace" in rendered
+    assert "ConfigError" in rendered
+    assert "unknown-error" in rendered
+    assert "RuntimeError" not in rendered
+    assert "foreign-provider-exception" not in rendered
+    assert_no_sentinels_leaked(rendered)
+
+
+def test_cli_locked_output_explains_fresh_split_recovery_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    from codedoc.cli.cli import run_cli
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        root = PermissionError("The process cannot access the file")
+        root.winerror = 32
+        root.errno = 13
+        raise OutputError("out.json", "atomic replace failed") from root
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "transient file lock" in err
+    assert "Any crash-recovery file already created" in err
+    assert "can also occur before one is created" in err
+    assert "Completed work is preserved" not in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err
+
+
+def test_cli_non_lock_output_explains_fresh_split_recovery_boundary(
+    tmp_path, monkeypatch, capsys
+):
+    from codedoc.cli.cli import run_cli
+    from codedoc.utils.errors import OutputError
+
+    def fake_pipeline(*_args, **_kwargs):
+        raise OutputError("out.json", "permission denied") from PermissionError(
+            "permission denied"
+        )
+
+    monkeypatch.setattr("codedoc.pipeline.run_pipeline", fake_pipeline)
+
+    assert run_cli([str(tmp_path)]) == 1
+    err = capsys.readouterr().err
+    assert "Choose a writable output directory" in err
+    assert "failure can also occur before one exists" in err
+    assert "completed ordinary and split records may be reused" in err
+    assert "compatible current schema-4 split node checkpoints may resume" in err

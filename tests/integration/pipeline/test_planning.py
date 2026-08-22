@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from tests.support.pipeline_identity import _PRIOR_RUN_IDENTITY
+import hashlib
 import json
 from tests.support.pipeline_scenarios import patch_provider
 from tests.support.pipeline_scenarios import no_llm
@@ -12,11 +13,12 @@ from tests.support.pipeline_scenarios import write_existing_md
 import logging
 from pathlib import Path
 import pytest
-from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from tests.support.pipeline_usage import write_py
 from tests.support.pipeline_usage import make_graph
 from dataclasses import asdict, fields
 from codedoc.core.loader import load_config
+from codedoc.core.execution_model import build_call_manifest
 from codedoc.core.planning import PipelinePlan, build_pipeline_plan
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ConfigError
@@ -24,11 +26,266 @@ from tests.support.selection_projects import _project
 from tests.support.selection_projects import _graph_and_map
 from tests.support.markdown_cases import _fake_provider as markdown_fake_provider
 from tests.support.configuration_cases import _fake_provider as configuration_fake_provider
+import codedoc.core.file_division as file_division
 from codedoc.core.discovery import _resolve_entry_and_docs
 from codedoc.core.project_view import build_project_view, json_from_view
 from codedoc.pipeline import _final_entry_source
 from tests.support.run_metadata_cases import _records
 from tests.support.run_metadata_cases import _stats
+
+
+def test_retained_split_nodes_are_excluded_from_exact_unpaid_manifest(tmp_path):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    source_path = tmp_path / "main.py"
+    source_path.write_text(source, encoding="utf-8", newline="")
+    config = load_config(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "analysis_mode": "single",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+        },
+    )
+    division = file_division.build_division_plan(
+        rel_path="main.py",
+        language="python",
+        content=source,
+        source_budget_chars=2000,
+    )
+    tree = file_division.build_reduction_tree(
+        division,
+        max_content_chars=2000,
+        language="python",
+    )
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    provider_identity = file_division.provider_execution_identity(config)
+    retained_chunks = division.chunks[:2]
+    recovered = file_division.SplitTreeState(
+        schema_version=file_division.SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=tuple(
+            file_division.tree_node_state(
+                node_id=chunk.chunk_id,
+                node_type="leaf",
+                rel_path="main.py",
+                content_hash=content_hash,
+                division_plan_digest=division.plan_digest,
+                input_digest=file_division.leaf_input_digest(
+                    rel_path="main.py",
+                    language="python",
+                    chunk=chunk,
+                    unit_indexes=division.unit_positions(chunk),
+                    unit_count=len(division.units),
+                ),
+                execution_identity_digest=file_division.leaf_execution_identity(
+                    rel_path="main.py",
+                    content_hash=content_hash,
+                    division_plan_digest=division.plan_digest,
+                    provider_identity=provider_identity,
+                    chunk=chunk,
+                ),
+                unit_id=None,
+                child_ids=(),
+                coverage_leaf_ids=(chunk.chunk_id,),
+                result={
+                    "description": f"retained {index}",
+                    "chunk_id": chunk.chunk_id,
+                    "unit_id": chunk.unit_id,
+                },
+            )
+            for index, chunk in enumerate(retained_chunks)
+        ),
+    )
+    graph = make_graph("main.py")
+    plan, materials = build_pipeline_plan(
+        {
+            "main.py": {
+                "path": source_path,
+                "rel_path": "main.py",
+                "language": "python",
+                "extension": ".py",
+            }
+        },
+        graph,
+        {"main.py"},
+        "main.py",
+        {},
+        [],
+        config,
+        recovered_partials={"main.py": recovered},
+    )
+
+    manifest = build_call_manifest(
+        [],
+        plan.agent_rels,
+        "single",
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
+    )
+    planned = plan.with_call_manifest(
+        manifest,
+        0,
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
+    )
+
+    retained_ids = set(materials.tree_states["main.py"].by_id())
+    assert retained_ids == {chunk.chunk_id for chunk in retained_chunks}
+    assert all(call.owner not in retained_ids for call in manifest.calls)
+    assert planned.total_calls_planned == (
+        planned.unit_documentation_calls_planned
+        + planned.file_reduction_calls_planned
+        + planned.synthesis_calls_planned
+    )
+    assert planned.total_calls_planned == (
+        len(division.chunks) + len(tree.all_nodes) - len(retained_ids)
+    )
+
+
+def test_split_dry_run_plans_chunks_and_synthesis_without_provider_or_output(
+    tmp_path, monkeypatch
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "dry_run": True,
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert stats["split_divided_files"] == 1
+    assert stats["unit_documentation_calls_planned"] == stats["split_chunks"]
+    assert stats["synthesis_calls_planned"] == 1
+    assert stats["split_final_synthesis_calls_planned"] == 1
+    # Hierarchical reduction: file_reduction_calls_planned covers every
+    # unit-consolidation + general-reduction node below the final synthesis.
+    assert stats["file_reduction_calls_planned"] == (
+        stats["split_unit_consolidation_calls_planned"]
+        + stats["split_general_reduction_calls_planned"]
+    )
+    assert stats["file_reduction_calls_planned"] > 0
+    assert stats["total_calls_planned"] == (
+        stats["unit_documentation_calls_planned"]
+        + stats["file_reduction_calls_planned"]
+        + stats["synthesis_calls_planned"]
+    )
+    assert not (tmp_path / "docs").exists()
+
+
+def test_split_dry_run_final_estimate_uses_reserved_synopsis_bound(
+    tmp_path,
+    monkeypatch,
+):
+    source = "\n".join(f"value_{index} = {index}" for index in range(1200)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+    config = {
+        "dry_run": True,
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 12000,
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    baseline = run_pipeline(tmp_path, config)
+    original = file_division.worst_case_final_synthesis_chars
+
+    def expanded_bound(**kwargs):
+        return original(**kwargs) + 4
+
+    monkeypatch.setattr(
+        file_division,
+        "worst_case_final_synthesis_chars",
+        expanded_bound,
+    )
+    expanded = run_pipeline(tmp_path, config)
+
+    assert expanded["estimated_input_tokens"] == (
+        baseline["estimated_input_tokens"] + 1
+    )
+    assert not (tmp_path / "docs").exists()
+
+
+def test_complex_split_plan_reports_a_provider_free_non_blocking_advisory(
+    tmp_path, monkeypatch
+):
+    """D6a: a plan whose chunk count or reduction depth exceeds its frozen
+    threshold carries a deterministic, provider-free advisory. It never
+    creates a provider, blocks the run, or changes the resolved model/provider
+    selection — it is purely an informational dry-run/CLI surface.
+
+    A single oversized statement (rather than many small top-level
+    statements) keeps the exact chunk count independent of whether the
+    optional structural grammar extra is available: with a real parser,
+    adjacent bare statements can merge into one shared "gap" unit, while a
+    lone oversized statement is always its own unit under both lexical
+    fallback and syntax-mode parsing."""
+    source = "x = " + ("1" * 78001) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+    config = {
+        "dry_run": True,
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "llm_provider": "auto",
+        "model_name": "",
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+
+    stats = run_pipeline(tmp_path, config)
+
+    assert stats["split_chunks"] > 24
+    advisory = stats["split_complexity_advisory"]
+    assert advisory is not None
+    assert "higher-capability model" in advisory
+    assert "max_content_chars" in advisory
+    # Purely informational: the config this run actually used is unchanged.
+    assert config["llm_provider"] == "auto"
+    assert config["model_name"] == ""
+    assert not (tmp_path / "docs").exists()
+
+
+def test_simple_split_plan_reports_no_complexity_advisory(tmp_path, monkeypatch):
+    # See test_complex_split_plan_reports_a_provider_free_non_blocking_advisory
+    # for why this uses a single oversized statement rather than many small
+    # top-level statements.
+    source = "x = " + ("1" * 7001) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    no_llm(monkeypatch)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "dry_run": True,
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert stats["split_chunks"] <= 24
+    assert stats["split_complexity_advisory"] is None
+
 
 def test_pipeline_no_entry_no_docs_uses_auto_detection(tmp_path):
     """0.8.1: pipeline with no --entry and no existing docs must NOT raise 'No entry point
@@ -312,9 +569,9 @@ def test_I1_propagate_changes_true_reimports_updated(tmp_path, monkeypatch):
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
             {"path": "a.py", "hash": "old_a_hash", "language": "python",
-             "description": "Old A.", **_cache_identity()},
+             "description": "Old A.", **_cache_identity("a.py")},
             {"path": "b.py", "hash": b_hash, "language": "python",
-             "description": "Old B.", **_cache_identity()},
+             "description": "Old B.", **_cache_identity("b.py")},
         ],
     }), encoding="utf-8")
 
@@ -342,8 +599,8 @@ def test_I2_propagate_changes_false_only_changed(tmp_path, monkeypatch):
     (out / "codedoc.json").write_text(json.dumps({
         "_codedoc": {"entry_file": "b.py", "schema_version": "1.4"},
         "files": [
-            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A.", **_cache_identity()},
-            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B.", **_cache_identity()},
+            {"path": "a.py", "hash": "old_a_hash", "language": "python", "description": "Old A.", **_cache_identity("a.py")},
+            {"path": "b.py", "hash": b_hash, "language": "python", "description": "Old B.", **_cache_identity("b.py")},
         ],
     }), encoding="utf-8")
 
@@ -370,11 +627,13 @@ def test_forcing_precedes_propagation_and_only_forced_file_bypasses_reuse(tmp_pa
     graph = make_graph("dep.py", "main.py", edges=(("main.py", "dep.py"),))
     existing = {
         rel: {
-            "path": rel,
-            "hash": compute_file_hash(tmp_path / rel),
-            "description": "cached",
-            "_analysis_revision": ANALYSIS_REVISION,
+                "path": rel,
+                "hash": compute_file_hash(tmp_path / rel),
+                "description": "cached",
+                "language": "python",
+                "_analysis_revision": ANALYSIS_REVISION,
             "_analysis_mode": "single",
+            "_ordinary_path_identity": expected_ordinary_path_identity(rel),
         }
         for rel in file_map
     }

@@ -18,18 +18,29 @@ class TestAPIProviders:
             def __init__(self, **kwargs):
                 self.kwargs = kwargs
 
+        class FakeHttpRetryOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+        class FakeHttpOptions:
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
         class FakeModels:
             def generate_content(self, **kwargs):
                 captured.update(kwargs)
                 return types.SimpleNamespace(text='{"ok": true}')
 
         class FakeClient:
-            def __init__(self, api_key):
+            def __init__(self, api_key, http_options=None):
                 captured["api_key"] = api_key
+                captured["http_options"] = http_options
                 self.models = FakeModels()
 
         fake_types = types.SimpleNamespace(
-            GenerateContentConfig=FakeGenerateContentConfig
+            GenerateContentConfig=FakeGenerateContentConfig,
+            HttpRetryOptions=FakeHttpRetryOptions,
+            HttpOptions=FakeHttpOptions,
         )
         fake_genai = types.SimpleNamespace(Client=FakeClient, types=fake_types)
         fake_google = types.SimpleNamespace(genai=fake_genai)

@@ -1,5 +1,697 @@
 # Changelog
 
+## 0.14.5 2026-08-22
+
+### Structured provider-failure classification
+
+- Every provider exception is now converted, at the adapter boundary, into a
+  closed `ProviderFailureEnvelope` (`codedoc/utils/errors.py`) carrying a
+  `provider_kind`, one of nine closed `reason_code` values
+  (`provider-request-failed`, `provider-authentication-rejected`,
+  `provider-rate-limited`, `provider-quota-exhausted`,
+  `provider-model-unavailable`, `provider-timeout`,
+  `provider-connection-failed`, `provider-response-malformed`,
+  `provider-input-rejected`), the HTTP status, an optional `retry_after_s`,
+  and an optional `limit_type` -- replacing the previous classifier, which
+  matched substrings against rendered exception text. This is a closed table,
+  not a fallback chain: OpenAI and Anthropic classify HTTP `400`/`413`/`422`
+  as input-rejected, `401`/`403` as credentials-rejected, `404` as
+  model-unavailable, `429` as rate-limited (OpenAI's `429` with
+  `insufficient_quota` as quota-exhausted instead), and `529` as rate-limited
+  with `limit_type: overloaded`; Anthropic additionally classifies by its own
+  structured error `type` before falling back to status. Gemini classifies by
+  its structured `status` name (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`,
+  `UNAUTHENTICATED`, `PERMISSION_DENIED`, `NOT_FOUND`, `DEADLINE_EXCEEDED`,
+  `INVALID_ARGUMENT`) with a numeric-code fallback (`429`, `503`, `401`,
+  `403`, `404`, `504`, `400`). Every SDK-typed timeout, connection, and
+  malformed-response exception on all three providers is classified by SDK
+  exception class, never by status. Any other status or exception shape is
+  `provider-request-failed`.
+- Adapter metadata handling is now total: a malformed SDK status value
+  (non-integer, boolean, or otherwise unexpected), a non-string Anthropic
+  error `type`, or a non-string, malformed, or non-finite `Retry-After` value
+  is normalized to a safe default instead of escaping as a raw
+  `ValueError`/`TypeError` from the adapter boundary, and a valid
+  `Retry-After` value is preserved even when the failure falls through to the
+  generic `provider-request-failed` case.
+- Terminal-abort wording (`_build_terminal_abort()`) is now derived
+  structurally from the envelope's `reason_code` and `status` instead of
+  embedding provider text, so every terminal-abort message is canonical and
+  sanitized: it never contains raw provider response text, credentials, or
+  endpoint detail.
+- Custom `rate_limit_signals_add`/`rate_limit_signals_remove` entries are
+  narrowed: they now promote only an otherwise-unmapped adapter failure
+  (`provider-request-failed`) to rate-limit handling, never a failure that
+  already carries its own closed reason code.
+- A failure that carries no `ProviderFailureEnvelope` at all -- raised
+  locally, or by a test double with no `provider_failure` attribute --
+  classifies as `transient` and aborts no run, rather than matching on
+  message substrings.
+
+### Warnings, retries, and provider-specific backoff
+
+- A rate-limit warning's `error_sample` is now canonical compact JSON --
+  `{"reason_code":...,"status":...,"retry_after_s":...}`, key-sorted with no
+  extra whitespace -- built from the first failing sibling's envelope,
+  instead of free-text.
+- The provider SDK's own internal retry loop is now disabled at construction
+  (`max_retries=0` for OpenAI and Anthropic; one attempt for Gemini via
+  `HttpRetryOptions`). CodeDoc's own `file_retry_attempts` is the sole source
+  of retry behaviour, so a recoverable failure is never retried by two
+  independent policies at once.
+- A new `provider_request_timeout_s` config key (CLI
+  `--provider-request-timeout-s`, env `CODEDOC_PROVIDER_REQUEST_TIMEOUT_S`,
+  default `120`, range `1`-`600`) bounds each connect/read/write/pool phase
+  of a provider request. Explicit JSON/Python `null` and an empty
+  config/CLI value are rejected boundedly rather than silently defaulting;
+  an absent key still defaults to `120`, and an empty environment variable
+  still behaves as absent.
+- The rate-limit profile is now resolved once, in the factory, and passed
+  into the adapter's own constructor -- a provider built by calling
+  `create_provider()` directly (not only through `run_pipeline`) now
+  correctly receives its configured `rate_limit_signals_add`/`_remove`
+  entries at construction time, and `pipeline.py` no longer mutates adapter
+  state after the fact.
+- `respect_retry_after`/`retry_after_cap_s` now apply only to OpenAI and
+  Anthropic, whose `Retry-After` is a plain-seconds hint; Gemini always uses
+  computed backoff and never reads a provider `Retry-After` value.
+- Sibling-error handling in `triple` and `split` execution now carries the
+  structured `provider_failure` envelope across the dict boundary between
+  agent results and terminal aggregation. Terminal sibling precedence -- the
+  first terminal/global sibling wins even when that same sibling also
+  carries a response-contract failure, since a genuine run-level abort is
+  never masked by a contract failure on the call that produced it -- is now
+  decided from that same structured reason code, not a re-derived guess. The
+  overall failure's envelope is always the first fixed-order sibling's own
+  envelope: an envelope-less first failure (e.g. a local error) is never
+  skipped in favor of inheriting a later sibling's unrelated rate-limit
+  metadata.
+
+### Scanner skip-dir and diagnostics correctness
+
+- The exact generated JSON, Markdown, and recovery target files are now
+  excluded from scanning by resolved-path equality; the output directory
+  itself is not automatically excluded. Removing the default `codedoc`
+  skip-dir (for example, to document CodeDoc's own package) therefore keeps
+  other supported source files co-located in that directory scannable while
+  preventing generated targets from being re-scanned as source.
+- New scan-diagnostics counters (`files_skipped_large`,
+  `files_skipped_unreadable`) are reported in both the run and `--dry-run`
+  summaries, including on the early-return path taken when nothing
+  supported is found. A file that raises `OSError` on stat (permission
+  error, broken metadata) is now recorded and skipped instead of silently
+  dropped, with a bounded, deduplicated warning count that no longer
+  double-counts the same file across a rescan.
+- A source file that passes the scanner's own stat check but fails to read
+  moments later, during planning (a permission change or deletion racing
+  the scan), no longer escapes as a raw, unbounded filesystem error: it is
+  detected before any provider is constructed, and fails with a
+  bounded `ConfigError`. An explicitly named `--entry` or `force_files`
+  path that cannot be read raises a `ConfigError` naming that path
+  specifically, before any recovery file or output is created.
+
+### BaseAgent logging correction
+
+- `BaseAgent._safe_run()`'s generic exception log boundary now applies the
+  same two-tier rule the recorded result already used: a `CodeDocError`
+  (already bounded by construction) renders unchanged via `str(exc)`; only a
+  genuinely foreign exception is reduced through `bounded_exception_summary`.
+  A bare `LLMError` raised outside `_call_llm_counted` no longer misreports
+  its canonical reason as `unknown-error`.
+
+### Packaging
+
+- This is the first official PyPI `0.14.x` release certified from both a
+  built wheel and a built sdist. CI now installs `pytest` alongside `build`
+  and `twine`, runs the artifact-content contract against the built
+  distributions, installs the wheel and the sdist into two separate clean
+  environments, and runs the installed-artifact smoke harness against each.
+- `installed_artifact_smoke.py --scenario cross-version` now takes a
+  required `--peer-version` and asserts the peer's and the candidate's
+  installed versions and import origins before changing any state. It runs
+  one of two non-interchangeable matrices: Matrix A for the ordinary-record
+  predecessor (official PyPI `0.13.1`, which predates `large_file_strategy:
+  split` entirely) and Matrix B for the split-capable predecessor (TestPyPI
+  `0.14.4`).
+
+### Unrelated identities unchanged
+
+- No split/division/analysis schema identity changed in this release. Active
+  split identities remain `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v5`, `leaf-capsule-v7`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v2`,
+  `file-synthesis-v3`, `division-execution-v6`, `large-file-v3`, and ordinary
+  `file-doc-v3`.
+
+### Known limitations
+
+- Four distinct request/transport reason codes (`provider-request-failed`,
+  `provider-connection-failed`, `provider-timeout`,
+  `provider-response-malformed`) all share the `transient` classification.
+- Gemini always uses computed backoff rather than honoring `Retry-After`.
+- HTTP `401` and `403` share one reason code
+  (`provider-authentication-rejected`) on every provider.
+- Custom rate-limit signals are narrowed to otherwise-unmapped adapter
+  faults; they cannot override a closed classification.
+- Dependency testing proves the declared lower bounds and a current latest
+  resolution, not every admitted intermediate combination.
+- Every HTTP `400` is treated as a per-file input failure and may spend one
+  call per remaining file when the actual cause is global configuration.
+- Every HTTP `404` aborts as model-unavailable even when the actual cause is
+  a wrong base path.
+
+## 0.14.4 2026-08-16
+
+### Endpoint-trust authorization for a custom `api_base_url`
+
+- A project-controlled `codedoc.config.json` can set `api_base_url` and, before
+  this release, silently sent the resolved `OPENAI_API_KEY`/`LLM_API_KEY`
+  credential plus the project's source and prompts to that endpoint with no
+  runtime decision by the user. A non-empty `api_base_url` now additionally
+  requires runtime endpoint-trust approval, accepted from exactly two
+  sources: the new `--trust-api-base-url URL` CLI option and the
+  `CODEDOC_TRUST_API_BASE_URL` environment variable (the CLI value wins when
+  both are present). Approval is compared to the configured `api_base_url` as
+  a canonical identity (scheme, lowercased host, port defaulted per scheme,
+  path with trailing slashes stripped) via the existing
+  `effective_endpoint_identity` SHA-256 digest contract in
+  `codedoc/llm/factory.py`; either URL carrying a username, password, query
+  string, or fragment is rejected outright, since those components fall
+  outside the compared identity and must never appear approved.
+- `codedoc.config.json` and programmatic `config_overrides` can never satisfy
+  this gate: the keys `trust_api_base_url`, `trusted_api_base_url`, and
+  `_endpoint_trust` are rejected wherever ordinary configuration is read, with
+  an error naming the two real runtime mechanisms. An approval supplied while
+  `api_base_url` is empty is also rejected, so a stale approval can never sit
+  unnoticed in the environment.
+- Authorization is resolved, in `codedoc/core/loader.py`, before any
+  credential is read or selected: the config-file and `config_overrides`
+  `api_key` candidates are retained in loader-local variables only, and
+  `LLM_API_KEY` is not read, until the gate succeeds or the endpoint is the
+  default provider endpoint. Once resolved, credential precedence is
+  unchanged (config-file `api_key` lowest, `LLM_API_KEY` next, programmatic
+  `config_overrides` `api_key` highest; provider-specific fallbacks apply only
+  when none of those three is present). The gate applies identically to
+  `--dry-run`, so a dry run never reports a plan a real run would refuse. On
+  any refusal, the error names only the configured endpoint's canonical
+  digest and the two approval mechanisms -- never the raw endpoint URL, the
+  approval URL, or any credential.
+- `load_config()` now returns `ResolvedConfig`, a dict-compatible mapping
+  behaving exactly as the existing configuration dict for every current
+  reader, carrying one additional non-serialized `endpoint_trust` attribute
+  (an `EndpointTrustAttestation`) that is excluded from iteration, `dict()`
+  conversion, JSON serialization, persistence, cache identity, recovery
+  identity, and provider identity by construction. `create_provider()` in
+  `codedoc/llm/factory.py` verifies this attestation before any credential
+  lookup when `api_base_url` is non-empty, and rejects a plain dictionary
+  carrying a non-empty `api_base_url` with the same error -- a hand-built
+  config can no longer bypass authorization by calling `create_provider()`
+  directly.
+- `validate_config_data()` remains a static syntax validator: it checks
+  `api_base_url` syntax (including the new forbidden-component rule) and
+  rejects the trust keys, but never performs runtime authorization and can
+  never itself satisfy this gate.
+
+### Ordinary identical-content reuse is now same-path only
+
+- Ordinary identical-content reuse previously matched by content hash alone,
+  so it could copy model-authored, path-specific documentation from one
+  relative path to a different path with byte-identical content. A new
+  private cache-identity key, `_ordinary_path_identity`
+  (`codedoc/core/record_meta.py`), binds every ordinary and oversized
+  truncate-path record to its own path; `_record_is_reusable()` in
+  `codedoc/core/planning.py` now takes a keyword-only `rel_path` and requires
+  both that a candidate's stored `path` equals the destination and that its
+  `_ordinary_path_identity` matches the expected value for that destination.
+  Ordinary cross-path reuse is refused for every record, legacy or
+  regenerated; split reuse was already path-bound and is unaffected.
+- Every record written before `0.14.4` lacks `_ordinary_path_identity` and is
+  therefore treated as invalid until it is successfully replaced by a freshly
+  generated record carrying the new identity for its own path; a record that
+  is not replaced in a given run stays invalid. After successful replacement,
+  same-path reuse, dependency-propagated same-path reuse, and both
+  JSON-to-Markdown and Markdown-to-JSON cross-format directions resolve with
+  zero provider calls again. The first run after upgrading to `0.14.4`
+  therefore regenerates every ordinary and truncate-strategy record once,
+  which raises that run's `total_calls_planned`; `max_planned_calls` is
+  still evaluated against the complete selected run before usage accounting,
+  provider creation, or any confirmation callback, so an exceeded cap blocks
+  the entire run rather than throttling it, exactly as before.
+- The public `files_reused_identical_content` counter and the published
+  `last_run` partition invariant are unchanged; only their documented
+  semantics are corrected, from reuse "from another path with identical
+  content" to same-path identical-content reuse.
+
+### Split leaf and reducer prompt-contract corrections
+
+- A split leaf prompt could list up to `MAX_KNOWN_SYMBOLS_PER_CHUNK` (32)
+  known symbol names per kind while the rendered response contract accepted
+  only 12 functions and 12 classes, so a truthful response naming every known
+  symbol was rejected in full. `MAX_LEAF_SYMBOL_ITEMS_PER_KIND` is now
+  derived from `MAX_KNOWN_SYMBOLS_PER_CHUNK` (`codedoc/core/file_division.py`)
+  instead of restating the literal, raising it to 32 and raising the derived
+  `MAX_LEAF_CAPSULE_CANONICAL_CHARS` worst-case bound from `200192` to
+  exactly `448672`. `LEAF_CAPSULE_SCHEMA_REVISION` advances from
+  `leaf-capsule-v6` to `leaf-capsule-v7`.
+- Split reduction responses are capped at 300 characters
+  (`MAX_REDUCTION_NARRATIVE_CHARS`), but neither the initial reducer prompt
+  nor the correction prompt stated that limit, so a truthful longer narrative
+  was rejected in full. The reducer shape block in
+  `codedoc/agents/file_synthesis_agent.py` now states the bound explicitly,
+  covering both the initial and correction routes (they share one shape
+  block). `REDUCER_PROMPT_REVISION` advances from `file-reduction-v1` to
+  `file-reduction-v2`.
+- Advancing these two revisions invalidates every node of an existing
+  schema-4 checkpoint at once. The per-file quarantine bound,
+  `MAX_QUARANTINE_ENTRIES_PER_FILE`, was `32` -- far below the number of
+  checkpoint IDs a valid plan can contain -- so an ordinary stale checkpoint
+  raised a recovery error that aborted the whole run. It is now derived as
+  `2 * MAX_CHUNKS_PER_FILE` (512), which covers every plannable node: a valid
+  plan over `n` leaf chunks contains at most `n` leaves, at most `n - 1`
+  intermediate reducers (`_pack_level` promotes a trailing singleton group
+  unchanged rather than wrapping it in a unary reducer), and exactly one
+  final node. `SPLIT_PARTIAL_SCHEMA_VERSION` stays `4`; a stale but planned
+  schema-4 node -- including one that was previously paid -- is quarantined
+  and re-executed within the new bound instead of aborting. Every other
+  recovery rejection stays fail-closed exactly as before: a malformed
+  container, a foreign owner, an unsupported schema version, an unplanned or
+  duplicate node ID, and a quarantine map that still exceeds the bound all
+  raise and stop the run.
+- Unrelated active split identities are unchanged: `source-structure-v2`,
+  `semantic-unit-v3`, `division-packer-v5`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-synthesis-v3`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v3`.
+  `MAX_LEDGER_SYNOPSIS_CHARS` (3000) and `MAX_QUARANTINE_ENTRY_CHARS` (4096)
+  are unaffected; the increased leaf bound creates no new capacity failure,
+  since `worst_case_final_synthesis_chars` reserves the fixed ledger-synopsis
+  bound rather than measuring a ledger.
+- The fixed-capsule correction and failure contract is now pinned by test for
+  both the leaf and reducer routes: with correction enabled, a valid
+  corrected response succeeds and the node is checkpointed; a still-invalid
+  corrected response fails that file; a correction call that fails with a
+  nonterminal provider fault fails that file without a second correction
+  call; and a correction call that fails with a terminal-billing or global
+  provider fault preserves the existing whole-run abort rather than becoming
+  a per-file response-contract failure. With correction disabled, a rejected
+  fixed capsule fails the file immediately and makes no correction call.
+
+### Closed reason codes in final response-contract failures
+
+- A final (non-retryable) response-contract error previously stated that a
+  contract failed without stating which one. `codedoc/agents/
+  response_correction_agent.py` now includes the closed diagnostic reason
+  code in the message raised on the correction-disabled path, the
+  correction-provider-fault path, and the still-invalid-after-correction
+  path (the corrected response's own reason code). These messages reach the
+  user unchanged through `_bounded_reason` in `codedoc/core/execution.py`.
+  They carry no source text, prompt text, raw or truncated provider
+  response, credential, endpoint, or per-field removal detail -- only the
+  closed code.
+
+### Documentation
+
+- `README.md` and `RUN_FLOW.md` now describe the endpoint-trust authorization
+  rule and its source-egress consequence, the corrected leaf and reducer
+  bounds, the raised quarantine bound, the closed reason code carried by a
+  final response-contract failure, and same-path-only ordinary reuse.
+- The `api_base_url` entry in `PUBLIC_CONFIG_KEYS`
+  (`codedoc/core/config_template.py`) and the generated configuration template
+  state the runtime authorization requirement.
+
+## 0.14.3 (Unreleased)
+
+### Split-leaf signature-bound correction
+
+- Raised the private split-leaf response-field signature bound
+  (`MAX_LEAF_SYMBOL_SIGNATURE_CHARS`) from `256` to exactly `600`, aliased to
+  the parser's existing `SemanticUnitIdentity.signature` ceiling
+  (`MAX_STRUCTURE_SIGNATURE_CHARS`) so the two bounds cannot drift apart. The
+  256-character value was a conservative internal short-item bound introduced
+  alongside the `0.14.0` split-planning implementation; it was narrower than
+  the parser contract, so a model that accurately echoed a 257-to-600
+  character declaration signature CodeDoc itself supplied could fail the
+  entire leaf response as `fixed_cap_exceeded`. A response signature over 600
+  characters is still rejected through the existing correction/failure
+  contract and is never silently truncated into a shortened accepted value;
+  parser-owned signatures continue to replace matching model-reported
+  signature text before ledger use. Signatures remain private: no signature
+  field reaches JSON, Markdown, embedded view, or converted output. The
+  derived `MAX_LEAF_CAPSULE_CANONICAL_CHARS` worst-case bound rises from
+  `150656` to exactly `200192` characters as a result.
+
+### Current split-partial recovery generation
+
+- Advanced `LEAF_CAPSULE_SCHEMA_REVISION` from `leaf-capsule-v5` to
+  `leaf-capsule-v6` (the fixed fragment prompt bytes versioned by this
+  revision changed alongside the signature bound, so a v5 leaf checkpoint
+  cannot validate as a current v6 checkpoint) and the current node-keyed
+  split-partial container schema from `3` to `4`. The wire fields are
+  unchanged; the bump makes the boundary early and uniform. No predecessor
+  constant was added: the existing current-schema equality check already
+  rejects every non-4 value, so a real `0.14.3` run rejects a released
+  schema-3 container on its schema version alone, before any node is
+  deserialized or quarantined, before planning, `SafeWriter`, or provider
+  construction, and leaves the recovery artifact byte-identical. Schema 1
+  remains recognized legacy preserve-and-block state and schema 2 remains
+  dormant preserve-and-block state, both unchanged. An unfinished `0.14.2`
+  split run must be finished with `0.14.2`, which still owns that recovery
+  generation, or have `crash_recovery.json` moved aside — or deleted as a
+  deliberate discard — before `0.14.3` will proceed.
+- A completed `0.14.2` split record (bound to `leaf-capsule-v5` and the
+  150,656-character capsule bound) is preserved but treated as stale under
+  the current `leaf-capsule-v6` / 200,192-character identity and
+  re-executes; ordinary compatible records are unaffected.
+- Unrelated active split identities are unchanged: `fact-ledger-v6`,
+  `division-execution-v6`, `large-file-v3`, and the current narrow
+  identities `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v1`, and
+  `file-synthesis-v3`. Ordinary `file-doc-v3` remains unchanged, and the
+  300-character reduction narrative bound is unaffected.
+
+### Support declaration
+
+- Declares `single + split` execution, completed-record reuse, and
+  node-level recovery fully supported, following the complete compatibility,
+  determinism, security, documentation, source, and installed-artifact
+  matrix. `triple + split` remains unavailable, and split never silently
+  falls back to truncate.
+
+## 0.14.2 2026-08-04
+
+### Logging privacy and redirected Windows safety
+
+- Scoped verbose DEBUG logging to the `codedoc` namespace without raising the
+  root logger, and held the reviewed provider, authentication, HTTP-client, and
+  transport namespaces at WARNING or stricter. Redirected legacy-code-page
+  output now uses deterministic encoding-safe rendering.
+- Replaced provider- and user-derived exception text at every rendering boundary
+  with closed bounded reason codes. Exception types and CLI exit-code classes
+  are unchanged, but affected message text intentionally changes. In-memory
+  `ErrorReporter` entries no longer retain a `traceback` field.
+- Added bounded split-node completion diagnostics that report only owner,
+  category, node digest, ordinal/count, stage, reason, and response size.
+
+### Completed split reuse and node recovery
+
+- Enabled exactly compatible same-path completed split reuse and schema-3
+  dependency-valid node recovery. Forced paths bypass execution reuse while
+  preserving prior output/recovery until replacement; cross-path split reuse
+  remains unavailable.
+- Added deterministic imports and stage-local input digests, strict
+  duplicate-aware recovery parsing, bounded non-executable quarantine, ordered
+  coverage checks, and preserve-first handling for schema-1, schema-2, foreign,
+  malformed, and future recovery.
+- Retired new `_split_reuse_contract` stamping while retaining the registry key
+  so `0.14.1` `fresh-only-v1` records remain round-trippable and stale by
+  design. Advanced active split identities to `leaf-capsule-v5`,
+  `fact-ledger-v6`, `division-execution-v6`, `large-file-v3`, and split-partial
+  schema version `3`; ordinary `file-doc-v3` remains unchanged.
+- Retained the unchanged narrow identities `source-structure-v2`,
+  `semantic-unit-v3`, `division-packer-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v1`, and `file-synthesis-v3`.
+- Added six optional split run counters for completed reuse, partial resume,
+  unpaid/reexecuted nodes, quarantine, and recovery-conflict files without
+  making predecessor `last_run` documents unreadable.
+
+### Packaging metadata
+
+- Raised the declared setuptools build-backend minimum to 77 for the existing
+  PEP 639 `license` and `license-files` form.
+
+## 0.14.1 - 2026-08-01
+
+### Fresh large-file split execution
+
+- Enabled real `large_file_strategy: split` execution for `analysis_mode:
+  single`. The existing provider-free dry-run uses the same deterministic
+  complete-source division, capacity gates, reduction topology, and canonical
+  call manifest. `triple + split` remains rejected before scanning or any other
+  side effect, and `truncate` remains the default.
+- Made the release boundary explicit and non-configurable: every oversized split
+  file performs fresh paid leaf, reduction, and final-synthesis work on every
+  run. Same-path and identical-content completed split reuse, node checkpoints,
+  and partial split recovery remain unavailable. Under-threshold files continue
+  through the ordinary whole-file reuse path.
+- Added private `fresh-only-v1` split-result identity. Existing split-node
+  recovery is recognized, preserved byte-for-byte, and rejected before provider
+  use or persistent mutation instead of being silently overwritten.
+- Kept split-node persistence outside the fresh executor. A completed split file
+  reaches only the ordinary file-level crash writer and stable-output pipeline;
+  no leaf, reducer, or synthesis checkpoint is read or written.
+- Retained accepted split nodes only in process-local memory across file retries
+  and rate-limit ladder passes. A retry repeats the failed logical call without
+  replaying earlier successful paid nodes; this ephemeral state is never
+  serialized and cannot survive interruption or authorize a later run.
+- Propagated the shared cancellation signal through sequential split retries, so
+  an observed stop prevents every later initial, retry, correction, reduction,
+  or synthesis call.
+- Allocated signed facts before unsigned facts against unconsumed authoritative
+  parser symbol/unit IDs. Mixed forms consolidate for one declaration while
+  out-of-order same-name overload reports retain every distinct declaration.
+- Added offline contract coverage against the installed OpenAI, Anthropic, and
+  Gemini SDK request surfaces without making network calls.
+
+### Active split identities
+
+- The active release identities are `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v5`, `leaf-capsule-v4`, `fact-ledger-v5`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v1`,
+  `file-synthesis-v3`, `division-execution-v5`, `large-file-v2`, and
+  `file-doc-v3`.
+
+## 0.14.0 - 2026-07-30
+
+### Large-file planning preview
+
+- Added provider-free large-file split planning for
+  `large_file_strategy: split` together with `dry_run: true` and
+  `analysis_mode: single`. Planning reads the canonical source snapshot,
+  constructs deterministic semantic or lexical chunks and reduction topology,
+  verifies complete source coverage and serialized capacity, and reports exact
+  initial call categories without contacting a provider or writing output.
+- Real split execution and `triple + split` now fail configuration validation
+  before scanning, recovery inspection, output creation, prompt review, or
+  provider construction. The request never silently falls back to truncate.
+  Split completed output, reuse, checkpoints, and partial recovery are not
+  available from the planning preview.
+- Corrected worst-case split planning to account for canonical JSON escaping of
+  quotes, backslashes, control characters, newlines, and Unicode. Unsafe plans
+  now block locally with `final-synthesis-envelope-cap`; the topology contract
+  advanced to `reduction-packing-v4`. Final-input estimates reserve the full
+  3,000-character canonical ledger-synopsis allowance instead of relying on
+  one concrete maximum-field ledger whose whole-item trimming can underfill it.
+- Kept the default `truncate` route and ordinary `file-doc-v3` identity
+  unchanged. The dormant, test-gated later-patch implementation currently uses
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v4`, `fact-ledger-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v1`, `file-synthesis-v3`,
+  `division-execution-v5`, and `large-file-v2`.
+- Documented the runtime-offline optional structure package and the 4,096
+  lexical-atom ceiling without presenting the package as a remedy for malformed
+  or error-dominated source.
+
+### Ordinary-path and conversion corrections
+
+- Required effective-language equality for ordinary same-path and
+  identical-content reuse while preserving the established ordinary identity
+  bytes.
+- Removed the CLI's unconditional provider-free claim after an output preflight
+  failure when mandatory prompt review may already have been billed.
+- Routed zero-supported-file output-directory creation through the classified
+  output-accessibility boundary.
+- Recursively projected nested records and run metadata through the public
+  schema across JSON, Markdown, embedded-view, read, and reverse-conversion
+  paths, without deleting legitimate user values merely because a path or value
+  resembles an internal field name.
+- Kept preserve-first recovery guidance, strict generated JSON configuration,
+  bounded Windows atomic-replace retry, secret-free endpoint validation, and
+  base-install lexical fallback.
+
+<details>
+<summary>Dormant later-patch split implementation history (not public)</summary>
+
+The implementation notes below remain for later `0.14.x` review. Their
+execution, completed reuse, and recovery paths are test-gated and unreachable
+through public configuration, environment, CLI, or pipeline entry points in
+`0.14.0`.
+
+### Prior release-audit implementation notes
+
+- Prevented silent split-leaf fact loss. Fixed leaf capsules now use practical,
+  prompt-visible symbol/export bounds aligned with established file-level
+  limits and a 300-character reducer-compatible description bound. Any
+  over-limit fact or item count is rejected through the existing
+  correction/failure contract instead of being truncated or omitted from the
+  authoritative local ledger.
+- Corrected reduction fan-in planning to measure the exact rendered
+  child-narrative manifest (`"- "` prefixes and newline separators), rather
+  than using canonical leaf-capsule JSON size as a proxy. Execution now
+  rechecks that invariant before a reducer provider call, and worst-case
+  synopsis trimming uses the same deterministic priority in logarithmic rather
+  than quadratic serialization work.
+- Normalized trailing slashes in OpenAI-compatible endpoint recovery identity,
+  matching the effective base-endpoint behavior while continuing to exclude
+  credentials, query strings, and fragments.
+- Documented the 4,096 lexical-atom split ceiling and the conditional
+  syntax-aware-extra remedy in README, CLI help, generated config guidance, and
+  public-documentation contract tests.
+- Removed dormant ordinary-file call-ID override parameters and centralized
+  flat combined-result assembly in a neutral core helper, eliminating duplicate
+  record construction and the recovery validator's core-to-agent dependency.
+- Extended the bounded Windows atomic-replace retry to transient WinError 5
+  (`ERROR_ACCESS_DENIED`) at that exact boundary. If retries are exhausted it
+  remains classified and reported as a permission failure, with the original
+  exception preserved.
+- Made split fact identity declaration-aware. Parser symbol IDs and source
+  ranges distinguish same-named nested declarations and overloads; ambiguous
+  packed facts receive deterministic occurrence scopes, while continuation
+  reports for one source unit still consolidate. Private provenance remains
+  internal, and all publication/conversion paths recursively apply the
+  ordinary file-level symbol/export schema and limits.
+- Made packed leaf metadata truthful and bounded. Requests carry every ordered
+  semantic unit, unit index, and owning range, while the source packer closes a
+  call group before the exact rendered metadata reaches its fixed ceiling.
+  Planning, validation, and prompt rendering share the same accounting.
+- Hardened schema-2 split recovery parsing. Invalid node entries are rejected
+  independently so valid paid siblings survive; malformed containers and
+  duplicate normalized path aliases fail closed without replacing recovery or
+  stable output.
+- Moved empty and whitespace-only source rejection into provider-free planning,
+  before split extraction, import parsing, manifest construction, `max_files`,
+  or provider creation. A skipped path removes stale documentation
+  transactionally and produces no placeholder.
+- Added cooperative interruption across parallel split execution and the
+  centralized provider-call boundary. Already-running calls may finish and a
+  valid returned node is checkpointed, but queued work and every later leaf,
+  reducer, synthesis, retry, or correction call are canceled before provider
+  contact.
+- Enforced the reduction-depth ceiling across the complete
+  unit-consolidation-plus-general path, rather than applying the limit
+  independently to each phase.
+- Rejected malformed OpenAI-compatible URL schemes, hosts, and ports as
+  value-free configuration errors before provider creation, without echoing
+  credentials or endpoint details even in verbose diagnostics.
+- Sanitized public views before deriving Markdown-visible, embedded, or
+  lightweight metadata while retaining the raw embedded schema separately for
+  ownership/version conflict validation.
+- Expanded Python decorated declarations to include every decorator in their
+  owned source span, including async functions, classes, CRLF, and Unicode
+  cases. Structural extraction and validation now use bounded iterative and
+  indexed algorithms for large sibling/declaration populations.
+
+### Hierarchical large-file division
+
+- Added opt-in `large_file_strategy: split` support for oversized readable
+  source files, currently single-mode only — `triple` plus `split` fails with
+  "currently unavailable" guidance before scanning or any other side effect.
+  The default remains `truncate`, byte-compatible and unchanged.
+- Added semantic-first division: an oversized file is divided at semantic
+  boundaries (functions, classes, top-level declarations) into complete leaf
+  chunks; a unit that fits stays whole, an oversized unit uses explicit
+  continuation chunks, and `max_content_chars` is the hard ceiling per chunk.
+  Split never truncates or drops source — every byte is covered by exactly one
+  analyzed leaf chunk.
+- Added a deterministic hierarchical reduction tree above the leaf chunks:
+  same-unit continuation chunks are consolidated first, in source order, then
+  bounded general-reduction levels combine sibling narratives only until the
+  complete final manifest fits. Final synthesis may accept several ordered
+  roots, and singleton remainders are promoted rather than placed behind a
+  unary reducer.
+- Added fixed, non-configurable internal prompt contracts for leaf and
+  reduction calls: a leaf capsule requires a description and allows bounded
+  optional function/class/export facts; a reduction capsule carries only a
+  refined narrative. Neither ever receives separately parsed whole-file
+  imports or the final customizable shape. Only the final synthesis call uses
+  the resolved (possibly user-customized) file-level shape.
+- Added a local, deterministic, lossless internal fact ledger: every distinct
+  accepted structured fact from every leaf is retained by semantic key,
+  independent of narrative reduction, and never touched by an AI call.
+- Added eight named, provider-free capacity-blocked reasons, checked in a fixed
+  order (`atom-cap`, `symbol-cap`, `unit-cap`, `chunk-cap`,
+  `reduction-envelope-cap`, `reduction-fan-in-cap`,
+  `reduction-depth-cap`, `final-synthesis-envelope-cap`). A blocked file makes
+  no provider call and is excluded from `max_files`; dry-run reports every
+  blocked path and reason with exit 0, and a real run stops with a
+  `ConfigError` (exit 2) before any write or provider contact. There is no
+  silent capacity fallback to truncation.
+- Fixed oversized multiline semantic-unit packing so adjacent complete lines
+  fill each chunk up to the character budget instead of producing one paid
+  chunk per physical line. Removed the invalid `chunk-envelope-cap`, which
+  compared total parser symbols with a per-kind response limit and rejected
+  ordinary classes; parser-derived name hints are now independently bounded.
+- Added a distinct, rarer internal division-plan defect outcome: a genuine
+  invariant failure propagates uncaught and aborts the whole run — dry or
+  real — before any provider or writer side effect, leaving prior stable
+  output untouched. It is never a per-file failure statistic.
+- Added a `file-reduction` planned-call category alongside `unit-documentation`
+  (one leaf chunk call) and `file-synthesis` (one final call per divided
+  file). The exact initial-call plan is
+  `P = R + O + (C - Hc) + (U - Hu) + (G - Hg) + (F - Hf)`, known completely
+  before provider creation and enforced by `max_planned_calls`; retries and
+  corrections are additional attempts, never new entries in `P`. Dry-run and a
+  real run report leaf/reduction/synthesis calls as separate categories and
+  label the synthesis input token estimate as a deterministic worst-case
+  envelope.
+- Added a non-blocking, deterministic, provider-free dry-run advisory that
+  suggests reviewing model capability for an unusually complex plan (many
+  chunks or deep reduction), without changing model selection.
+- Added node-keyed split-partial recovery (schema version 2): every leaf,
+  unit-consolidation, general-reduction, and final-synthesis node is
+  checkpointed independently by its own node ID under
+  `_codedoc.partial_files`, each carrying a provider/model/effective-endpoint
+  execution identity (never the literal `auto` selector, an endpoint
+  credential, or a raw API key). A node from a different provider, model,
+  endpoint, content revision, division plan, or reduction tree is rejected on
+  resume. Exact node type, ordered children, coverage, node-specific execution
+  identity, and the live stage cleaner/required-field schema are revalidated;
+  recovery retention is dependency-closed, so an invalid descendant prunes all
+  affected ancestors. Resuming re-executes only the resulting unpaid nodes,
+  never a whole file. A predecessor build's completed split output migrates as
+  an ordinary stable record; a predecessor prefix-based split partial (schema
+  version 1) is detected and fails closed: finish with the predecessor build or
+  move `crash_recovery.json` aside first. Deletion is described only as an
+  explicit discard of those checkpoints, and stable output remains untouched.
+- Added a construction-time provider identity attestation: the concrete
+  provider, effective model, and normalized non-secret endpoint selected by the
+  factory must match the provider-free plan before prompt review or
+  documentation calls. Missing/malformed attestation fails closed; implicit
+  HTTP/HTTPS ports normalize identically to explicit `:80`/`:443`.
+- Corrected final-capacity planning and dry estimates to use the actual path,
+  language, and parser imports, distinct maximum-size reduction narratives,
+  and the complete fixed ledger-synopsis character allowance. Only the lossy
+  ledger synopsis may shrink; authoritative imports, narratives, and coverage
+  never do.
+- Preserved source semantic-unit identity independently from packed leaf call
+  groups and strengthened every recoverable node identity with its exact
+  planned node/stage metadata. The contracts at that implementation checkpoint
+  were
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v4`, `fact-ledger-v5`, `reduction-capsule-v1`,
+  `reduction-packing-v3`, `file-reduction-v1`, `file-synthesis-v3`,
+  `division-execution-v5`, `large-file-v2`, and ordinary `file-doc-v3`.
+- Made `max_files`, prompt-profile review scopes, and the call manifest operate
+  on the exact unpaid plan after recovery. Fully restored files contribute no
+  candidate or review call, and calls are globally phased across all files:
+  reviews, ordinary/leaves, unit consolidation, general reduction, then final
+  synthesis.
+- Centralized a completed-output allowlist across direct JSON, Markdown,
+  embedded-view, reverse-conversion, and document-read boundaries, preventing
+  predecessor chunk/unit/reduction state or unregistered private fields from
+  leaking through public converters.
+- Added `_large_file_identity` cache invalidation (revision `large-file-v2`)
+  bound to a record's exact division plan and reduction tree together.
+- Added optional bundled grammar extraction with complete lexical fallback and
+  no runtime grammar download.
+- Only the final, synthesized file-level documentation is ever published for a
+  split file — no chunk, unit, or reduction content, and no `division` or
+  `documentation_units` object, appears in JSON or Markdown output, visible or
+  embedded. Customizing the final documentation shape never changes the fixed
+  internal chunk/reduction contracts.
+- Preserved the default truncate path: it imports no optional grammar package
+  and emits no split-specific output or statistics.
+
+</details>
+
 ## 0.13.1 - 2026-07-22
 
 ### Deterministic private metadata and verified dead-state cleanup

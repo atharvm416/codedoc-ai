@@ -23,6 +23,13 @@ def test_winerror_lock_codes_classify_as_locked():
     assert classify_os_error(_oserror(PermissionError, winerror=33)) == CATEGORY_LOCKED
     assert is_transient_lock(_oserror(PermissionError, winerror=32))
 
+
+def test_winerror_5_remains_a_permission_diagnostic():
+    exc = _oserror(PermissionError, errno_=errno.EACCES, winerror=5)
+    assert classify_os_error(exc) == CATEGORY_PERMISSION
+    assert not is_transient_lock(exc)
+
+
 def test_plain_permission_is_not_a_transient_lock():
     exc = _oserror(PermissionError, errno_=errno.EACCES)
     assert classify_os_error(exc) == CATEGORY_PERMISSION

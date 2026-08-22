@@ -57,3 +57,11 @@ def test_initial_calls_per_file_values():
     assert initial_calls_per_file("triple") == 3
     # Anything not explicitly triple resolves to one call (single default).
     assert initial_calls_per_file("anything-else") == 1
+
+
+def test_large_file_strategy_is_public_and_defaults_to_truncate():
+    generated = build_default_config()
+
+    assert DEFAULTS["large_file_strategy"] == "truncate"
+    assert generated["large_file_strategy"] == "truncate"
+    assert "large_file_strategy" in dict(PUBLIC_CONFIG_KEYS)

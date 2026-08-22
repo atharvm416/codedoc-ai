@@ -25,10 +25,8 @@ DISCOVERY_REEXPORTS = [
 ]
 
 EXECUTION_REEXPORTS = [
-    "_is_rate_limit_error",
     "_detect_limit_type",
     "_build_default_ladder",
-    "_parse_retry_after",
     "_process_and_record",
     "_process_descriptor_batch",
     "_process_files_sequentially",
@@ -164,6 +162,10 @@ def test_execution_context_fields():
         "new_results",
         "options",
         "execution_requests",
+        "division_plans",
+        "reduction_trees",
+        "provider_identity",
+        "split_execution_mode",
     }
 
 def test_execute_agent_files_is_public_entry():

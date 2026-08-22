@@ -18,7 +18,11 @@ from codedoc.core.prompt_profiles import (
     ReviewBatch,
     clean_review_verdict,
 )
-from codedoc.utils.errors import PromptCustomizationValidationError
+from codedoc.utils.errors import (
+    CodeDocError,
+    PromptCustomizationValidationError,
+    bounded_exception_summary,
+)
 from codedoc.utils.json_utils import DuplicateJSONKeyError, loads_no_duplicate_keys
 
 
@@ -75,9 +79,10 @@ class PromptCustomizationValidationAgent(BaseAgent):
                 f"batch {batch.ordinal}/{batch.count}: duplicate key {exc.key!r}."
             ) from exc
         except Exception as exc:
+            detail = str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
             raise PromptCustomizationValidationError(
                 "prompt customization standards/safety review failed closed for "
-                f"batch {batch.ordinal}/{batch.count}: {exc}"
+                f"batch {batch.ordinal}/{batch.count}: {detail}"
             ) from exc
 
     def review(self, batches: list[ReviewBatch]) -> ReviewOutcome:

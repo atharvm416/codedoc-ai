@@ -9,12 +9,22 @@ import pytest
 from codedoc.core.markdown_view import markdown_from_view
 from codedoc.core.output import write_summary
 from codedoc.core.planning import PipelinePlan
-from codedoc.core.project_view import build_project_view
+from codedoc.core.project_view import build_project_view, sanitize_public_view
 from codedoc.pipeline import _set_plan_counters
 from tests.support.run_metadata_cases import _records
 from tests.support.run_metadata_cases import _stats
 from tests.support.run_metadata_cases import _view
 from tests.support.run_metadata_cases import _partition_sum
+from tests.support.run_metadata_cases import _split_record, _split_stats
+
+_OPTIONAL_SPLIT_COUNTERS = (
+    "split_completed_files_reused",
+    "split_partial_files_resumed",
+    "split_unpaid_nodes",
+    "split_reexecuted_nodes",
+    "split_quarantined_nodes",
+    "split_recovery_conflict_files",
+)
 
 def test_F1_md_metadata_contains_file_hashes(tmp_path, monkeypatch):
     """F1: written MD output contains file_hashes in the codedoc-ai comment."""
@@ -166,3 +176,25 @@ def test_resumed_is_a_subset_and_must_not_be_summed_into_the_partition():
     assert lr["files_resumed_from_recovery"] <= lr["files_reused_unchanged"]
     assert lr["files_selected"] == _partition_sum(lr)
     assert _partition_sum(lr) + lr["files_resumed_from_recovery"] > lr["files_selected"]
+
+
+def test_current_split_run_emits_all_six_optional_counters():
+    last_run = build_project_view([_split_record()], _split_stats())["last_run"]
+    assert {key: last_run[key] for key in _OPTIONAL_SPLIT_COUNTERS} == {
+        "split_completed_files_reused": 0,
+        "split_partial_files_resumed": 0,
+        "split_unpaid_nodes": 3,
+        "split_reexecuted_nodes": 1,
+        "split_quarantined_nodes": 2,
+        "split_recovery_conflict_files": 1,
+    }
+
+
+def test_predecessor_split_view_does_not_acquire_optional_counters_on_sanitize():
+    predecessor = build_project_view([_split_record()], _split_stats())
+    for key in _OPTIONAL_SPLIT_COUNTERS:
+        predecessor["last_run"].pop(key)
+
+    sanitized = sanitize_public_view(predecessor)
+
+    assert all(key not in sanitized["last_run"] for key in _OPTIONAL_SPLIT_COUNTERS)

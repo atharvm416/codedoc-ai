@@ -31,7 +31,35 @@ The registry carries the per-file cache-identity keys
 
 from __future__ import annotations
 
+import hashlib
+import json
+
 from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
+from codedoc.parser.source_structure import normalize_rel_path
+from codedoc.core.file_division import (
+    FINAL_SYNTHESIS_REVISION,
+    LEAF_CAPSULE_SCHEMA_REVISION,
+    LEDGER_SCHEMA_REVISION,
+    MAX_ATOMS_PER_FILE,
+    MAX_CHUNKS_PER_FILE,
+    MAX_KNOWN_SYMBOLS_PER_CHUNK,
+    MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+    MAX_LEAF_PROMPT_METADATA_CHARS,
+    MAX_LEDGER_SYNOPSIS_CHARS,
+    MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+    MAX_REDUCTION_NARRATIVE_CHARS,
+    MAX_REDUCTION_TREE_DEPTH,
+    MAX_SYMBOLS_PER_FILE,
+    MAX_UNITS_PER_FILE,
+    PACKER_SCHEMA_REVISION,
+    REDUCER_PROMPT_REVISION,
+    REDUCTION_CAPSULE_SCHEMA_REVISION,
+    REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+    REDUCTION_PACKING_REVISION,
+    STRUCTURE_SCHEMA_REVISION,
+    UNIT_SCHEMA_REVISION,
+)
+from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 
 # Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
 # changes in a way that should invalidate previously cached records.
@@ -45,6 +73,12 @@ from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
 # ``file-doc-v2`` (and ``file-doc-v1``) records remain readable but are
 # reprocessed exactly once under the current contract before reuse.
 ANALYSIS_REVISION = "file-doc-v3"
+
+# Rejected predecessor value from the 0.14.1 fresh-only split contract. Current
+# production code never stamps it, but the key remains registered so predecessor
+# records survive every public-format round trip and mismatch the current absent
+# expected value without inferring policy from the package version.
+FRESH_SPLIT_REUSE_CONTRACT = "fresh-only-v1"
 
 # Per-file truncation identity token.  The head-plus-tail truncation of an
 # oversized file depends on the effective ``max_content_chars`` ceiling and the
@@ -74,6 +108,9 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
         "_analysis_mode",
         "_max_context_revision",
         "_prompt_profile_digest",
+        "_large_file_identity",
+        "_split_reuse_contract",
+        "_ordinary_path_identity",
     }
 )
 
@@ -81,6 +118,11 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
 # here compares as its default value when absent from a record, so an omitted key
 # and an explicitly stored default are equivalent.  Keys not listed here default
 # to ``None`` when absent (the historical behaviour for the other identity keys).
+# ``_ordinary_path_identity`` is deliberately unregistered here: every pre-0.14.4
+# ordinary/truncate-path record lacks it, so an absent key must normalize to
+# ``None`` and compare unequal to any expected (non-``None``) value -- leaving
+# every such legacy record invalid until it is regenerated under the current
+# path-bound contract (see ``_record_is_reusable``'s ``rel_path`` keyword).
 _CACHE_KEY_ABSENT_DEFAULTS: dict[str, str] = {
     "_prompt_profile_digest": NO_PROMPT_PROFILE_DIGEST,
 }
@@ -93,11 +135,16 @@ _CACHE_KEY_ABSENT_DEFAULTS: dict[str, str] = {
 # order and keeps run-level identity ahead of per-file identity.  Plain
 # ``sorted()`` would also be deterministic but would gratuitously reorder every
 # freshly generated record; do not "simplify" this to alphabetical order.
+# ``_ordinary_path_identity`` is appended last so every existing record's key
+# order is preserved.
 PRIVATE_KEY_ORDER: tuple[str, ...] = (
     "_analysis_revision",
     "_analysis_mode",
     "_max_context_revision",
     "_prompt_profile_digest",
+    "_large_file_identity",
+    "_split_reuse_contract",
+    "_ordinary_path_identity",
 )
 
 # Registered private record keys: persisted through JSON / Markdown / live
@@ -154,8 +201,120 @@ def expected_max_context_revision(
     plus the ceiling and ratio, matter.
     """
     if source_chars > max_chars:
-        return f"{MAX_CONTEXT_REVISION}:max={int(max_chars)}:head={float(head_ratio):.4f}"
+        ratio = float(head_ratio)
+        rendered = f"{ratio:.4f}"
+        identity = f"{MAX_CONTEXT_REVISION}:max={int(max_chars)}:head={rendered}"
+        # The 4-place rendering aliases ratios that differ beyond the fourth
+        # decimal (e.g. 0.7000501 and 0.7001499 both render "0.7001") even
+        # though they produce different head/tail splits and therefore
+        # different prompts. Append the exact round-trippable value only when
+        # rounding actually lost information, so every ratio representable at
+        # four decimals — including the 0.70 default — keeps its existing
+        # identity bytes and stays reusable.
+        if float(rendered) != ratio:
+            identity = f"{identity}:exact={ratio!r}"
+        return identity
     return None
+
+
+def expected_large_file_identity(
+    *,
+    source_chars: int,
+    max_chars: int,
+    rel_path: str,
+    division_plan_digest: str,
+    reduction_tree_digest: str,
+    structural_mode: str,
+    imports_digest: str,
+) -> str | None:
+    """Return the effective-split cache-identity value, or ``None``.
+
+    ``None`` for a record whose source fits `max_chars` (never split) or that
+    was never a completed effective split.  There is no capacity-fallback or
+    effective-truncate identity case: a completed record carrying this key
+    always describes a complete effective split (D8/D11/section 13).  The
+    revision prefix (``large-file-v3``) is distinct from every predecessor's
+    so an earlier split identity (including the dormant ``large-file-v2``)
+    can never satisfy this comparison.  Binds the deterministic imports
+    digest (section 6) so an equal-length import change invalidates the
+    completed record.
+    """
+    if source_chars <= max_chars:
+        return None
+    payload = {
+        "revision": "large-file-identity-v3",
+        "requested_strategy": "split",
+        "effective_strategy": "split",
+        "source_budget": int(max_chars),
+        "path": rel_path,
+        "division_plan_digest": division_plan_digest,
+        "reduction_tree_digest": reduction_tree_digest,
+        "structural_mode": structural_mode,
+        "imports_digest": imports_digest,
+        "parser_package_version": PARSER_PACKAGE_VERSION,
+        "grammar_availability_mode": (
+            "bundled-grammar-or-complete-lexical-fallback-v1"
+        ),
+        "bounds": {
+            "atoms": MAX_ATOMS_PER_FILE,
+            "symbols": MAX_SYMBOLS_PER_FILE,
+            "units": MAX_UNITS_PER_FILE,
+            "chunks": MAX_CHUNKS_PER_FILE,
+            "known_symbols_per_chunk": MAX_KNOWN_SYMBOLS_PER_CHUNK,
+            "leaf_prompt_metadata_chars": MAX_LEAF_PROMPT_METADATA_CHARS,
+        },
+        "reduction_bounds": {
+            "leaf_capsule_chars": MAX_LEAF_CAPSULE_CANONICAL_CHARS,
+            "reduction_capsule_chars": MAX_REDUCTION_CAPSULE_CANONICAL_CHARS,
+            "reduction_envelope_overhead": REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+            "final_narrative_chars": MAX_REDUCTION_NARRATIVE_CHARS,
+            "final_ledger_synopsis_chars": MAX_LEDGER_SYNOPSIS_CHARS,
+            "final_envelope": "exact-worst-case-v2",
+            "max_tree_depth": MAX_REDUCTION_TREE_DEPTH,
+        },
+        "revisions": {
+            "structure": STRUCTURE_SCHEMA_REVISION,
+            "units": UNIT_SCHEMA_REVISION,
+            "packer": PACKER_SCHEMA_REVISION,
+            "leaf_capsule": LEAF_CAPSULE_SCHEMA_REVISION,
+            "ledger": LEDGER_SCHEMA_REVISION,
+            "reduction_capsule": REDUCTION_CAPSULE_SCHEMA_REVISION,
+            "reduction_packing": REDUCTION_PACKING_REVISION,
+            "reducer_prompt": REDUCER_PROMPT_REVISION,
+            "final_synthesis": FINAL_SYNTHESIS_REVISION,
+        },
+    }
+    return "large-file-v3:" + hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def expected_ordinary_path_identity(rel_path: str) -> str:
+    """Return the ordinary-only path-bound cache identity for *rel_path*.
+
+    Ordinary identical-content reuse (same content hash, same cache identity)
+    must never copy model-authored, path-specific documentation from one
+    relative path to another: only *this exact path*'s prior record may ever
+    satisfy it.  ``_record_is_reusable``'s ``rel_path`` keyword compares this
+    value against the record's own stored ``_ordinary_path_identity``, so a
+    record whose stored ``path`` and stamped identity do not both match the
+    destination path is never reusable there.
+
+    Deliberately serializes with ``ensure_ascii=True`` -- unlike
+    :func:`codedoc.core.file_division.canonical_json`, which uses
+    ``ensure_ascii=False`` -- so a non-ASCII path always escapes to the same
+    bytes regardless of platform or Python version; do not switch this to the
+    shared ``canonical_json`` helper.
+    """
+    payload = {"revision": "ordinary-path-v1", "path": normalize_rel_path(rel_path)}
+    canonical = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+        allow_nan=False,
+    )
+    return "ordinary-path-v1:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _ordered_private_keys(registered: frozenset[str]) -> list[str]:

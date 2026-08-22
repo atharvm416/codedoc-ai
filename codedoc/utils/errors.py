@@ -4,11 +4,186 @@ Issues are collected in memory only — CodeDoc never writes a persistent
 ``error.log``.  Bounded diagnostics are printed to the terminal and embedded in
 the final output (and preserved in ``crash_recovery.json`` while a run is
 interrupted).  Error counters include only errors; issue counters include both.
+
+This module is also the canonical bounded error-projection owner
+(:func:`bounded_exception_summary`).  Two tiers govern every rendering
+boundary in this codebase:
+
+1. **CodeDoc-owned exceptions are bounded by construction, not by rendering.**
+   Every :class:`CodeDocError` subclass has a message CodeDoc composed itself
+   (any foreign text was already passed through :func:`bounded_exception_summary`
+   at its construction site).  A rendering boundary emits ``str(exc)``
+   **unchanged** for these types.
+2. **Everything else is reduced** through :func:`bounded_exception_summary`.
+
+The rule is decidable from the type alone: never call
+:func:`bounded_exception_summary` on a :class:`CodeDocError` instance, and
+never skip it for a foreign exception being wrapped into a new CodeDoc error.
 """
 
 from __future__ import annotations
 
-import traceback
+import math
+import re
+from concurrent.futures import CancelledError
+from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Provider failure envelope (structured, bounded provider-failure identity)
+# ---------------------------------------------------------------------------
+
+PROVIDER_KINDS: frozenset[str] = frozenset({"openai", "anthropic", "gemini"})
+
+# The nine closed provider failure reason codes. Every adapter-boundary
+# classification (codedoc/llm/*_provider.py) resolves to exactly one of
+# these; there is no default/fallback code outside this set.
+PROVIDER_FAILURE_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "provider-request-failed",
+        "provider-authentication-rejected",
+        "provider-rate-limited",
+        "provider-quota-exhausted",
+        "provider-model-unavailable",
+        "provider-timeout",
+        "provider-connection-failed",
+        "provider-response-malformed",
+        "provider-input-rejected",
+    }
+)
+
+PROVIDER_LIMIT_TYPES: frozenset[str] = frozenset({"tpm", "rpm", "quota", "overloaded"})
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailureEnvelope:
+    """A structured, bounded description of one provider call failure.
+
+    Built only at the immediate adapter exception boundary from allowlisted
+    primitive SDK fields (never from rendered provider text, response
+    bodies, prompt/source text, credentials, endpoint URLs, exception class
+    names, agent names, or file paths), and carried through the exception
+    chain as :attr:`LLMError.provider_failure`.
+
+    All field validation lives here — callers (including the defensive
+    mapping deserializer :func:`provider_failure_from_mapping`) never
+    duplicate it.
+    """
+
+    provider_kind: str
+    reason_code: str
+    status: int | None = None
+    retry_after_s: float | None = None
+    limit_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider_kind not in PROVIDER_KINDS:
+            raise ValueError(f"Unsupported provider_kind: {self.provider_kind!r}")
+        if self.reason_code not in PROVIDER_FAILURE_REASON_CODES:
+            raise ValueError(
+                f"Unsupported provider failure reason_code: {self.reason_code!r}"
+            )
+        if self.status is not None and (
+            isinstance(self.status, bool) or not isinstance(self.status, int)
+        ):
+            raise ValueError("status must be a non-boolean integer or None")
+        if self.retry_after_s is not None:
+            if isinstance(self.retry_after_s, bool) or not isinstance(
+                self.retry_after_s, (int, float)
+            ):
+                raise ValueError(
+                    "retry_after_s must be a non-negative finite float or None"
+                )
+            retry_after_s = float(self.retry_after_s)
+            if not math.isfinite(retry_after_s) or retry_after_s < 0:
+                raise ValueError(
+                    "retry_after_s must be a non-negative finite float or None"
+                )
+            object.__setattr__(self, "retry_after_s", retry_after_s)
+        if self.limit_type is not None and self.limit_type not in PROVIDER_LIMIT_TYPES:
+            raise ValueError(f"Unsupported limit_type: {self.limit_type!r}")
+
+
+def find_provider_failure(exc: BaseException | None) -> ProviderFailureEnvelope | None:
+    """Walk *exc*'s ``__cause__``/``__context__`` chain and return the first
+    attached :class:`ProviderFailureEnvelope`, or ``None`` if none is found.
+
+    Cycle-safe via a visited-id guard, mirroring the chain-walking pattern
+    used throughout this codebase.
+    """
+    visited: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        failure = getattr(current, "provider_failure", None)
+        if isinstance(failure, ProviderFailureEnvelope):
+            return failure
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def provider_failure_as_mapping(failure: ProviderFailureEnvelope) -> dict:
+    """Serialize *failure* to a plain, JSON-safe mapping."""
+    return {
+        "provider_kind": failure.provider_kind,
+        "reason_code": failure.reason_code,
+        "status": failure.status,
+        "retry_after_s": failure.retry_after_s,
+        "limit_type": failure.limit_type,
+    }
+
+
+def provider_failure_from_mapping(mapping: object) -> ProviderFailureEnvelope | None:
+    """Defensively reconstruct a :class:`ProviderFailureEnvelope` from
+    *mapping*.
+
+    Returns ``None`` for anything malformed or foreign — a non-mapping, a
+    missing/extra key, or a value the dataclass itself rejects — rather than
+    raising.  All field validation lives in the dataclass; this function
+    only catches its rejection.
+    """
+    if not isinstance(mapping, dict):
+        return None
+    expected_keys = {"provider_kind", "reason_code", "status", "retry_after_s", "limit_type"}
+    if set(mapping) != expected_keys:
+        return None
+    try:
+        return ProviderFailureEnvelope(
+            provider_kind=mapping["provider_kind"],
+            reason_code=mapping["reason_code"],
+            status=mapping["status"],
+            retry_after_s=mapping["retry_after_s"],
+            limit_type=mapping["limit_type"],
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit-type text classifier (relocated from codedoc.core.error_classifier;
+# a pure string classifier with no exception-chain or SDK dependency, kept
+# here alongside the envelope it feeds section 5.3's ``limit_type`` field).
+# ---------------------------------------------------------------------------
+
+_DETECT_TPM_RE = re.compile(r"\btpm\b", re.IGNORECASE)
+_DETECT_RPM_RE = re.compile(r"\brpm\b", re.IGNORECASE)
+
+
+def detect_limit_type(error_msg: str) -> str | None:
+    """Classify the kind of rate limit from an error message string.
+
+    Returns ``"tpm"``, ``"rpm"``, ``"quota"``, ``"overloaded"``, or ``None``.
+    """
+    msg = error_msg.lower()
+    if "tokens per min" in msg or _DETECT_TPM_RE.search(error_msg):
+        return "tpm"
+    if "requests per min" in msg or _DETECT_RPM_RE.search(error_msg):
+        return "rpm"
+    if "daily" in msg or "quota" in msg or "resource_exhausted" in msg:
+        return "quota"
+    if "overloaded" in msg or "529" in msg:
+        return "overloaded"
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -39,9 +214,16 @@ class InsufficientSourceError(CodeDocError):
 class LLMError(CodeDocError):
     """Raised when an LLM call fails or returns invalid output."""
 
-    def __init__(self, provider: str, reason: str):
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        *,
+        provider_failure: ProviderFailureEnvelope | None = None,
+    ):
         self.provider = provider
         self.reason = reason
+        self.provider_failure = provider_failure
         super().__init__(f"LLMError [{provider}]: {reason}")
 
 
@@ -53,8 +235,12 @@ class UnrecoverableProviderError(LLMError):
     *provider* fault.  It is raised exclusively by ``codedoc.core.execution`` so
     that it is distinguishable from an ordinary ``AgentError`` / ``LLMError`` that
     may legitimately appear in an exception chain.  Every stop it represents is
-    *safe*: crash_recovery.json is left intact and resumable; no stop path
-    deletes the backup or overwrites it with a "complete" final output.
+    *safe*: crash_recovery.json is left intact. Compatible completed ordinary
+    and split records may be reused, and compatible current schema-4 split node
+    checkpoints may resume; forced, stale, identity-mismatched, legacy,
+    foreign, or unsupported state is rerun or preserved and blocked according
+    to the documented remedy. No stop path deletes the backup or overwrites it
+    with a "complete" final output.
 
     Parameters
     ----------
@@ -187,6 +373,121 @@ class LiveBackupWriteError(OutputError):
 
 
 # ---------------------------------------------------------------------------
+# Bounded exception rendering (section 3A)
+# ---------------------------------------------------------------------------
+# Frozen contract: bounded_exception_summary(exc) returns exactly
+# "<reason_code>" or "<reason_code> (<detail>)" -- never an exception class
+# name, module path, repr(), or chained-cause text.  Callers decide the tier:
+# a CodeDocError's own str(exc) is never passed through this helper.
+
+MAX_BOUNDED_SUMMARY_CHARS = 200
+
+# Closed reason-code enum. No free text is ever emitted by
+# bounded_exception_summary outside this set.
+BOUNDED_EXCEPTION_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "provider-request-failed",
+        "provider-initialization-failed",
+        "provider-authentication-rejected",
+        "provider-rate-limited",
+        "provider-quota-exhausted",
+        "provider-model-unavailable",
+        "provider-timeout",
+        "provider-connection-failed",
+        "provider-response-malformed",
+        "provider-input-rejected",
+        "filesystem-error",
+        "cancelled",
+        "unknown-error",
+    }
+)
+
+# Frozen (module, class_name) -> reason-code table, resolved by walking the
+# exception's MRO from most- to least-derived and taking the first match.
+# Matching is by fully-qualified type name only: no provider SDK is imported
+# here, so this table has zero import-time coupling to optional or
+# not-yet-installed provider packages.  OpenAI and Anthropic mirror the same
+# exception hierarchy (module == package name); google-genai only
+# distinguishes client/server faults, so both map to the general
+# request-failed code and rely on the numeric ``.code`` detail below to carry
+# the HTTP status.
+_PROVIDER_EXCEPTION_REASON_CODES: dict[tuple[str, str], str] = {
+    ("openai", "AuthenticationError"): "provider-authentication-rejected",
+    ("openai", "PermissionDeniedError"): "provider-authentication-rejected",
+    ("openai", "RateLimitError"): "provider-rate-limited",
+    ("openai", "APITimeoutError"): "provider-timeout",
+    ("openai", "APIConnectionError"): "provider-connection-failed",
+    ("openai", "NotFoundError"): "provider-model-unavailable",
+    ("openai", "UnprocessableEntityError"): "provider-response-malformed",
+    ("openai", "APIStatusError"): "provider-request-failed",
+    ("openai", "APIError"): "provider-request-failed",
+    ("anthropic", "AuthenticationError"): "provider-authentication-rejected",
+    ("anthropic", "PermissionDeniedError"): "provider-authentication-rejected",
+    ("anthropic", "RateLimitError"): "provider-rate-limited",
+    ("anthropic", "APITimeoutError"): "provider-timeout",
+    ("anthropic", "APIConnectionError"): "provider-connection-failed",
+    ("anthropic", "NotFoundError"): "provider-model-unavailable",
+    ("anthropic", "UnprocessableEntityError"): "provider-response-malformed",
+    ("anthropic", "APIStatusError"): "provider-request-failed",
+    ("anthropic", "APIError"): "provider-request-failed",
+    ("google.genai.errors", "ClientError"): "provider-request-failed",
+    ("google.genai.errors", "ServerError"): "provider-request-failed",
+    ("google.genai.errors", "APIError"): "provider-request-failed",
+}
+
+
+def _reason_code_for(exc: BaseException) -> str:
+    """Resolve the closed reason code for *exc*, by type alone."""
+    if isinstance(exc, OSError):
+        return "filesystem-error"
+    if isinstance(exc, (KeyboardInterrupt, SystemExit, CancelledError)):
+        return "cancelled"
+    for cls in type(exc).__mro__:
+        code = _PROVIDER_EXCEPTION_REASON_CODES.get((cls.__module__, cls.__name__))
+        if code is not None:
+            return code
+    return "unknown-error"
+
+
+def _bounded_detail(exc: BaseException) -> int | str | None:
+    """Resolve the one permitted ``detail`` for *exc*, from a closed source
+    list only.  Never calls ``str()``/``repr()`` on the exception or any of
+    its attributes, and never traverses ``__cause__``/``__context__``."""
+    if isinstance(exc, OSError):
+        from codedoc.core.io_diagnostics import category_reason, classify_os_error
+
+        return category_reason(classify_os_error(exc))
+    for attr in ("status_code", "code", "retry_after"):
+        value = getattr(exc, attr, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value
+    return None
+
+
+def bounded_exception_summary(exc: BaseException) -> str:
+    """Render *exc* as a stable, non-sensitive, bounded summary.
+
+    Returns exactly ``"<reason_code>"`` or ``"<reason_code> (<detail>)"`` --
+    never an exception class name, module path, ``repr()``, or chained-cause
+    text.  *exc* must not be a :class:`CodeDocError`: those are bounded at
+    construction, not at rendering, and every rendering boundary in this
+    codebase emits their text unchanged instead of calling this helper.
+
+    An exception whose type matches no row in the frozen mapping returns
+    exactly ``"unknown-error"`` with no detail -- there is no fallback to
+    ``str(exc)``, no partial rendering, and no best-effort path.
+    """
+    reason_code = _reason_code_for(exc)
+    detail = (
+        _bounded_detail(exc)
+        if reason_code == "filesystem-error" or reason_code.startswith("provider-")
+        else None
+    )
+    text = reason_code if detail is None else f"{reason_code} ({detail})"
+    return text[:MAX_BOUNDED_SUMMARY_CHARS]
+
+
+# ---------------------------------------------------------------------------
 # Error Reporter
 # ---------------------------------------------------------------------------
 
@@ -232,12 +533,16 @@ class ErrorReporter:
         """
         if len(self._entries) >= self._MAX_ENTRIES:
             return
+        message = (
+            str(error)
+            if isinstance(error, CodeDocError)
+            else bounded_exception_summary(error)
+        )
         entry = {
             "type": type(error).__name__,
-            "message": str(error),
+            "message": message,
             "context": context,
             "level": level,
-            "traceback": traceback.format_exc(),
         }
         self._entries.append(entry)
 

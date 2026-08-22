@@ -1,9 +1,11 @@
 """
 Provider-aware rate-limit profiles for codedoc.
 
-Extracts provider-specific rate-limit signal lists and backoff
-parameters from the hardcoded ``_RATE_LIMIT_SIGNALS`` tuple in
-``pipeline.py`` into configurable per-provider profiles.
+Defines configurable per-provider rate-limit signal lists and backoff
+parameters. Signals are evaluated at the adapter boundary
+(``codedoc.llm.api_provider``, section 5.3) and apply only to an otherwise
+provider-request-failed failure -- never to override a structured
+classification.
 
 The pipeline can now:
 - Use the correct signals for each provider (tighter false-positive
@@ -148,9 +150,9 @@ def get_rate_limit_profile(
     # mutated even when add / remove overrides are applied.
     signals = list(base.signals)
 
-    # Normalize all signals to lower-case so comparisons in _is_rate_limit_error
-    # are always case-insensitive.  The pipeline already lowercases the message,
-    # so the signals must also be lower-case to match correctly.
+    # Normalize all signals to lower-case so the adapter-boundary comparison
+    # (section 5.3) is always case-insensitive against the lower-cased
+    # provider message it checks the signals against.
     add = [s.lower() for s in (config.get("rate_limit_signals_add") or [])]
     seen = set(signals)
     for sig in add:

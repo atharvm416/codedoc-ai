@@ -25,7 +25,18 @@ one strict contract.  They are re-exported here for backward compatibility.
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
-from codedoc.core.execution_model import AgentCallContext, PlannedCall
+from codedoc.core.execution_model import AgentCallContext, PlannedCall, UnitChunkExecutionRequest
+from codedoc.core.file_division import (
+    MAX_LEAF_DESCRIPTION_CHARS,
+    MAX_LEAF_EXPORT_ITEM_CHARS,
+    MAX_LEAF_EXPORT_ITEMS,
+    MAX_LEAF_SYMBOL_DESCRIPTION_CHARS,
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
+    MAX_LEAF_SYMBOL_NAME_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+    MAX_LEAF_PROMPT_METADATA_CHARS,
+    render_leaf_prompt_metadata,
+)
 from codedoc.core.prompt_profiles import (
     ResolvedShapeBlock,
     default_shape_block,
@@ -40,6 +51,7 @@ from codedoc.agents.response_cleaning import (  # noqa: F401  (re-export)
     MAX_DEPENDENCY_NAME_CHARS,
     MAX_DEPENDENCY_PURPOSE_CHARS,
     MAX_DESCRIPTION_CHARS,
+    MAX_EXPORT_ITEM_CHARS,
     MAX_EXPORT_ITEMS,
     MAX_KEY_CONCEPT_CHARS,
     MAX_KEY_CONCEPT_ITEMS,
@@ -58,6 +70,7 @@ from codedoc.agents.response_cleaning import (  # noqa: F401  (re-export)
     _enforce_global_cap,
     clean_combined_report,
     clean_combined_response,
+    clean_leaf_capsule_report,
 )
 from codedoc.utils.logger import get_logger
 
@@ -137,6 +150,121 @@ def build_prompt(
     return _SYSTEM, prompt
 
 
+# ---------------------------------------------------------------------------
+# Fixed internal fragment (split leaf chunk) prompt — D5/section 7
+# ---------------------------------------------------------------------------
+# Completely independent of prompt-profile customization: chunk prompt bytes
+# are fixed and versioned by CodeDoc (`LEAF_CAPSULE_SCHEMA_REVISION`), never
+# derived from `resolved_synthesis_shape(...)` or any per-file bundle.
+
+LEAF_CAPSULE_REQUESTED_PATHS: tuple[str, ...] = ("description", "functions", "classes", "exports")
+LEAF_CAPSULE_REQUIRED_PATHS: tuple[str, ...] = ("description",)
+
+_FRAGMENT_SYSTEM = (
+    "You are a senior software engineer analysing one bounded fragment of a "
+    "larger source file. You respond ONLY with valid JSON — no markdown, no "
+    "explanation."
+)
+
+_FRAGMENT_SHAPE_BLOCK = (
+    "Return exactly this fixed internal JSON shape (never the final "
+    'file-level shape):\n{\n  "description": "<required, non-empty; a '
+    'truthful minimal description such as \'Comment-only fragment; no '
+    "executable symbols' is valid for a fragment with no executable "
+    'code>",\n  "functions": [{"name": "...", "signature": "...", '
+    '"description": "..."}, ...], '
+    '(optional)\n  "classes": [{"name": "...", "signature": "...", '
+    '"description": "..."}, ...], '
+    '(optional)\n  "exports": ["...", ...] (optional)\n}\n'
+    "Hard bounds: description <= "
+    f"{MAX_LEAF_DESCRIPTION_CHARS} characters; functions <= "
+    f"{MAX_LEAF_SYMBOL_ITEMS_PER_KIND} items; classes <= "
+    f"{MAX_LEAF_SYMBOL_ITEMS_PER_KIND} items; each symbol name <= "
+    f"{MAX_LEAF_SYMBOL_NAME_CHARS} characters; each symbol signature <= "
+    f"{MAX_LEAF_SYMBOL_SIGNATURE_CHARS} characters; each symbol description <= "
+    f"{MAX_LEAF_SYMBOL_DESCRIPTION_CHARS} characters; exports <= "
+    f"{MAX_LEAF_EXPORT_ITEMS} items; each export <= "
+    f"{MAX_LEAF_EXPORT_ITEM_CHARS} characters."
+)
+
+_FRAGMENT_PROMPT_TEMPLATE = """This is one bounded fragment of a larger {language} file. It is NOT the \
+whole file.
+
+File: {file_path}
+Fragment position: fragment {fragment_index} of {fragment_count} within this \
+leaf call group; overall \
+fragment {global_index} of {global_count} in this file.
+Fragment metadata (ordered JSON; semantic_unit_indexes are 1-based): \
+{fragment_metadata}
+Continues an earlier fragment of the same unit: {continuation_before}
+Continues into a later fragment of the same unit: {continuation_after}
+Known symbol name(s) anchored in this fragment: {known_symbols}
+
+Visible fragment source:
+{payload}
+
+{shape_block}
+
+Rules:
+""" + EXACT_JSON_RESPONSE_RULES + """
+- Analyze only the visible fragment source above
+- Do not infer this file's overall role, its whole-file dependencies, its \
+key concepts, or a usage example — those belong only to final file-level \
+synthesis, never to a fragment
+- Do not assume, invent, or describe content from an earlier or later \
+fragment you cannot see, even when this fragment continues a larger unit
+- Do not invent source ranges, IDs, or coverage claims; report only what is \
+directly visible
+- functions and classes must be ones actually visible and defined in this \
+fragment
+- include "signature" for every function or method whose language expresses \
+one, copied from the visible declaration (parameter types/arity), so that \
+overloads sharing a name stay distinguishable; omit it only when the \
+language has no signature or the declaration is not visible here
+- If this fragment continues into a later fragment, describe only the \
+portion visible here
+- If the fragment contains only comments, whitespace, or other \
+non-executable text, still provide a truthful minimal description and omit \
+functions/classes/exports
+- Omit a key instead of returning an empty list, empty object, or null
+- Do not include duplicate fields
+"""
+
+
+def build_fragment_prompt(request: UnitChunkExecutionRequest) -> tuple[str, str]:
+    """Return ``(system, prompt)`` for one fixed internal fragment request.
+
+    *request* already carries every deterministic metadata field the prompt
+    needs; this never reopens source, recomputes division/tree topology, or
+    accepts a prompt-profile shape.
+    """
+    known_symbols = ", ".join(request.known_symbols) if request.known_symbols else "(none known)"
+    fragment_metadata = render_leaf_prompt_metadata(
+        group_unit_id=request.unit_id,
+        semantic_units=request.semantic_units,
+        unit_indexes=request.unit_indexes,
+        unit_count=request.unit_count,
+        owning_ranges=request.owning_ranges,
+    )
+    if len(fragment_metadata) > MAX_LEAF_PROMPT_METADATA_CHARS:
+        raise ValueError("fragment prompt metadata exceeds its fixed bound.")
+    prompt = _FRAGMENT_PROMPT_TEMPLATE.format(
+        language=request.language,
+        file_path=request.rel_path,
+        fragment_index=request.unit_chunk_index + 1,
+        fragment_count=request.unit_chunk_count,
+        global_index=request.global_index + 1,
+        global_count=request.global_count,
+        fragment_metadata=fragment_metadata,
+        continuation_before=request.continuation_before,
+        continuation_after=request.continuation_after,
+        known_symbols=known_symbols,
+        payload=request.payload,
+        shape_block=_FRAGMENT_SHAPE_BLOCK,
+    )
+    return _FRAGMENT_SYSTEM, prompt
+
+
 class FileDocumentationAgent(BaseAgent):
     """Default ``single``-mode agent: one combined call per file."""
 
@@ -189,6 +317,51 @@ class FileDocumentationAgent(BaseAgent):
         logger.debug(
             "FileDocumentationAgent: %s → %d functions, %d classes",
             file_path,
+            len(cleaned.get("functions", [])),
+            len(cleaned.get("classes", [])),
+        )
+        return cleaned
+
+    def run_fragment(
+        self,
+        request: UnitChunkExecutionRequest,
+        *,
+        planned_call: PlannedCall | None = None,
+        additional_attempt: bool = False,
+    ) -> dict:
+        """Document one immutable split leaf chunk under the fixed internal
+        fragment contract (D5/section 7).
+
+        The fixed fragment prompt is completely independent of any
+        prompt-profile customization — a customized final shape never reaches
+        this call — and the returned capsule is cleaned under the fixed
+        internal schema (`description` required; `functions`/`classes`/
+        `exports` optional), never the final synthesis shape.
+        """
+        system, prompt = build_fragment_prompt(request)
+        raw = self._call_llm(
+            prompt,
+            system=system,
+            planned_call=planned_call,
+            additional_attempt=additional_attempt,
+        )
+        cleaned = self._finalize_fixed_response(
+            raw,
+            label="split-leaf",
+            agent="leaf",
+            file_path=request.rel_path,
+            clean_reporter=clean_leaf_capsule_report,
+            requested_paths=LEAF_CAPSULE_REQUESTED_PATHS,
+            required_paths=LEAF_CAPSULE_REQUIRED_PATHS,
+            content=request.payload,
+            shape_block=_FRAGMENT_SHAPE_BLOCK,
+            planned_call=planned_call,
+        )
+        logger.debug(
+            "FileDocumentationAgent: %s fragment %d/%d -> %d functions, %d classes",
+            request.rel_path,
+            request.global_index + 1,
+            request.global_count,
             len(cleaned.get("functions", [])),
             len(cleaned.get("classes", [])),
         )

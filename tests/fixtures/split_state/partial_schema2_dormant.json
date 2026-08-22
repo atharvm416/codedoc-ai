@@ -1,0 +1,26 @@
+{
+  "schema_version": 2,
+  "owner": "codedoc-ai",
+  "rel_path": "src/large.py",
+  "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+  "reduction_tree_digest": "reduction-tree:2222222222222222222222222222222222222222222222222222222222222222",
+  "nodes": [
+    {
+      "node_id": "chunk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+      "execution_identity_digest": "division-execution:3333333333333333333333333333333333333333333333333333333333333333",
+      "input_digest": "leaf-input:5555555555555555555555555555555555555555555555555555555555555555",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      ],
+      "result_json": "{\"description\":\"leaf ok\"}",
+      "reduction_tree_digest": "reduction-tree:2222222222222222222222222222222222222222222222222222222222222222"
+    }
+  ]
+}

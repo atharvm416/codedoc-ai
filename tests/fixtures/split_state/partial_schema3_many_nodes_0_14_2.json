@@ -1,0 +1,565 @@
+{
+  "schema_version": 3,
+  "owner": "codedoc-ai",
+  "rel_path": "src/large.py",
+  "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+  "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+  "reduction_tree_digest": "reduction-tree:0d51a75448848532ee3d07ce961375df0fbdd56438e90eded71a5d471da8c466",
+  "nodes": [
+    {
+      "node_id": "chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000001",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000001"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000002",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000002"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000003",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000003"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000004",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000004"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000005",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000005"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000006",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000006"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000007",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000007"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000008",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000008"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000009",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000009"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000010",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000010"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000011",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000011"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000012",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000012"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000013",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000013"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000014",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000014"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000015",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000015"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000016",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000016"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000017",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000017"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000018",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000018"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000019",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000019"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000020",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000020"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000021",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000021"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000022",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000022"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000023",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000023"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000024",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000024"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000025",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000025"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000026",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000026"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000027",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000027"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000028",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000028"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000029",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000029"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000030",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000030"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000031",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000031"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000032",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000032"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000033",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000033"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000034",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000034"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000035",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000035"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    },
+    {
+      "node_id": "chunk_0000000000000000000000000000000000000000000000000000000000000036",
+      "node_type": "leaf",
+      "rel_path": "src/large.py",
+      "content_hash": "d283150697bbb93e2c50d1a27a6cceb3310d45d3fe42ec3b01f414bd835c7d98",
+      "division_plan_digest": "division-plan:3e4dcf6caab7c066f1e294bdb1eb31811be76d7c7ef7195bafd52910e02f86fc",
+      "execution_identity_digest": "division-execution:e1d7f59abc4f0330a23178cff43f5c7b48c92ebe52c8cbc056f9079a6c1d485f",
+      "input_digest": "leaf-input:717a87d3be3a1a619bd66d2eff603bcefebe9783c8cea5e5e969862bba65c0d2",
+      "unit_id": null,
+      "child_ids": [],
+      "coverage_leaf_ids": [
+        "chunk_0000000000000000000000000000000000000000000000000000000000000036"
+      ],
+      "result_json": "{\"chunk_id\":\"chunk_be272ba3692a2e1659c56ecc6e2648b6932c5b236d31788bac81657b8d9ad18e\",\"description\":\"A bounded fragment.\",\"functions\":[{\"description\":\"does f\",\"name\":\"f\"}],\"unit_id\":\"unit_f02cda2a065299db1ff9197e3233d7257d843fd6d853751e92f7d179ef8c4151\"}"
+    }
+  ]
+}

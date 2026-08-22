@@ -2,12 +2,15 @@
 
 import pytest
 from codedoc.core.prompt_profiles import (
+    FileScope,
     NO_PROMPT_PROFILE_DIGEST,
     PROFILE_ACTION_EXECUTABLE,
+    ResolvedProfile,
     build_resolved_profile,
     classify_profile_action,
     default_prompt_profiles,
     documentation_projectable_paths,
+    resolved_synthesis_shape,
     validate_profile,
 )
 from codedoc.utils.errors import ConfigError
@@ -157,3 +160,24 @@ def test_triple_per_extension_documentation_requires_common_documentation():
             source="inline",
             source_path=None,
         )
+
+
+@pytest.mark.parametrize("analysis_mode", ["single", "triple"])
+def test_default_synthesis_shape_is_mode_complete(analysis_mode):
+    bundle = ResolvedProfile(analysis_mode, None).resolve_bundle(
+        FileScope(basename="large.py")
+    )
+
+    shape = resolved_synthesis_shape(bundle)
+
+    assert shape.digest == NO_PROMPT_PROFILE_DIGEST
+    assert shape.resolved_fields[0].key == "description"
+    assert {
+        "description",
+        "functions",
+        "classes",
+        "exports",
+        "dependencies_analysis.external",
+        "key_concepts",
+        "usage_example",
+    } <= set(shape.requested_field_paths)

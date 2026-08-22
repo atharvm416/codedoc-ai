@@ -596,6 +596,7 @@ class ResolvedShapeBlock:
     digest: str
     active: bool
     requested_field_paths: tuple[str, ...]
+    resolved_fields: tuple[ShapeFieldSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -1606,7 +1607,9 @@ class ResolvedProfile:
         if cached is not None:
             return cached
         agents = self._agents()
-        rendered: dict[str, tuple[str, tuple[str, ...], bool]] = {}
+        rendered: dict[
+            str, tuple[str, tuple[str, ...], bool, tuple[_ResolvedField, ...]]
+        ] = {}
         for agent in agents:
             specs = self._effective_specs(agent, selector)
             active = specs != _default_resolved_fields(self.mode, agent)
@@ -1616,9 +1619,9 @@ class ResolvedProfile:
             else:
                 text = default_shape_block(self.mode, agent)
                 field_paths = default_field_paths(self.mode, agent)
-            rendered[agent] = (text, field_paths, active)
+            rendered[agent] = (text, field_paths, active, tuple(specs))
 
-        any_active = any(active for _, _, active in rendered.values())
+        any_active = any(active for _, _, active, _ in rendered.values())
         if self.profile is None or not any_active:
             digest = NO_PROMPT_PROFILE_DIGEST
         else:
@@ -1630,7 +1633,7 @@ class ResolvedProfile:
 
         selections: dict[str, ResolvedShapeSelection] = {}
         for agent in agents:
-            text, field_paths, active = rendered[agent]
+            text, field_paths, active, resolved_specs = rendered[agent]
             scope_kind, sel = self._scope_kind_for(agent, selector)
             selections[agent] = ResolvedShapeSelection(
                 block=ResolvedShapeBlock(
@@ -1638,6 +1641,10 @@ class ResolvedProfile:
                     digest=digest,
                     active=active,
                     requested_field_paths=field_paths,
+                    resolved_fields=tuple(
+                        ShapeFieldSpec(rf.path, rf.type, rf.instruction)
+                        for rf in resolved_specs
+                    ),
                 ),
                 scope=scope_kind,
                 selector=sel,
@@ -1671,6 +1678,57 @@ class ResolvedProfile:
 
     def is_active_for(self, basename: str = "") -> bool:
         return self.file_digest(basename) != NO_PROMPT_PROFILE_DIGEST
+
+
+def resolved_synthesis_shape(
+    bundle: ResolvedFileShapeBundle,
+) -> ResolvedShapeBlock:
+    """Return the reviewed combined-field shape used by split-file synthesis.
+
+    Single mode already resolves the combined block directly. Triple mode uses
+    the canonical combined-field order and the union of the already-resolved
+    structure, dependency, and documentation fields. When every contributing
+    block is the built-in default, this returns the existing combined default
+    byte-for-byte.
+    """
+    if bundle.mode == "single":
+        return bundle.selections["combined"].block
+    if bundle.mode != "triple":
+        raise ValueError(f"unsupported synthesis bundle mode: {bundle.mode!r}")
+    selections = tuple(
+        bundle.selections[agent].block
+        for agent in VALID_AGENTS_BY_MODE["triple"]
+    )
+    if not any(block.active for block in selections):
+        fields = tuple(
+            ShapeFieldSpec(field.path, field.type, field.instruction)
+            for field in iter_fields("single", "combined")
+        )
+        return ResolvedShapeBlock(
+            text=default_shape_block("single", "combined"),
+            digest=bundle.digest,
+            active=False,
+            requested_field_paths=tuple(field.key for field in fields),
+            resolved_fields=fields,
+        )
+
+    by_path: dict[str, ShapeFieldSpec] = {}
+    for block in selections:
+        for field in block.resolved_fields:
+            by_path[field.key] = field
+    combined_order = tuple(field.path for field in iter_fields("single", "combined"))
+    ordered = tuple(by_path[path] for path in combined_order if path in by_path)
+    rendered = [
+        _ResolvedField(field.key, field.type, field.instruction)
+        for field in ordered
+    ]
+    return ResolvedShapeBlock(
+        text=_render_block("single", "combined", rendered),
+        digest=bundle.digest,
+        active=True,
+        requested_field_paths=tuple(field.key for field in ordered),
+        resolved_fields=ordered,
+    )
 
 
 # ---------------------------------------------------------------------------

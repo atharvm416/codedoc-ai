@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import re
+
 import pytest
+
 from codedoc import __version__
 from codedoc.cli.cli import run_cli
+
 
 def test_version_identity_consistent(capsys):
     """Release identity: pyproject, codedoc.__version__, and CLI agree."""
@@ -21,12 +24,42 @@ def test_version_identity_consistent(capsys):
     assert match.group(1) == codedoc.__version__
 
     from codedoc.cli.cli import main
+
     with pytest.raises(SystemExit):
         main(["--version"])
     assert codedoc.__version__ in capsys.readouterr().out
+
 
 def test_version_flag_reports_canonical_identity(capsys):
     with pytest.raises(SystemExit) as caught:
         run_cli(["--version"])
     assert caught.value.code == 0
     assert __version__ in capsys.readouterr().out
+
+
+def test_release_identity_is_0_14_5():
+    assert __version__ == "0.14.5"
+
+
+def test_pep_639_license_form_declares_supported_setuptools_backend():
+    import pathlib
+
+    pyproject = (
+        pathlib.Path(__file__).resolve().parents[3] / "pyproject.toml"
+    ).read_text(encoding="utf-8")
+    assert re.search(r'(?m)^license\s*=\s*"[^"]+"\s*$', pyproject)
+    assert re.search(r"(?m)^license-files\s*=", pyproject)
+    build_requires = re.search(
+        r'(?ms)^\[build-system\]\s*.*?^requires\s*=\s*\[(.*?)\]',
+        pyproject,
+    )
+    assert build_requires
+    setuptools_minimum = re.search(
+        r'setuptools>=(\d+)', build_requires.group(1)
+    )
+    assert setuptools_minimum
+    assert int(setuptools_minimum.group(1)) >= 77
+    assert re.search(
+        r'(?ms)^\[build-system\]\s*.*?^build-backend\s*=\s*"setuptools\.build_meta"',
+        pyproject,
+    )

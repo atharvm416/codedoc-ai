@@ -2,137 +2,168 @@
   "llm_mode": "api",
   "llm_provider": "auto",
   "model_name": "",
+  "api_base_url": null,
   "api_key": null,
+  "entry_file": null,
+  "documentation_scope": "entry",
+  "output_dir": "codedoc",
+  "output_format": "json",
+  "output_json_filename": "codedoc.json",
+  "output_md_filename": "codedoc.md",
+  "parallel_agents": true,
+  "max_parallel_files": 5,
+  "file_retry_attempts": 1,
+  "max_consecutive_failures": 5,
+  "log_level": "INFO",
+  "max_file_size_kb": 500,
+  "follow_symlinks": false,
+  "propagate_changes": true,
+  "rate_limit_adaptive": true,
+  "parallel_ladder": null,
+  "respect_retry_after": true,
+  "retry_after_cap_s": 30,
+  "skip_dirs_add": [],
+  "skip_dirs_remove": [],
+  "extension_language_map_add": {},
+  "extension_language_map_remove": [],
+  "auto_entry_candidates_add": [],
+  "auto_entry_candidates_remove": [],
+  "provider_prefixes_add": {},
+  "provider_prefixes_remove": {},
+  "rate_limit_backoff_s": null,
+  "rate_limit_backoff_scale": null,
+  "rate_limit_signals_add": [],
+  "rate_limit_signals_remove": [],
+  "ignore_paths": [],
+  "max_content_chars": 12000,
+  "dry_run": false,
+  "max_files": 0,
+  "force_files": [],
+  "allow_partial": false,
   "analysis_mode": "single",
-  "output_format": "both",
-  "documentation_scope": "all",
+  "truncation_head_ratio": 0.7,
   "prompt_profiles": {
-    "$comment": [
-      "Public end-to-end fixture for testing extension-scoped prompt profiles.",
-      "Python files use the complete .py replacements below; other configured extensions fall back to common."
-    ],
     "single": {
       "common": {
         "requested_shape": {
-          "description": "Explain what this file does and why it exists based only on visible source evidence."
+          "description": "<clear paragraph describing what this file does and why it exists>",
+          "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+          "functions": [
+            {
+              "name": "<function or method defined IN this file>",
+              "description": "<what it does>"
+            }
+          ],
+          "classes": [
+            {
+              "name": "<class defined IN this file>",
+              "description": "<what it does>"
+            }
+          ],
+          "exports": [
+            "<symbol this module deliberately exposes, including intentional re-exports>"
+          ],
+          "dependencies_analysis": {
+            "internal": [
+              "<relative import paths that are project files>"
+            ],
+            "external": [
+              "<package names from node_modules / pip / pub / maven>"
+            ],
+            "dependency_refs": [
+              "<normalized dependency names used by this file>"
+            ],
+            "catalog_updates": [
+              {
+                "name": "<normalized dependency name>",
+                "type": "internal|external",
+                "used_for": "<stable project-level purpose>"
+              }
+            ],
+            "usage_notes": [
+              {
+                "import": "<import string>",
+                "used_for": "<file-specific note only>"
+              }
+            ],
+            "warnings": [
+              "<any dependency concern, e.g. unused import, potential cycle>"
+            ]
+          },
+          "key_concepts": [
+            "<important concept or pattern used in this file>"
+          ],
+          "usage_example": "<one-line example of how another file imports or uses this file, or empty string>"
         }
       },
-      "per_extension": {
-        ".py": {
-          "requested_shape": {
-            "description": "For this Python file, explain its concrete purpose and explicitly describe visible decorators, type annotations, module-level execution behavior, and Python-specific runtime conventions.",
-            "role_in_system": "Explain how this Python module connects to and supports the rest of the codebase.",
-            "functions": [
-              {
-                "name": "<function or method defined IN this file>",
-                "description": "<observable behavior, including relevant decorators and type annotations>"
-              }
-            ],
-            "classes": [
-              {
-                "name": "<class defined IN this file>",
-                "description": "<responsibility, including relevant decorators and type annotations>"
-              }
-            ],
-            "exports": [
-              "<symbol this module deliberately exposes, including intentional re-exports>"
-            ],
-            "dependencies_analysis": {
-              "internal": ["<relative imports that are project files>"],
-              "external": ["<third-party package imports>"],
-              "dependency_refs": ["<normalized dependency names>"],
-              "catalog_updates": [
-                {
-                  "name": "<normalized dependency name>",
-                  "type": "internal|external",
-                  "used_for": "<stable project-level purpose>"
-                }
-              ],
-              "usage_notes": [
-                {
-                  "import": "<import string>",
-                  "used_for": "<file-specific use>"
-                }
-              ],
-              "warnings": ["<visible dependency concern>"]
-            },
-            "key_concepts": ["<important Python concept or pattern visible here>"],
-            "usage_example": "<one-line example importing or using this Python module, or empty string>"
-          }
-        }
-      }
+      "per_extension": {}
     },
     "triple": {
       "common": {
         "structure": {
           "requested_shape": {
-            "description": "Describe the file's visible structure and purpose."
+            "description": "<one paragraph describing what this file does>",
+            "role_in_system": "<how this file fits into the broader system>",
+            "functions": [
+              {
+                "name": "<function or method defined IN this file>",
+                "description": "<what it does>"
+              }
+            ],
+            "classes": [
+              {
+                "name": "<class defined IN this file>",
+                "description": "<what it does>"
+              }
+            ],
+            "exports": [
+              "<symbol this module deliberately exposes, including intentional re-exports>"
+            ]
           }
         },
         "dependency": {
           "requested_shape": {
-            "dependencies_analysis": {}
+            "dependencies_analysis": {
+              "internal": [
+                "<relative import paths that are project files>"
+              ],
+              "external": [
+                "<package names from node_modules / pip / pub / maven>"
+              ],
+              "dependency_refs": [
+                "<normalized dependency names used by this file>"
+              ],
+              "catalog_updates": [
+                {
+                  "name": "<normalized dependency name>",
+                  "type": "internal|external",
+                  "used_for": "<stable project-level purpose for this dependency>"
+                }
+              ],
+              "usage_notes": [
+                {
+                  "import": "<import string>",
+                  "used_for": "<file-specific note only>"
+                }
+              ],
+              "warnings": [
+                "<any dependency concern, e.g. unused import, potential cycle>"
+              ]
+            }
           }
         },
         "documentation": {
           "requested_shape": {
-            "description": "Explain what this file does and why it exists based only on visible source evidence."
+            "description": "<clear, detailed paragraph describing what this file does and why it exists>",
+            "role_in_system": "<how this file connects to and supports the rest of the codebase>",
+            "key_concepts": [
+              "<important concept or pattern used in this file>"
+            ],
+            "usage_example": "<one-line example of how another file would import or use this file, or empty string>"
           }
         }
       },
-      "per_extension": {
-        ".py": {
-          "structure": {
-            "requested_shape": {
-              "description": "For this Python file, describe its structural purpose and explicitly identify visible decorators, type annotations, and module-level execution behavior.",
-              "functions": [
-                {
-                  "name": "<function or method defined IN this file>",
-                  "description": "<observable behavior and relevant annotations>"
-                }
-              ],
-              "classes": [
-                {
-                  "name": "<class defined IN this file>",
-                  "description": "<responsibility and relevant annotations>"
-                }
-              ],
-              "exports": ["<symbol this module deliberately exposes, including intentional re-exports>"]
-            }
-          },
-          "dependency": {
-            "requested_shape": {
-              "dependencies_analysis": {
-                "internal": ["<relative imports that are project files>"],
-                "external": ["<third-party package imports>"],
-                "dependency_refs": ["<normalized dependency names>"],
-                "catalog_updates": [
-                  {
-                    "name": "<normalized dependency name>",
-                    "type": "internal|external",
-                    "used_for": "<stable project-level purpose>"
-                  }
-                ],
-                "usage_notes": [
-                  {
-                    "import": "<import string>",
-                    "used_for": "<file-specific use>"
-                  }
-                ],
-                "warnings": ["<visible Python dependency concern>"]
-              }
-            }
-          },
-          "documentation": {
-            "requested_shape": {
-              "description": "For this Python file, provide a factual developer-facing explanation covering visible decorators, type annotations, module-level behavior, and Python-specific runtime conventions.",
-              "role_in_system": "Explain how this Python module connects to and supports the rest of the codebase.",
-              "key_concepts": ["<important Python concept or pattern visible here>"],
-              "usage_example": "<one-line example importing or using this Python module, or empty string>"
-            }
-          }
-        }
-      }
+      "per_extension": {}
     }
   }
 }

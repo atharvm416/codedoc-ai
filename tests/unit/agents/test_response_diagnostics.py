@@ -9,6 +9,7 @@ from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import (
     clean_combined_report,
     clean_dependency_report,
+    clean_leaf_capsule_report,
     clean_structure_report,
 )
 from codedoc.agents.response_diagnostics import (
@@ -19,9 +20,16 @@ from codedoc.agents.response_diagnostics import (
     MAX_REMOVAL_ENTRIES,
     ResponseDiagnostic,
     extract_json_candidate,
+    process_fixed_capsule_response,
     process_response,
     required_field_paths,
 )
+from codedoc.core.file_division import (
+    MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
+    MAX_LEAF_SYMBOL_NAME_CHARS,
+    MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
+)
+from codedoc.parser.source_structure import MAX_STRUCTURE_SIGNATURE_CHARS
 from codedoc.utils.errors import AgentError, ResponseContractError
 
 def _reasons(removed):
@@ -148,6 +156,127 @@ def test_item_limit_reported_for_overflow():
     functions = [{"name": f"f{i}"} for i in range(20)]
     result = clean_combined_report({"description": "d", "functions": functions}, "m.py")
     assert any(r.reason_code == "item_limit" for r in result.removed)
+
+
+def _run_leaf_capsule(raw):
+    return process_fixed_capsule_response(
+        json.dumps(raw),
+        label="split-leaf",
+        agent="leaf",
+        file_path="m.py",
+        clean_reporter=clean_leaf_capsule_report,
+        requested_paths=("description", "functions", "classes", "exports"),
+        required_paths=("description",),
+    )
+
+
+def test_fixed_leaf_capsule_preserves_every_fact_at_declared_bounds():
+    functions = [
+        {"name": f"f{index}".ljust(MAX_LEAF_SYMBOL_NAME_CHARS, "x")}
+        for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND)
+    ]
+
+    result = _run_leaf_capsule(
+        {"description": "visible facts", "functions": functions}
+    )
+
+    assert result["functions"] == functions
+
+
+@pytest.mark.parametrize(
+    "functions",
+    [
+        [{"name": "x" * (MAX_LEAF_SYMBOL_NAME_CHARS + 1)}],
+        [
+            {"name": f"function_{index}"}
+            for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND + 1)
+        ],
+    ],
+)
+def test_fixed_leaf_capsule_rejects_lossy_fact_caps(functions):
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(
+            {"description": "visible facts", "functions": functions}
+        )
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.stage == "clean"
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.reason_code in {"response_cap", "item_limit"}
+        for removal in diagnostic.removed
+    )
+
+
+def test_fixed_leaf_losslessness_survives_bounded_diagnostic_overflow():
+    raw = {"description": "visible facts"}
+    raw.update({f"unknown_{index}": "x" for index in range(80)})
+    raw["functions"] = [
+        {"name": "x" * (MAX_LEAF_SYMBOL_NAME_CHARS + 1)}
+    ]
+
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(raw)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert len(diagnostic.removed) <= MAX_REMOVAL_ENTRIES
+
+
+def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
+    """Section 2A: the private response-field bound now equals the parser's
+    600-character `SemanticUnitIdentity.signature` ceiling, not the prior
+    256-character short-item bound.  A 552-character model-returned signature
+    (the installed 0.14.2 TestPyPI observation) and the exact 600-character
+    boundary are both accepted; 601 is rejected as `fixed_cap_exceeded` and
+    the response is not silently truncated into a shortened accepted fact."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+
+    accepted_552 = _run_leaf_capsule(
+        {
+            "description": "visible facts",
+            "functions": [{"name": "f", "signature": "s" * 552}],
+        }
+    )
+    assert accepted_552["functions"][0]["signature"] == "s" * 552
+
+    accepted_600 = _run_leaf_capsule(
+        {
+            "description": "visible facts",
+            "functions": [{"name": "f", "signature": "s" * 600}],
+        }
+    )
+    assert accepted_600["functions"][0]["signature"] == "s" * 600
+
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(
+            {
+                "description": "visible facts",
+                "functions": [{"name": "f", "signature": "s" * 601}],
+            }
+        )
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    signature_removals = [
+        removal for removal in diagnostic.removed if removal.field.endswith("signature")
+    ]
+    assert signature_removals and signature_removals[0].reason_code == "response_cap"
+    # The over-bound signature must never appear anywhere in the diagnostic --
+    # not in the field path, not in the bounded `detail` summary, not
+    # anywhere in the complete cross-boundary-safe representation -- so this
+    # inspects the full `as_summary()` structure rather than only field names
+    # (a leak through `detail` would not have been caught by field names
+    # alone).
+    full_diagnostic_json = json.dumps(diagnostic.as_summary())
+    assert "s" * 601 not in full_diagnostic_json
+    assert "s" * 100 not in full_diagnostic_json
+
+
+def test_many_unknown_fixed_leaf_fields_do_not_fake_a_fact_cap_failure():
+    raw = {"description": "visible facts"}
+    raw.update({f"unknown_{index}": "x" for index in range(80)})
+
+    assert _run_leaf_capsule(raw) == {"description": "visible facts"}
 
 def test_nested_unknown_symbol_and_object_fields_are_reported():
     result = clean_combined_report(

@@ -9,18 +9,21 @@ from tests.support.record_metadata_cases import private_key  # noqa: F401, F811
 import json
 from pathlib import Path
 import pytest
-from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from tests.support.recovery_rate_limit_runs import _make_fake_provider
 from tests.support.recovery_rate_limit_runs import _patch_provider
 from tests.support.recovery_rate_limit_runs import _run as recovery_rate_limit_run
 from codedoc.agents.response_cleaning import clean_combined_response
 from codedoc.core.document import read_codedoc_document
-from codedoc.core.safe_writer import SafeWriter
+from codedoc.core.safe_writer import SafeWriter, _CRASH_SAFETY_BANNER
 from codedoc.utils.errors import ConfigError
+from tests.support.provider_failures import provider_failure_error
 from tests.support.versionless_documents import _assert_versionless
 from codedoc.core.document import records_by_path
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
+    RecoveryState,
+    _recovery_remedy,
     build_recovery_identity,
 )
 from codedoc.pipeline import run_pipeline
@@ -38,13 +41,30 @@ from codedoc.core.resume import (
 )
 from tests.support.execution_requests import make_execution_request
 
+
+def test_crash_recovery_banner_explains_reuse_and_recovery_boundary():
+    assert "compatible completed ordinary and split records may be reused" in _CRASH_SAFETY_BANNER
+    assert "compatible current schema-4 split node checkpoints may resume" in _CRASH_SAFETY_BANNER
+    assert "deliberately re-documented" not in _CRASH_SAFETY_BANNER
+    assert "re-run the same command to resume" not in _CRASH_SAFETY_BANNER
+
+
+def test_generic_recovery_remedy_explains_reuse_and_recovery_boundary(tmp_path):
+    message = _recovery_remedy(tmp_path / RECOVERY_FILENAME)
+
+    assert "completed ordinary and split records may then be reused" in message
+    assert "compatible current schema-4 split node checkpoints may resume" in message
+    assert "deliberately re-documented" not in message
+    assert "resume that work" not in message
+
+
 class _RateLimitOrch:
     class _LLM:
         provider_name = "fake"
     llm = _LLM()
 
     def process(self, request):
-        raise RuntimeError("429 rate limit exceeded")
+        raise provider_failure_error("openai", "provider-rate-limited", status=429)
 
 def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     """A4: a file actually recorded THIS run whose future surfaces a rate-limit
@@ -73,6 +93,7 @@ def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
+        split_execution_mode="recovery",
     )
 
     assert succeeded.get("x.py", {}).get("description") == "Fresh desc"
@@ -113,6 +134,7 @@ def test_A4_preloaded_stale_record_is_retried_not_restored(tmp_path):
     succeeded, retry_rate_limited, failed = _process_descriptor_batch(
         [request], _RateLimitOrch(), queue, stats, reporter,
         max_workers=2, recorder=recorder, profile=None,
+        split_execution_mode="recovery",
     )
 
     retried_paths = [r.rel_path for r, _exc in retry_rate_limited]
@@ -285,6 +307,7 @@ def test_matching_live_recovery_is_reused_in_both_modes(tmp_path, monkeypatch, m
                         "description": "Recovered.",
                         "_analysis_revision": ANALYSIS_REVISION,
                         "_analysis_mode": mode,
+                        "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
                     }
                 ],
             }
@@ -580,7 +603,7 @@ def test_fixed_recovery_name_and_identity_mismatch_blocks(tmp_path):
     writer = SafeWriter(path, "json", "main.py", {}, identity)
     writer.initialize_empty()
     assert path.name == "crash_recovery.json"
-    assert load_recovery_records_if_compatible(path, identity) == {}
+    assert load_recovery_records_if_compatible(path, identity) == RecoveryState()
     with pytest.raises(ConfigError, match="analysis_mode expected.*triple.*single"):
         load_recovery_records_if_compatible(
             path, _identity(tmp_path, analysis_mode="triple")

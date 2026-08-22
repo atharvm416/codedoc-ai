@@ -1,0 +1,54 @@
+{
+  "partial_files": {
+    "src/legacy_large.py": {
+      "schema_version": 3,
+      "owner": "codedoc-ai",
+      "rel_path": "src/legacy_large.py",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+      "reduction_tree_digest": "reduction-tree:2222222222222222222222222222222222222222222222222222222222222222",
+      "nodes": [
+        {
+          "node_id": "chunk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "node_type": "leaf",
+          "rel_path": "src/large.py",
+          "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+          "execution_identity_digest": "division-execution:3333333333333333333333333333333333333333333333333333333333333333",
+          "input_digest": "leaf-input:5555555555555555555555555555555555555555555555555555555555555555",
+          "unit_id": null,
+          "child_ids": [],
+          "coverage_leaf_ids": [
+            "chunk_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+          ],
+          "result_json": "{\"description\":\"leaf ok\"}"
+        }
+      ]
+    },
+    "src/present_large.py": {
+      "schema_version": 4,
+      "owner": "codedoc-ai",
+      "rel_path": "src/present_large.py",
+      "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+      "reduction_tree_digest": "reduction-tree:2222222222222222222222222222222222222222222222222222222222222222",
+      "nodes": [
+        {
+          "node_id": "chunk_7777777777777777777777777777777777777777777777777777777777777777",
+          "node_type": "leaf",
+          "rel_path": "src/present_large.py",
+          "content_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "division_plan_digest": "division-plan:1111111111111111111111111111111111111111111111111111111111111111",
+          "execution_identity_digest": "division-execution:3333333333333333333333333333333333333333333333333333333333333333",
+          "input_digest": "leaf-input:8888888888888888888888888888888888888888888888888888888888888888",
+          "unit_id": null,
+          "child_ids": [],
+          "coverage_leaf_ids": [
+            "chunk_7777777777777777777777777777777777777777777777777777777777777777"
+          ],
+          "result_json": "{\"description\":\"leaf ok\"}"
+        }
+      ]
+    }
+  }
+}

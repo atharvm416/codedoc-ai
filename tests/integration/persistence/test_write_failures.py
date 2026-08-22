@@ -7,6 +7,12 @@ import time
 import pytest
 import codedoc.core.execution as ex
 import codedoc.core.safe_writer as safe_writer_mod
+from codedoc.core.file_division import (
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    QuarantineEntry,
+    SplitTreeState,
+    tree_node_state,
+)
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.utils.errors import (
     ErrorReporter,
@@ -111,7 +117,12 @@ def test_initialize_empty_raises_on_write_failure(tmp_path, monkeypatch):
     with pytest.raises(LiveBackupWriteError) as excinfo:
         sw.initialize_empty()
     # Carries the target path, retains the original cause, leaks no source data.
-    assert "codedoc.json" in str(excinfo.value)
+    message = str(excinfo.value)
+    assert "codedoc.json" in message
+    assert "persisted before this failed write remains preserved" in message
+    assert "result being written is not guaranteed saved" in message
+    assert "completed ordinary and split records may be reused" in message
+    assert "compatible current schema-4 split node checkpoints may resume" in message
     assert isinstance(excinfo.value.__cause__, OSError)
 
 def test_pipeline_initialization_failure_creates_no_provider(tmp_path, monkeypatch):
@@ -199,6 +210,94 @@ def test_failed_record_preserves_previously_persisted_records(tmp_path, monkeypa
     assert "a.py" in on_disk
     assert "b.py" not in on_disk
 
+
+def _quarantined_prior_state() -> SplitTreeState:
+    """One retained leaf node plus one quarantined sibling for 'main.py'."""
+    content_hash = "a" * 64
+    division_plan_digest = "division-plan:" + "b" * 64
+    reduction_tree_digest = "reduction-tree:" + "c" * 64
+    retained = tree_node_state(
+        node_id="chunk_" + "1" * 58,
+        node_type="leaf",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division_plan_digest,
+        input_digest="leaf-input:" + "d" * 64,
+        execution_identity_digest="division-execution:" + "e" * 64,
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=("chunk_" + "1" * 58,),
+        result={"description": "leaf 1"},
+    )
+    quarantined = QuarantineEntry(
+        node_id="chunk_" + "2" * 58, reason="stale-revision", raw_json="{}"
+    )
+    return SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash=content_hash,
+        division_plan_digest=division_plan_digest,
+        reduction_tree_digest=reduction_tree_digest,
+        nodes=(retained,),
+        quarantine=(quarantined,),
+    )
+
+
+def test_record_tree_node_flush_failure_restores_prior_quarantine_container(
+    tmp_path, monkeypatch
+):
+    """0.14.4 regression: checkpointing a valid replacement node removes any
+    quarantine entry with the same node ID in the same write, and restores
+    the prior container -- quarantine entry included -- when the flush
+    fails, so a transient write failure can never silently drop a bounded
+    quarantine record or fabricate an unpersisted node checkpoint."""
+    sw = SafeWriter(tmp_path / "docs" / "crash_recovery.json", "json", None, {})
+    prior = _quarantined_prior_state()
+    sw.load(preloaded_partials={"main.py": prior})
+    sw.initialize_empty()
+    on_disk_before = (tmp_path / "docs" / "crash_recovery.json").read_text(
+        encoding="utf-8"
+    )
+    assert "stale-revision" in on_disk_before  # the quarantine entry is on disk
+
+    def boom(path, text):
+        raise OSError("no space")
+
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", boom)
+
+    replacement = tree_node_state(
+        node_id="chunk_" + "2" * 58,
+        node_type="leaf",
+        rel_path="main.py",
+        content_hash="a" * 64,
+        division_plan_digest="division-plan:" + "b" * 64,
+        input_digest="leaf-input:" + "f" * 64,
+        execution_identity_digest="division-execution:" + "9" * 64,
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=("chunk_" + "2" * 58,),
+        result={"description": "leaf 2 (corrected)"},
+    )
+    with pytest.raises(LiveBackupWriteError):
+        sw.record_tree_node(
+            "main.py", replacement, reduction_tree_digest="reduction-tree:" + "c" * 64
+        )
+
+    # In-memory state is exactly the pre-call container: the replacement was
+    # never adopted and the quarantine entry it would have cleared is intact.
+    restored = sw.get_tree_state("main.py")
+    assert restored == prior
+    assert len(restored.nodes) == 1
+    assert len(restored.quarantine) == 1
+    assert restored.quarantine[0].node_id == "chunk_" + "2" * 58
+
+    # The on-disk container is untouched by the failed write.
+    on_disk_after = (tmp_path / "docs" / "crash_recovery.json").read_text(
+        encoding="utf-8"
+    )
+    assert on_disk_after == on_disk_before
+
 def test_discard_removes_record_and_recorded_marker(tmp_path):
     sw = _writer(tmp_path)
     sw.initialize_empty()
@@ -255,6 +354,7 @@ def test_sequential_persistence_failure_is_fatal_without_retry(tmp_path, monkeyp
             max_consecutive_failures=5,
             new_results={},
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # Recorded exactly once — never retried — and never demoted to a per-file
@@ -278,6 +378,7 @@ def test_parallel_persistence_failure_is_fatal_without_retry(tmp_path, monkeypat
             reporter,
             max_workers=4,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # No file was reclassified as a rate-limit or ordinary failure.
@@ -313,6 +414,7 @@ def test_parallel_persistence_failure_cancels_work_not_yet_started(
             reporter,
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     # One additional task may already be running when the first failed future is
@@ -348,6 +450,7 @@ def test_sequential_skip_discard_failure_is_fatal_before_skip_accounting(
             max_consecutive_failures=5,
             new_results={},
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert recorder.discard_calls == 1
@@ -381,6 +484,7 @@ def test_parallel_skip_discard_failure_uses_fatal_abort_protocol(
             ErrorReporter(),
             max_workers=1,
             recorder=recorder,
+            split_execution_mode="recovery",
         )
 
     assert recorder.discard_calls == 1
@@ -416,6 +520,35 @@ def test_preflight_classifies_failure_and_cleans_probes(tmp_path, monkeypatch):
     assert "No provider was contacted" in str(excinfo.value)
     assert str(out) in excinfo.value.file_path
     assert list(out.glob(".codedoc_preflight_*")) == []
+
+
+def test_zero_source_directory_creation_failure_is_classified(tmp_path, monkeypatch):
+    import codedoc.core.output as output_mod
+
+    out = tmp_path / "docs"
+    original_mkdir = output_mod.Path.mkdir
+
+    def guarded_mkdir(path, *args, **kwargs):
+        if path == out:
+            raise _oserror(PermissionError, errno_=errno.EACCES)
+        return original_mkdir(path, *args, **kwargs)
+
+    monkeypatch.setattr(output_mod.Path, "mkdir", guarded_mkdir)
+
+    with pytest.raises(OutputError) as excinfo:
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": None,
+                "auto_entry_candidates": [],
+                "output_dir": "docs",
+            },
+        )
+
+    assert "No provider was contacted" in str(excinfo.value)
+    assert excinfo.value.file_path == str(out)
+    assert not out.exists()
+
 
 def test_zero_call_conversion_write_failure_preserves_sibling_and_recovery(
     tmp_path, monkeypatch

@@ -16,10 +16,20 @@ local-provider choice.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import ConfigError, ProviderInitError
+from codedoc.llm.rate_limit_profile import RateLimitProfile, get_rate_limit_profile
+from codedoc.utils.errors import (
+    CodeDocError,
+    ConfigError,
+    ProviderInitError,
+    bounded_exception_summary,
+)
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -43,6 +53,115 @@ _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
 }
 
+_ENDPOINT_DEFAULT_SENTINEL = "provider-default"
+_EXECUTION_DESCRIPTOR_ATTRIBUTE = "_codedoc_provider_execution_descriptor"
+_RATE_LIMIT_PROFILE_ATTRIBUTE = "_codedoc_rate_limit_profile"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderExecutionDescriptor:
+    """Non-secret identity inputs for one concrete provider construction."""
+
+    provider_kind: str
+    model: str
+    endpoint_identity: str
+
+
+def effective_endpoint_identity(api_base_url: object) -> str:
+    """Return a non-secret identity for one effective OpenAI endpoint.
+
+    Shared by the configured ``api_base_url`` and by a runtime endpoint-trust
+    approval URL (see ``codedoc.core.loader``'s authorization gate) — both are
+    canonicalized and rejected under exactly the same syntax rules, so an
+    approval can never cover a differently-shaped URL than the one actually
+    used.
+    """
+    if not isinstance(api_base_url, str) or not api_base_url.strip():
+        return _ENDPOINT_DEFAULT_SENTINEL
+    try:
+        parts = urlsplit(api_base_url.strip())
+        scheme = (parts.scheme or "").lower()
+        host = parts.hostname
+        port = parts.port
+        username = parts.username
+        password = parts.password
+        query = parts.query
+        fragment = parts.fragment
+    except ValueError:
+        raise ConfigError(
+            "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
+        ) from None
+    authority = parts.netloc.rsplit("@", 1)[-1]
+    if (
+        scheme not in ("http", "https")
+        or not host
+        or any(character.isspace() for character in host)
+        or authority.endswith(":")
+    ):
+        raise ConfigError(
+            "api_base_url must be a valid HTTP or HTTPS URL with a valid host and port."
+        )
+    if username is not None or password is not None or query or fragment:
+        # These components fall outside the four-field canonical identity
+        # (scheme/host/port/path) below, so a URL carrying one would silently
+        # canonicalize identically to a "clean" URL missing it -- letting an
+        # approval cover a differently-behaving endpoint. Reject instead of
+        # silently dropping them.
+        raise ConfigError(
+            "api_base_url must not include a username, password, query string, "
+            "or fragment."
+        )
+    if port is None:
+        if scheme == "https":
+            port = 443
+        elif scheme == "http":
+            port = 80
+    normalized = {
+        "scheme": scheme,
+        "host": host.lower(),
+        "port": port,
+        # OpenAI's client treats a trailing slash as the same base endpoint:
+        # it ensures exactly that separator before resolving resource paths.
+        # Bind recovery to effective routing, not superficial URL spelling.
+        "path": (parts.path or "").rstrip("/"),
+    }
+    canonical = json.dumps(
+        normalized,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+# Attribute name ``ResolvedConfig`` (``codedoc.core.loader``) uses to carry an
+# ``EndpointTrustAttestation``.  Read here via ``getattr()`` rather than an
+# ``isinstance`` check against ``ResolvedConfig``, so this module never needs to
+# import ``codedoc.core.loader`` (which imports this module for
+# ``effective_endpoint_identity`` and this attestation type) -- a plain
+# ``dict`` simply has no such attribute and is therefore always unattested.
+ENDPOINT_TRUST_ATTRIBUTE = "endpoint_trust"
+
+
+@dataclass(frozen=True, slots=True)
+class EndpointTrustAttestation:
+    """Records that a custom ``api_base_url`` was authorized, and how.
+
+    Constructed only by :func:`codedoc.core.loader.load_config` once its
+    runtime endpoint-authorization gate succeeds, and carried as a
+    non-serialized ``endpoint_trust`` attribute on the ``ResolvedConfig`` it
+    returns -- never a dict key, so it cannot be forged through configuration
+    and never appears in iteration, ``dict()`` conversion, serialization,
+    persistence, cache identity, recovery identity, or provider identity.
+    ``digest`` is the canonical :func:`effective_endpoint_identity` of the
+    authorized endpoint; ``mechanism`` names which runtime approval source
+    supplied it (``"--trust-api-base-url"`` or ``"CODEDOC_TRUST_API_BASE_URL"``).
+    """
+
+    digest: str
+    mechanism: str
+
 
 def describe_provider_selection(config: dict) -> tuple[str, str]:
     """Return the provider/model pair that :func:`create_provider` will use."""
@@ -53,6 +172,58 @@ def describe_provider_selection(config: dict) -> tuple[str, str]:
         config.get("provider_prefixes") or {},
     )
     return selected, model or _DEFAULT_MODELS[selected]
+
+
+def describe_provider_execution(config: dict) -> ProviderExecutionDescriptor:
+    """Describe exactly what :func:`create_provider` must construct."""
+    selected, model = describe_provider_selection(config)
+    endpoint = (
+        effective_endpoint_identity(config.get("api_base_url"))
+        if selected == "openai"
+        else _ENDPOINT_DEFAULT_SENTINEL
+    )
+    return ProviderExecutionDescriptor(selected, model, endpoint)
+
+
+def constructed_provider_execution(
+    provider: LLMProvider,
+) -> ProviderExecutionDescriptor | None:
+    """Return the factory's construction attestation, if present."""
+    descriptor = getattr(provider, _EXECUTION_DESCRIPTOR_ATTRIBUTE, None)
+    return descriptor if isinstance(descriptor, ProviderExecutionDescriptor) else None
+
+
+def constructed_rate_limit_profile(provider: LLMProvider) -> RateLimitProfile | None:
+    """Return the same :class:`RateLimitProfile` the factory resolved and
+    passed into this provider's constructor, if present (section 5.5 / 12.1
+    C2). The pipeline reads this rather than re-resolving the profile, so
+    the profile driving execution and the signal tuple the adapter's own
+    exception boundary uses can never independently drift apart."""
+    profile = getattr(provider, _RATE_LIMIT_PROFILE_ATTRIBUTE, None)
+    return profile if isinstance(profile, RateLimitProfile) else None
+
+
+def attest_provider_execution(
+    provider: object,
+    config: dict,
+) -> object:
+    """Attach an explicit non-secret execution descriptor to an injected provider.
+
+    The production factory attests its own concrete branch automatically.
+    Alternate provider factories and network-free test doubles must call this
+    helper explicitly; verification never infers an attestation from config.
+
+    Also resolves and attaches the same rate-limit profile (and its signal
+    tuple) that :func:`create_provider` would attach for this config, so an
+    explicitly attested test double is indistinguishable from a real
+    factory-constructed provider for section 5.5 purposes.
+    """
+    descriptor = describe_provider_execution(config)
+    setattr(provider, _EXECUTION_DESCRIPTOR_ATTRIBUTE, descriptor)
+    rate_limit_profile = get_rate_limit_profile(descriptor.provider_kind, config)
+    setattr(provider, _RATE_LIMIT_PROFILE_ATTRIBUTE, rate_limit_profile)
+    provider._rate_limit_signals = tuple(rate_limit_profile.signals)
+    return provider
 
 
 def create_provider(config: dict) -> LLMProvider:
@@ -71,20 +242,74 @@ def create_provider(config: dict) -> LLMProvider:
     provider = config.get("llm_provider", "auto")
     model = config.get("model_name", "")
     provider_prefixes: dict[str, list[str]] = config.get("provider_prefixes") or {}
-    api_key = config.get("api_key") or _provider_api_key(provider, model, provider_prefixes)
     base_url = config.get("api_base_url") or None
+
+    # Endpoint-authorization verification -- resolved before any credential is
+    # read or selected.  A non-empty api_base_url requires a present
+    # EndpointTrustAttestation whose digest matches this exact endpoint;
+    # config is a plain dict for every legacy/test caller, which simply has no
+    # ``endpoint_trust`` attribute and is therefore always rejected here when it
+    # carries a custom endpoint -- create_provider(custom_plain_dict) cannot
+    # bypass authorization.  An empty api_base_url is the default provider
+    # endpoint and requires no attestation.
+    if base_url:
+        expected_digest = effective_endpoint_identity(base_url)
+        attestation = getattr(config, ENDPOINT_TRUST_ATTRIBUTE, None)
+        if (
+            not isinstance(attestation, EndpointTrustAttestation)
+            or attestation.digest != expected_digest
+        ):
+            raise ProviderInitError(
+                "api_base_url is set to a custom endpoint that was not authorized "
+                "at runtime. Approve the exact endpoint using --trust-api-base-url "
+                "or CODEDOC_TRUST_API_BASE_URL, then load configuration through "
+                "load_config() so the authorization can be verified."
+            )
+
+    api_key = config.get("api_key") or _provider_api_key(provider, model, provider_prefixes)
 
     if mode == "api":
         # Provider-initialization error boundary.  Construction, import,
         # and auth-configuration failures from provider SDKs are classified as
         # ProviderInitError (a ConfigError subclass → CLI exit code 2).
         try:
-            return _make_api(provider, model, api_key, base_url, provider_prefixes)
+            expected = describe_provider_execution(config)
+            rate_limit_profile = get_rate_limit_profile(expected.provider_kind, config)
+            result = _make_api(
+                provider,
+                model,
+                api_key,
+                base_url,
+                provider_prefixes,
+                provider_request_timeout_s=config.get("provider_request_timeout_s", 120),
+                rate_limit_signals=tuple(rate_limit_profile.signals),
+            )
+            actual = constructed_provider_execution(result)
+            if actual != expected:
+                raise ProviderInitError(
+                    "LLM provider construction identity did not match the "
+                    "resolved provider/model/effective-endpoint plan."
+                )
+            setattr(result, _RATE_LIMIT_PROFILE_ATTRIBUTE, rate_limit_profile)
+            return result
         except ConfigError:
             raise
         except Exception as exc:
+            # A wrapped CodeDocError (e.g. an LLMError raised by a provider's
+            # own __init__ for a missing SDK package) is already bounded by
+            # construction and renders unchanged (tier 1). Anything else is
+            # reduced (tier 2); "unknown-error" is replaced with the more
+            # specific "provider-initialization-failed" for this construction
+            # context, since every fault reaching here occurred while building
+            # the provider, not while it was already in use.
+            if isinstance(exc, CodeDocError):
+                detail = str(exc)
+            else:
+                detail = bounded_exception_summary(exc)
+                if detail == "unknown-error":
+                    detail = "provider-initialization-failed"
             raise ProviderInitError(
-                f"LLM provider initialization failed: {exc}"
+                f"LLM provider initialization failed: {detail}"
             ) from exc
 
     raise ConfigError(
@@ -98,6 +323,9 @@ def _make_api(
     api_key: str,
     base_url: str | None,
     provider_prefixes: dict[str, list[str]] | None = None,
+    *,
+    provider_request_timeout_s: float = 120,
+    rate_limit_signals: tuple[str, ...] = (),
 ) -> LLMProvider:
     if not api_key:
         raise ConfigError(
@@ -109,28 +337,51 @@ def _make_api(
 
     model_lower = model.lower()
     selected = _resolve_api_provider(provider, model_lower, provider_prefixes)
+    effective_model = model or _DEFAULT_MODELS[selected]
 
     if selected == "anthropic":
         from codedoc.llm.api_provider import AnthropicProvider
-        return AnthropicProvider(
-            api_key=api_key,
-            model=model or _DEFAULT_MODELS["anthropic"],
-        )
 
-    if selected == "gemini":
+        result = AnthropicProvider(
+            api_key=api_key,
+            model=effective_model,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
+        )
+        endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
+    elif selected == "gemini":
         from codedoc.llm.api_provider import GeminiProvider
-        return GeminiProvider(
-            api_key=api_key,
-            model=model or _DEFAULT_MODELS["gemini"],
-        )
 
-    # OpenAI or compatible endpoint (default)
-    from codedoc.llm.api_provider import OpenAIProvider
-    return OpenAIProvider(
-        api_key=api_key,
-        model=model or _DEFAULT_MODELS["openai"],
-        base_url=base_url,
+        result = GeminiProvider(
+            api_key=api_key,
+            model=effective_model,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
+        )
+        endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
+    else:
+        # OpenAI or compatible endpoint (default)
+        from codedoc.llm.api_provider import OpenAIProvider
+
+        result = OpenAIProvider(
+            api_key=api_key,
+            model=effective_model,
+            base_url=base_url,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
+        )
+        endpoint_identity = effective_endpoint_identity(base_url)
+
+    setattr(
+        result,
+        _EXECUTION_DESCRIPTOR_ATTRIBUTE,
+        ProviderExecutionDescriptor(
+            provider_kind=selected,
+            model=effective_model,
+            endpoint_identity=endpoint_identity,
+        ),
     )
+    return result
 
 
 def _resolve_api_provider(

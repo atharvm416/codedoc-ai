@@ -37,7 +37,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Mapping
 
 from codedoc.agents.base_agent import truncate_for_llm
 from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
@@ -56,9 +56,20 @@ from codedoc.core.execution import (
     ExecutionOptions,
     execute_agent_files,
     reconcile_planned_calls,
+    restore_completed_tree_result,
 )
-from codedoc.core.execution_model import REVIEW_OWNER, CallManifestTracker, build_call_manifest
+from codedoc.core.execution_model import (
+    REVIEW_OWNER,
+    CallManifest,
+    CallManifestTracker,
+    build_call_manifest,
+)
 from codedoc.core.feasibility import build_feasibility_notes
+from codedoc.core.file_division import (
+    DivisionPlan,
+    ReductionTreePlan,
+    verify_provider_execution_identity,
+)
 from codedoc.core.loader import load_config
 from codedoc.core.output import (
     inspect_output_ownership,
@@ -67,6 +78,7 @@ from codedoc.core.output import (
     write_project_outputs,
 )
 from codedoc.core.planning import (
+    PlanMaterials,
     PipelinePlan,
     PlanSourceInputs,
     build_pipeline_plan,
@@ -81,27 +93,36 @@ from codedoc.core.prompt_profiles import (
     build_review_batches,
     classify_profile_action,
     resolve_profile_source,
+    resolved_synthesis_shape,
 )
 from codedoc.core.queue import ProcessingQueue, STATUS_SKIPPED_INSUFFICIENT_SOURCE
 from codedoc.core.record_meta import ANALYSIS_REVISION
+from codedoc.core.release_policy import current_split_release_policy
 from codedoc.core.resume import (
     RECOVERY_FILENAME,
+    RecoveryState,
     _build_documentation_records,
     _load_existing_file_docs,
     build_recovery_identity,
     load_recovery_records_if_compatible,
 )
 from codedoc.core.safe_writer import SafeWriter
-from codedoc.core.scanner import scan_files
+from codedoc.core.scanner import ScanDiagnostics, exclude_path_key, scan_files
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
-from codedoc.llm.factory import create_provider, describe_provider_selection
-from codedoc.llm.rate_limit_profile import get_rate_limit_profile
+from codedoc.llm.factory import (
+    constructed_provider_execution,
+    constructed_rate_limit_profile,
+    create_provider,
+    describe_provider_selection,
+)
 from codedoc.utils.errors import (
+    CodeDocError,
     ConfigError,
     ErrorReporter,
     LiveBackupWriteError,
     PromptCustomizationValidationError,
     UnrecoverableProviderError,
+    bounded_exception_summary,
 )
 from codedoc.utils.logger import get_logger, set_level
 
@@ -118,14 +139,11 @@ from codedoc.core.resume import (  # noqa: F401  (compat re-export)
     _public_record_to_doc,
 )
 from codedoc.core.execution import (  # noqa: F401  (compat re-export)
-    _RATE_LIMIT_SIGNALS,
     _agent_errors,
     _build_default_ladder,
     _cancel_pending,
     _detect_limit_type,
-    _is_rate_limit_error,
     _log_file_progress,
-    _parse_retry_after,
     _process_and_record,
     _process_descriptor_batch,
     _process_files_sequentially,
@@ -146,6 +164,7 @@ def run_pipeline(
     config_overrides: dict | None = None,
     *,
     confirm_risky: Callable[[tuple[str, ...]], bool] | None = None,
+    trust_api_base_url: str | None = None,
 ) -> dict:
     """Run the full documentation pipeline on a project."""
     if isinstance(project_root, dict) and config_overrides is None:
@@ -161,11 +180,15 @@ def run_pipeline(
     if config_overrides is None:
         config_overrides = {}
 
-    config = load_config(root, config_overrides)
+    config = load_config(root, config_overrides, trust_api_base_url=trust_api_base_url)
 
     set_level(config.get("log_level", "INFO"))
     logger.info("codedoc starting: root=%s", root)
     dry_run = bool(config.get("dry_run", False))
+    split_release = current_split_release_policy()
+    split_planning_preview = (
+        dry_run and config.get("large_file_strategy", "truncate") == "split"
+    )
 
     analysis_mode = config.get("analysis_mode", "single")
     # The configured extension keys (lowercased) gate ``per_extension`` overrides.
@@ -269,26 +292,54 @@ def run_pipeline(
     existing_docs = _load_existing_file_docs(
         json_candidate, md_candidate, output_format
     )
+    if split_planning_preview:
+        existing_docs = {
+            rel_path: record
+            for rel_path, record in existing_docs.items()
+            if not record.get("_large_file_identity")
+        }
 
-    # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
-    # resolved by load_config with _add/_remove applied), then unconditionally
-    # append the output directory name so codedoc never scans its own output
-    # even when the user removes "codedoc" via --remove-skip-dir.
-    _scan_skip_dirs = list(config.get("skip_dirs", []))
-    _raw_output_dir = str(config.get("output_dir", "codedoc"))
-    if _raw_output_dir not in (".", ""):
-        _output_dir_name = Path(_raw_output_dir).name
-        if _output_dir_name and _output_dir_name not in _scan_skip_dirs:
-            _scan_skip_dirs.append(_output_dir_name)
+    # Section 5.6: skip_dirs is used exactly as resolved by load_config (with
+    # _add/_remove already applied) -- no unconditional re-addition of the
+    # output directory's basename, so --remove-skip-dir works. The exact
+    # generated targets (both format candidates, so an opposite-format
+    # sibling resume can read is also never mistaken for source, plus the
+    # recovery file) are protected instead by exact-path equality, which
+    # also keeps co-located source/output directories supported: a source
+    # file merely sharing the output directory's name is never excluded.
+    _generated_target_paths = (json_candidate, md_candidate, recovery_path)
+    _scan_exclude_paths = frozenset(
+        exclude_path_key(path) for path in _generated_target_paths
+    )
+
+    def _reject_generated_target_collision(label: str, raw: str) -> None:
+        candidate = Path(raw)
+        resolved = candidate if candidate.is_absolute() else root / candidate
+        if exclude_path_key(resolved) in _scan_exclude_paths:
+            raise ConfigError(
+                f"{label} '{raw}' resolves to a generated output target "
+                f"(codedoc.json, codedoc.md, or {RECOVERY_FILENAME}) and cannot "
+                "also be treated as source. Choose a different path, or move "
+                "the output directory."
+            )
+
+    if config.get("entry_file"):
+        _reject_generated_target_collision("entry_file", str(config["entry_file"]))
+    for _forced in config.get("force_files") or []:
+        _reject_generated_target_collision("force_files", str(_forced))
+
+    _scan_diagnostics = ScanDiagnostics()
 
     def _scan_source_files() -> list[dict]:
         return scan_files(
             root,
             extension_language_map=config["extension_language_map"],
             max_file_size_kb=config["max_file_size_kb"],
-            skip_dirs=_scan_skip_dirs,
+            skip_dirs=config.get("skip_dirs", []),
             ignore_paths=config.get("ignore_paths"),
             follow_symlinks=config.get("follow_symlinks", False),
+            exclude_paths=_scan_exclude_paths,
+            diagnostics=_scan_diagnostics,
         )
 
     all_files = _scan_source_files()
@@ -310,8 +361,10 @@ def run_pipeline(
                 "selected": 0,
                 "entry_excluded": 0,
                 "analysis_mode": config.get("analysis_mode", "single"),
-                "initial_calls_per_file": initial_calls_per_file(
-                    config.get("analysis_mode", "single")
+                "initial_calls_per_file": _initial_calls_per_file_for_stats(
+                    config.get("analysis_mode", "single"),
+                    config.get("large_file_strategy", "truncate"),
+                    None,
                 ),
                 "documentation_scope": config.get("documentation_scope", "entry"),
                 "entry_reachable": 0,
@@ -334,9 +387,12 @@ def run_pipeline(
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
                 "output_files": [],
+                "files_skipped_large": _scan_diagnostics.files_skipped_large,
+                "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
                 **no_work_profile_stats,
+                **_split_division_stats(config, None, None),
             }
-        output_dir.mkdir(parents=True, exist_ok=True)
+        preflight_output_accessibility(output_dir)
         return {
             "checked": 0,
             "failed": 0,
@@ -344,19 +400,23 @@ def run_pipeline(
             "skipped_insufficient_source": 0,
             "entry_excluded": 0,
             "analysis_mode": config.get("analysis_mode", "single"),
-            "initial_calls_per_file": initial_calls_per_file(
-                config.get("analysis_mode", "single")
+            "initial_calls_per_file": _initial_calls_per_file_for_stats(
+                config.get("analysis_mode", "single"),
+                config.get("large_file_strategy", "truncate"),
+                None,
             ),
             "output_dir": str(output_dir),
             "live_backup_path": None,
             "issues_recorded": 0,
-            "rate_limit_warnings": [],
             "documentation_scope": config.get("documentation_scope", "entry"),
             "entry_reachable": 0,
             "entry_disconnected": 0,
             "disconnected_paid_files": 0,
             "disconnected_planned_calls": 0,
+            "files_skipped_large": _scan_diagnostics.files_skipped_large,
+            "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
             **no_work_profile_stats,
+            **_split_division_stats(config, None, None),
         }
 
     graph, file_map, unresolved_imports_by_path = _build_graph(all_files, root, error_reporter)
@@ -404,6 +464,12 @@ def run_pipeline(
     # every recovered record individually, so narrowing this field set keeps
     # version 1 (a backward-compatible narrowing) and never discards resumable
     # work for an unrelated profile edit or a newly added file.
+    # The effective large-file strategy is part of the identity because split
+    # recovery carries partial chunk checkpoints a truncate run can neither read
+    # nor rewrite.  Binding it makes the cross-strategy boundary fail closed
+    # here — before SafeWriter initialization and provider creation — instead of
+    # letting a truncate flush silently drop already-paid split checkpoints.
+    large_file_strategy = config.get("large_file_strategy", "truncate")
     recovery_identity = build_recovery_identity(
         project_root=root,
         json_target=json_target,
@@ -412,19 +478,54 @@ def run_pipeline(
         documentation_scope=config.get("documentation_scope", "entry"),
         analysis_mode=analysis_mode,
         analysis_revision=ANALYSIS_REVISION,
+        large_file_strategy=large_file_strategy,
+    )
+    # D2 explicit local gate: partial (split-node) recovery is enabled only
+    # from the valid effective split route, not the bare requested string —
+    # analysis_mode 'triple' can never legitimately reach here with
+    # large_file_strategy 'split' (loader._validate rejects it first), but the
+    # check stays visible here as defense-in-depth rather than relying solely
+    # on that earlier gate.
+    effective_real_split = (
+        large_file_strategy == "split"
+        and analysis_mode == "single"
+        and not dry_run
     )
     # Inspect the single exact recovery file, read-only.  A real run blocks on an
     # incompatible / foreign / malformed / completed recovery file; a dry run
     # never mutates it and treats an incompatible file as non-resumable rather
     # than blocking planning.
-    recovery_records: dict[str, dict] = {}
+    recovery_state = RecoveryState()
     try:
-        recovery_records = load_recovery_records_if_compatible(
-            recovery_path, recovery_identity
+        recovery_state = load_recovery_records_if_compatible(
+            recovery_path,
+            recovery_identity,
+            # Split node checkpoints are consumed for real (dependency-valid)
+            # recovery; a dry run never reads them (see split_planning_preview
+            # below, section 18).
+            include_partial_files=effective_real_split,
         )
     except ConfigError:
         if not dry_run:
             raise
+    recovery_records = recovery_state.records_by_path()
+    if split_planning_preview:
+        # A fresh split preview must ignore completed split records, but
+        # ordinary completed recovery remains reusable in the identical real
+        # run. Dropping every record here overstates paid work and makes dry
+        # and real manifests disagree.
+        recovery_records = {
+            rel_path: record
+            for rel_path, record in recovery_records.items()
+            if not record.get("_large_file_identity")
+        }
+    # Every structurally parseable partial. Planning narrows this to the subset
+    # that is actually reusable; the writer is seeded from that narrower set.
+    recovered_partials_by_path = (
+        {}
+        if split_planning_preview or not split_release.partial_recovery
+        else {state.rel_path: state for state in recovery_state.partial_files}
+    )
     if recovery_records:
         logger.info(
             "Resuming: overlaying %d compatible record(s) from '%s'.",
@@ -447,7 +548,17 @@ def run_pipeline(
         config=config,
         resolved_profile=resolved_profile,
         rebuild_source_inputs=_rebuild_source_inputs,
+        recovered_partials=recovered_partials_by_path,
+        diagnostics=_scan_diagnostics,
     )
+
+    # Capacity-blocked requested-split files have no authorized provider
+    # action (D8): a real run raises one deterministic ConfigError listing
+    # every blocked (rel_path, reason) pair before any writer/provider
+    # creation; a dry run reports the same pairs without mutation (see
+    # _build_dry_run_stats / _split_division_stats) and exits 0.
+    if materials.division_blocked and not dry_run:
+        raise ConfigError(_blocked_split_files_message(materials.division_blocked))
 
     # Derived from the file set/graph/selection the plan was actually built
     # from, so a stale-revision rebuild above is reflected here rather than
@@ -464,7 +575,8 @@ def run_pipeline(
     # profile components (common and per-extension) are reviewed.  An explicitly
     # empty set means no planned agent file is reachable, so no review is built.
     planned_scopes = frozenset(
-        resolved_profile.scope_for(file_map[rel]) for rel in plan.agent_rels
+        resolved_profile.scope_for(file_map[rel])
+        for rel in plan.unpaid_action_rels
     )
     review_batches = build_review_batches(resolved_profile, planned_scopes)
     feasibility_notes = build_feasibility_notes(resolved_profile, planned_scopes)
@@ -472,12 +584,23 @@ def run_pipeline(
     # One canonical call manifest, shared by dry-run and real execution alike.
     # Built and attached before any cap is enforced or any provider-side effect
     # can occur.
-    call_manifest = build_call_manifest(review_batches, plan.agent_rels, analysis_mode)
+    call_manifest = build_call_manifest(
+        review_batches,
+        plan.agent_rels,
+        analysis_mode,
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
+    )
     plan = plan.with_call_manifest(
-        call_manifest, int(config.get("max_planned_calls", 0) or 0)
+        call_manifest,
+        int(config.get("max_planned_calls", 0) or 0),
+        materials.division_plans,
+        materials.reduction_trees,
+        materials.tree_states,
     )
     insufficient_source_rels = frozenset(materials.insufficient_source_reasons)
-    max_files_candidate_count = len(plan.agent_rels) + len(insufficient_source_rels)
+    max_files_candidate_count = len(plan.unpaid_action_rels)
     call_tracker = CallManifestTracker(call_manifest)
     # Bounded: digest and counts only — never raw source, prompts, custom
     # instructions, credentials, or provider responses.
@@ -490,6 +613,14 @@ def run_pipeline(
         plan.documentation_calls_planned,
         plan.max_planned_calls,
     )
+    if config.get("large_file_strategy", "truncate") == "split" and analysis_mode == "single":
+        logger.debug(
+            "Split call categories: file=%d leaf=%d reduction=%d synthesis=%d",
+            plan.file_documentation_calls_planned,
+            plan.unit_documentation_calls_planned,
+            plan.file_reduction_calls_planned,
+            plan.synthesis_calls_planned,
+        )
 
     if dry_run:
         return _build_dry_run_stats(
@@ -502,13 +633,22 @@ def run_pipeline(
             resolved_profile,
             profile_resolution,
             review_batches,
-            recovery_resumed=len(recovery_records),
+            call_manifest=call_manifest,
+            recovery_resumed_paths=frozenset(recovery_records),
             materials=materials,
             feasibility_notes=feasibility_notes,
+            scan_diagnostics=_scan_diagnostics,
         )
 
     scope_stats = _build_scope_stats(
-        config, file_map, reachable_rels, documented_rels, plan.agent_rels, entry_rel
+        config,
+        file_map,
+        reachable_rels,
+        documented_rels,
+        plan.agent_rels,
+        entry_rel,
+        call_manifest=call_manifest,
+        materials=materials,
     )
 
     # Paid-file safety cap: enforced after the complete plan exists and before
@@ -524,11 +664,22 @@ def run_pipeline(
     # Whole-run call-authorization cap: independent of max_files, checked before
     # usage accounting, provider creation, or any confirmation callback.
     if plan.max_planned_calls_exceeded:
+        if config.get("large_file_strategy", "truncate") == "split" and analysis_mode == "single":
+            call_breakdown = (
+                f"{plan.review_calls_planned} prompt-customization review, "
+                f"{plan.file_documentation_calls_planned} file documentation, "
+                f"{plan.unit_documentation_calls_planned} leaf documentation, "
+                f"{plan.file_reduction_calls_planned} file reduction, "
+                f"{plan.synthesis_calls_planned} file synthesis"
+            )
+        else:
+            call_breakdown = (
+                f"{plan.review_calls_planned} prompt-customization review, "
+                f"{plan.file_documentation_calls_planned} file documentation"
+            )
         raise ConfigError(
             f"This run has {plan.total_calls_planned} initially planned LLM "
-            f"call(s) ({plan.review_calls_planned} prompt-customization review, "
-            f"{plan.documentation_calls_planned} initial documentation at "
-            f"{initial_calls_per_file(analysis_mode)} call(s) per file), which "
+            f"call(s) ({call_breakdown}), which "
             f"exceeds the configured max_planned_calls limit of "
             f"{plan.max_planned_calls}. Inspect the plan first with --dry-run, "
             "and raise --max-planned-calls only after reviewing it."
@@ -569,6 +720,11 @@ def run_pipeline(
             [c.call_id for c in call_manifest.calls if c.category == "prompt-review"],
         )
         llm = create_provider(config)
+        verify_provider_execution_identity(
+            llm,
+            config,
+            materials.provider_identity,
+        )
         reviewer = PromptCustomizationValidationAgent(
             llm, usage=usage, call_tracker=call_tracker
         )
@@ -587,7 +743,12 @@ def run_pipeline(
             _set_manifest_reconciliation(
                 review_stats, usage, plan, call_tracker
             )
-            raise PromptCustomizationValidationError(str(exc), stats=review_stats) from exc
+            detail = (
+                str(exc)
+                if isinstance(exc, CodeDocError)
+                else bounded_exception_summary(exc)
+            )
+            raise PromptCustomizationValidationError(detail, stats=review_stats) from exc
         review_stats["prompt_customization_security_review_calls_completed"] = (
             outcome.calls_completed
         )
@@ -648,14 +809,20 @@ def run_pipeline(
     # ------------------------------------------------------------------
     # Mutation boundary — everything below may write to the filesystem.
     # ------------------------------------------------------------------
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # A provider-free output accessibility probe before
-    # any provider is created.  Runs for every real finalization path — including
-    # all-reused runs that still rewrite stable output — but never for dry-run
-    # (which returns above).  Raises a classified OutputError if the directory
-    # cannot be written, so a persistent permission/space failure is caught
-    # before paid work instead of after it.
-    preflight_output_accessibility(output_dir)
+    # An output accessibility probe before the documentation provider is
+    # created.  Runs for every real finalization path — including all-reused
+    # runs that still rewrite stable output — but never for dry-run (which
+    # returns above).  Raises a classified OutputError if the directory cannot
+    # be written, so a persistent permission/space failure is caught before
+    # paid documentation work instead of after it.
+    #
+    # Directory creation belongs to the probe itself: doing it here would put
+    # the mkdir outside the probe's classified OSError boundary, so an absent
+    # directory under an unwritable parent would escape as a raw PermissionError.
+    #
+    # `llm is not None` here means the prompt-customization review already ran
+    # and was billed, so the diagnostic must not claim a provider-free abort.
+    preflight_output_accessibility(output_dir, provider_contacted=llm is not None)
 
     # Always-on crash-recovery writer.  Targets the single fixed recovery file for
     # every format; the stable output is untouched until finalization.  The
@@ -669,7 +836,17 @@ def run_pipeline(
     # Seed the writer with the same merged reuse set planning consumed (stable
     # baseline + compatible recovery overlay) so every partial flush of the
     # recovery file is a self-contained resumable snapshot.
-    recorder.load(preloaded=existing_docs)
+    # Seed the writer with the exact retention-eligible tree-state set rather
+    # than letting it re-read every parseable partial.  Planning already
+    # narrowed the recovered nodes to those that are current, selected, and
+    # dependency-valid (validate_node_for_tree); a rejected, stale, or
+    # unselected checkpoint must never keep the recovery file alive after a
+    # successful finalization.
+    recorder.load(
+        preloaded=existing_docs,
+        preloaded_partials=dict(materials.tree_states),
+        preloaded_carry_partials=dict(materials.carry_states),
+    )
 
     skipped = len(plan.unchanged_rels)
     if skipped > 0:
@@ -686,21 +863,45 @@ def run_pipeline(
             source_doc.get("path", "unknown"),
         )
     reused = len(plan.identical_reuse_rels)
-    resumed = len(recovery_records)
+    resumed = len(
+        (set(recovery_records) - set(plan.split_execution_rels))
+        | set(materials.tree_states)
+    )
 
     agent_rels = set(plan.agent_rels)
+    locally_restored = 0
+    for rel_path, tree_state in materials.tree_states.items():
+        reduction_tree = materials.reduction_trees[rel_path]
+        if reduction_tree.final_node.node_id not in tree_state.by_id():
+            continue
+        result = restore_completed_tree_result(
+            materials.execution_requests[rel_path],
+            materials.division_plans[rel_path],
+            reduction_tree,
+            tree_state,
+        )
+        recorder.record(
+            rel_path,
+            result,
+            materials.execution_requests[rel_path].content_hash,
+        )
+        new_results[rel_path] = result
+        agent_rels.discard(rel_path)
+        locally_restored += 1
+        logger.info(
+            "Finalized synthesized split recovery for %s without provider work.",
+            rel_path,
+        )
     for rel_path, reason in materials.insufficient_source_reasons.items():
         logger.info(
             "[SKIP] %s | insufficient source: %s — not sent to provider",
             rel_path,
             reason,
         )
-    rate_limit_warnings: list[dict] = []
-
     if not agent_rels:
         logger.info("All selected files are up-to-date or reused from cached content.")
         stats: dict = {
-            "checked": 0,
+            "checked": locally_restored,
             "failed": 0,
             "skipped_insufficient_source": len(insufficient_source_rels),
             "skipped": skipped,
@@ -711,17 +912,21 @@ def run_pipeline(
             "entry_excluded": entry_excluded,
             **scope_stats,
             "output_dir": str(output_dir),
-            "rate_limit_warnings": rate_limit_warnings,
+            "files_skipped_large": _scan_diagnostics.files_skipped_large,
+            "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
             **no_work_profile_stats,
             **review_stats,
+            **_split_division_stats(config, materials, plan),
         }
         _set_plan_counters(
-            stats, plan, provider_free_skips=len(insufficient_source_rels)
+            stats,
+            plan,
+            provider_free_skips=len(insufficient_source_rels),
         )
         output_files = write_project_outputs(
             _build_documentation_records(
                 documented_rels - insufficient_source_rels,
-                file_map,
+                dict(materials.content_hashes),
                 graph.topological_order(),
                 existing_docs,
                 new_results,
@@ -738,7 +943,8 @@ def run_pipeline(
             unresolved_imports_by_path=unresolved_imports_by_path,
         )
         stats["output_files"] = [str(path) for path in output_files if path]
-        recorder.delete()
+        if not recorder.has_partial_state():
+            recorder.delete()
         _set_issue_stats(stats, error_reporter, recovery_path)
         _set_usage_stats(
             stats,
@@ -764,6 +970,11 @@ def run_pipeline(
     try:
         if llm is None:
             llm = create_provider(config)
+        verify_provider_execution_identity(
+            llm,
+            config,
+            materials.provider_identity,
+        )
         logger.info("LLM provider: %s", llm.provider_name)
     except Exception as exc:
         error_reporter.record(exc, context="LLM provider init")
@@ -787,7 +998,7 @@ def run_pipeline(
         call_tracker=call_tracker,
     )
     stats = {
-        "checked": 0,
+        "checked": locally_restored,
         "failed": 0,
         "skipped_insufficient_source": len(insufficient_source_rels),
         "skipped": skipped,
@@ -797,8 +1008,10 @@ def run_pipeline(
         "entry_source": entry_source,
         "entry_excluded": entry_excluded,
         **scope_stats,
-        "rate_limit_warnings": rate_limit_warnings,
+        "files_skipped_large": _scan_diagnostics.files_skipped_large,
+        "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
         **review_stats,
+        **_split_division_stats(config, materials, plan),
     }
 
     max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
@@ -827,16 +1040,47 @@ def run_pipeline(
         respect_retry_after=config.get("respect_retry_after", True),
         retry_after_cap_s=config.get("retry_after_cap_s", 30),
     )
+    # Section 5.5: select the profile from the attested provider_kind, never
+    # the decorated provider_name (e.g. "OpenAI(gpt-4o-mini)"), which does
+    # not match any PROVIDER_PROFILES key and would silently fall back to
+    # the "default" union. verify_provider_execution_identity above already
+    # fails closed on a missing attestation, so a descriptor is guaranteed
+    # here; the explicit check documents that invariant rather than trusting
+    # it silently.
+    descriptor = constructed_provider_execution(llm)
+    if descriptor is None:
+        raise ConfigError(
+            "Constructed LLM provider is missing a valid concrete execution "
+            "attestation required for rate-limit profile selection."
+        )
+    # Section 12.1 C2: read back the same profile the factory already
+    # resolved and passed into the adapter's constructor -- never re-resolve
+    # it here, and never assign adapter signal state from pipeline.py. A
+    # provider without an attached profile (attested only via a bespoke path
+    # that skipped attest_provider_execution) fails closed rather than
+    # silently running with no configured rate-limit signals.
+    rate_limit_profile = constructed_rate_limit_profile(llm)
+    if rate_limit_profile is None:
+        raise ConfigError(
+            "Constructed LLM provider is missing a valid rate-limit profile "
+            "attestation."
+        )
     context = ExecutionContext(
         orchestrator=orchestrator,
         queue=queue,
         recorder=recorder,
         error_reporter=error_reporter,
-        rate_limit_profile=get_rate_limit_profile(llm.provider_name, config),
+        rate_limit_profile=rate_limit_profile,
         stats=stats,
         new_results=new_results,
         options=options,
         execution_requests=materials.execution_requests,
+        division_plans=materials.division_plans,
+        reduction_trees=materials.reduction_trees,
+        provider_identity=materials.provider_identity,
+        split_execution_mode=(
+            "recovery" if split_release.partial_recovery else "fresh"
+        ),
     )
     try:
         execute_agent_files(context)
@@ -868,8 +1112,13 @@ def run_pipeline(
             if recovery_path.exists()
             else ""
         )
+        detail = (
+            str(exc)
+            if isinstance(exc, CodeDocError)
+            else bounded_exception_summary(exc)
+        )
         print(
-            f"\nError: {exc}{recovery_note}",
+            f"\nError: {detail}{recovery_note}",
             file=sys.stderr,
             flush=True,
         )
@@ -887,7 +1136,9 @@ def run_pipeline(
 
     stats["output_dir"] = str(output_dir)
     _set_plan_counters(
-        stats, plan, provider_free_skips=len(insufficient_source_rels)
+        stats,
+        plan,
+        provider_free_skips=len(insufficient_source_rels),
     )
     skipped_rels = set(insufficient_source_rels) | {
         rel
@@ -897,7 +1148,7 @@ def run_pipeline(
     output_files = write_project_outputs(
         _build_documentation_records(
             documented_rels - skipped_rels,
-            file_map,
+            dict(materials.content_hashes),
             graph.topological_order(),
             existing_docs,
             new_results,
@@ -917,7 +1168,8 @@ def run_pipeline(
     # Clean completion: the stable output is written above; only now delete the
     # dedicated recovery file (all formats).  A deletion OSError raises
     # OutputError and leaves both the stable output and the recovery file intact.
-    recorder.delete()
+    if not recorder.has_partial_state():
+        recorder.delete()
     _set_issue_stats(stats, error_reporter, recovery_path)
     _set_usage_stats(
         stats, usage, plan, config, correction_ledger,
@@ -959,7 +1211,10 @@ def _final_entry_source(resolution_source: str, entry_rel: str | None) -> str:
 
 
 def _set_plan_counters(
-    stats: dict, plan: PipelinePlan, *, provider_free_skips: int = 0
+    stats: dict,
+    plan: PipelinePlan,
+    *,
+    provider_free_skips: int = 0,
 ) -> None:
     """Populate provider-free plan counters needed by the public view.
 
@@ -969,18 +1224,21 @@ def _set_plan_counters(
     must not be subtracted from that population a second time — only the
     execution-time defensive guard's skips are.  Both skip populations still
     report through the one ``skipped_insufficient_source`` statistic, so the
-    selected-file completion partition reconciles exactly.
+    selected-file completion partition reconciles exactly.  A capacity-blocked
+    split file (``plan.division_blocked``) never reaches ``agent_rels`` either
+    (D8), so it needs no separate accounting here.
     """
     stats["files_scanned"] = len(plan.scanned_rels)
     stats["files_selected"] = len(plan.documented_rels)
     execution_skips = max(
         0, stats.get("skipped_insufficient_source", 0) - provider_free_skips
     )
+    execution_failures = stats.get("failed", 0)
     stats["unattempted_files"] = max(
         0,
         len(plan.agent_rels)
         - stats.get("checked", 0)
-        - stats.get("failed", 0)
+        - execution_failures
         - execution_skips,
     )
 
@@ -999,7 +1257,9 @@ def _set_usage_stats(
     Token figures are character-heuristic estimates, not tokenizer counts.
     """
     analysis_mode = config.get("analysis_mode", "single")
-    per_file = initial_calls_per_file(analysis_mode)
+    per_file = _initial_calls_per_file_for_stats(
+        analysis_mode, config.get("large_file_strategy", "truncate"), plan
+    )
     stats.update(usage.snapshot())
     # Correction statistics are run-level metadata, snapshot beside the existing
     # documentation-call counter.  Every correction provider call is one paid
@@ -1073,14 +1333,15 @@ def _prompt_profile_scope_counts(
     file_map: dict[str, dict],
     resolved_profile: ResolvedProfile | None,
 ) -> dict[str, int]:
-    """Count planned agent files by the strongest scope their bundle resolved to.
+    """Count unpaid-action files by the strongest scope their bundle resolved to.
 
-    Counted over ``plan.agent_rels`` with precedence ``extension > common >
+    Counted over ``plan.unpaid_action_rels`` with precedence ``extension > common >
     built-in`` (a triple-mode file is counted once, under the strongest scope any
-    of its three agents resolved to), so the counts sum to ``len(agent_rels)``.
+    of its three agents resolved to), so the counts sum to the files that can
+    still cause provider work.
     """
     counts = {"extension": 0, "common": 0, "built-in": 0}
-    for rel in plan.agent_rels:
+    for rel in plan.unpaid_action_rels:
         if resolved_profile is None:
             counts["built-in"] += 1
             continue
@@ -1107,10 +1368,12 @@ def _build_dry_run_stats(
     resolved_profile: ResolvedProfile | None = None,
     profile_resolution: ProfileResolution | None = None,
     review_batches: list[ReviewBatch] | None = None,
-    recovery_resumed: int = 0,
+    call_manifest: CallManifest | None = None,
+    recovery_resumed_paths: frozenset[str] = frozenset(),
     materials=None,
     *,
     feasibility_notes: tuple[str, ...],
+    scan_diagnostics: "ScanDiagnostics | None" = None,
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -1120,9 +1383,13 @@ def _build_dry_run_stats(
         set(plan.documented_rels),
         plan.agent_rels,
         plan.entry_rel,
+        call_manifest=call_manifest,
+        materials=materials,
     )
     analysis_mode = config.get("analysis_mode", "single")
-    per_file = initial_calls_per_file(analysis_mode)
+    per_file = _initial_calls_per_file_for_stats(
+        analysis_mode, config.get("large_file_strategy", "truncate"), plan
+    )
     # single mode embeds only known inputs, so its input estimate is exact;
     # triple mode's documentation prompt estimate is a lower bound.
     estimate_is_lower_bound = analysis_mode == "triple"
@@ -1137,9 +1404,11 @@ def _build_dry_run_stats(
         materials.execution_requests if materials is not None else {}
     )
     frozen_skip_rels = frozenset(skip_rels)
-    remaining = len(plan.agent_rels)
-    # From the one canonical manifest, never re-derived here — the plan already
-    # verified it equals len(agent_rels) * initial_calls_per_file(mode).
+    remaining = len(plan.unpaid_action_rels)
+    # From the one canonical manifest, never re-derived here: the exact sum of
+    # every documentation-related category (ordinary file-documentation plus
+    # any split file's leaf/reduction/synthesis calls), already reconciled by
+    # with_call_manifest().
     estimated_calls = plan.documentation_calls_planned
     correction_possible_max = estimated_calls if correction_enabled else 0
     review_batches = review_batches or []
@@ -1175,7 +1444,10 @@ def _build_dry_run_stats(
         "would_skip_insufficient_source": len(frozen_skip_rels),
         "unchanged": len(plan.unchanged_rels),
         "would_reuse": len(plan.identical_reuse_rels),
-        "would_resume": recovery_resumed,
+        "would_resume": len(
+            (set(recovery_resumed_paths) - set(plan.split_execution_rels))
+            | set(materials.tree_states if materials is not None else ())
+        ),
         "forced": len(plan.forced_rels),
         "estimated_calls": estimated_calls,
         "response_correction_enabled": correction_enabled,
@@ -1189,10 +1461,21 @@ def _build_dry_run_stats(
             skip_rels=frozen_skip_rels,
             review_batches=review_batches,
             execution_requests=execution_requests,
+            division_plans=(
+                materials.division_plans if materials is not None else None
+            ),
+            reduction_trees=(
+                materials.reduction_trees if materials is not None else None
+            ),
+            tree_states=(
+                materials.tree_states if materials is not None else None
+            ),
         ),
         "estimate_is_lower_bound": estimate_is_lower_bound,
         "max_files": plan.max_files,
-        "max_files_candidate_files": len(plan.agent_rels) + len(frozen_skip_rels),
+        # Capacity-blocked files never enter agent_rels (D8), so they are
+        # already excluded here without a separate term.
+        "max_files_candidate_files": len(plan.unpaid_action_rels),
         "max_files_exceeded": plan.max_files_exceeded,
         # The canonical call manifest's own counts/cap/digest. Provider-free and
         # identical whether returned here or (after attempts) from a real run.
@@ -1201,9 +1484,16 @@ def _build_dry_run_stats(
         "max_planned_calls_exceeded": plan.max_planned_calls_exceeded,
         "call_manifest_digest": plan.call_manifest_digest,
         "documentation_calls_planned": plan.documentation_calls_planned,
+        **_split_division_stats(config, materials, plan),
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
+        "files_skipped_large": (
+            scan_diagnostics.files_skipped_large if scan_diagnostics is not None else 0
+        ),
+        "files_skipped_unreadable": (
+            scan_diagnostics.files_skipped_unreadable if scan_diagnostics is not None else 0
+        ),
         "prompt_profile_scope_counts": _prompt_profile_scope_counts(
             plan, file_map, resolved_profile
         ),
@@ -1264,14 +1554,47 @@ def _build_scope_stats(
     documented_rels: set[str] | frozenset[str],
     agent_rels: set[str] | frozenset[str],
     entry_rel: str | None,
+    *,
+    call_manifest: CallManifest | None = None,
+    materials: PlanMaterials | None = None,
 ) -> dict:
     """Return the stable scope/reachability statistics contract."""
     scope = config.get("documentation_scope", "entry")
-    per_file = initial_calls_per_file(config.get("analysis_mode", "single"))
-    disconnected_paid = (
-        len(set(agent_rels) - set(reachable_rels))
+    disconnected_rels = (
+        set(agent_rels) - set(reachable_rels)
         if scope == "all" and entry_rel is not None
-        else 0
+        else set()
+    )
+    chunk_paths = {
+        chunk.chunk_id: rel_path
+        for rel_path, division_plan in (
+            materials.division_plans.items() if materials is not None else ()
+        )
+        for chunk in division_plan.chunks
+    }
+    node_paths = {
+        node.node_id: rel_path
+        for rel_path, reduction_tree in (
+            materials.reduction_trees.items() if materials is not None else ()
+        )
+        for node in reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes
+    }
+    calls_by_path: dict[str, int] = {}
+    for call in call_manifest.calls if call_manifest is not None else ():
+        rel_path = None
+        if call.category in ("file-documentation", "file-synthesis"):
+            rel_path = call.owner
+        elif call.category == "unit-documentation":
+            rel_path = chunk_paths.get(call.owner)
+        elif call.category == "file-reduction":
+            rel_path = node_paths.get(call.owner)
+        if rel_path is not None:
+            calls_by_path[rel_path] = calls_by_path.get(rel_path, 0) + 1
+    disconnected_planned_calls = sum(
+        calls_by_path.get(rel_path, 0) for rel_path in disconnected_rels
+    )
+    disconnected_paid = sum(
+        1 for rel_path in disconnected_rels if calls_by_path.get(rel_path, 0)
     )
     return {
         "documentation_scope": scope,
@@ -1279,8 +1602,245 @@ def _build_scope_stats(
         "entry_disconnected": len(file_map) - len(reachable_rels),
         "entry_excluded": len(file_map) - len(documented_rels),
         "disconnected_paid_files": disconnected_paid,
-        "disconnected_planned_calls": disconnected_paid * per_file,
+        "disconnected_planned_calls": disconnected_planned_calls,
     }
+
+
+def _blocked_split_files_message(division_blocked: Mapping[str, str]) -> str:
+    """The deterministic ConfigError message for every capacity-blocked file.
+
+    Lists every ``(rel_path, reason)`` pair in sorted order (D3/D8): a real
+    run must name each one before any writer/provider creation.
+    """
+    pairs = ", ".join(
+        f"{rel_path} ({reason})" for rel_path, reason in sorted(division_blocked.items())
+    )
+    return (
+        f"{len(division_blocked)} file(s) cannot be completely split-planned "
+        f"provider-free: {pairs}. Split never falls back to truncation. "
+        "Inspect each reason: raising max_content_chars can help chunk or "
+        "reduction capacity when the provider supports a larger input, but "
+        "does not change atom or symbol counts. Reduce/refactor the affected "
+        "source for structural caps. If a supported language is using lexical "
+        "fallback, the optional structure extra may produce coarser "
+        "syntax-aware atoms. Otherwise choose "
+        "large_file_strategy 'truncate' only when incomplete-source analysis "
+        "is acceptable for these files. Inspect the exact reasons first with "
+        "--dry-run."
+    )
+
+
+def _initial_calls_per_file_for_stats(
+    analysis_mode: str,
+    large_file_strategy: str,
+    plan: PipelinePlan | None,
+) -> int:
+    """The per-file call count for the `initial_calls_per_file` summary field.
+
+    Ordinary `truncate` behavior (single or triple mode) is unchanged: this is
+    exactly `initial_calls_per_file(analysis_mode)`. A valid effective split
+    route must never call that helper (workstream 6/D9) — including for the
+    under-threshold ordinary files a split-configured run may still contain.
+    For split, the per-ordinary-file count is instead derived from the one
+    canonical manifest already attached to *plan*: its exact
+    `file_documentation_calls_planned` total (ordinary `file-documentation`
+    calls only — never a leaf/reduction/synthesis call) divided by the number
+    of ordinary (non-division-plan) files currently in scope. With no plan yet
+    (nothing scanned) or no ordinary file in scope, there is nothing to derive
+    and the value is 0.
+    """
+    if large_file_strategy != "split":
+        return initial_calls_per_file(analysis_mode)
+    if plan is None:
+        return 0
+    ordinary_count = len(set(plan.agent_rels) - set(plan.division_plan_rels))
+    if ordinary_count == 0:
+        return 0
+    return plan.file_documentation_calls_planned // ordinary_count
+
+
+def _split_division_stats(
+    config: dict,
+    materials: PlanMaterials | None,
+    plan: PipelinePlan | None,
+) -> dict:
+    """Return split-only observability; default truncate runs remain unchanged.
+
+    Every field/definition here matches the frozen run-statistics contract:
+    `split_ordinary_files` is the current exact-provider-plan count (`O` in
+    the call formula), every `split_restored_*` count is <= its matching
+    total, and no split statistic ever applies a triple-mode multiplier
+    (split is valid only in single mode — D2).
+    """
+    # D2 explicit local gate: split statistics are emitted only for the valid
+    # effective split route (large_file_strategy 'split' AND analysis_mode
+    # 'single' — D2), never from the bare requested strategy string alone.
+    if (
+        config.get("large_file_strategy", "truncate") != "split"
+        or config.get("analysis_mode", "single") != "single"
+    ):
+        return {}
+    plans = materials.division_plans if materials is not None else {}
+    trees = materials.reduction_trees if materials is not None else {}
+    tree_states = materials.tree_states if materials is not None else {}
+    blocked = materials.division_blocked if materials is not None else {}
+
+    syntax = lexical = chunks = units = divided = continuation_groups = 0
+    unit_consolidation_levels = general_reduction_levels = 0
+    unit_consolidation_total = general_reduction_total = final_total = 0
+    restored_chunks = restored_uc = restored_gr = restored_final = 0
+
+    for rel_path, division_plan in plans.items():
+        divided += 1
+        chunks += len(division_plan.chunks)
+        file_units = division_plan.units
+        units += len(file_units)
+        chunk_counts_by_unit: dict[str, int] = {}
+        for chunk in division_plan.chunks:
+            chunk_counts_by_unit[chunk.unit_id] = (
+                chunk_counts_by_unit.get(chunk.unit_id, 0) + 1
+            )
+        continuation_groups += sum(1 for count in chunk_counts_by_unit.values() if count >= 2)
+        if division_plan.structural_mode == "syntax":
+            syntax += 1
+        else:
+            lexical += 1
+
+        reduction_tree = trees.get(rel_path)
+        if reduction_tree is None:
+            continue
+        unit_consolidation_levels = max(
+            unit_consolidation_levels,
+            max((node.level for node in reduction_tree.unit_consolidation_nodes), default=0),
+        )
+        general_reduction_levels = max(
+            general_reduction_levels,
+            max((node.level for node in reduction_tree.general_nodes), default=0),
+        )
+        unit_consolidation_total += len(reduction_tree.unit_consolidation_nodes)
+        general_reduction_total += len(reduction_tree.general_nodes)
+        final_total += 1
+
+        state = tree_states.get(rel_path)
+        completed_ids = frozenset(state.by_id()) if state is not None else frozenset()
+        restored_chunks += sum(
+            1 for chunk in division_plan.chunks if chunk.chunk_id in completed_ids
+        )
+        restored_uc += sum(
+            1 for node in reduction_tree.unit_consolidation_nodes if node.node_id in completed_ids
+        )
+        restored_gr += sum(
+            1 for node in reduction_tree.general_nodes if node.node_id in completed_ids
+        )
+        if reduction_tree.final_node.node_id in completed_ids:
+            restored_final += 1
+
+    ordinary = (
+        len(set(plan.unpaid_action_rels) - set(plans))
+        if plan is not None
+        else 0
+    )
+
+    blocked_by_reason: dict[str, int] = {}
+    for reason in blocked.values():
+        blocked_by_reason[reason] = blocked_by_reason.get(reason, 0) + 1
+    # Dry-run must expose the complete deterministic diagnostic, not only
+    # aggregate counts (D8).  Real runs abort above before these pairs could
+    # become completed-output metadata; project_view intentionally persists only
+    # the aggregate split counters.
+    blocked_pairs = tuple(sorted(blocked.items()))
+
+    split_unpaid_nodes = (
+        plan.unit_documentation_calls_planned
+        + plan.file_reduction_calls_planned
+        + plan.synthesis_calls_planned
+        if plan is not None
+        else 0
+    )
+    reexecuted_nodes = materials.reexecuted_nodes if materials is not None else 0
+    if reexecuted_nodes > split_unpaid_nodes:
+        raise ValueError("split reexecuted-node count exceeds exact unpaid work.")
+    partial_files_resumed = sum(
+        1 for state in tree_states.values() if state.nodes
+    )
+    quarantined_nodes = sum(len(state.quarantine) for state in tree_states.values())
+
+    return {
+        "large_file_strategy": "split",
+        "split_ordinary_files": ordinary,
+        "split_syntax_files": syntax,
+        "split_lexical_files": lexical,
+        "split_blocked_files": len(blocked),
+        "split_blocked_by_reason": blocked_by_reason,
+        "split_blocked_pairs": blocked_pairs,
+        "split_divided_files": divided,
+        "split_units": units,
+        "split_chunks": chunks,
+        "split_continuation_groups": continuation_groups,
+        "split_unit_consolidation_levels": unit_consolidation_levels,
+        "split_unit_consolidation_calls_planned": unit_consolidation_total,
+        "split_general_reduction_levels": general_reduction_levels,
+        "split_general_reduction_calls_planned": general_reduction_total,
+        "split_final_synthesis_calls_planned": final_total,
+        "split_restored_complete_chunks": restored_chunks,
+        "split_restored_unit_consolidation_calls": restored_uc,
+        "split_restored_general_reduction_calls": restored_gr,
+        "split_restored_final_synthesis_calls": restored_final,
+        "split_completed_files_reused": (
+            len(plan.completed_split_reuse_rels) if plan is not None else 0
+        ),
+        "split_partial_files_resumed": partial_files_resumed,
+        "split_unpaid_nodes": split_unpaid_nodes,
+        "split_reexecuted_nodes": reexecuted_nodes,
+        "split_quarantined_nodes": quarantined_nodes,
+        "split_recovery_conflict_files": (
+            materials.recovery_conflict_files if materials is not None else 0
+        ),
+        "file_documentation_calls_planned": (
+            plan.file_documentation_calls_planned if plan is not None else 0
+        ),
+        "unit_documentation_calls_planned": (
+            plan.unit_documentation_calls_planned if plan is not None else 0
+        ),
+        "file_reduction_calls_planned": (
+            plan.file_reduction_calls_planned if plan is not None else 0
+        ),
+        "synthesis_calls_planned": (
+            plan.synthesis_calls_planned if plan is not None else 0
+        ),
+        "split_synthesis_input_estimate": "deterministic-worst-case-envelope",
+        "split_complexity_advisory": _split_complexity_advisory(plans, trees),
+    }
+
+
+def _split_complexity_advisory(
+    plans: Mapping[str, DivisionPlan], trees: Mapping[str, ReductionTreePlan]
+) -> str | None:
+    """The D6a non-blocking higher-capability-model advisory, or `None`.
+
+    Derived solely from the completed provider-free plan; never creates a
+    provider, ranks/selects a model, or blocks/prompts.  Fires only when a
+    chunk count or reduction depth is strictly greater than its frozen
+    threshold (tested at threshold-1/threshold/threshold+1).
+    """
+    from codedoc.core.file_division import (
+        SPLIT_COMPLEXITY_ADVISORY_CHUNKS,
+        SPLIT_COMPLEXITY_ADVISORY_REDUCTION_DEPTH,
+        reduction_depth,
+    )
+
+    max_chunks = max((len(plan.chunks) for plan in plans.values()), default=0)
+    max_depth = max((reduction_depth(tree) for tree in trees.values()), default=0)
+    if max_chunks <= SPLIT_COMPLEXITY_ADVISORY_CHUNKS and max_depth <= (
+        SPLIT_COMPLEXITY_ADVISORY_REDUCTION_DEPTH
+    ):
+        return None
+    return (
+        "This file requires multi-level synthesis. A higher-capability model may "
+        "improve cross-chunk reasoning and final documentation quality. If the "
+        "selected provider/model supports a larger context window, raising "
+        "max_content_chars may reduce calls but can increase per-call cost."
+    )
 
 
 def _estimate_planned_input_tokens(
@@ -1292,41 +1852,54 @@ def _estimate_planned_input_tokens(
     skip_rels: frozenset[str] = frozenset(),
     review_batches: list[ReviewBatch] | tuple[ReviewBatch, ...] = (),
     execution_requests: dict | None = None,
+    division_plans: dict | None = None,
+    reduction_trees: dict | None = None,
+    tree_states: dict | None = None,
 ) -> int:
-    """Estimate input tokens for the planned LLM calls — a lower bound.
+    """Estimate input tokens for the planned LLM calls — a lower bound for
+    ordinary triple-mode prompts, exact for single-mode/leaf/reduction/final.
 
     The structure and dependency prompts are built from known inputs.  The
-    documentation prompt embeds the other agents' responses, which do not
-    exist yet, so it is estimated with empty analysis objects.  Uses the same
-    centralized truncation helper as real execution so the estimated source
-    size matches what would actually be sent.
+    triple-mode documentation prompt embeds the other agents' responses, which
+    do not exist yet, so it is estimated with empty analysis objects.  Uses the
+    same centralized truncation helper as real execution so the estimated
+    source size matches what would actually be sent.
+
+    Every unpaid leaf chunk uses its exact fixed fragment prompt.  Every
+    unpaid unit-consolidation, general-reduction, and final synthesis call
+    uses its deterministic *worst-case* canonical envelope (D15/section 15): restored
+    nodes are excluded, and the predecessor "all chunks plus one synthesis"
+    assumption is never used.
     """
     from codedoc.agents import (
         dependency_agent,
         documentation_agent,
         file_documentation_agent,
+        file_synthesis_agent,
         structure_agent,
+    )
+    from codedoc.core.execution_model import FileReductionExecutionRequest, UnitChunkExecutionRequest
+    from codedoc.core.file_division import (
+        REDUCER_PROMPT_REVISION,
+        maximum_distinct_narratives,
+        worst_case_final_synthesis_chars,
     )
 
     analysis_mode = config.get("analysis_mode", "single")
     total = 0
     execution_requests = execution_requests or {}
-    for rel_path in plan.agent_rels:
-        if rel_path in skip_rels:
-            continue
-        request = execution_requests.get(rel_path)
-        if request is None:
-            continue
-        imports = list(request.imports)
-        language = request.language
-        content = truncate_for_llm(
-            request.content,
-            request.context.max_content_chars,
-            head_fraction=request.context.truncation_head_ratio,
-        )
-        # The profile block is selected by extension scope (basename), matching
-        # exactly what real execution will send for this file.
-        bundle = request.context.resolved_shape_bundle
+    division_plans = division_plans or {}
+    reduction_trees = reduction_trees or {}
+    tree_states = tree_states or {}
+
+    def _estimate_documentation_prompts(
+        rel_path: str,
+        content: str,
+        imports: list[str],
+        language: str,
+        bundle,
+    ) -> int:
+        prompt_total = 0
         if analysis_mode == "triple":
             structure_shape = bundle.selections["structure"].block if bundle else None
             dependency_shape = bundle.selections["dependency"].block if bundle else None
@@ -1352,7 +1925,116 @@ def _estimate_planned_input_tokens(
                 ),
             )
         for system, prompt in prompts:
-            total += estimate_tokens(system) + estimate_tokens(prompt)
+            prompt_total += estimate_tokens(system) + estimate_tokens(prompt)
+        return prompt_total
+
+    for rel_path in plan.agent_rels:
+        if rel_path in skip_rels:
+            continue
+        request = execution_requests.get(rel_path)
+        if request is None:
+            continue
+        imports = list(request.imports)
+        language = request.language
+        bundle = request.context.resolved_shape_bundle
+        division_plan = division_plans.get(rel_path)
+        if division_plan is not None:
+            reduction_tree = reduction_trees.get(rel_path)
+            state = tree_states.get(rel_path)
+            completed_ids = frozenset(state.by_id()) if state is not None else frozenset()
+
+            for chunk in division_plan.chunks:
+                if chunk.chunk_id in completed_ids:
+                    continue
+                leaf_request = UnitChunkExecutionRequest(
+                    rel_path=rel_path,
+                    language=language,
+                    full_content_hash=request.content_hash,
+                    division_plan_digest=division_plan.plan_digest,
+                    chunk_id=chunk.chunk_id,
+                    unit_id=chunk.unit_id,
+                    semantic_units=chunk.semantic_units,
+                    unit_indexes=division_plan.unit_positions(chunk),
+                    unit_count=len(division_plan.units),
+                    unit_chunk_index=chunk.unit_chunk_index,
+                    unit_chunk_count=chunk.unit_chunk_count,
+                    global_index=chunk.global_index,
+                    global_count=chunk.global_count,
+                    owning_ranges=chunk.owning_ranges,
+                    continuation_before=chunk.continuation_before,
+                    continuation_after=chunk.continuation_after,
+                    known_symbols=chunk.known_symbols,
+                    payload=chunk.payload,
+                    context=request.context,
+                )
+                system, prompt = file_documentation_agent.build_fragment_prompt(leaf_request)
+                total += estimate_tokens(system) + estimate_tokens(prompt)
+
+            if reduction_tree is None:
+                continue
+            for node in reduction_tree.unit_consolidation_nodes + reduction_tree.general_nodes:
+                if node.node_id in completed_ids:
+                    continue
+                placeholder_narratives = maximum_distinct_narratives(
+                    len(node.child_ids)
+                )
+                reduction_request = FileReductionExecutionRequest(
+                    rel_path=rel_path,
+                    division_plan_digest=division_plan.plan_digest,
+                    reduction_tree_digest=reduction_tree.tree_digest,
+                    node_id=node.node_id,
+                    phase=node.phase,
+                    unit_id=node.unit_id,
+                    level=node.level,
+                    ordinal=node.ordinal,
+                    child_ids=node.child_ids,
+                    child_capsules=tuple(
+                        {"narrative": narrative}
+                        for narrative in placeholder_narratives
+                    ),
+                    reducer_revision=REDUCER_PROMPT_REVISION,
+                    context=request.context,
+                )
+                system, prompt = file_synthesis_agent.build_reduction_prompt(
+                    reduction_request, placeholder_narratives
+                )
+                total += estimate_tokens(system) + estimate_tokens(prompt)
+
+            if reduction_tree.final_node.node_id not in completed_ids:
+                manifest_chars = worst_case_final_synthesis_chars(
+                    rel_path=rel_path,
+                    language=language,
+                    imports=imports,
+                    root_count=len(reduction_tree.final_node.child_ids),
+                    leaf_count=len(reduction_tree.final_node.leaf_ids),
+                    max_chars=request.context.max_content_chars,
+                )
+                shape = resolved_synthesis_shape(bundle)
+                system, empty_prompt = file_synthesis_agent.build_prompt(
+                    rel_path,
+                    "",
+                    shape,
+                )
+                prompt_chars = len(empty_prompt) + manifest_chars
+                total += estimate_tokens(system) + max(
+                    1,
+                    (prompt_chars + 3) // 4,
+                )
+            continue
+        content = truncate_for_llm(
+            request.content,
+            request.context.max_content_chars,
+            head_fraction=request.context.truncation_head_ratio,
+        )
+        # The profile block is selected by extension scope (basename), matching
+        # exactly what real execution will send for this file.
+        total += _estimate_documentation_prompts(
+            rel_path,
+            content,
+            imports,
+            language,
+            bundle,
+        )
     for batch in review_batches:
         total += estimate_tokens(REVIEW_SYSTEM) + estimate_tokens(batch.text)
     return total

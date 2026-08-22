@@ -24,11 +24,37 @@ import copy
 from codedoc.core.document import (
     _LAST_RUN_INTEGER_FIELDS,
     _LAST_RUN_OPTIONAL_INTEGER_FIELDS,
+    _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS,
 )
 from codedoc.core.output import _is_codedoc_owned
 from tests.support.run_metadata_cases import _view as run_metadata_view
 from tests.support.run_metadata_cases import _partition_sum
+from tests.support.run_metadata_cases import _split_record, _split_stats
 from tests.support.json_document_cases import _view as json_contract_view
+from tests.support.fixture_paths import FIXTURES_ROOT
+
+_SPLIT_STATE_FIXTURES = FIXTURES_ROOT / "split_state"
+
+
+def _load_split_state_fixture(name: str) -> dict:
+    return json.loads((_SPLIT_STATE_FIXTURES / name).read_text(encoding="utf-8"))
+
+
+def _recovery_json(tmp_path, partial_files: dict, name="crash_recovery.json"):
+    payload = {
+        "_crash_safety": "INCOMPLETE",
+        "_codedoc": {
+            "entry_file": "main.py",
+            "status": "in_progress",
+            "live_backup": True,
+            "schema_version": "1.4",
+            "partial_files": partial_files,
+        },
+        "files": [],
+    }
+    path = tmp_path / name
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    return path
 
 def _completed_json(tmp_path, schema="1.4", entry="main.py", files=None, name="codedoc.json"):
     payload = {
@@ -79,6 +105,126 @@ def test_in_progress_json_missing_schema_accepted(tmp_path):
     doc = read_codedoc_document(_in_progress_json(tmp_path, include_schema=False))
     assert doc.in_progress is True
     assert doc.schema_version is None
+
+
+def test_partial_recovery_map_rejects_embedded_path_mismatch(tmp_path):
+    payload = {
+        "_crash_safety": "INCOMPLETE",
+        "_codedoc": {
+            "entry_file": "main.py",
+            "status": "in_progress",
+            "live_backup": True,
+            "schema_version": "1.4",
+            "partial_files": {
+                "main.py": {
+                    "schema_version": 1,
+                    "owner": "codedoc-ai",
+                    "rel_path": "other.py",
+                    "content_hash": "a" * 64,
+                    "execution_identity_digest": "division-execution:" + "b" * 64,
+                    "division_plan_digest": "division-plan:" + "c" * 64,
+                    "stage": "documenting",
+                    "completed_chunks": [],
+                    "synthesis_json": None,
+                }
+            },
+        },
+        "files": [],
+    }
+    path = tmp_path / "codedoc.json"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    document = read_codedoc_document(path)
+
+    assert document.partial_files == ()
+
+@pytest.mark.parametrize(
+    "fixture_name",
+    ["partial_schema3_0_14_2.json", "partial_schema3_many_nodes_0_14_2.json"],
+)
+def test_released_schema3_container_rejected_before_node_deserialization(
+    tmp_path, fixture_name, monkeypatch
+):
+    """Section 5: `_partial_files_from_meta` rejects a released schema-3
+    container on its schema version alone, before any of its nodes are
+    read -- including the more-than-32-node fixture, which must reach the
+    same early rejection rather than the bounded quarantine path.
+
+    This is this repository's unit-owner proof of that boundary (section
+    4A/20A item 1): the schema check alone is not enough evidence that node
+    reading never happens -- if the check ever moved to after node parsing,
+    the eventual `ConfigError` could still fire after every schema-3 node
+    had already been deserialized, and the assertion below would not catch
+    it. A fail-fast sentinel replacing `ReductionNodeState` with a callable
+    that raises `AssertionError` on any invocation closes that gap directly:
+    `AssertionError` is neither `TypeError` nor `ValueError` (the narrow
+    pair `document.py::_partial_files_from_meta` catches around its
+    `ReductionNodeState(...)` call site), so it is not silently absorbed
+    into quarantine -- it propagates to pytest as an unambiguous failure.
+    The `pytest.raises(ConfigError)` block below is itself the direct proof
+    that no recovery state is ever returned by the reader for this
+    document, for both fixtures. This unit-owner file does not rely on the
+    separate integration-level sentinel test in
+    `tests/integration/persistence/test_cross_version_split_state.py` as a
+    substitute -- the plan assigns this proof to this file."""
+    fixture = _load_split_state_fixture(fixture_name)
+    assert fixture["schema_version"] == 3
+    path = _recovery_json(tmp_path, {"main.py": fixture})
+    before = path.read_bytes()
+
+    def _fail_on_construction(*args, **kwargs):
+        raise AssertionError(
+            "ReductionNodeState constructed for "
+            f"{kwargs.get('rel_path')!r} while reading {fixture_name}: node "
+            "deserialization must never be reached for a rejected "
+            "schema-3 container"
+        )
+
+    monkeypatch.setattr(
+        "codedoc.core.document.ReductionNodeState", _fail_on_construction
+    )
+
+    with pytest.raises(ConfigError, match="unsupported"):
+        read_codedoc_document(path, include_partial_files=True)
+
+    assert path.read_bytes() == before
+
+
+def test_current_schema4_container_parses_normally(tmp_path):
+    """Section 5: the current schema-4 generation must still parse into a
+    real `SplitTreeState`, proving the schema-3 boundary did not disturb
+    same-version behavior."""
+    fixture = _load_split_state_fixture("partial_schema4_0_14_3.json")
+    assert fixture["schema_version"] == 4
+    path = _recovery_json(tmp_path, {fixture["rel_path"]: fixture})
+
+    document = read_codedoc_document(path, include_partial_files=True)
+
+    assert len(document.partial_files) == 1
+    assert document.partial_files[0].schema_version == 4
+
+
+def test_mixed_schema3_schema4_document_rejected_as_a_whole(tmp_path):
+    """Section 5: a document whose `partial_files` map holds both a
+    schema-3 and a schema-4 container is rejected on the first unsupported
+    entry -- the schema-4 sibling is never partially accepted."""
+    mixed = _load_split_state_fixture("partial_mixed_generations.json")["partial_files"]
+    path = _recovery_json(tmp_path, mixed)
+
+    with pytest.raises(ConfigError, match="unsupported"):
+        read_codedoc_document(path, include_partial_files=True)
+
+
+def test_malformed_current_schema_container_rejected(tmp_path):
+    """Section 5: a structurally malformed current-schema container (here,
+    an unknown extra field) fails closed like every other unsupported or
+    foreign container shape."""
+    fixture = _load_split_state_fixture("malformed_container.json")
+    path = _recovery_json(tmp_path, {"main.py": fixture})
+
+    with pytest.raises(ConfigError, match="unknown or missing field"):
+        read_codedoc_document(path, include_partial_files=True)
+
 
 def test_legacy_13_json_fixture(tmp_path):
     doc = read_codedoc_document(LEGACY_DOCUMENT_FIXTURES / "codedoc_13.json")
@@ -230,6 +376,44 @@ def test_malformed_metadata_is_rejected_even_with_valid_embedded_view(tmp_path):
     )
     with pytest.raises(ConfigError):
         read_codedoc_document(p)
+
+
+def test_conflicting_markdown_embedded_schema_is_rejected(tmp_path):
+    embedded = {
+        "schema_version": "1.3",
+        "last_run": {},
+        "files": [],
+    }
+    encoded = base64.b64encode(json.dumps(embedded).encode("utf-8")).decode("ascii")
+    path = tmp_path / "codedoc.md"
+    path.write_text(
+        '<!-- codedoc-ai: {"entry_file": null, "schema_version": "1.4", '
+        '"file_hashes": {}} -->\n'
+        f"<!-- codedoc-ai-view-base64\n{encoded}\n-->\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="conflicting schema versions"):
+        read_codedoc_document(path)
+
+
+def test_unsupported_markdown_embedded_schema_is_rejected(tmp_path):
+    embedded = {
+        "schema_version": "2.0",
+        "last_run": {},
+        "files": [],
+    }
+    encoded = base64.b64encode(json.dumps(embedded).encode("utf-8")).decode("ascii")
+    path = tmp_path / "codedoc.md"
+    path.write_text(
+        '<!-- codedoc-ai: {"entry_file": null, "file_hashes": {}} -->\n'
+        f"<!-- codedoc-ai-view-base64\n{encoded}\n-->\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError, match="unsupported CodeDoc schema version"):
+        read_codedoc_document(path)
+
 
 def test_markdown_missing_schema_rejected(tmp_path):
     p = tmp_path / "codedoc.md"
@@ -534,6 +718,66 @@ def test_json_reader_rejects_malformed_optional_skip_counter(tmp_path, value):
     with pytest.raises(ConfigError):
         read_codedoc_document(path)
 
+
+def _split_document_data() -> dict:
+    return json.loads(json_from_view(build_project_view([_split_record()], _split_stats())))
+
+
+def test_split_optional_counter_set_is_exact_and_predecessor_absence_is_readable(tmp_path):
+    assert _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS == {
+        "split_completed_files_reused",
+        "split_partial_files_resumed",
+        "split_unpaid_nodes",
+        "split_reexecuted_nodes",
+        "split_quarantined_nodes",
+        "split_recovery_conflict_files",
+    }
+    data = _split_document_data()
+    for key in _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS:
+        data["last_run"].pop(key)
+    path = tmp_path / "predecessor-split.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    loaded = read_codedoc_document(path)
+
+    assert all(
+        key not in loaded.view["last_run"]
+        for key in _LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS
+    )
+
+
+@pytest.mark.parametrize("value", [-1, True, 1.5, "1"])
+@pytest.mark.parametrize("field", sorted(_LAST_RUN_SPLIT_OPTIONAL_INTEGER_FIELDS))
+def test_json_reader_rejects_malformed_optional_split_counter(tmp_path, field, value):
+    data = _split_document_data()
+    data["last_run"][field] = value
+    path = tmp_path / f"malformed-{field}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        read_codedoc_document(path)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("split_unpaid_nodes", 4),
+        ("split_reexecuted_nodes", 4),
+        ("split_completed_files_reused", 1),
+        ("split_partial_files_resumed", 1),
+    ],
+)
+def test_json_reader_rejects_contradictory_optional_split_counter(
+    tmp_path, field, value
+):
+    data = _split_document_data()
+    data["last_run"][field] = value
+    path = tmp_path / f"contradictory-{field}.json"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    with pytest.raises(ConfigError):
+        read_codedoc_document(path)
+
 @pytest.mark.parametrize(
     ("label", "mutate"),
     [
@@ -583,8 +827,11 @@ def test_legacy_json_without_last_run_is_accepted_and_owned(tmp_path):
 
     assert _is_codedoc_owned(path)
     doc = read_codedoc_document(path)
-    assert "last_run" not in doc.view
-    assert doc.view["run"]["files_documented"] == 2
+    assert doc.view["last_run"]["entry_file"] == "main.py"
+    assert "run" not in doc.view
+    # The canonical counter maps from the legacy run's provider-work counter,
+    # not its output file-count field.
+    assert doc.view["last_run"]["files_documented_by_llm"] == 1
 
 def test_current_json_without_envelope_is_owned(tmp_path):
     data = json.loads(json_from_view(run_metadata_view()))
@@ -627,7 +874,8 @@ def test_legacy_completed_json_remains_owned_and_readable(tmp_path):
     assert _is_codedoc_owned(path)
     doc = read_codedoc_document(path)
     assert doc.entry_file == "main.py"
-    assert doc.view["run"]["files_documented"] == 2
+    assert "run" not in doc.view
+    assert doc.view["last_run"]["files_documented_by_llm"] == 2
 
 def test_foreign_json_without_codedoc_shape_still_fails_closed(tmp_path):
     path = tmp_path / "codedoc.json"

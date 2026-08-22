@@ -1,185 +1,291 @@
 # CodeDoc run lifecycle
 
-This document describes the phase ordering CodeDoc uses for a real run.
-The deterministic scanner, parser, graph, and output cleaners remain authoritative;
-LLM output is bounded enrichment.
+This document describes the active phase ordering for ordinary and large-file
+runs. Local scanning, parsing, graph construction, split planning, output
+cleaning, and serialization are deterministic; provider output is bounded
+enrichment.
+
+## Availability boundary
+
+The default `large_file_strategy: truncate` supports real `single` and `triple`
+runs. Beginning in `0.14.2`, `large_file_strategy: split` supports provider-free
+dry-run planning, paid execution, same-path completed reuse, and dependency-valid
+node recovery with `analysis_mode: single`. As of `0.14.3`, `single + split`
+execution, completed-record reuse, and node-level recovery are fully
+supported; `triple + split` remains unavailable. Split leaf signatures stay
+private, internal matching metadata bounded to the parser-aligned
+600-character ceiling; split never silently truncates an over-bound response.
+A leaf accepts up to 32 functions and up to 32 classes (matching the known-symbol
+count the leaf prompt may list); a combined reduction narrative is capped at
+300 characters, and the reducer prompt states that bound explicitly.
+
+`triple + split` fails during configuration validation before scanning,
+recovery inspection, output-directory creation, prompt-customization review,
+provider construction, or provider calls. It never silently falls back to
+truncate.
+
+An exactly compatible same-path completed split record authorizes zero-call
+reuse. Cross-path identical-content split reuse remains unavailable because
+split identities are path-bound. Accepted leaf, reducer, and final nodes are
+checkpointed only after cleaning and validation; a compatible interrupted run
+resumes only unpaid nodes. An explicit force bypasses reuse/recovery for that
+path while old stable output and recovery remain preserved until replacement.
+
+The predecessor `0.14.1` `fresh-only-v1` split record is stale by default under
+`0.14.2` and reruns once. Schema-1 and schema-2 partials are preserved but not
+resumed. Rolling back to `0.14.1` reruns `large-file-v3` split output fresh and
+blocks schema-4 recovery preserve-first.
+
+The current node-keyed partial-recovery generation is schema 4 (`0.14.3`,
+bound to the `leaf-capsule-v6` leaf identity). Released schema 3
+(`0.14.2`, `leaf-capsule-v5`) is now an unsupported predecessor generation,
+preserved and blocked before any node is read, before planning, `SafeWriter`,
+or provider construction — the recovery artifact stays byte-identical.
+Nothing from a released schema-3 partial is carried forward; a fresh
+`0.14.3` run performs complete v6 re-execution. Finish an unfinished `0.14.2`
+split run with `0.14.2`, or move `crash_recovery.json` aside (or delete it as
+a deliberate discard) to start fresh under `0.14.3`.
+
+`0.14.4` advances the same schema-4 generation to the `leaf-capsule-v7` leaf
+identity and the `file-reduction-v2` reducer prompt, with no schema-version
+change. A node checkpointed under the predecessor `leaf-capsule-v6` /
+`file-reduction-v1` identity is stale, not rejected outright: it is
+quarantined and re-executed like any other stale node, including a node that
+was previously paid. `MAX_QUARANTINE_ENTRIES_PER_FILE` is 512 (twice the
+maximum leaf-chunk count), sized to cover every node of the largest valid
+plan quarantined at once, so an ordinary revision-driven re-execution never
+aborts the run. Every other schema-4 rejection stays fail-closed exactly as
+before: a malformed container, a foreign owner, an unsupported schema
+version, an unplanned or duplicate node ID, and a quarantine map that still
+exceeds the bound all raise and stop the run.
 
 ## Persistent-file allowlist
 
 CodeDoc automatically reads or writes only:
 
-1. `<project_root>/codedoc.config.json` for optional configuration and inline instructions;
-2. `<output_dir>/crash_recovery.json` while a run is in progress;
+1. `<project_root>/codedoc.config.json` for optional configuration and inline
+   instructions;
+2. `<output_dir>/crash_recovery.json` while a real run is in
+   progress; and
 3. the exact selected CodeDoc-owned JSON and/or Markdown final target, plus its
    deterministic opposite-format counterpart only when the selected target is
    missing.
 
 There is no alternate-config, `.env`, external-profile, directory-wide output,
-checkpoint, build, database, legacy-recovery, issue-log, or `.gitignore`
-discovery. The counterpart uses the configured filename pair, or the same stem
-for a named output; no directory walk or unrelated sibling is permitted.
+database, issue-log, or `.gitignore` discovery. A named output uses only its
+configured counterpart; CodeDoc does not scan unrelated siblings.
 
-## Ordered phases
+## Split planning, reuse, and recovery
 
-1. **Load configuration.** Read only the exact `codedoc.config.json`, merge
-   supported environment/in-memory scalar overrides, reject removed keys, and
-   resolve exact final target paths. `crash_recovery.json` is a reserved final
-   filename.
+When `large_file_strategy` resolves to `split`, CodeDoc reads one canonical
+decoded snapshot per selected source file. A file at or below
+`max_content_chars` remains one planned whole-file call. An oversized file is
+divided at deterministic syntax boundaries when available, otherwise at
+complete lexical line boundaries. An individually oversized semantic unit or
+physical line receives deterministic continuation chunks.
 
-2. **Read-only output preflight.** Validate distinct artifact paths and ownership
-   of every existing selected target. Load incremental records from the selected
-   target, or strictly validate its exact opposite-format counterpart when the
-   selected target is missing. A foreign or malformed fallback blocks before
-   provider use. In both mode, compare schema, entry, exact path set, hashes, and
-   normalized cache identity; any mismatch blocks before mutation/provider use.
+Every source character belongs to exactly one planned leaf. Adjacent fitting
+semantic units may share a planned leaf call while retaining their own
+identities. Continuations for one semantic unit consolidate before general
+reduction. General reduction continues only until the complete final manifest
+fits; several ordered roots may feed the planned final synthesis.
 
-3. **Instruction resolution.** Resolve `prompt_profiles` as inline or absent,
-   validate schema v1/v2 under the required `common` envelope and the optional
-   `per_extension` overrides, choose single or triple mode, and build
-   deterministic documentation projection when a single-only customization is
-   selected in triple mode. Each file's effective block is chosen by
-   `longest matching per_extension > common > built-in default` on the lowercased
-   basename. No routing conversion exists.
+Structure extraction is runtime-offline: it never downloads a grammar or
+writes a grammar cache. Without the optional structure package, a matching
+grammar, or a usable parse, planning uses one lexical atom per physical line.
+The lexical path has a 4,096 lexical-atom ceiling and reports `atom-cap` when
+that limit is exceeded. Because the cap counts atoms rather than characters,
+raising `max_content_chars` cannot clear it. For a supported language currently
+using lexical fallback, syntax-aware extraction may reduce the atom count:
 
-4. **Scan and plan.** Scan source, construct the dependency graph, select entry
-   reachability/documentation scope, compute per-file profile digests by
-   extension scope, and build the versioned recovery identity (which no longer
-   binds a profile-wide digest). For every file routed to a documentation call,
-   planning also builds one frozen execution request from a single canonical
-   source snapshot: raw bytes are read once, hashed, and decoded with the
-   canonical text policy, so the request's content, byte hash, and derived
-   imports always describe the same file revision. A file that changes between
-   its routing hash and that snapshot triggers exactly one complete rebuild of
-   the source-dependent inputs — scanning, parsing, dependency-graph
-   construction, entry selection, and planning — because the graph was parsed
-   before the routing hash and may itself have observed the stale revision.
-   A second detected change is reported as a concurrent-source-change error
-   before usage accounting, provider creation, any confirmation callback, or
-   writer initialization. Execution later consumes these requests without
-   rescanning source, recomputing a hash, resolving a prompt scope, or mutating
-   plan materials; reused and unchanged records never receive one.
+```bash
+pip install "codedoc-ai[structure]"
+```
 
-5. **Exact recovery inspection.** Inspect only
-   `<output_dir>/crash_recovery.json`. Missing means fresh state. A compatible
-   owned in-progress document overlays selected-target or cross-format fallback
-   records. Foreign, malformed, completed, unsupported, or identity-mismatched
-   recovery blocks with guidance to restore the prior configuration or delete the
-   exact recovery file.
+The package is a reason-specific option, not a promise to repair malformed or
+error-dominated source. Refactoring is the reliable remedy when a usable syntax
+parse is unavailable.
 
-6. **Final read-only gates.** Build the final plan from stable plus compatible
-   recovery records, then build the exact prompt-customization review batches
-   (provider-free) and the one canonical call manifest they share with
-   documentation requests: review calls first in batch order, then
-   documentation calls sorted by relative path and canonical per-mode agent
-   order. Attach the manifest's counts, cap outcome, and digest to the
-   immutable plan. Dry-run returns here and mutates nothing, surfacing the same
-   counts a real run would use.
+Planning measures the exact canonical JSON representation used by bounded leaf,
+reducer, and final manifests, including quotes, backslashes, controls,
+newlines, and Unicode. It evaluates these provider-free capacity reasons in
+fixed order:
 
-   For a real run, enforce `max_files` over documentation-call candidates, then
-   independently enforce `max_planned_calls` — a safety cap on the manifest's
-   total initially planned calls (prompt-customization reviews plus initial
-   documentation calls; retries and corrections are excluded). Equality with
-   either cap passes; either failure stops before usage accounting, provider
-   creation, any confirmation callback, or writer initialization, and leaves
-   prior output untouched. Only then perform mandatory semantic review for
-   active customization that will reach documentation calls: SAFE continues,
-   RISKY warns, TOO_RISKY blocks. Separately, derive deterministic non-blocking
-   feasibility advisories for customized fields that appear to need cross-file
-   context; these add no provider call and never alter the safety verdict.
+1. `atom-cap`;
+2. `symbol-cap`;
+3. `unit-cap`;
+4. `chunk-cap`;
+5. `reduction-envelope-cap`;
+6. `reduction-fan-in-cap`;
+7. `reduction-depth-cap`; and
+8. `final-synthesis-envelope-cap`.
 
-7. **Mutation boundary.** Create the output directory and run the provider-free
-   create/write/fsync/atomic-rename/delete accessibility probe. Initialize
-   `SafeWriter` with the exact recovery path, queue order, compatible records, and
-   recovery identity. The empty in-progress recovery snapshot is written before
-   provider creation/documentation calls.
+A blocked file contributes no provider call. Dry-run reports each blocked path
+and reason and exits without mutation; a real run stops before provider creation
+or persistent mutation. A genuine planning invariant failure is not converted
+into a capacity result; it aborts planning while prior output remains untouched.
 
-8. **Execution.** Process dependencies before dependents where possible. Single
-   mode makes one combined documentation call per file; triple mode runs
-   structure, dependency, and documentation agents. Planning has already derived
-   imports from the frozen decoded snapshot. Before any per-file provider call, a
-   deterministic pre-check skips empty or whitespace-only content. The skip is not
-   a failure, persists no placeholder record, consumes no manifest ID, and
-   transactionally removes any stale preloaded record.
-   Each non-skipped agent response passes one canonical validation path: JSON
-   candidate extraction, parse, top-level object check, strict cleaning, profile
-   filtering, a check that at least one requested field survives, and
-   registry-required-field validation. A response that fails this contract is
-   rejected with a bounded, structured diagnostic (a stable top-level reason code
-   plus bounded per-field removal reasons) that carries no raw response, source,
-   prompt, or credential text.
+The split dry-run manifest reports ordinary-file, leaf,
+unit-consolidation/general-reduction, and final-synthesis call categories. It
+also reports a deterministic worst-case final-input estimate that reserves the
+complete 3,000-character canonical ledger-synopsis allowance rather than using
+one concrete trimmed ledger as a proxy. It is a character-based estimate rather
+than a tokenizer-exact prediction. Dry-run stops after this provider-free plan
+and does not consume checkpoints; a real run executes the same authorized
+topology after completed reuse and dependency-valid recovery remove already-paid
+work.
 
-   When response correction is enabled (`response_correction_enabled: true`), each
-   agent's response boundary makes at most one targeted correction call for its own
-   eligible failure, revalidated through the identical path; a successful sibling
-   agent is never rerun. When correction is disabled, the eligible failure is
-   final at the initial call. Either way the failure is classified
-   `response_contract_final` and is non-retryable, so a response-contract rejection
-   never becomes a duplicate whole-file call. A correction call that fails on a
-   rate-limit/transport fault ends correction for that file (still
-   `response_contract_final`); a billing/credential/model correction fault stays a
-   run-level terminal abort. Each completed record is atomically persisted to the
-   fixed recovery file. Other recoverable failures follow the bounded
-   retry/rate-limit rules governed by `file_retry_attempts`;
-   terminal/provider/persistence failures stop and preserve recovery.
+## Ordered phases for a real run
 
-9. **Finalization.** Render all selected payloads before replacement. Markdown is
-   atomically replaced before JSON in both mode; this is per-artifact atomicity,
-   not a cross-file transaction. Only after every selected final target succeeds
-   is `crash_recovery.json` deleted. A failed final write or recovery deletion
-   reports failure and leaves recovery available.
+1. **Load configuration and instructions.** Read only the exact
+   `codedoc.config.json`, merge supported environment and in-memory overrides,
+   normalize strict values, reject unavailable strategy/mode combinations, and
+   resolve/classify the effective prompt profile. Instruction resolution occurs
+   before entry recovery, ownership inspection, stable-output reads, or source
+   scanning.
 
-10. **Diagnostics.** Bounded issues remain in memory/terminal and in permitted
-    final or recovery metadata. No persistent `error.log` is created.
+2. **Resolve exact artifacts and inspect ownership.** Resolve entry information
+   from configuration or the exact selected documentation, validate that JSON,
+   Markdown, and recovery targets do not collide, then inspect ownership of the
+   selected targets. If a selected format is absent, read only its exact
+   opposite-format counterpart. Foreign, malformed, conflicting, or unsupported
+   ownership blocks before provider use or mutation.
+
+3. **Scan and select.** Scan supported source, construct the dependency graph,
+   determine entry reachability and documentation scope, and freeze each
+   provider-bound file from one source snapshot. Content, byte hash, effective
+   language, and derived imports describe that same snapshot. A detected
+   concurrent source change causes one complete source-dependent rebuild; a
+   second change fails before accounting or provider construction.
+
+4. **Inspect recovery and build the final read-only plan.** Inspect only the
+   exact `<output_dir>/crash_recovery.json`. Compatible ordinary completed
+   records may overlay stable output. Foreign, completed, unsupported,
+   malformed, or run-identity-mismatched recovery blocks without mutation.
+   Current schema-4 split nodes are validated topologically; valid siblings are
+   retained, rejected nodes are quarantined, and their ancestors are pruned.
+   Planning applies completed reuse, rejects insufficient source locally,
+   divides oversized split files, and blocks any capacity failure before calls.
+
+5. **Build the canonical manifest and enforce caps.** Derive review scopes only
+   from files with unpaid work, then build one review/documentation call
+   manifest. Enforce `max_files` and `max_planned_calls` before usage accounting,
+   confirmation, writer initialization, or provider construction.
+
+6. **Prompt-customization review.** If active non-default instructions will
+   reach unpaid provider work, construct the provider and run the mandatory
+   semantic review. A later output-accessibility failure states that this review
+   may already have been billed; it does not claim the run was provider-free.
+
+7. **Mutation preflight.** Create and probe the output directory through the
+   classified create/write/fsync/atomic-rename/delete boundary. Permission and
+   space failures become stable output errors rather than raw filesystem
+   exceptions.
+
+8. **Execution and recovery.** Initialize the one recovery file only when
+   provider work remains, before documentation-provider construction. Process
+   dependencies before dependents where possible. Ordinary single mode makes one
+   combined call per file; triple mode makes three bounded calls. An oversized
+   split file runs only unpaid nodes in its planned leaf/reduction/final tree.
+   Every returned node is cleaned, schema-validated, and transactionally
+   checkpointed before a dependent is scheduled. A fully recovered final is
+   restored locally with no provider or review. Only completed file-level output
+   reaches the public record. Response cleaning, optional correction, retry limits,
+   terminal-provider handling, cancellation, and usage accounting share the
+   canonical call boundary.
+
+9. **Finalization.** Project every completed record through the public schema
+   before deriving JSON, visible Markdown, embedded views, or lightweight
+   metadata. Render selected payloads before replacement. Each artifact is
+   replaced atomically; `both` mode is per-artifact atomic, not a cross-file
+   transaction. Remove recovery only after every selected write succeeds.
+
+10. **Diagnostics.** Keep bounded issues in memory and terminal output.
+    Permitted hard-error summaries may appear in final output. CodeDoc does not
+    create a persistent `error.log`.
 
 ## Cache and recovery identity
 
-Per-file reuse uses the single centralized predicate over content hash and:
+Ordinary per-file reuse uses one centralized predicate over content hash,
+effective language, and the registered cache identity:
 
 - `_analysis_revision`;
 - `_analysis_mode`;
 - `_max_context_revision`;
-- `_prompt_profile_digest`.
+- `_prompt_profile_digest`; and
+- `_ordinary_path_identity`.
 
-The run-level recovery identity additionally binds project root, exact selected
-targets, entry, documentation scope, and analysis mode/revision. It no longer
-binds a profile-wide digest — narrowing the compared field set is
-backward-compatible and keeps recovery identity version 1. The run identity gates
-whether recovery may be overlaid; each overlaid record is still re-validated by
-the per-file reuse checks above, so `_prompt_profile_digest` selectively filters
-recovered records by extension scope.
+Ordinary identical-content reuse is same-path only: the predicate also
+requires the stored record's own path to equal the destination path, so
+CodeDoc never copies documentation from one path to a different path even
+when their content is byte-identical. A record written before `0.14.4` lacks
+`_ordinary_path_identity` and is therefore invalid until it is successfully
+regenerated under the current path-bound identity.
 
-## Call manifest and planned-call authorization
+The run-level ordinary recovery identity additionally binds project root, exact
+targets, entry, documentation scope, analysis mode/revision, and the effective
+large-file strategy. Every recovered record is still revalidated by the
+per-file predicate.
 
-Dry-run and a real run consume one canonical call manifest and never
-independently derive planned counts. Each entry is a domain-separated,
-deterministic identifier for one initially planned logical call — a
-prompt-customization review batch or one agent's initial documentation call
-for one file — never for a retry or a correction. `max_planned_calls` (`0` =
-unlimited; the default preserves unlimited authorization) is a safety cap on
-that manifest's total, checked once, before provider creation; it is
-independent of `max_files` and is never a hard ceiling on actual provider
-attempts or a stop-after-N-calls limit.
+An oversized split result additionally carries the private current
+`large-file-v3` topology/imports identity. The retired `_split_reuse_contract`
+key is no longer stamped, but remains registered so literal `0.14.1`
+`fresh-only-v1` records round-trip unchanged and compare stale. Completed cache
+reuse is provider-agnostic. Partial node identity additionally binds provider,
+model, and effective endpoint; imports-only changes preserve leaves/reducers and
+rerun final synthesis. Cross-path split reuse remains unavailable.
 
-Dry-run and a completed real run both report the manifest's `total_calls_planned`,
-`max_planned_calls`, `max_planned_calls_exceeded`, and `call_manifest_digest`.
-The established `documentation_calls_planned` and
-`prompt_customization_security_review_calls_planned` fields keep their
-existing meaning; the manifest introduces no second alias for either.
+Schema-4 recovery stores container provenance, ordered node state, exact
+stage-local input digests, and bounded non-executable quarantine. Released
+schema-3, schema-1, schema-2, unknown, foreign, duplicate, aliased, or unsafe
+container state is preserved and blocked. The remedies are ordered
+preserve-first: restore the matching version/configuration or move the file
+aside; deletion is only an explicit discard.
 
-A real run additionally reconciles planned against attempted logical calls:
-`attempted_logical_calls` counts unique planned call IDs reached at least once;
-`planned_calls_not_attempted` is the remainder left by an early stop (a valid
-outcome, not a defect); and `additional_attempts` is the actual attempted-call
-count in excess of `attempted_logical_calls`, i.e. retries and corrections.
-This reconciliation holds for a clean completion, an `allow_partial`
-completion, and a terminal abort alike, without requiring execution to
-continue past the abort.
+## Call authorization and accounting
+
+Dry-run and real execution derive counts from one canonical call manifest.
+`max_planned_calls` is checked before provider construction and covers initial
+logical calls, including mandatory prompt-review calls. Retries and corrections
+are additional attempts attached to an existing logical call.
+
+Every real run reconciles planned logical calls with attempted calls.
+`planned_calls_not_attempted` may be non-zero after a bounded stop;
+`additional_attempts` records retries and corrections. A clean completion,
+allowed partial completion, and terminal abort use the same accounting model.
 
 ## Failure invariants
 
-- Stable output is never mutated during analysis.
-- Recovery is initialized only after all read-only gates and semantic review.
-- Recovery is preserved on interruption, provider failure, and final-output failure.
-- No unrelated sibling or legacy file is opened or deleted; an exact validated
-  opposite-format counterpart is read-only.
-- Dry-run performs no persistent mutation and contacts no provider.
+- `triple + split` fails before every side effect.
+- Split dry-run performs no provider call and no persistent mutation.
+- Exactly compatible same-path completed split records authorize zero-call
+  reuse; cross-path split records do not.
+- Current dependency-valid schema-4 nodes authorize only their own paid work;
+  invalid nodes never authorize an ancestor and remain quarantined until valid
+  replacement or completed output succeeds.
+- Released schema-3, schema-1/schema-2, foreign, future, malformed, duplicate,
+  or aliased recovery is preserved and blocked before provider construction or
+  mutation.
+- Stable output is not mutated during analysis.
+- Recovery is initialized only after read-only gates, caps, and any semantic
+  review.
+- Recovery is preserved on interruption, provider failure, and final-output
+  failure.
+- After interruption is observed, no new initial, retry, or correction call
+  begins.
+- Empty and whitespace-only files make no provider call and publish no
+  placeholder.
+- No unrelated sibling or legacy file is opened or deleted.
+- Output replacement is ownership-guarded and atomic per artifact.
+- CodeDoc verbosity never raises the root logger or lowers reviewed provider,
+  authentication, HTTP-client, or transport floors. Provider errors and public
+  output never expose credentials, raw prompts, source text, or raw provider
+  responses.
+- A final (non-retryable) response-contract failure names its closed reason
+  code in the visible failure message; it still exposes no source, prompt,
+  raw or truncated provider response, credential, endpoint, or per-field
+  removal detail.
+- A custom `api_base_url` requires runtime endpoint-trust approval bound to
+  its exact canonicalized identity; `codedoc.config.json` and
+  `config_overrides` can never satisfy this gate, which is resolved before
+  any credential is read and applies identically to a dry run.

@@ -70,6 +70,7 @@ MAX_CORRECTION_RESPONSE_CHARS = 8000
 REASON_NO_JSON_OBJECT = "no_json_object"
 REASON_JSON_PARSE_ERROR = "json_parse_error"
 REASON_TOP_LEVEL_NOT_OBJECT = "top_level_not_object"
+REASON_FIXED_CAP_EXCEEDED = "fixed_cap_exceeded"
 REASON_NO_USABLE_FIELDS = "no_usable_fields"
 REASON_MISSING_REQUIRED = "missing_required"
 
@@ -77,11 +78,15 @@ TOP_LEVEL_REASONS = (
     REASON_NO_JSON_OBJECT,
     REASON_JSON_PARSE_ERROR,
     REASON_TOP_LEVEL_NOT_OBJECT,
+    REASON_FIXED_CAP_EXCEEDED,
     REASON_NO_USABLE_FIELDS,
     REASON_MISSING_REQUIRED,
 )
 
-# Per-field removal reasons — recorded in ``removed``; never itself a file failure.
+# Per-field removal reasons are recorded in ``removed``. Ordinary configurable
+# response cleaning may retain other usable fields after any of these removals.
+# Fixed split capsules are stricter: item/response-cap removals are elevated to
+# ``fixed_cap_exceeded`` so bounded facts are never silently discarded.
 REMOVAL_UNKNOWN_FIELD = "unknown_field"
 REMOVAL_WRONG_TYPE = "wrong_type"
 REMOVAL_EMPTY_VALUE = "empty_value"
@@ -178,6 +183,10 @@ class CleanResult:
     # Explicit, correctly typed empty optional collections are valid responses
     # even though the historical cleaners omit them from the persisted value.
     valid_empty_paths: tuple[str, ...] = ()
+    # Complete reason-code set observed before the bounded diagnostic list was
+    # truncated. Fixed capsules use this to enforce losslessness even when
+    # many earlier removals exhaust the user-facing diagnostic detail budget.
+    removal_reason_codes: frozenset[str] = frozenset()
 
 
 # ---------------------------------------------------------------------------
@@ -223,13 +232,15 @@ def _sanitize(text: str, cap: int) -> str:
 class RemovalCollector:
     """Collects bounded :class:`RemovedField` entries in first-seen order."""
 
-    __slots__ = ("_items", "_omitted")
+    __slots__ = ("_items", "_omitted", "_reason_codes")
 
     def __init__(self) -> None:
         self._items: list[RemovedField] = []
         self._omitted = 0
+        self._reason_codes: set[str] = set()
 
     def add(self, field: str, reason_code: str, detail: str) -> None:
+        self._reason_codes.add(reason_code)
         if self._omitted:
             self._omitted += 1
             return
@@ -261,6 +272,10 @@ class RemovalCollector:
                 )
             )
         return tuple(items)
+
+    def reason_codes(self) -> frozenset[str]:
+        """Return every observed reason, including omitted diagnostic entries."""
+        return frozenset(self._reason_codes)
 
 
 def _cap_keys(keys) -> tuple[str, ...]:
@@ -530,6 +545,99 @@ def process_response(
                reason_detail="; ".join(missing))
 
     return filtered
+
+
+def process_fixed_capsule_response(
+    raw: str,
+    *,
+    label: str,
+    agent: str,
+    file_path: str,
+    clean_reporter,
+    requested_paths: tuple[str, ...],
+    required_paths: tuple[str, ...],
+) -> dict:
+    """Turn a raw provider response into a validated fixed-schema capsule.
+
+    The split leaf/reduction internal contract is never prompt-profile
+    driven (D5/D6): there is no filtering stage, and the requested/required
+    paths are the fixed capsule schema itself, not a registry lookup.
+    Otherwise follows :func:`process_response` through JSON candidate
+    selection -> JSON parse -> top-level object check -> ``clean_reporter``.
+    It then rejects lossy item/response-cap removals before
+    ``no_usable_fields`` and required-field validation. It uses the same bounded
+    :class:`ResponseDiagnostic` / :class:`~codedoc.utils.errors.
+    ResponseContractError` shape and the same correction path.
+
+    *label* is a bounded descriptive stage tag (e.g. ``"split-leaf"`` or
+    ``"split-reduction"``) carried only for diagnostics; it never selects a
+    registry.
+    """
+    requested_set = set(requested_paths)
+    response_chars = len(raw)
+
+    outcome = extract_json_candidate(raw)
+    if outcome.kind == REASON_NO_JSON_OBJECT:
+        _raise(label, agent, file_path, STAGE_JSON_EXTRACT, REASON_NO_JSON_OBJECT,
+               expected=requested_paths, response_chars=response_chars)
+    if outcome.kind == REASON_JSON_PARSE_ERROR:
+        _raise(label, agent, file_path, STAGE_JSON_PARSE, REASON_JSON_PARSE_ERROR,
+               expected=requested_paths, response_chars=response_chars,
+               parse_error=outcome.parse_error, parse_position=outcome.parse_position)
+    if outcome.kind == REASON_TOP_LEVEL_NOT_OBJECT:
+        _raise(label, agent, file_path, STAGE_TOP_LEVEL, REASON_TOP_LEVEL_NOT_OBJECT,
+               expected=requested_paths, response_chars=response_chars,
+               removed=(RemovedField("<top-level>", REMOVAL_WRONG_TYPE,
+                                     type_detail(outcome.value)),))
+
+    parsed: dict = outcome.value
+    returned_keys = tuple(parsed.keys())
+
+    clean_result: CleanResult = clean_reporter(parsed, file_path)
+    cleaned = clean_result.value
+    removed = list(clean_result.removed)
+
+    retained_set = {p for p in _leaf_paths(cleaned) if p in requested_set}
+    retained_set.update(p for p in clean_result.valid_empty_paths if p in requested_set)
+    retained = tuple(p for p in requested_paths if p in retained_set)
+
+    returned_types = tuple(f"{key}:{type_detail(value)}" for key, value in parsed.items())
+
+    if clean_result.removal_reason_codes.intersection(
+        (REMOVAL_ITEM_LIMIT, REMOVAL_RESPONSE_CAP)
+    ):
+        _raise(
+            label,
+            agent,
+            file_path,
+            STAGE_CLEAN,
+            REASON_FIXED_CAP_EXCEEDED,
+            expected=requested_paths,
+            returned=returned_keys,
+            retained=retained,
+            returned_types=returned_types,
+            removed=removed,
+            response_chars=response_chars,
+            reason_detail=(
+                "fixed split capsules must be corrected rather than "
+                "published after bounded facts were removed"
+            ),
+        )
+
+    if requested_set and not retained:
+        _raise(label, agent, file_path, STAGE_CLEAN, REASON_NO_USABLE_FIELDS,
+               expected=requested_paths, returned=returned_keys, retained=retained,
+               returned_types=returned_types, removed=removed, response_chars=response_chars)
+
+    retained_leaves = set(_leaf_paths(cleaned))
+    missing = [path for path in required_paths if path not in retained_leaves]
+    if missing:
+        _raise(label, agent, file_path, STAGE_REQUIRED_FIELDS, REASON_MISSING_REQUIRED,
+               expected=requested_paths, returned=returned_keys, retained=retained,
+               returned_types=returned_types, removed=removed, response_chars=response_chars,
+               reason_detail="; ".join(missing))
+
+    return cleaned
 
 
 def _raise(
