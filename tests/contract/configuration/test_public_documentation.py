@@ -15,7 +15,8 @@ from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
     LEAF_CAPSULE_SCHEMA_REVISION,
     LEDGER_SCHEMA_REVISION,
-    MAX_QUARANTINE_ENTRIES_PER_FILE,
+    MAX_LEAF_EXPORT_ITEM_CHARS,
+    MAX_LEAF_EXPORT_ITEMS,
     PACKER_SCHEMA_REVISION,
     REDUCER_PROMPT_REVISION,
     REDUCTION_CAPSULE_SCHEMA_REVISION,
@@ -50,27 +51,96 @@ def test_public_docs_and_help_use_canonical_command_spelling():
     template = ROOT / "codedoc" / "templates" / "github-actions-codedoc.yml"
     assert "\n            run\n" not in template.read_text(encoding="utf-8")
 
-def test_release_docs_frame_current_and_predecessor_versions_explicitly():
-    """Gate 17.13, assertion 3: `0.14.0`, `0.14.1`, and `0.14.2` references
-    must be framed as historical or downgrade guidance, not merely present
-    anywhere in the document. Located via the shared "predecessor ...
-    fresh-only-v1" paragraph opening both files' downgrade guidance, rather
-    than a whole-document substring search that a same-page but unrelated
-    mention of the same version number would also satisfy."""
-    readme = (ROOT / "README.md").read_text(encoding="utf-8")
-    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
-    readme_paragraph = _locate_paragraph(
-        readme, "The `0.14.1` `fresh-only-v1` completed split contract is stale"
-    )
-    run_flow_paragraph = _locate_paragraph(
-        run_flow, "The predecessor `0.14.1` `fresh-only-v1` split record is stale"
-    )
-    for paragraph in (readme_paragraph, run_flow_paragraph):
-        assert "0.14.2" in paragraph
-        assert "0.14.1" in paragraph
-        assert "fresh-only-v1" in paragraph
-        assert "stale" in paragraph
-        assert "Rolling back to `0.14.1`" in paragraph
+#: Vocabulary a reader of README/RUN_FLOW cannot act on. Release numbers date
+#: the documents and internal revision names are invisible outside the source
+#: tree, so both belong in CHANGELOG.md instead. Kept as one list so the ban is
+#: enforced identically everywhere it is applied.
+_INTERNAL_DOC_VOCABULARY = (
+    "leaf-capsule", "file-reduction-v", "large-file-v", "fresh-only",
+    "source-structure-v", "semantic-unit-v", "division-packer",
+    "fact-ledger", "reduction-capsule-v", "reduction-packing",
+    "file-synthesis-v", "division-execution-v", "file-doc-v",
+    "ordinary-path-v", "truncate-v", "MAX_QUARANTINE_ENTRIES_PER_FILE",
+    "schema 1", "schema 2", "schema 3", "schema 4",
+    "schema-1", "schema-2", "schema-3", "schema-4",
+)
+
+#: Matches a bare or `v`-prefixed release number. `\b\d` alone misses
+#: `v0.14.6`, because there is no word boundary between `v` and `0`.
+_RELEASE_NUMBER = re.compile(r"(?<![\w.])v?\d+\.\d+\.\d+(?![\w.])")
+
+
+def test_public_docs_carry_no_release_numbers_or_internal_revision_names():
+    """README and RUN_FLOW document what CodeDoc offers and how to use it.
+
+    They are not a release history. A reader cannot act on "advances to
+    `leaf-capsule-v7`" or on "a fresh `0.14.3` run" -- the first names an
+    internal identity revision that exists only inside the source tree, and
+    the second dates the document the moment the next release ships. Both
+    belong in CHANGELOG.md, which has its own contract test
+    (`test_release_documents_name_every_active_split_identity`) requiring the
+    full identity roster there.
+
+    The behaviour those sentences used to carry is not dropped; it is restated
+    in user terms and asserted by the siblings below."""
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        text = path.read_text(encoding="utf-8")
+        found = _RELEASE_NUMBER.findall(text)
+        assert not found, f"{path.name} names release(s) {sorted(set(found))}"
+        for token in _INTERNAL_DOC_VOCABULARY:
+            assert token not in text, f"{path.name} names internal `{token}`"
+
+
+def test_public_docs_state_the_incompatible_recovery_remedies_in_user_terms():
+    """The fact the retired version paragraphs actually carried: recovery this
+    build cannot resume is preserved, never rewritten or silently discarded,
+    and the user has exactly two supported remedies. Asserted without naming
+    which release wrote the file, since the answer is "whichever one did"."""
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        assert "cannot resume is recognized and preserved" in normalized, path.name
+        assert "the CodeDoc version that wrote the file" in normalized, path.name
+        assert "move `crash_recovery.json` aside" in normalized, path.name
+        assert "explicit discard" in normalized, path.name
+        # Preserve-first is only meaningful if nothing is paid or mutated first.
+        assert "before any node is read" in normalized, path.name
+        # The retired schema-generation tests also owned this claim: every
+        # other rejection stops the run rather than guessing. Scoped to the
+        # sentence that actually states it, and asserting all five cases --
+        # a whole-document search would pass on an unrelated mention, and
+        # checking only three left the other two deletable with the suite
+        # green.
+        assert "stays fail-closed" in normalized, path.name
+        fail_closed = normalized.split("stays fail-closed", 1)[1].split(". ", 1)[0]
+        for case in (
+            "malformed container",
+            "foreign owner",
+            "unsupported container version",
+            "unplanned or duplicate node ID",
+            "set-aside map that exceeds its bound",
+        ):
+            assert case in fail_closed, f"{path.name} drops {case!r}"
+        assert "raise and stop the run" in fail_closed, path.name
+
+
+def test_public_docs_state_the_upgrade_reprocessing_cost_in_user_terms():
+    """The other fact those paragraphs carried: an upgrade that changes the
+    internal fragment contract makes earlier split work stale, both unfinished
+    and completed, and that costs one extra pass. Stated without naming the
+    revision that changed, which the user has no way to look up."""
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        assert "versions the internal contract each fragment is documented under" in (
+            normalized
+        ), path.name
+        assert "stale" in normalized, path.name
+        assert "re-executed" in normalized, path.name
+        assert "reprocessed in full" in normalized, path.name
+        # Whole-plan invalidation must be documented as recoverable, not fatal.
+        assert "instead of aborting the run" in normalized or (
+            "rather than aborting the run" in normalized
+        ), path.name
+        assert "Rolling back to an older version" in normalized, path.name
 
 def test_readme_documents_every_long_flag_and_environment_variable():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -148,11 +218,10 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     assert "4,096 planned lexical atoms" in normalized_large_files
     assert "`atom-cap` before any provider call" in normalized_large_files
     assert "optional package" in normalized_large_files
-    assert "Completed split reuse and node-level partial recovery begin in `0.14.2`" in normalized_large_files
     assert "exactly compatible same-path completed split record" in normalized_large_files
     assert "Cross-path identical-content split reuse remains unavailable" in normalized_large_files
-    assert "Schema-1 and schema-2 partial state" in normalized_large_files
-    assert "preserved but not resumed" in normalized_large_files
+    assert "cannot resume is recognized and preserved" in normalized_large_files
+    assert "never resumed, rewritten, or silently discarded" in normalized_large_files
     assert "Imports-only changes" in normalized_large_files
     assert "Provider, model, or effective-endpoint changes invalidate partial nodes" in normalized_large_files
     assert "completed cache reuse remains provider-agnostic" in normalized_large_files
@@ -176,8 +245,8 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     )[1]
     assert "Recovery is dependency-closed" in current_recovery
     normalized_recovery = " ".join(readme.split("## Crash recovery", 1)[1].split())
-    assert "current schema-4 split container is validated in plan order" in normalized_recovery
-    assert "bounded non-executable quarantine" in normalized_recovery
+    assert "compatible split container is validated in plan order" in normalized_recovery
+    assert "bounded, non-executable set-aside map" in normalized_recovery
     assert "deletion is an explicit choice to discard" in normalized_recovery
     assert "default `large_file_strategy: truncate`" in run_flow
     assert "resolves to `split`" in run_flow
@@ -200,7 +269,7 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     assert "same-path completed reuse" in normalized_run_flow
     assert "dependency-valid node recovery" in normalized_run_flow
     assert "Cross-path identical-content split reuse remains unavailable" in normalized_run_flow
-    assert "Schema-1 and schema-2 partials are preserved but not resumed" in normalized_run_flow
+    assert "cannot resume is recognized and preserved" in normalized_run_flow
     assert "preserved and blocked" in normalized_run_flow
     assert "up to 32 functions and up to 32 classes" in normalized_run_flow
     assert "reduction narrative is capped at 300 characters" in normalized_run_flow
@@ -354,50 +423,86 @@ def test_security_md_recovery_sensitivity_wording_is_present_and_unchanged():
     assert "Current verbose mode emits bounded CodeDoc diagnostics" in security
 
 
-def test_readme_and_run_flow_name_schema4_current_and_schema3_predecessor():
-    """Gate 17.13, assertion 5: README and RUN_FLOW must name schema 4 as
-    the current partial generation and schema 3 as unsupported predecessor
-    recovery, state complete v6 re-execution, and explain both supported
-    remedies for an unfinished `0.14.2` split run -- all inside the one
-    located paragraph that actually states the schema boundary, not
-    scattered anywhere in the document. Whole-document token presence does
-    not prove these facts belong together; a "schema 4" mention in one
-    unrelated sentence and a "schema 3" mention in another would satisfy a
-    bare substring search without ever stating the boundary between them."""
-    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
-        text = path.read_text(encoding="utf-8")
-        paragraph = _locate_paragraph(text, "The current node-keyed")
-        assert "schema 4" in paragraph
-        assert "schema 3" in paragraph
-        assert "unsupported predecessor" in paragraph
-        assert "leaf-capsule-v6" in paragraph
-        assert "v6 re-execution" in paragraph
-        assert "finish" in paragraph.lower() and "0.14.2" in paragraph
-        assert "move" in paragraph.lower() and "crash_recovery.json" in paragraph
-        assert "deliberate discard" in paragraph or "explicit discard" in paragraph
+_EXPORT_SECTION_HEADING = "Module exports in a split file"
 
 
-def test_readme_and_run_flow_declare_0_14_4_quarantines_stale_schema4_nodes():
-    """0.14.4 advances the same schema-4 generation's leaf/reducer identity
-    (v6->v7, file-reduction-v1->v2) with no schema-version change; a stale
-    node is quarantined and re-executed -- bounded by the raised
-    MAX_QUARANTINE_ENTRIES_PER_FILE -- rather than the whole container being
-    rejected, and every other schema-4 rejection stays fail-closed."""
-    assert LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
-    assert REDUCER_PROMPT_REVISION == "file-reduction-v2"
-    assert MAX_QUARANTINE_ENTRIES_PER_FILE == 512
+def _export_section(text: str) -> str:
+    """Return the whitespace-normalized body of the shared export section.
+
+    Sliced by heading rather than by paragraph: the section is deliberately
+    structured (capability, then usage) and spans several blocks, so a
+    single-paragraph locator would silently check only the first one.
+    """
+    start = text.index(_EXPORT_SECTION_HEADING) + len(_EXPORT_SECTION_HEADING)
+    rest = text[start:]
+    end = rest.index("\n#")
+    return " ".join(rest[:end].split())
+
+
+def test_readme_and_run_flow_document_split_export_behavior_not_release_history():
+    """README and RUN_FLOW describe what CodeDoc offers and how to use it.
+
+    Behavior is documented as a named capability section, not as a
+    `0.14.x advances ...` release narrative -- version numbering and internal
+    revision names belong in CHANGELOG.md, which has its own contract test
+    (`test_release_documents_name_every_active_split_identity`). The release
+    archaeology these documents used to carry was removed, not preserved; the
+    facts it carried are asserted version-free by the siblings above.
+
+    Both documents must carry the same section, so the two cannot drift into
+    describing different products."""
+    assert MAX_LEAF_EXPORT_ITEMS == 32
+    assert MAX_LEAF_EXPORT_ITEM_CHARS == 256
 
     for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
         text = path.read_text(encoding="utf-8")
-        paragraph = _locate_paragraph(text, "`0.14.4` advances the same schema-4")
-        assert "leaf-capsule-v7" in paragraph
-        assert "file-reduction-v2" in paragraph
-        assert "leaf-capsule-v6" in paragraph
-        assert "file-reduction-v1" in paragraph
-        assert "no schema-version" in paragraph
-        assert "quarantined" in paragraph
-        assert "512" in paragraph
-        assert "fail-closed" in paragraph
+        assert _EXPORT_SECTION_HEADING in text, path.name
+        section = _export_section(text)
+
+        # Structured as capability, then usage -- not one undifferentiated wall.
+        assert "**What CodeDoc reports.**" in section, path.name
+        assert "**How you use it.**" in section, path.name
+
+        # What is available: the rule itself.
+        assert "declaration or re-export" in section
+        assert "declaration visibility decides this" in section
+        assert (
+            "not an export merely because the value containing it is exported"
+            in section
+        )
+        # The carve-out. Stating the exclusion absolutely would misdocument
+        # `__all__`, `module.exports`, and brace-enclosed export lists as
+        # non-exports, contradicting the shipped prompt. The unqualified
+        # sentence is forbidden outright, so a future reword cannot satisfy
+        # this test by adding the carve-out while leaving the wrong claim
+        # standing beside it.
+        assert "exported-names manifest" in section
+        assert "the module's export table" in section
+        assert "those entries are the exported names" in section
+        assert "are data, not exports" not in section
+        # Bounds, and that they are enforced losslessly.
+        assert "at most 32 export names" in section
+        assert "256 characters" in section
+        assert "never silently" in section
+        # The correction route carries the same definition.
+        assert "the same definition is sent with the optional single repair call" in (
+            section
+        )
+
+        # How you use it: rerun-to-resume, and the one-off reprocessing cost.
+        assert "rerun the identical command" in section
+        assert "resume" in section
+        assert "redoes each large file's split work once" in section
+        assert "whether that file was finished or still in progress" in section
+        assert "--dry-run" in section
+        assert "response_correction_enabled" in section
+
+        # House convention: no release numbering in these two documents' own
+        # description of current behavior.
+        assert "0.14." not in section, f"{path.name} export section names a release"
+        assert "leaf-capsule" not in section, (
+            f"{path.name} export section names an internal revision"
+        )
 
 
 def test_readme_configuration_reference_matches_generated_public_keys():

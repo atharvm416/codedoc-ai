@@ -17,6 +17,7 @@ import json
 
 import pytest
 
+import codedoc.core.file_division as file_division
 from codedoc.core.file_division import (
     MAX_QUARANTINE_ENTRIES_PER_FILE,
     SPLIT_PARTIAL_SCHEMA_VERSION,
@@ -481,3 +482,139 @@ def test_recovery_file_with_an_over_bound_quarantine_map_is_preserved_and_makes_
         )
 
     assert recovery_path.read_bytes() == before_bytes
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: the leaf-capsule-v7 -> v8 revision transition
+# ---------------------------------------------------------------------------
+# The predecessor state below is never hand-authored. It is produced by the
+# production identity functions themselves with the module constant patched
+# back to "leaf-capsule-v7", then validated with the patch undone. A fabricated
+# "wrong digest" would be insensitive to the constant and would still pass with
+# the v8 advance reverted, proving nothing about the invalidation.
+
+
+def _leaf_nodes_for_every_chunk(
+    plan, *, content_hash: str, provider_identity: str
+) -> tuple:
+    """One checkpointed leaf per planned chunk, exactly as a live run writes
+    them under whatever `LEAF_CAPSULE_SCHEMA_REVISION` is in force."""
+    return tuple(
+        tree_node_state(
+            node_id=chunk.chunk_id,
+            node_type="leaf",
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            input_digest=leaf_input_digest(
+                rel_path=plan.rel_path,
+                language="python",
+                chunk=chunk,
+                unit_indexes=plan.unit_positions(chunk),
+                unit_count=len(plan.units),
+            ),
+            execution_identity_digest=leaf_execution_identity(
+                rel_path=plan.rel_path,
+                content_hash=content_hash,
+                division_plan_digest=plan.plan_digest,
+                provider_identity=provider_identity,
+                chunk=chunk,
+            ),
+            unit_id=None,
+            child_ids=(),
+            coverage_leaf_ids=(chunk.chunk_id,),
+            result={
+                "description": f"leaf {index}",
+                "chunk_id": chunk.chunk_id,
+                "unit_id": chunk.unit_id,
+            },
+        )
+        for index, chunk in enumerate(plan.chunks)
+    )
+
+
+def test_leaf_capsule_v7_partial_is_owned_but_stale_and_re_executes(
+    tmp_path, monkeypatch
+) -> None:
+    """0.14.6: a schema-4 partial written by 0.14.5 stays a valid owned
+    container, but every `leaf-capsule-v7` leaf in it is stale.
+
+    Two directions, so this cannot pass vacuously. First the genuine v7
+    checkpoints are shown to be *retained* while the constant reads
+    `leaf-capsule-v7` -- proving they are real predecessor state, not junk.
+    Then, under the real current `leaf-capsule-v8`, the identical nodes are
+    quarantined under the closed reason `stale-identity` and re-executed,
+    within the existing `MAX_QUARANTINE_ENTRIES_PER_FILE` bound and with no
+    schema-version change.
+    """
+    source = _large_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = _split_config(tmp_path)
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000, language="python")
+    provider_identity = provider_execution_identity(config)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert len(plan.chunks) >= 2
+
+    # The current revision's *value* is owned by
+    # `test_only_the_leaf_capsule_revision_advanced_for_0_14_6`. Pinning it
+    # here too would make this proof short-circuit on a literal instead of on
+    # the staleness behaviour it exists to demonstrate.
+    monkeypatch.setattr(
+        file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v7"
+    )
+    predecessor_nodes = _leaf_nodes_for_every_chunk(
+        plan, content_hash=content_hash, provider_identity=provider_identity
+    )
+
+    # Direction one: genuine, currently-valid v7 state.
+    retained_v7, quarantine_v7 = validate_recovered_tree(
+        predecessor_nodes,
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=config.get("_prompt_profile_digest", ""),
+        imports_digest=deterministic_imports_digest(()),
+        language="python",
+    )
+    assert quarantine_v7 == ()
+    assert len(retained_v7) == len(plan.chunks)
+
+    # Direction two: the same bytes under the real current revision.
+    monkeypatch.undo()
+
+    retained_v8, quarantine_v8 = validate_recovered_tree(
+        predecessor_nodes,
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=config.get("_prompt_profile_digest", ""),
+        imports_digest=deterministic_imports_digest(()),
+        language="python",
+    )
+    assert retained_v8 == ()
+    assert len(quarantine_v8) == len(plan.chunks)
+    assert all(entry.reason == "stale-identity" for entry in quarantine_v8)
+    assert len(quarantine_v8) <= MAX_QUARANTINE_ENTRIES_PER_FILE
+
+    # Owned-but-stale, not rejected: the container itself is still a valid
+    # schema-4 state carrying the quarantined nodes, with nothing to reuse.
+    state = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=retained_v8,
+        quarantine=quarantine_v8,
+    )
+    assert state.schema_version == SPLIT_PARTIAL_SCHEMA_VERSION == 4
+    assert state.nodes == ()
+    assert tuple(entry.node_id for entry in state.quarantine) == tuple(
+        chunk.chunk_id for chunk in plan.chunks
+    )

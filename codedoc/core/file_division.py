@@ -69,13 +69,19 @@ from codedoc.core.result_assembly import flat_combined_result
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
 PACKER_SCHEMA_REVISION = "division-packer-v5"
-# Advanced from v6: MAX_LEAF_SYMBOL_ITEMS_PER_KIND now equals
-# MAX_KNOWN_SYMBOLS_PER_CHUNK (32, up from 12), and the fixed fragment prompt
-# bytes versioned by this revision change with it, so a v6 leaf checkpoint
-# cannot validate as a current v7 checkpoint. v6 had advanced from v5: the
-# fixed leaf response signature ceiling matched the existing 600-character
-# parser/semantic-unit ceiling.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v7"
+# Advanced from v7: the fixed fragment shape block now carries the shared
+# module-export contract (`_FRAGMENT_EXPORT_CONTRACT`), which reaches the
+# initial leaf prompt and the one targeted correction prompt alike, so the
+# fixed fragment prompt bytes versioned by this revision changed and a v7 leaf
+# checkpoint cannot validate as a current v8 checkpoint. This is not merely a
+# staleness formality: a v7 leaf that reported exported-value interior (array
+# members, object keys, IDs) as `exports` within the fixed caps was accepted
+# and checkpointed, and its exports flow through `build_fact_ledger` into the
+# published record. v7 had advanced from v6: MAX_LEAF_SYMBOL_ITEMS_PER_KIND
+# came to equal MAX_KNOWN_SYMBOLS_PER_CHUNK (32, up from 12). v6 had advanced
+# from v5: the fixed leaf response signature ceiling matched the existing
+# 600-character parser/semantic-unit ceiling.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v8"
 # Advanced from v5. Bound into final-node execution identity, the final-node
 # exact input digest, and the completed split identity; a ledger revision
 # change alone reruns final synthesis but preserves compatible leaves and

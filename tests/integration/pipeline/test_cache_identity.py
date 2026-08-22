@@ -844,7 +844,7 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
 
 
 @requires_structure_pack
-def test_actual_predecessor_completed_split_record_is_stale_under_v7(tmp_path, monkeypatch):
+def test_actual_predecessor_completed_split_record_is_stale_under_v8(tmp_path, monkeypatch):
     """The frozen record's ``_large_file_identity`` is not a placeholder: it
     is the real value ``expected_large_file_identity`` produces for this
     exact source under the genuine reconstructed division plan, reduction
@@ -953,26 +953,26 @@ def test_actual_predecessor_completed_split_record_is_stale_under_v7(tmp_path, m
     assert rel_path in plan_result_v5.unchanged_rels
     assert rel_path not in plan_result_v5.changed_rels
 
-    # Second direction: undo the patch, restoring the real current (v7)
+    # Second direction: undo the patch, restoring the real current (v8)
     # bound/revision, and confirm the same record is now genuinely stale.
     monkeypatch.undo()
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v8"
     assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
 
-    v7_identity = record_meta.expected_large_file_identity(
+    v8_identity = record_meta.expected_large_file_identity(
         source_chars=len(source), max_chars=2500, rel_path=rel_path,
         division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
         structural_mode=plan.structural_mode, imports_digest=imports_digest,
     )
-    assert v7_identity != v5_identity
+    assert v8_identity != v5_identity
 
-    graph_v7 = DependencyGraph()
-    graph_v7.add_file(rel_path)
-    plan_result_v7, _ = build_pipeline_plan(
-        file_map, graph_v7, {rel_path}, rel_path, {rel_path: record}, [], config,
+    graph_v8 = DependencyGraph()
+    graph_v8.add_file(rel_path)
+    plan_result_v8, _ = build_pipeline_plan(
+        file_map, graph_v8, {rel_path}, rel_path, {rel_path: record}, [], config,
     )
-    assert rel_path not in plan_result_v7.unchanged_rels
-    assert rel_path in plan_result_v7.changed_rels
+    assert rel_path not in plan_result_v8.unchanged_rels
+    assert rel_path in plan_result_v8.changed_rels
 
 
 def test_actual_predecessor_completed_split_recovery_has_no_partial_files():
@@ -989,3 +989,85 @@ def test_actual_predecessor_completed_split_recovery_has_no_partial_files():
     record = payload["files"][0]
     assert record["_split_reuse_contract"] == "fresh-only-v1"
     assert record["_large_file_identity"].startswith("large-file-v2:")
+
+
+def test_completed_leaf_capsule_v7_record_is_planned_as_unpaid_work(tmp_path, monkeypatch):
+    """0.14.6: a *completed* 0.14.5 split record must stop being reused.
+
+    The sibling above proves the same thing for the frozen `0.14.2` (`v5`)
+    predecessor, and a unit test proves the identity digest moves between
+    `v7` and `v8`. Neither shows the planner acting on the `v7` -> `v8`
+    advance specifically, which is the migration real users hit. This builds
+    a record stamped with a genuine `v7` `large-file-v3:` identity -- produced
+    by `expected_large_file_identity` itself with the constant patched back,
+    never hand-written -- and runs it through `build_pipeline_plan` twice.
+
+    Two directions, so it cannot pass vacuously: reusable while the constant
+    reads `leaf-capsule-v7`, unpaid work under the real current revision."""
+    src = tmp_path / "main.py"
+    source = "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+    src.write_text(source, encoding="utf-8", newline="")
+    max_chars = 2000
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=max_chars,
+    )
+    tree = build_reduction_tree(plan, max_content_chars=max_chars, language="python")
+    identity_kwargs = dict(
+        source_chars=len(source),
+        max_chars=max_chars,
+        rel_path="main.py",
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        structural_mode=plan.structural_mode,
+        imports_digest=deterministic_imports_digest(()),
+    )
+    file_map = {
+        "main.py": {
+            "path": src, "rel_path": "main.py",
+            "language": "python", "extension": ".py",
+        }
+    }
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": max_chars, "truncation_head_ratio": 0.70,
+    }
+
+    def plan_for(record):
+        graph = DependencyGraph()
+        graph.add_file("main.py")
+        result, _ = build_pipeline_plan(
+            file_map, graph, {"main.py"}, "main.py", {"main.py": record}, [], config,
+        )
+        return result
+
+    monkeypatch.setattr(
+        record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v7"
+    )
+    v7_identity = record_meta.expected_large_file_identity(**identity_kwargs)
+    assert v7_identity.startswith("large-file-v3:")
+    record = {
+        "path": "main.py",
+        "hash": compute_file_hash(src),
+        "description": "documented by 0.14.5",
+        "language": "python",
+        "_analysis_revision": "file-doc-v3",
+        "_analysis_mode": "single",
+        "_large_file_identity": v7_identity,
+    }
+
+    # Direction one: this really is a valid completed record of its own release.
+    under_v7 = plan_for(record)
+    assert "main.py" in under_v7.unchanged_rels
+    assert "main.py" not in under_v7.changed_rels
+
+    # Direction two: the identical record under the real current revision.
+    monkeypatch.undo()
+    current_identity = record_meta.expected_large_file_identity(**identity_kwargs)
+    assert current_identity != v7_identity
+    assert current_identity.startswith("large-file-v3:")
+
+    under_current = plan_for(record)
+    assert "main.py" not in under_current.unchanged_rels
+    assert "main.py" in under_current.changed_rels

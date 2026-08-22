@@ -1,6 +1,86 @@
 # Changelog
 
-## 0.14.5 2026-08-22
+## 0.14.6 - 2026-08-22
+
+### Split-leaf module-export contract
+
+- The fixed split-leaf prompt now states what an export is. Previously the
+  fragment shape block described `exports` only as an optional string list with
+  count and length bounds, and the fragment rules defined `functions` and
+  `classes` but never `exports` — so a fragment showing only the interior of a
+  large exported array or object was free to report its members as module
+  exports, and a valid data-only source could fail its own leaf response.
+- The contract is one string rendered inside the fixed fragment shape block, so
+  it reaches the initial leaf call and the one targeted correction call
+  byte-identically. The correction route previously received the shape block
+  and none of the fragment-specific rules, so a rule added only to the initial
+  template would have left that route defective.
+- The exclusion is scoped to containment, never to the shape of a literal.
+  Where a language declares its exports *as* a list or an object — an
+  exported-names manifest, a brace-enclosed export list, or an assignment to
+  the module's export table — those entries are the exported names and are
+  reported as such. Only ordinary data nested inside an exported value is
+  excluded, so the fix cannot trade the over-reporting bug for silent
+  under-reporting in any supported language.
+- The contract is language-neutral and judged by declaration visibility alone,
+  never by fragment position or continuation flags. Under the lexical fallback
+  a formatted multi-line exported value is packed into ordinary independent
+  chunks, not a marked continuation group, so every chunk after the first
+  reports `fragment 1 of 1` with both continuation flags false while still
+  showing nothing but exported-value interior. Such a fragment omits `exports`.
+- Metadata rendered alongside the source — a symbol-name list, a position
+  marker, or an identifier — is never on its own evidence that a name is
+  exported, and a fragment with no qualifying export omits the optional
+  `exports` key rather than inventing a placeholder.
+
+- The contract lengthens the fixed split-leaf shape/contract block from 741 to
+  2,233 characters, an increase of 1,492 characters — roughly 370 additional
+  input tokens by the usual four-characters-per-token heuristic, not a measured
+  provider count. That cost is standing, not one-time: it applies to every
+  split-leaf call and every leaf correction call. Nothing else changes — there
+  is no total leaf-prompt bound to breach, the fragment payload is still
+  governed by `max_content_chars`, the leaf prompt metadata bound is unchanged,
+  and no chunking or capacity decision moves.
+
+### Recovery and cache identity
+
+- `LEAF_CAPSULE_SCHEMA_REVISION` advances from `leaf-capsule-v7` to
+  `leaf-capsule-v8`. A completed `0.14.5` split record is stale and reruns
+  once; a schema-4 partial stays a valid owned container, but each `v7` leaf is
+  quarantined under the closed reason `stale-identity` and re-executed, and
+  every reducer and final-synthesis node depending on it is pruned with it
+  under `input-digest-mismatch`. This is not a formality: a `v7` leaf that
+  reported exported-value interior as `exports` within the fixed caps was
+  accepted, and those names flow into the published record.
+- Quarantine stays inside the existing `MAX_QUARANTINE_ENTRIES_PER_FILE` bound
+  of `512`, which is already sized for one revision advance invalidating every
+  node of the largest valid plan at once, so this upgrade never aborts a run.
+- No schema-version change and no bound change. The active split identities are
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v8`, `fact-ledger-v6`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v2`, `file-synthesis-v3`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v3`.
+- The fixed export caps are unchanged at 32 items and 256 characters per item.
+  An over-cap or over-length response is still rejected losslessly through the
+  correction contract, never truncated, filtered by guessed string patterns, or
+  converted into a successful empty export list.
+
+### Documentation
+
+- README and RUN_FLOW now carry one shared `Module exports in a split file`
+  section, structured as what CodeDoc reports and then how you use it, and the
+  troubleshooting guidance states the normal behaviour plainly: rerun the
+  identical command and compatible recovery resumes automatically.
+- Both documents were also de-versioned. Release numbers, internal identity
+  revisions, recovery schema generations, and internal constant names are gone
+  from them entirely; a reader cannot act on that vocabulary and it dates the
+  documents on every release. The behaviour those passages carried is
+  preserved in user terms: what happens to recovery this build cannot resume
+  and the two supported remedies, the one-extra-pass cost when an upgrade
+  invalidates earlier split work, and the complete fail-closed rejection list.
+  Version identity lives here in the changelog instead.
+
+## 0.14.5 - 2026-08-22
 
 ### Structured provider-failure classification
 
@@ -160,7 +240,7 @@
 - Every HTTP `404` aborts as model-unavailable even when the actual cause is
   a wrong base path.
 
-## 0.14.4 2026-08-16
+## 0.14.4 - 2026-08-16
 
 ### Endpoint-trust authorization for a custom `api_base_url`
 
@@ -318,7 +398,7 @@
   (`codedoc/core/config_template.py`) and the generated configuration template
   state the runtime authorization requirement.
 
-## 0.14.3 (Unreleased)
+## 0.14.3 - 2026-08-09
 
 ### Split-leaf signature-bound correction
 
@@ -376,7 +456,7 @@
   matrix. `triple + split` remains unavailable, and split never silently
   falls back to truncate.
 
-## 0.14.2 2026-08-04
+## 0.14.2 - 2026-08-04
 
 ### Logging privacy and redirected Windows safety
 

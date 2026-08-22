@@ -287,6 +287,13 @@ def test_current_schema4_partial_still_resumes_normally(tmp_path) -> None:
     what generated the fixture, so `validate_recovered_tree` can genuinely
     retain it rather than only proving the JSON parses.
 
+    Because the fixture's leaf digests bind `LEAF_CAPSULE_SCHEMA_REVISION`,
+    every advance of that revision regenerates exactly those two fields --
+    `execution_identity_digest` and `input_digest` -- from this same
+    reconstruction, keeping the fixture a genuine *current*-generation
+    checkpoint. `0.14.6` did so for `leaf-capsule-v7` -> `leaf-capsule-v8`,
+    as `0.14.4` did for `v6` -> `v7`. Nothing else in the fixture changes.
+
     That reconstruction runs the real parser (`structural_mode == "syntax"`
     for this source when the optional `structure` extra is installed), so
     it depends on that extra exactly as the frozen fixture's own digests do

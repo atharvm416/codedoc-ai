@@ -258,26 +258,33 @@ def test_completed_large_file_identity_binds_leaf_capsule_revision_and_bound(
 ):
     """Section 5: the completed large-file identity changes whenever the
     bound leaf-capsule revision or its derived canonical-character maximum
-    changes -- exactly the two inputs `0.14.4`'s leaf per-kind cap correction
-    advances (`leaf-capsule-v6` -> `leaf-capsule-v7`, 200,192 -> 448,672) --
-    while the `large-file-v3:` prefix itself never changes, since split
-    completed identity is not versioned by the package release."""
+    changes, while the `large-file-v3:` prefix itself never changes, since
+    split completed identity is not versioned by the package release.
+
+    `0.14.6` advances the revision alone (`leaf-capsule-v7` ->
+    `leaf-capsule-v8`, for the shared module-export contract now carried in
+    the fixed fragment shape block) and leaves the canonical-character
+    maximum at 448,672. Both inputs are still proven independently: the
+    revision is reverted first, then the bound `0.14.4` had also moved
+    (448,672 -> 200,192), so neither can silently stop participating."""
     kwargs = _large_file_identity_kwargs()
-    current_v7 = record_meta.expected_large_file_identity(**kwargs)
-    assert current_v7 is not None
-    assert current_v7.startswith("large-file-v3:")
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
+    current_v8 = record_meta.expected_large_file_identity(**kwargs)
+    assert current_v8 is not None
+    assert current_v8.startswith("large-file-v3:")
+    # The revision's value is owned by the roster test below; asserting it here
+    # would let this proof short-circuit on a literal instead of on the
+    # identity actually changing when the revision is reverted.
     assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
 
-    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v6")
+    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v7")
     revision_reverted = record_meta.expected_large_file_identity(**kwargs)
-    assert revision_reverted != current_v7
+    assert revision_reverted != current_v8
     assert revision_reverted.startswith("large-file-v3:")
 
     monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 200192)
     bound_also_reverted = record_meta.expected_large_file_identity(**kwargs)
     assert bound_also_reverted != revision_reverted
-    assert bound_also_reverted != current_v7
+    assert bound_also_reverted != current_v8
     assert bound_also_reverted.startswith("large-file-v3:")
 
 
@@ -296,3 +303,38 @@ def test_patched_registry_excludes_unregistered_production_keys(private_key):
         target,
     )
     assert target == {"_secret": "keep"}
+
+
+def test_only_the_leaf_capsule_revision_advanced_for_0_14_6() -> None:
+    """0.14.6 changes exactly one internal revision and no bound.
+
+    The release repairs the fixed split-leaf prompt, so `leaf-capsule-v7`
+    becomes `leaf-capsule-v8` and nothing else moves: the reducer prompt, the
+    fact ledger, the packer, the execution-identity schema, the completed
+    split prefix, and ordinary analysis identity are all unchanged, as are the
+    fixed export caps the repair deliberately did not relax. Frozen by value
+    here so an unrelated revision or bound cannot ride along in a patch whose
+    whole point is a minimal, well-understood invalidation."""
+    from codedoc.core import file_division
+
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v8"
+
+    assert file_division.STRUCTURE_SCHEMA_REVISION == "source-structure-v2"
+    assert file_division.UNIT_SCHEMA_REVISION == "semantic-unit-v3"
+    assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v5"
+    assert file_division.LEDGER_SCHEMA_REVISION == "fact-ledger-v6"
+    assert file_division.REDUCTION_CAPSULE_SCHEMA_REVISION == "reduction-capsule-v1"
+    assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v4"
+    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v2"
+    assert file_division.FINAL_SYNTHESIS_REVISION == "file-synthesis-v3"
+    assert file_division.EXECUTION_IDENTITY_SCHEMA_REVISION == "division-execution-v6"
+    assert file_division.SPLIT_PARTIAL_SCHEMA_VERSION == 4
+    assert record_meta.ANALYSIS_REVISION == "file-doc-v3"
+
+    # The repair is a prompt contract, never a relaxed bound: an over-cap
+    # response is still rejected losslessly rather than truncated.
+    assert file_division.MAX_LEAF_EXPORT_ITEMS == 32
+    assert file_division.MAX_LEAF_EXPORT_ITEM_CHARS == 256
+    assert file_division.MAX_LEAF_DESCRIPTION_CHARS == 300
+    assert file_division.MAX_LEAF_SYMBOL_ITEMS_PER_KIND == 32
+    assert file_division.MAX_QUARANTINE_ENTRIES_PER_FILE == 512

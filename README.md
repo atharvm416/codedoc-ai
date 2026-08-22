@@ -294,9 +294,9 @@ partition category: a restored completed record can be classified as reused.
 Ordinary identical-content reuse (`files_reused_identical_content`) is same-path
 only: a record documents exactly its own path, and CodeDoc never copies
 documentation from one path to a different path even when their content is
-byte-identical. The first run after upgrading to `0.14.4` regenerates every
-ordinary and truncate-strategy record once, under the corrected same-path-bound
-identity, which raises that run's `total_calls_planned`. `max_planned_calls` is
+byte-identical. An upgrade that changes the ordinary record identity
+regenerates every ordinary and truncate-strategy record once, which raises that
+run's `total_calls_planned`. `max_planned_calls` is
 evaluated against the complete selected run before usage accounting, provider
 creation, or any confirmation callback, so an exceeded cap blocks the entire run
 rather than throttling it — this one-time regeneration cannot be spread across
@@ -463,15 +463,14 @@ Any `triple + split` request fails configuration validation before scanning,
 recovery inspection, output-directory creation, prompt review, or provider
 construction; it never silently falls back to truncation.
 
-Completed split reuse and node-level partial recovery begin in `0.14.2`. As of
-`0.14.3`, `single + split` execution, completed-record reuse, and node-level
-recovery are fully supported; `triple + split` remains unavailable. An
-exactly compatible same-path completed split record is reused without provider
-construction, review calls, documentation calls, partial writes, or paid-cap
-usage. Cross-path identical-content split reuse remains unavailable because the
-split plan and completed identity are path-bound. An explicit force bypasses
-reuse and recovery for that path while preserving prior stable output and
-recovery until replacement succeeds.
+`single + split` execution, completed-record reuse, and node-level recovery are
+fully supported; `triple + split` remains unavailable. An exactly compatible
+same-path completed split record is reused without provider construction,
+review calls, documentation calls, partial writes, or paid-cap usage.
+Cross-path identical-content split reuse remains unavailable because the split
+plan and completed identity are path-bound. An explicit force bypasses reuse
+and recovery for that path while preserving prior stable output and recovery
+until replacement succeeds.
 
 Split leaf signatures are private, internal matching metadata only — never
 part of any public schema. They are bounded to the parser-aligned
@@ -481,45 +480,40 @@ truncated into a shortened accepted value.
 
 Each accepted leaf, reduction, and final-synthesis result is checkpointed only
 after it has been cleaned and validated. A compatible interrupted run resumes
-only unpaid nodes in dependency order. Schema-1 and schema-2 partial state is
-recognized and preserved but not resumed; unknown, foreign, aliased, duplicate,
-or otherwise unsafe containers block with preserve-first guidance. Move an
-incompatible recovery file aside to retain it for diagnosis or a matching
-version; deletion is an explicit discard of that state.
+only unpaid nodes in dependency order.
 
-The current node-keyed recovery generation is schema 4 (`0.14.3`, bound to the
-`leaf-capsule-v6` leaf identity). Released schema 3 (`0.14.2`,
-`leaf-capsule-v5`) is now an unsupported predecessor generation, preserved
-and blocked exactly like schema-1/schema-2 state: a real `0.14.3` run rejects
-it on its container schema version alone, before any node is read, before
-planning, `SafeWriter`, or provider construction, and leaves the recovery
-artifact byte-identical. Nothing from a released schema-3 partial is carried
-forward; a fresh `0.14.3` run performs complete v6 re-execution. An unfinished
-`0.14.2` split run has two supported remedies: finish it with `0.14.2`, which
-still owns that recovery generation; or move `crash_recovery.json` aside — or
-delete it as a deliberate discard — to start fresh under `0.14.3`.
+**Recovery written by a different CodeDoc version.** A `crash_recovery.json`
+this version cannot resume is recognized and preserved exactly as found. It is
+never resumed, rewritten, or silently discarded, and the check happens before
+any node is read and before planning, output writing, or provider
+construction, so the run pays for nothing. You have two supported options:
+finish the run with the CodeDoc version that wrote the file, or move
+`crash_recovery.json` aside — deleting it is an explicit discard of that state
+— and start fresh with the current version. The same preserve-first rule
+covers an unknown, foreign, aliased, or duplicated recovery container.
 
-`0.14.4` advances the same schema-4 generation to the `leaf-capsule-v7` leaf
-identity and the `file-reduction-v2` reducer prompt; it makes no schema-version
-change. A node checkpointed under the predecessor `leaf-capsule-v6` /
-`file-reduction-v1` identity is stale, not rejected outright: it is quarantined
-and re-executed like any other stale node, including a node that was
-previously paid. The quarantine bound, `MAX_QUARANTINE_ENTRIES_PER_FILE`, is
-512 (twice the maximum leaf-chunk count), sized to cover every node of the
-largest valid plan quarantined at once — so an ordinary revision-driven
-re-execution never aborts the run. Every other schema-4 rejection stays
-fail-closed exactly as before: a malformed container, a foreign owner, an
-unsupported schema version, an unplanned or duplicate node ID, and a
-quarantine map that still exceeds the bound all raise and stop the run.
+**When an upgrade invalidates earlier split work.** CodeDoc versions the
+internal contract each fragment is documented under. When an upgrade changes
+that contract, earlier work goes stale. That is not the same as an
+unreadable recovery container, which is refused outright: stale work is still
+yours and is simply redone. In an unfinished file the affected fragments are
+set aside and re-executed, along with every reduction and synthesis step that
+depended on them, and a file already completed is reprocessed in full. Everything still compatible is reused. Even
+an upgrade that invalidates every fragment of the largest file CodeDoc will
+split recovers this way instead of aborting the run. Rolling back to an older
+version has the same effect in reverse. In every case you rerun the same
+command — expect one extra pass over your large files, and use `--dry-run`
+first to see the exact call count.
+
+Every other recovery rejection stays fail-closed: a malformed container, a
+foreign owner, an unsupported container version, an unplanned or duplicate
+node ID, and a set-aside map that exceeds its bound all raise and stop the
+run.
 
 Imports-only changes preserve compatible leaves and reducers but invalidate
 final synthesis. Provider, model, or effective-endpoint changes invalidate
-partial nodes, while completed cache reuse remains provider-agnostic.
-
-The `0.14.1` `fresh-only-v1` completed split contract is stale by default under
-`0.14.2` and reruns once to produce the current `large-file-v3` identity.
-Rolling back to `0.14.1` likewise reruns current split output fresh. Files at or
-below `max_content_chars` continue through the ordinary whole-file path.
+partial nodes, while completed cache reuse remains provider-agnostic. Files at
+or below `max_content_chars` continue through the ordinary whole-file path.
 
 A split dry-run scans the canonical source snapshot, builds the same
 deterministic semantic or lexical chunks, verifies complete coverage, constructs
@@ -551,6 +545,46 @@ reports the first applicable local capacity reason: `atom-cap`, `symbol-cap`,
 `unit-cap`, `chunk-cap`, `reduction-envelope-cap`,
 `reduction-fan-in-cap`, `reduction-depth-cap`, or
 `final-synthesis-envelope-cap`.
+
+#### Module exports in a split file
+
+**What CodeDoc reports.** Each fragment of a split file is asked only for the
+module exports its own visible source declares:
+
+- a name the module or package exposes through a declaration or re-export that
+  is visible in that fragment is reported as an export;
+- data carried inside an exported value — array elements, object properties,
+  keys, values, IDs, labels, and nested members — is not an export merely
+  because the value containing it is exported;
+- where a language declares its exports as a list or an object — an
+  exported-names manifest, a brace-enclosed export list, or an assignment to
+  the module's export table — those entries are the exported names and are
+  reported as such;
+- a fragment showing only the interior of a large exported value reports no
+  exports at all: declaration visibility decides this, never the fragment's
+  position in the file; and
+- the same definition is sent with the optional single repair call, so a retry
+  cannot reinterpret it.
+
+A fragment may return at most 32 export names, each at most 256 characters. A
+response above either limit is rejected and reported, never silently
+shortened.
+
+**How you use it.** There is nothing to configure. This applies to every file
+large enough to take the split path:
+
+- run CodeDoc once; a large file is divided, documented, and reassembled
+  automatically;
+- if a run is interrupted, rate-limited, or fails on one file, rerun the
+  identical command — completed files and per-fragment checkpoints resume
+  automatically, and only unpaid work is repeated;
+- when an upgrade changes the split-leaf contract, the first run afterwards
+  redoes each large file's split work once, whether that file was finished or
+  still in progress, because fragments produced under the previous contract
+  are not reused. Run with `--dry-run` first to see the exact call count;
+  later runs reuse normally again; and
+- set `"response_correction_enabled": true` to allow one repair call per
+  rejected response.
 
 #### Routing overview
 
@@ -1025,11 +1059,11 @@ large-file strategy. It no longer binds a profile-wide digest: each recovered
 completed record is instead re-validated individually against the current
 per-file `_prompt_profile_digest`, so an unrelated profile edit or a newly added
 file no longer discards a resumable run. Compatible completed ordinary and split
-records may be reused. A current schema-4 split container is validated in plan
-order; valid siblings remain reusable, rejected nodes are retained in bounded
-non-executable quarantine, and affected ancestors rerun. A released schema-3
-container is unsupported predecessor recovery: it is rejected on its schema
-version before any node is read. Provider changes
+records may be reused. A compatible split container is validated in plan
+order; valid siblings remain reusable, rejected nodes are retained in a
+bounded, non-executable set-aside map, and affected ancestors rerun. A
+container written by a CodeDoc version whose recovery format this release does
+not read is rejected on that format alone, before any node is read. Provider changes
 invalidate partial nodes but not a compatible completed record. Imports-only
 changes retain compatible leaves and reducers while rerunning final synthesis.
 A foreign, completed, unsupported, or identity-mismatched recovery file blocks
@@ -1154,6 +1188,20 @@ themselves.
 - Missing files: check entry selection, `documentation_scope`, `skip_dirs`,
   `ignore_paths`, `extension_language_map`, and `max_file_size_kb`.
 - Rate limits: lower `max_parallel_files`; adaptive stepping is enabled by default.
+- Interrupted, rate-limited, or partly failed run: rerun the identical command.
+  Compatible completed files and split node checkpoints resume automatically;
+  only unpaid work is re-executed. Never hand-edit `crash_recovery.json`.
+- Large files cost one extra pass after an upgrade that changes the split-leaf
+  contract: each is paid for again, once, whether it was finished or still in
+  progress. See
+  [Module exports in a split file](#module-exports-in-a-split-file). Budget
+  for that pass, use `--dry-run` first to see the exact call count, and expect
+  normal reuse from the next run on.
+- Repeated response-contract rejection on one file: `response_correction_enabled`
+  is an optional one-time project setting that spends at most one extra
+  provider call per rejected response. If the same closed reason repeats, try a
+  more capable model, or report the bounded reason code and file type — never
+  source, prompts, credentials, or the recovery file.
 
 ## License
 

@@ -166,6 +166,53 @@ _FRAGMENT_SYSTEM = (
     "explanation."
 )
 
+# The one semantic definition of `exports` for a split leaf.  Rendered inside
+# `_FRAGMENT_SHAPE_BLOCK` so it reaches the initial leaf prompt and the one
+# targeted correction prompt byte-identically -- the correction route receives
+# the shape block and nothing else from `_FRAGMENT_PROMPT_TEMPLATE`.  Every
+# clause therefore resolves against the visible source alone: the correction
+# prompt renders no fragment position, no continuation flag, and no
+# known-symbol line, and a clause conditioned on one of those would be
+# unanchored exactly where the 0.14.5 failure was never repaired.  Declaration
+# visibility, not fragment position, is the test: a lexical chunk holding only
+# the interior of a large exported array reports `fragment 1 of 1` with both
+# continuation flags false, so "continuation" cannot be the condition.
+#
+# The exclusion is scoped to *containment*, never to the shape of the literal.
+# Several supported languages declare their exports AS a list or object -- an
+# exported-names manifest, a brace-enclosed export list, an assignment to the
+# module's export table -- and CodeDoc's own public surface is one of them.
+# Excluding "array elements and object properties" outright would suppress
+# every real export in those languages, so the carve-out below is mandatory
+# and must survive any future rewording.
+_FRAGMENT_EXPORT_CONTRACT = (
+    "\nModule-export contract for the optional \"exports\" list:\n"
+    "- An \"exports\" item is a name this module or package exposes as part "
+    "of its own language-level API, through a declaration or re-export that "
+    "is itself visible in the source shown above.\n"
+    "- Containment is not export: array elements, object properties, keys, "
+    "values, IDs, labels, option names, enum-like data entries, string or "
+    "number literals, and members nested inside a larger value are data, and "
+    "are not module exports merely because the value containing them is "
+    "exported.\n"
+    "- But when the construct in view IS the module's own export declaration "
+    "-- an exported-names manifest, a brace-enclosed export list, or an "
+    "assignment to the module's export table -- its entries are the exported "
+    "names themselves and must be reported. The previous rule excludes "
+    "ordinary data inside an exported value, never the names a language "
+    "exports through a list or an object.\n"
+    "- Judge an export by declaration visibility alone, never by where this "
+    "source sits in the file and never by any continuation flag: source "
+    "showing only the interior of a larger exported value must omit "
+    "\"exports\" when no export declaration or re-export appears in it.\n"
+    "- Metadata supplied alongside the source — a list of symbol names, a "
+    "position marker, or an identifier — is never on its own evidence "
+    "that a name is exported.\n"
+    "- When no name qualifies, omit the optional \"exports\" key entirely; "
+    "never invent a placeholder, and never repeat a name inferred from "
+    "source you cannot see."
+)
+
 _FRAGMENT_SHAPE_BLOCK = (
     "Return exactly this fixed internal JSON shape (never the final "
     'file-level shape):\n{\n  "description": "<required, non-empty; a '
@@ -185,7 +232,7 @@ _FRAGMENT_SHAPE_BLOCK = (
     f"{MAX_LEAF_SYMBOL_DESCRIPTION_CHARS} characters; exports <= "
     f"{MAX_LEAF_EXPORT_ITEMS} items; each export <= "
     f"{MAX_LEAF_EXPORT_ITEM_CHARS} characters."
-)
+) + _FRAGMENT_EXPORT_CONTRACT
 
 _FRAGMENT_PROMPT_TEMPLATE = """This is one bounded fragment of a larger {language} file. It is NOT the \
 whole file.

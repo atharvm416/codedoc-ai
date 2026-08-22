@@ -20,6 +20,8 @@ from codedoc.agents.file_documentation_agent import (
 )
 from codedoc.core.execution_model import UnitChunkExecutionRequest
 from codedoc.core.file_division import (
+    MAX_LEAF_EXPORT_ITEM_CHARS,
+    MAX_LEAF_EXPORT_ITEMS,
     MAX_LEAF_PROMPT_METADATA_CHARS,
     MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
     MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
@@ -82,6 +84,23 @@ class _CorrectingProvider:
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt, system)
+
+
+class _RecordingCorrectingProvider(_CorrectingProvider):
+    """`_CorrectingProvider` that also keeps every prompt it was sent.
+
+    The 0.14.6 correction-route assertions must inspect the prompt actually
+    built and sent by the real `ResponseCorrectionAgent`, not a prompt the
+    test reconstructs itself.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt, system=""):
+        self.prompts.append(prompt)
+        return super().complete_json(prompt, system)
 
 _LANG_FIXTURES = {
     "python": {
@@ -811,3 +830,329 @@ def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
     assert failure.status == 429
     assert isinstance(caught.value.__cause__, LLMError)
     assert provider.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: the shared split-leaf module-export contract
+# ---------------------------------------------------------------------------
+# The 0.14.5 failure was a split leaf that reported exported-value *interior*
+# (array members, object keys, IDs) as module `exports`, blowing the fixed cap
+# on both the initial leaf response and its one targeted correction. The repair
+# is a semantic contract, and it must reach the correction route too -- that
+# route receives only the shape block, never `_FRAGMENT_PROMPT_TEMPLATE`'s
+# fragment-specific rules.
+
+#: Every clause the shared contract must state, asserted as exact substrings so
+#: a reworded-but-weakened contract fails instead of silently passing. Spelled
+#: out here rather than imported from production, so these assertions cannot be
+#: satisfied by the very string they exist to police.
+_EXPORT_CONTRACT_CLAUSES = (
+    "is a name this module or package exposes as part of its own "
+    "language-level API",
+    "Containment is not export",
+    "not module exports merely because the value containing them is exported",
+    "IS the module's own export declaration",
+    "its entries are the exported names themselves and must be reported",
+    "Judge an export by declaration visibility alone",
+    "never by any continuation flag",
+    "is never on its own evidence that a name is exported",
+    'omit the optional "exports" key entirely',
+)
+
+
+def _at_cap_exports() -> list[str]:
+    """Exactly MAX_LEAF_EXPORT_ITEMS distinct export names."""
+    return [f"exportName{index}" for index in range(MAX_LEAF_EXPORT_ITEMS)]
+
+
+def _over_cap_exports() -> list[str]:
+    """One more export name than MAX_LEAF_EXPORT_ITEMS allows."""
+    return [f"exportName{index}" for index in range(MAX_LEAF_EXPORT_ITEMS + 1)]
+
+
+def _assert_states_the_export_contract_once(prompt: str) -> None:
+    for clause in _EXPORT_CONTRACT_CLAUSES:
+        assert prompt.count(clause) == 1, clause
+    # The pre-existing hard bounds must survive the contract edit verbatim.
+    assert f"exports <= {MAX_LEAF_EXPORT_ITEMS} items" in prompt
+    assert f"each export <= {MAX_LEAF_EXPORT_ITEM_CHARS} characters" in prompt
+
+
+def _interior_only_data_source(entries: int = 120) -> str:
+    """A data-only module whose later lexical chunks show array interior only.
+
+    Used where a fixture response claims "no exports": the claim has to be
+    true of the fragment the model was actually shown. A fragment whose
+    visible source declares a symbol, answered with "data-only fragment, no
+    exports", satisfies the schema while contradicting the factuality contract
+    this release exists to defend.
+    """
+    lines = ["ROWS = ["]
+    lines.extend(f'    {{"id": "row_{index:03d}"}},' for index in range(entries))
+    lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
+def _corrected_leaf_agent(tmp_path):
+    """One real leaf agent over an interior-only data fragment: the first
+    response is an over-cap `exports` list, and the correction returns a
+    truthful description-only capsule -- truthful because the fragment really
+    does show nothing but array interior."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(
+        tmp_path,
+        content=_interior_only_data_source(),
+        max_content_chars=600,
+        chunk_index=1,
+    )
+    assert "ROWS = [" not in request.payload, (
+        "chunk 1 must show array interior only, with no visible declaration"
+    )
+    provider = _RecordingCorrectingProvider(
+        first_response={"description": "ok", "exports": _over_cap_exports()},
+        corrected_response={
+            "description": "Entries of a larger data table; no declaration visible."
+        },
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=600)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+    return request, provider, agent
+
+
+def test_fragment_prompt_states_the_module_export_contract_exactly_once(tmp_path):
+    """0.14.6: the initial split-leaf prompt must define what an export is.
+
+    Before this release `_FRAGMENT_SHAPE_BLOCK` described `exports` only as
+    `"exports": ["...", ...] (optional)` plus its bounds, and
+    `_FRAGMENT_PROMPT_TEMPLATE` defined `functions`/`classes` but never
+    `exports` -- so a fragment showing only the interior of a large exported
+    array was free to report its members as module exports."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    _assert_states_the_export_contract_once(prompt)
+
+
+def test_fragment_export_contract_is_language_neutral(tmp_path):
+    """The reproduction was TypeScript, but the contract governs every
+    supported language: it may name generic data shapes, never one language's
+    keywords as the only reading."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    assert fda._FRAGMENT_EXPORT_CONTRACT in prompt
+    for language_specific in (
+        "TypeScript", "JavaScript", "TSX", "Python", "__init__.py",
+        "export const", "module.exports", "__all__",
+    ):
+        assert language_specific not in fda._FRAGMENT_EXPORT_CONTRACT
+
+
+def test_initial_and_correction_leaf_prompts_carry_the_identical_shape_block(
+    tmp_path,
+):
+    """No-drift guard: both routes must carry `_FRAGMENT_SHAPE_BLOCK` byte for
+    byte. Two texts that each merely satisfy a substring check could still
+    drift apart; the same string object in both prompts cannot."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    initial_prompt, correction_prompt = provider.prompts
+    assert fda._FRAGMENT_SHAPE_BLOCK in initial_prompt
+    assert fda._FRAGMENT_SHAPE_BLOCK in correction_prompt
+
+
+def test_correction_prompt_states_the_same_module_export_contract_once(tmp_path):
+    """0.14.6: the one targeted correction call must carry the same export
+    contract as the initial call.
+
+    `run_fragment()` hands `_FRAGMENT_SHAPE_BLOCK` -- and nothing else from
+    `_FRAGMENT_PROMPT_TEMPLATE` -- to `_finalize_fixed_response()`, so a rule
+    added only to the initial template would leave the correction route
+    defective. This drives a real over-cap `exports` rejection through the
+    real correction component and inspects the prompt actually sent."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    # A corrected capsule carrying only a truthful non-empty description is
+    # valid: `exports` stays optional and is never forced to an empty list.
+    result = agent.run_fragment(request)
+
+    assert result == {
+        "description": "Entries of a larger data table; no declaration visible."
+    }
+    assert provider.calls == 2
+    correction_prompt = provider.prompts[1]
+    assert "Previous response (verbatim" in correction_prompt
+    _assert_states_the_export_contract_once(correction_prompt)
+
+
+def test_export_contract_is_self_contained_for_the_correction_route(tmp_path):
+    """The correction prompt renders no fragment position, no continuation
+    flags, and no known-symbol line -- for a fixed capsule it also passes an
+    empty language and an empty import list. A contract clause whose condition
+    named one of those lines would be unanchored on exactly the defective
+    route, so every clause must resolve against the visible source alone."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    correction_prompt = provider.prompts[1]
+    assert "Continues an earlier fragment" not in correction_prompt
+    assert "Known symbol name(s)" not in correction_prompt
+    assert "Fragment position:" not in correction_prompt
+    assert fda._FRAGMENT_EXPORT_CONTRACT in correction_prompt
+    # No clause may point at one of the initial prompt's own metadata lines.
+    # "continuation flag" appears only as something the model must *ignore*,
+    # which is exactly the 0.14.5 repair and stays correct with the flags
+    # absent -- so the labels themselves are what must not be referenced.
+    for initial_only_line in (
+        "Fragment position:",
+        "Fragment metadata",
+        "Continues an earlier fragment",
+        "Continues into a later fragment",
+        "Known symbol name",
+        "known_symbols",
+    ):
+        assert initial_only_line not in fda._FRAGMENT_EXPORT_CONTRACT
+
+
+def test_module_export_contract_does_not_reach_unrelated_prompts():
+    """Scope guard: the contract governs the fixed split-leaf capsule only. It
+    must not leak into the reduction/final-synthesis capsule (which never
+    carries exports at all) or into the whole-file `single` prompt, whose own
+    export wording this release deliberately leaves unchanged."""
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    _system, whole_file_prompt = build_prompt(
+        "src/example.py", "x = 1\n", ["os"], "python"
+    )
+
+    for clause in _EXPORT_CONTRACT_CLAUSES:
+        assert clause not in _REDUCTION_SHAPE_BLOCK
+        assert clause not in whole_file_prompt
+    # The whole-file prompt keeps its own, separate export sentence.
+    assert "exports are names this module deliberately exposes" in whole_file_prompt
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: `exports`-specific fixed-capsule cap evidence
+# ---------------------------------------------------------------------------
+# The at-cap/over-cap regressions above exercise `functions` only. The released
+# failure was an over-cap `exports` list, so the rejection path that actually
+# fired had no direct coverage.
+
+
+def test_run_fragment_at_cap_exports_is_accepted(tmp_path) -> None:
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    exports = _at_cap_exports()
+    provider = _Provider(json.dumps({"description": "ok", "exports": exports}))
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    result = agent.run_fragment(request)
+
+    assert result["exports"] == exports
+    assert provider.calls == 1
+
+
+def test_run_fragment_over_cap_exports_is_rejected_without_correction(
+    tmp_path,
+) -> None:
+    """The exact 0.14.5 rejection: an over-cap `exports` list is rejected in
+    full with `fixed_cap_exceeded` and an `item_limit` removal reported on an
+    `exports[...]` path -- never truncated to the first 32 names."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _Provider(
+        json.dumps({"description": "ok", "exports": _over_cap_exports()})
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    assert agent._correction is None
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.field.startswith("exports[")
+        and removal.reason_code == "item_limit"
+        for removal in diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+def test_run_fragment_over_long_export_item_is_rejected_without_correction(
+    tmp_path,
+) -> None:
+    """The collection-size cap is not the only export bound: one item over
+    `MAX_LEAF_EXPORT_ITEM_CHARS` is also a lossy removal, reported as
+    `response_cap` on that item's own path."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _Provider(
+        json.dumps(
+            {
+                "description": "ok",
+                "exports": ["e" * (MAX_LEAF_EXPORT_ITEM_CHARS + 1)],
+            }
+        )
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.field == "exports[0]" and removal.reason_code == "response_cap"
+        for removal in diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+def test_export_contract_never_suppresses_a_manifest_style_export(tmp_path):
+    """The exclusion is scoped to containment, not to the shape of a literal.
+
+    Several supported languages declare their exports *as* a list or an object
+    -- an exported-names manifest, a brace-enclosed export list, an assignment
+    to the module's export table -- and CodeDoc's own public surface is one of
+    them (`codedoc/__init__.py` uses `__all__`). An unqualified "array
+    elements and object properties are not exports" would tell a model to drop
+    every real export in those languages, trading the 0.14.5 over-reporting
+    bug for a silent under-reporting one.
+
+    Only the prompt wording can be guarded here: the fixed cleaner accepts
+    whatever names a response carries, so no end-to-end run can demonstrate
+    that the *prompt* stopped suppressing a manifest-style export."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+    contract = fda._FRAGMENT_EXPORT_CONTRACT
+
+    # The exclusion must be conditional, never absolute.
+    assert "merely because the value containing them is exported" in contract
+    exclusion = contract[contract.index("Containment is not export"):]
+    assert "are data, not module exports." not in exclusion
+
+    # ...and the carve-out must be present, in the same block, exactly once.
+    assert contract.count("IS the module's own export declaration") == 1
+    assert "must be reported" in contract
+    assert prompt.count("IS the module's own export declaration") == 1
+
+    # Stated neutrally: the carve-out survives the language-neutrality rule
+    # rather than being dropped by it.
+    for language_specific in ("__all__", "module.exports", "export {", "export const"):
+        assert language_specific not in contract

@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
+import sys
 import threading
 
 import pytest
@@ -20,6 +22,7 @@ from codedoc.core.execution import _process_descriptor_batch
 from codedoc.core.execution_model import build_call_manifest
 from codedoc.core.file_division import (
     BLOCKED_REASON_ORDER,
+    MAX_LEAF_EXPORT_ITEMS,
     SPLIT_PARTIAL_SCHEMA_VERSION,
     DivisionInternalDefect,
     SplitCapacityBlocked,
@@ -1924,3 +1927,413 @@ def test_rejected_recovery_partial_does_not_force_retention(
     assert second["skipped"] == 1
     assert second["split_restored_complete_chunks"] == 0
     assert not recovery_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: the lexical data-module export-contract regression
+# ---------------------------------------------------------------------------
+# Structural reproduction of the released 0.14.5 failure, provider-free. The
+# external project's own source is deliberately not copied here.
+
+_EXPORT_CONTRACT_MARKER = "Module-export contract for the optional"
+
+_DATA_MODULE_ENTRIES = 160
+_DATA_MODULE_BUDGET = 2000
+
+#: Real module-level exports of `_data_module_source()`, in source order.
+_REAL_DATA_MODULE_EXPORTS = [
+    "OPTION_ROWS",
+    "DEFAULT_ROW_ID",
+    "ROW_COUNT",
+    "ROW_GROUPS",
+]
+
+
+def _data_module_source(
+    entries: int = _DATA_MODULE_ENTRIES, groups: int = 24
+) -> str:
+    """A valid, oversized, data-only TypeScript module.
+
+    Formatted one entry per line, exactly like the module that failed. Under
+    the lexical fallback an atom is one physical line, so `pack_chunks()`
+    packs this into several *independent* chunks -- not a marked continuation
+    group -- and every chunk between the first and the last shows only
+    exported array interior, with no `export` declaration in sight.
+    """
+    lines = ["export const OPTION_ROWS = ["]
+    for index in range(entries):
+        lines.append(f'  {{ id: "row_{index:03d}", label: "Row {index:03d}" }},')
+    lines.append("];")
+    lines.append("")
+    lines.append('export const DEFAULT_ROW_ID = "row_000";')
+    lines.append(f"export const ROW_COUNT = {entries};")
+    lines.append("")
+    lines.append("export const ROW_GROUPS = [")
+    for index in range(groups):
+        lines.append(f'  {{ key: "group_{index:02d}" }},')
+    lines.append("];")
+    return "\n".join(lines) + "\n"
+
+
+class _DataModuleFake(SmartFake):
+    """Leaf-aware double for the data-module regression.
+
+    A leaf whose visible source carries real `export` declarations answers
+    with exactly those names. The first leaf showing only array interior
+    answers with an over-cap export list built from the visible data IDs --
+    the observed 0.14.5 misreading -- which the fixed cleaner must reject as
+    `fixed_cap_exceeded`; the one correction call then returns a truthful,
+    export-free capsule.
+
+    Prompts are recorded, never asserted on in-line: an assertion raised
+    inside a provider double would surface as an opaque provider fault and be
+    absorbed by the file-retry path instead of failing the test.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.leaf_prompts: list[str] = []
+        self.correction_prompts: list[str] = []
+        self.prompts_without_contract: list[str] = []
+        self.over_cap_id_count = 0
+
+    def _record(self, prompt: str, bucket: list[str]) -> None:
+        bucket.append(prompt)
+        if _EXPORT_CONTRACT_MARKER not in prompt:
+            self.prompts_without_contract.append(prompt)
+
+    def complete_json(self, prompt, system=""):
+        if "Previous response (verbatim" in prompt:
+            self._record(prompt, self.correction_prompts)
+            self.doc_calls += 1
+            return json.dumps(
+                {"description": "Rows of an exported data table."}
+            )
+        if "This is one bounded fragment of a larger" in prompt:
+            self._record(prompt, self.leaf_prompts)
+            self.doc_calls += 1
+            declared = re.findall(r"^export const (\w+)", prompt, flags=re.M)
+            if declared:
+                return json.dumps(
+                    {
+                        "description": "Exported data declarations.",
+                        "exports": declared,
+                    }
+                )
+            if not self.over_cap_id_count:
+                # The released misreading: array members promoted to exports.
+                ids = re.findall(r'id: "(row_\d+)"', prompt)
+                self.over_cap_id_count = len(ids)
+                return json.dumps(
+                    {
+                        "description": "Rows of the exported table.",
+                        "exports": ids[: MAX_LEAF_EXPORT_ITEMS + 1],
+                    }
+                )
+            return json.dumps({"description": "Rows of the exported table."})
+        return super().complete_json(prompt, system)
+
+
+def test_lexical_data_module_never_publishes_array_interior_as_exports(
+    tmp_path, monkeypatch
+) -> None:
+    """0.14.6 end-to-end: the structural shape that failed on 0.14.5.
+
+    A valid oversized data-only TypeScript module, divided through the
+    supported base-install lexical fallback, completes with one rejected leaf
+    response and one successful correction, and publishes only the module's
+    real language-level exports -- no `id`, label, group key, or other array
+    member is ever promoted to a module export.
+
+    The optional `structure` extra is simulated away rather than skipped, so
+    this proves the supported base-install path in every environment.
+    """
+    monkeypatch.setitem(sys.modules, "tree_sitter_language_pack", None)
+
+    source = _data_module_source()
+    (tmp_path / "data.tsx").write_text(source, encoding="utf-8", newline="")
+    division = build_division_plan(
+        rel_path="data.tsx",
+        language="tsx",
+        content=source,
+        source_budget_chars=_DATA_MODULE_BUDGET,
+    )
+    tree = build_reduction_tree(
+        division, max_content_chars=_DATA_MODULE_BUDGET, language="tsx"
+    )
+
+    # Fixture integrity: lexical fallback, several chunks, at least two of them
+    # showing nothing but exported-array interior, and NOT a continuation
+    # group. If a future chunker change turned these into continuation
+    # fragments this test would silently stop covering the reported failure,
+    # so the shape is asserted, never assumed.
+    assert division.structural_mode == "lexical"
+    assert len(division.chunks) >= 4
+    interior_only = [
+        chunk for chunk in division.chunks if "export const " not in chunk.payload
+    ]
+    assert len(interior_only) >= 2
+    assert all(
+        chunk.continuation_before is False
+        and chunk.continuation_after is False
+        and chunk.unit_chunk_count == 1
+        for chunk in division.chunks
+    )
+    # An interior-only fragment must show more data IDs than the export cap
+    # allows, or the over-cap misreading it provokes could not be reproduced.
+    assert all(
+        len(re.findall(r'id: "row_\d+"', chunk.payload)) > MAX_LEAF_EXPORT_ITEMS
+        for chunk in interior_only
+    )
+    assert len(_REAL_DATA_MODULE_EXPORTS) < MAX_LEAF_EXPORT_ITEMS
+
+    provider = _DataModuleFake()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider
+    )
+
+    callback_calls: list = []
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "data.tsx",
+            "analysis_mode": "single",
+            "parallel_agents": False,
+            "large_file_strategy": "split",
+            "max_content_chars": _DATA_MODULE_BUDGET,
+            "max_parallel_files": 1,
+            "file_retry_attempts": 0,
+            "response_correction_enabled": True,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+        confirm_risky=lambda warnings: callback_calls.append(warnings) or True,
+    )
+
+    # Both routes carried the contract; the over-cap response really was built
+    # from visible array interior, not from a name the source never declared.
+    assert provider.prompts_without_contract == []
+    assert len(provider.leaf_prompts) == len(division.chunks)
+    assert len(provider.correction_prompts) == 1
+    assert provider.over_cap_id_count > MAX_LEAF_EXPORT_ITEMS
+
+    planned = len(division.chunks) + _reduction_total(tree) + 1
+    assert stats["checked"] == 1
+    assert stats["failed"] == 0
+    assert stats["total_calls_planned"] == planned
+    assert stats["attempted_logical_calls"] == planned
+    assert stats["attempted_calls"] == planned + 1
+    assert stats["successful_calls"] == planned + 1
+    assert stats["failed_calls"] == 0
+    assert stats["planned_calls_not_attempted"] == 0
+    assert stats["response_contract_failures"] == 1
+    assert stats["response_correction_calls_attempted"] == 1
+    assert stats["response_correction_calls_succeeded"] == 1
+    assert stats["response_correction_calls_failed"] == 0
+    assert stats["additional_attempts"] == 1
+    assert callback_calls == []
+
+    document = json.loads(
+        (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    # A clean run publishes no "errors" key at all.
+    assert "errors" not in document
+    assert len(document["files"]) == 1
+    record = document["files"][0]
+    assert record["exports"] == _REAL_DATA_MODULE_EXPORTS
+    # A data-only module declares no functions or classes, so the published
+    # record omits both -- the ledger never invented one from array interior.
+    assert record.get("functions", []) == []
+    assert record.get("classes", []) == []
+    # Nothing from an exported value's interior may reach the published record
+    # as an export, whatever a model returned for an interior-only fragment.
+    serialized_exports = json.dumps(record["exports"])
+    for interior_token in ("row_", "group_", "Row 0", "Group 0"):
+        assert interior_token not in serialized_exports
+
+    # A clean completion removes recovery; nothing is left behind to resume.
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
+
+
+def test_leaf_capsule_v7_tree_cannot_leave_a_reducer_or_final_node_alive(
+    tmp_path, monkeypatch
+) -> None:
+    """0.14.6: no v7-derived reducer or final result survives its stale leaves.
+
+    Reduction and final execution identities deliberately do not bind
+    `LEAF_CAPSULE_SCHEMA_REVISION`, so each of those nodes remains
+    individually well-formed across the advance. Dependency closure is what
+    removes them: `validate_recovered_tree` never validates a reducer until
+    every ordered child is already retained, gates the final node on every
+    leaf being retained, and then quarantines each checkpointed node left
+    outside the closure. Without that sweep a v8 run could publish a final
+    synthesis built from exports a v7 leaf mis-derived.
+
+    Proven in two directions from one set of bytes: the complete tree is
+    genuinely reusable while the constant reads `leaf-capsule-v7`, and
+    entirely non-reusable under the real current `leaf-capsule-v8`.
+    """
+    source = _large_python_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(plan, max_content_chars=2000, language="python")
+    provider_identity = _provider_identity_for(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+        },
+    )
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    assert _reduction_total(tree) >= 1
+
+    # Deliberately not pinning the current revision's value here: this proof
+    # must fail on the retained/quarantined outcome if the advance is ever
+    # reverted, not on a constant-equality guard that owns nothing.
+    monkeypatch.setattr(
+        file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v7"
+    )
+    predecessor = _fully_completed_tree_state(
+        plan,
+        tree,
+        provider_identity=provider_identity,
+        content_hash=content_hash,
+    )
+    node_count = len(plan.chunks) + _reduction_total(tree) + 1
+    assert len(predecessor.nodes) == node_count
+
+    validate_kwargs = dict(
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=NO_PROMPT_PROFILE_DIGEST,
+        imports_digest=deterministic_imports_digest(()),
+        language="python",
+        max_content_chars=2000,
+        # The final node's live-schema re-check needs the resolved final
+        # shape, or it would be rejected in *both* directions and this test
+        # could not show that closure -- not its own identity -- removed it.
+        resolved_shape=ResolvedProfile("single", None).resolve_block(
+            "combined", "main.py"
+        ),
+    )
+
+    retained_v7, quarantine_v7 = validate_recovered_tree(
+        predecessor.nodes, **validate_kwargs
+    )
+    assert quarantine_v7 == ()
+    assert len(retained_v7) == node_count
+
+    monkeypatch.undo()
+
+    retained_v8, quarantine_v8 = validate_recovered_tree(
+        predecessor.nodes, **validate_kwargs
+    )
+    assert retained_v8 == ()
+    assert len(quarantine_v8) == node_count
+
+    by_id = {entry.node_id: entry.reason for entry in quarantine_v8}
+    leaf_ids = {chunk.chunk_id for chunk in plan.chunks}
+    for node_id, reason in by_id.items():
+        if node_id in leaf_ids:
+            # The leaf itself binds the revision: its identity no longer matches.
+            assert reason == "stale-identity", node_id
+        else:
+            # A reducer/final node is pruned by dependency closure, not by its
+            # own identity -- which is unchanged across this advance.
+            assert reason == "input-digest-mismatch", node_id
+    assert len(quarantine_v8) <= file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+
+
+def test_leaf_capsule_v7_partial_is_actually_re_executed_by_a_real_run(
+    tmp_path, monkeypatch
+) -> None:
+    """0.14.6: the v7 partial migration, driven end to end.
+
+    Validating a recovered container in isolation proves the *decision*; it
+    does not prove the run then pays for the work, publishes the file, and
+    clears recovery. Here a complete v7 tree -- every leaf, reducer, and the
+    final node, all written by the production identity functions with the
+    constant patched back -- is handed to a real `run_pipeline` under the
+    current revision. Every node must be quarantined, re-executed against the
+    provider, and the run must finish cleanly.
+
+    Contrast with `test_fully_synthesized_split_recovery_finalizes_without_a
+    _provider`, whose identical tree is *current* and therefore costs nothing.
+    """
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+    division = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(division, max_content_chars=2000)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    config = {
+        "entry_file": "main.py",
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "max_parallel_files": 1,
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    provider_identity = _provider_identity_for(tmp_path, config)
+
+    with monkeypatch.context() as predecessor_revision:
+        predecessor_revision.setattr(
+            file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v7"
+        )
+        recovered = _fully_completed_tree_state(
+            division,
+            tree,
+            provider_identity=provider_identity,
+            content_hash=content_hash,
+        )
+
+    node_count = len(division.chunks) + _reduction_total(tree) + 1
+    assert len(recovered.nodes) == node_count
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.load_recovery_records_if_compatible",
+        lambda *_args, **_kwargs: RecoveryState(
+            records=(
+                (
+                    "main.py",
+                    canonical_json({"path": "main.py", "hash": "stale"}),
+                ),
+            ),
+            partial_files=(recovered,),
+        ),
+    )
+    provider = SmartFake()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider
+    )
+
+    stats = run_pipeline(tmp_path, config)
+
+    assert stats["checked"] == 1
+    assert stats["failed"] == 0
+    # Nothing survived the advance: no node was restored, every one was
+    # quarantined, and the whole tree was paid for again.
+    assert stats["split_restored_complete_chunks"] == 0
+    assert stats["split_restored_unit_consolidation_calls"] == 0
+    assert stats["split_restored_general_reduction_calls"] == 0
+    assert stats["split_restored_final_synthesis_calls"] == 0
+    assert stats["split_quarantined_nodes"] == node_count
+    assert stats["total_calls_planned"] == node_count
+    assert stats["attempted_calls"] == node_count
+    assert stats["successful_calls"] == node_count
+    assert provider.doc_calls == node_count
+
+    output = json.loads(
+        (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    assert len(output["files"]) == 1
+    # The freshly executed description, not the restored v7 one.
+    assert output["files"][0]["description"] == "A file."
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
