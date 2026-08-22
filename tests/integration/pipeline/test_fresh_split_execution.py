@@ -26,6 +26,7 @@ from codedoc.core.safe_writer import SafeWriter
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import LLMError, UnrecoverableProviderError
 from tests.support.execution_requests import make_execution_request
+from tests.support.provider_failures import provider_failure_error
 from tests.support.providers import SmartFake
 
 
@@ -350,7 +351,7 @@ def test_fresh_rate_limit_step_down_keeps_run_local_split_progress(
                         self.failed = True
                         self.doc_calls += 1
                 if should_fail:
-                    raise LLMError("openai", "429 rate_limit_exceeded")
+                    raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
             return super().complete_json(prompt, system)
 
     provider = RateLimitSecondLargeLeaf()
@@ -406,8 +407,8 @@ def test_split_dry_run_keeps_ordinary_recovery_and_matches_real_plan(
                 and "File: z_large.py" in prompt
             ):
                 self.doc_calls += 1
-                raise LLMError(
-                    "openai", "Your credit balance is too low to continue"
+                raise provider_failure_error(
+                    "openai", "provider-quota-exhausted", status=429
                 )
             return super().complete_json(prompt, system)
 

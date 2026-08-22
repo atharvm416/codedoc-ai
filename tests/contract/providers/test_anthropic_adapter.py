@@ -22,8 +22,10 @@ class TestAPIProviders:
                 )
 
         class FakeAnthropicClient:
-            def __init__(self, api_key):
+            def __init__(self, api_key, timeout=None, max_retries=None):
                 captured["api_key"] = api_key
+                captured["timeout"] = timeout
+                captured["max_retries"] = max_retries
                 self.messages = FakeMessages()
 
         monkeypatch.setitem(

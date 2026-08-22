@@ -23,7 +23,167 @@ never skip it for a foreign exception being wrapped into a new CodeDoc error.
 
 from __future__ import annotations
 
+import math
+import re
 from concurrent.futures import CancelledError
+from dataclasses import dataclass
+
+# ---------------------------------------------------------------------------
+# Provider failure envelope (structured, bounded provider-failure identity)
+# ---------------------------------------------------------------------------
+
+PROVIDER_KINDS: frozenset[str] = frozenset({"openai", "anthropic", "gemini"})
+
+# The nine closed provider failure reason codes. Every adapter-boundary
+# classification (codedoc/llm/*_provider.py) resolves to exactly one of
+# these; there is no default/fallback code outside this set.
+PROVIDER_FAILURE_REASON_CODES: frozenset[str] = frozenset(
+    {
+        "provider-request-failed",
+        "provider-authentication-rejected",
+        "provider-rate-limited",
+        "provider-quota-exhausted",
+        "provider-model-unavailable",
+        "provider-timeout",
+        "provider-connection-failed",
+        "provider-response-malformed",
+        "provider-input-rejected",
+    }
+)
+
+PROVIDER_LIMIT_TYPES: frozenset[str] = frozenset({"tpm", "rpm", "quota", "overloaded"})
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderFailureEnvelope:
+    """A structured, bounded description of one provider call failure.
+
+    Built only at the immediate adapter exception boundary from allowlisted
+    primitive SDK fields (never from rendered provider text, response
+    bodies, prompt/source text, credentials, endpoint URLs, exception class
+    names, agent names, or file paths), and carried through the exception
+    chain as :attr:`LLMError.provider_failure`.
+
+    All field validation lives here — callers (including the defensive
+    mapping deserializer :func:`provider_failure_from_mapping`) never
+    duplicate it.
+    """
+
+    provider_kind: str
+    reason_code: str
+    status: int | None = None
+    retry_after_s: float | None = None
+    limit_type: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.provider_kind not in PROVIDER_KINDS:
+            raise ValueError(f"Unsupported provider_kind: {self.provider_kind!r}")
+        if self.reason_code not in PROVIDER_FAILURE_REASON_CODES:
+            raise ValueError(
+                f"Unsupported provider failure reason_code: {self.reason_code!r}"
+            )
+        if self.status is not None and (
+            isinstance(self.status, bool) or not isinstance(self.status, int)
+        ):
+            raise ValueError("status must be a non-boolean integer or None")
+        if self.retry_after_s is not None:
+            if isinstance(self.retry_after_s, bool) or not isinstance(
+                self.retry_after_s, (int, float)
+            ):
+                raise ValueError(
+                    "retry_after_s must be a non-negative finite float or None"
+                )
+            retry_after_s = float(self.retry_after_s)
+            if not math.isfinite(retry_after_s) or retry_after_s < 0:
+                raise ValueError(
+                    "retry_after_s must be a non-negative finite float or None"
+                )
+            object.__setattr__(self, "retry_after_s", retry_after_s)
+        if self.limit_type is not None and self.limit_type not in PROVIDER_LIMIT_TYPES:
+            raise ValueError(f"Unsupported limit_type: {self.limit_type!r}")
+
+
+def find_provider_failure(exc: BaseException | None) -> ProviderFailureEnvelope | None:
+    """Walk *exc*'s ``__cause__``/``__context__`` chain and return the first
+    attached :class:`ProviderFailureEnvelope`, or ``None`` if none is found.
+
+    Cycle-safe via a visited-id guard, mirroring the chain-walking pattern
+    used throughout this codebase.
+    """
+    visited: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        failure = getattr(current, "provider_failure", None)
+        if isinstance(failure, ProviderFailureEnvelope):
+            return failure
+        current = current.__cause__ or current.__context__
+    return None
+
+
+def provider_failure_as_mapping(failure: ProviderFailureEnvelope) -> dict:
+    """Serialize *failure* to a plain, JSON-safe mapping."""
+    return {
+        "provider_kind": failure.provider_kind,
+        "reason_code": failure.reason_code,
+        "status": failure.status,
+        "retry_after_s": failure.retry_after_s,
+        "limit_type": failure.limit_type,
+    }
+
+
+def provider_failure_from_mapping(mapping: object) -> ProviderFailureEnvelope | None:
+    """Defensively reconstruct a :class:`ProviderFailureEnvelope` from
+    *mapping*.
+
+    Returns ``None`` for anything malformed or foreign — a non-mapping, a
+    missing/extra key, or a value the dataclass itself rejects — rather than
+    raising.  All field validation lives in the dataclass; this function
+    only catches its rejection.
+    """
+    if not isinstance(mapping, dict):
+        return None
+    expected_keys = {"provider_kind", "reason_code", "status", "retry_after_s", "limit_type"}
+    if set(mapping) != expected_keys:
+        return None
+    try:
+        return ProviderFailureEnvelope(
+            provider_kind=mapping["provider_kind"],
+            reason_code=mapping["reason_code"],
+            status=mapping["status"],
+            retry_after_s=mapping["retry_after_s"],
+            limit_type=mapping["limit_type"],
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Rate-limit-type text classifier (relocated from codedoc.core.error_classifier;
+# a pure string classifier with no exception-chain or SDK dependency, kept
+# here alongside the envelope it feeds section 5.3's ``limit_type`` field).
+# ---------------------------------------------------------------------------
+
+_DETECT_TPM_RE = re.compile(r"\btpm\b", re.IGNORECASE)
+_DETECT_RPM_RE = re.compile(r"\brpm\b", re.IGNORECASE)
+
+
+def detect_limit_type(error_msg: str) -> str | None:
+    """Classify the kind of rate limit from an error message string.
+
+    Returns ``"tpm"``, ``"rpm"``, ``"quota"``, ``"overloaded"``, or ``None``.
+    """
+    msg = error_msg.lower()
+    if "tokens per min" in msg or _DETECT_TPM_RE.search(error_msg):
+        return "tpm"
+    if "requests per min" in msg or _DETECT_RPM_RE.search(error_msg):
+        return "rpm"
+    if "daily" in msg or "quota" in msg or "resource_exhausted" in msg:
+        return "quota"
+    if "overloaded" in msg or "529" in msg:
+        return "overloaded"
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Exceptions
@@ -54,9 +214,16 @@ class InsufficientSourceError(CodeDocError):
 class LLMError(CodeDocError):
     """Raised when an LLM call fails or returns invalid output."""
 
-    def __init__(self, provider: str, reason: str):
+    def __init__(
+        self,
+        provider: str,
+        reason: str,
+        *,
+        provider_failure: ProviderFailureEnvelope | None = None,
+    ):
         self.provider = provider
         self.reason = reason
+        self.provider_failure = provider_failure
         super().__init__(f"LLMError [{provider}]: {reason}")
 
 
@@ -228,6 +395,7 @@ BOUNDED_EXCEPTION_REASON_CODES: frozenset[str] = frozenset(
         "provider-timeout",
         "provider-connection-failed",
         "provider-response-malformed",
+        "provider-input-rejected",
         "filesystem-error",
         "cancelled",
         "unknown-error",

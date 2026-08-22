@@ -1,5 +1,165 @@
 # Changelog
 
+## 0.14.5 2026-08-22
+
+### Structured provider-failure classification
+
+- Every provider exception is now converted, at the adapter boundary, into a
+  closed `ProviderFailureEnvelope` (`codedoc/utils/errors.py`) carrying a
+  `provider_kind`, one of nine closed `reason_code` values
+  (`provider-request-failed`, `provider-authentication-rejected`,
+  `provider-rate-limited`, `provider-quota-exhausted`,
+  `provider-model-unavailable`, `provider-timeout`,
+  `provider-connection-failed`, `provider-response-malformed`,
+  `provider-input-rejected`), the HTTP status, an optional `retry_after_s`,
+  and an optional `limit_type` -- replacing the previous classifier, which
+  matched substrings against rendered exception text. This is a closed table,
+  not a fallback chain: OpenAI and Anthropic classify HTTP `400`/`413`/`422`
+  as input-rejected, `401`/`403` as credentials-rejected, `404` as
+  model-unavailable, `429` as rate-limited (OpenAI's `429` with
+  `insufficient_quota` as quota-exhausted instead), and `529` as rate-limited
+  with `limit_type: overloaded`; Anthropic additionally classifies by its own
+  structured error `type` before falling back to status. Gemini classifies by
+  its structured `status` name (`RESOURCE_EXHAUSTED`, `UNAVAILABLE`,
+  `UNAUTHENTICATED`, `PERMISSION_DENIED`, `NOT_FOUND`, `DEADLINE_EXCEEDED`,
+  `INVALID_ARGUMENT`) with a numeric-code fallback (`429`, `503`, `401`,
+  `403`, `404`, `504`, `400`). Every SDK-typed timeout, connection, and
+  malformed-response exception on all three providers is classified by SDK
+  exception class, never by status. Any other status or exception shape is
+  `provider-request-failed`.
+- Adapter metadata handling is now total: a malformed SDK status value
+  (non-integer, boolean, or otherwise unexpected), a non-string Anthropic
+  error `type`, or a non-string, malformed, or non-finite `Retry-After` value
+  is normalized to a safe default instead of escaping as a raw
+  `ValueError`/`TypeError` from the adapter boundary, and a valid
+  `Retry-After` value is preserved even when the failure falls through to the
+  generic `provider-request-failed` case.
+- Terminal-abort wording (`_build_terminal_abort()`) is now derived
+  structurally from the envelope's `reason_code` and `status` instead of
+  embedding provider text, so every terminal-abort message is canonical and
+  sanitized: it never contains raw provider response text, credentials, or
+  endpoint detail.
+- Custom `rate_limit_signals_add`/`rate_limit_signals_remove` entries are
+  narrowed: they now promote only an otherwise-unmapped adapter failure
+  (`provider-request-failed`) to rate-limit handling, never a failure that
+  already carries its own closed reason code.
+- A failure that carries no `ProviderFailureEnvelope` at all -- raised
+  locally, or by a test double with no `provider_failure` attribute --
+  classifies as `transient` and aborts no run, rather than matching on
+  message substrings.
+
+### Warnings, retries, and provider-specific backoff
+
+- A rate-limit warning's `error_sample` is now canonical compact JSON --
+  `{"reason_code":...,"status":...,"retry_after_s":...}`, key-sorted with no
+  extra whitespace -- built from the first failing sibling's envelope,
+  instead of free-text.
+- The provider SDK's own internal retry loop is now disabled at construction
+  (`max_retries=0` for OpenAI and Anthropic; one attempt for Gemini via
+  `HttpRetryOptions`). CodeDoc's own `file_retry_attempts` is the sole source
+  of retry behaviour, so a recoverable failure is never retried by two
+  independent policies at once.
+- A new `provider_request_timeout_s` config key (CLI
+  `--provider-request-timeout-s`, env `CODEDOC_PROVIDER_REQUEST_TIMEOUT_S`,
+  default `120`, range `1`-`600`) bounds each connect/read/write/pool phase
+  of a provider request. Explicit JSON/Python `null` and an empty
+  config/CLI value are rejected boundedly rather than silently defaulting;
+  an absent key still defaults to `120`, and an empty environment variable
+  still behaves as absent.
+- The rate-limit profile is now resolved once, in the factory, and passed
+  into the adapter's own constructor -- a provider built by calling
+  `create_provider()` directly (not only through `run_pipeline`) now
+  correctly receives its configured `rate_limit_signals_add`/`_remove`
+  entries at construction time, and `pipeline.py` no longer mutates adapter
+  state after the fact.
+- `respect_retry_after`/`retry_after_cap_s` now apply only to OpenAI and
+  Anthropic, whose `Retry-After` is a plain-seconds hint; Gemini always uses
+  computed backoff and never reads a provider `Retry-After` value.
+- Sibling-error handling in `triple` and `split` execution now carries the
+  structured `provider_failure` envelope across the dict boundary between
+  agent results and terminal aggregation. Terminal sibling precedence -- the
+  first terminal/global sibling wins even when that same sibling also
+  carries a response-contract failure, since a genuine run-level abort is
+  never masked by a contract failure on the call that produced it -- is now
+  decided from that same structured reason code, not a re-derived guess. The
+  overall failure's envelope is always the first fixed-order sibling's own
+  envelope: an envelope-less first failure (e.g. a local error) is never
+  skipped in favor of inheriting a later sibling's unrelated rate-limit
+  metadata.
+
+### Scanner skip-dir and diagnostics correctness
+
+- The exact generated JSON, Markdown, and recovery target files are now
+  excluded from scanning by resolved-path equality; the output directory
+  itself is not automatically excluded. Removing the default `codedoc`
+  skip-dir (for example, to document CodeDoc's own package) therefore keeps
+  other supported source files co-located in that directory scannable while
+  preventing generated targets from being re-scanned as source.
+- New scan-diagnostics counters (`files_skipped_large`,
+  `files_skipped_unreadable`) are reported in both the run and `--dry-run`
+  summaries, including on the early-return path taken when nothing
+  supported is found. A file that raises `OSError` on stat (permission
+  error, broken metadata) is now recorded and skipped instead of silently
+  dropped, with a bounded, deduplicated warning count that no longer
+  double-counts the same file across a rescan.
+- A source file that passes the scanner's own stat check but fails to read
+  moments later, during planning (a permission change or deletion racing
+  the scan), no longer escapes as a raw, unbounded filesystem error: it is
+  detected before any provider is constructed, and fails with a
+  bounded `ConfigError`. An explicitly named `--entry` or `force_files`
+  path that cannot be read raises a `ConfigError` naming that path
+  specifically, before any recovery file or output is created.
+
+### BaseAgent logging correction
+
+- `BaseAgent._safe_run()`'s generic exception log boundary now applies the
+  same two-tier rule the recorded result already used: a `CodeDocError`
+  (already bounded by construction) renders unchanged via `str(exc)`; only a
+  genuinely foreign exception is reduced through `bounded_exception_summary`.
+  A bare `LLMError` raised outside `_call_llm_counted` no longer misreports
+  its canonical reason as `unknown-error`.
+
+### Packaging
+
+- This is the first official PyPI `0.14.x` release certified from both a
+  built wheel and a built sdist. CI now installs `pytest` alongside `build`
+  and `twine`, runs the artifact-content contract against the built
+  distributions, installs the wheel and the sdist into two separate clean
+  environments, and runs the installed-artifact smoke harness against each.
+- `installed_artifact_smoke.py --scenario cross-version` now takes a
+  required `--peer-version` and asserts the peer's and the candidate's
+  installed versions and import origins before changing any state. It runs
+  one of two non-interchangeable matrices: Matrix A for the ordinary-record
+  predecessor (official PyPI `0.13.1`, which predates `large_file_strategy:
+  split` entirely) and Matrix B for the split-capable predecessor (TestPyPI
+  `0.14.4`).
+
+### Unrelated identities unchanged
+
+- No split/division/analysis schema identity changed in this release. Active
+  split identities remain `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v5`, `leaf-capsule-v7`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v4`, `file-reduction-v2`,
+  `file-synthesis-v3`, `division-execution-v6`, `large-file-v3`, and ordinary
+  `file-doc-v3`.
+
+### Known limitations
+
+- Four distinct request/transport reason codes (`provider-request-failed`,
+  `provider-connection-failed`, `provider-timeout`,
+  `provider-response-malformed`) all share the `transient` classification.
+- Gemini always uses computed backoff rather than honoring `Retry-After`.
+- HTTP `401` and `403` share one reason code
+  (`provider-authentication-rejected`) on every provider.
+- Custom rate-limit signals are narrowed to otherwise-unmapped adapter
+  faults; they cannot override a closed classification.
+- Dependency testing proves the declared lower bounds and a current latest
+  resolution, not every admitted intermediate combination.
+- Every HTTP `400` is treated as a per-file input failure and may spend one
+  call per remaining file when the actual cause is global configuration.
+- Every HTTP `404` aborts as model-unavailable even when the actual cause is
+  a wrong base path.
+
 ## 0.14.4 2026-08-16
 
 ### Endpoint-trust authorization for a custom `api_base_url`

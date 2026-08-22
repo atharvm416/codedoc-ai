@@ -107,10 +107,14 @@ from codedoc.core.resume import (
     load_recovery_records_if_compatible,
 )
 from codedoc.core.safe_writer import SafeWriter
-from codedoc.core.scanner import scan_files
+from codedoc.core.scanner import ScanDiagnostics, exclude_path_key, scan_files
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
-from codedoc.llm.factory import create_provider, describe_provider_selection
-from codedoc.llm.rate_limit_profile import get_rate_limit_profile
+from codedoc.llm.factory import (
+    constructed_provider_execution,
+    constructed_rate_limit_profile,
+    create_provider,
+    describe_provider_selection,
+)
 from codedoc.utils.errors import (
     CodeDocError,
     ConfigError,
@@ -135,14 +139,11 @@ from codedoc.core.resume import (  # noqa: F401  (compat re-export)
     _public_record_to_doc,
 )
 from codedoc.core.execution import (  # noqa: F401  (compat re-export)
-    _RATE_LIMIT_SIGNALS,
     _agent_errors,
     _build_default_ladder,
     _cancel_pending,
     _detect_limit_type,
-    _is_rate_limit_error,
     _log_file_progress,
-    _parse_retry_after,
     _process_and_record,
     _process_descriptor_batch,
     _process_files_sequentially,
@@ -298,25 +299,47 @@ def run_pipeline(
             if not record.get("_large_file_identity")
         }
 
-    # Build the scanner skip_dirs list.  Start from config["skip_dirs"] (already
-    # resolved by load_config with _add/_remove applied), then unconditionally
-    # append the output directory name so codedoc never scans its own output
-    # even when the user removes "codedoc" via --remove-skip-dir.
-    _scan_skip_dirs = list(config.get("skip_dirs", []))
-    _raw_output_dir = str(config.get("output_dir", "codedoc"))
-    if _raw_output_dir not in (".", ""):
-        _output_dir_name = Path(_raw_output_dir).name
-        if _output_dir_name and _output_dir_name not in _scan_skip_dirs:
-            _scan_skip_dirs.append(_output_dir_name)
+    # Section 5.6: skip_dirs is used exactly as resolved by load_config (with
+    # _add/_remove already applied) -- no unconditional re-addition of the
+    # output directory's basename, so --remove-skip-dir works. The exact
+    # generated targets (both format candidates, so an opposite-format
+    # sibling resume can read is also never mistaken for source, plus the
+    # recovery file) are protected instead by exact-path equality, which
+    # also keeps co-located source/output directories supported: a source
+    # file merely sharing the output directory's name is never excluded.
+    _generated_target_paths = (json_candidate, md_candidate, recovery_path)
+    _scan_exclude_paths = frozenset(
+        exclude_path_key(path) for path in _generated_target_paths
+    )
+
+    def _reject_generated_target_collision(label: str, raw: str) -> None:
+        candidate = Path(raw)
+        resolved = candidate if candidate.is_absolute() else root / candidate
+        if exclude_path_key(resolved) in _scan_exclude_paths:
+            raise ConfigError(
+                f"{label} '{raw}' resolves to a generated output target "
+                f"(codedoc.json, codedoc.md, or {RECOVERY_FILENAME}) and cannot "
+                "also be treated as source. Choose a different path, or move "
+                "the output directory."
+            )
+
+    if config.get("entry_file"):
+        _reject_generated_target_collision("entry_file", str(config["entry_file"]))
+    for _forced in config.get("force_files") or []:
+        _reject_generated_target_collision("force_files", str(_forced))
+
+    _scan_diagnostics = ScanDiagnostics()
 
     def _scan_source_files() -> list[dict]:
         return scan_files(
             root,
             extension_language_map=config["extension_language_map"],
             max_file_size_kb=config["max_file_size_kb"],
-            skip_dirs=_scan_skip_dirs,
+            skip_dirs=config.get("skip_dirs", []),
             ignore_paths=config.get("ignore_paths"),
             follow_symlinks=config.get("follow_symlinks", False),
+            exclude_paths=_scan_exclude_paths,
+            diagnostics=_scan_diagnostics,
         )
 
     all_files = _scan_source_files()
@@ -364,6 +387,8 @@ def run_pipeline(
                 "ownership_conflicts": ownership_conflicts,
                 "output_dir": str(output_dir),
                 "output_files": [],
+                "files_skipped_large": _scan_diagnostics.files_skipped_large,
+                "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
                 **no_work_profile_stats,
                 **_split_division_stats(config, None, None),
             }
@@ -383,12 +408,13 @@ def run_pipeline(
             "output_dir": str(output_dir),
             "live_backup_path": None,
             "issues_recorded": 0,
-            "rate_limit_warnings": [],
             "documentation_scope": config.get("documentation_scope", "entry"),
             "entry_reachable": 0,
             "entry_disconnected": 0,
             "disconnected_paid_files": 0,
             "disconnected_planned_calls": 0,
+            "files_skipped_large": _scan_diagnostics.files_skipped_large,
+            "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
             **no_work_profile_stats,
             **_split_division_stats(config, None, None),
         }
@@ -523,6 +549,7 @@ def run_pipeline(
         resolved_profile=resolved_profile,
         rebuild_source_inputs=_rebuild_source_inputs,
         recovered_partials=recovered_partials_by_path,
+        diagnostics=_scan_diagnostics,
     )
 
     # Capacity-blocked requested-split files have no authorized provider
@@ -610,6 +637,7 @@ def run_pipeline(
             recovery_resumed_paths=frozenset(recovery_records),
             materials=materials,
             feasibility_notes=feasibility_notes,
+            scan_diagnostics=_scan_diagnostics,
         )
 
     scope_stats = _build_scope_stats(
@@ -870,8 +898,6 @@ def run_pipeline(
             rel_path,
             reason,
         )
-    rate_limit_warnings: list[dict] = []
-
     if not agent_rels:
         logger.info("All selected files are up-to-date or reused from cached content.")
         stats: dict = {
@@ -886,7 +912,8 @@ def run_pipeline(
             "entry_excluded": entry_excluded,
             **scope_stats,
             "output_dir": str(output_dir),
-            "rate_limit_warnings": rate_limit_warnings,
+            "files_skipped_large": _scan_diagnostics.files_skipped_large,
+            "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
             **no_work_profile_stats,
             **review_stats,
             **_split_division_stats(config, materials, plan),
@@ -981,7 +1008,8 @@ def run_pipeline(
         "entry_source": entry_source,
         "entry_excluded": entry_excluded,
         **scope_stats,
-        "rate_limit_warnings": rate_limit_warnings,
+        "files_skipped_large": _scan_diagnostics.files_skipped_large,
+        "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
         **review_stats,
         **_split_division_stats(config, materials, plan),
     }
@@ -1012,12 +1040,37 @@ def run_pipeline(
         respect_retry_after=config.get("respect_retry_after", True),
         retry_after_cap_s=config.get("retry_after_cap_s", 30),
     )
+    # Section 5.5: select the profile from the attested provider_kind, never
+    # the decorated provider_name (e.g. "OpenAI(gpt-4o-mini)"), which does
+    # not match any PROVIDER_PROFILES key and would silently fall back to
+    # the "default" union. verify_provider_execution_identity above already
+    # fails closed on a missing attestation, so a descriptor is guaranteed
+    # here; the explicit check documents that invariant rather than trusting
+    # it silently.
+    descriptor = constructed_provider_execution(llm)
+    if descriptor is None:
+        raise ConfigError(
+            "Constructed LLM provider is missing a valid concrete execution "
+            "attestation required for rate-limit profile selection."
+        )
+    # Section 12.1 C2: read back the same profile the factory already
+    # resolved and passed into the adapter's constructor -- never re-resolve
+    # it here, and never assign adapter signal state from pipeline.py. A
+    # provider without an attached profile (attested only via a bespoke path
+    # that skipped attest_provider_execution) fails closed rather than
+    # silently running with no configured rate-limit signals.
+    rate_limit_profile = constructed_rate_limit_profile(llm)
+    if rate_limit_profile is None:
+        raise ConfigError(
+            "Constructed LLM provider is missing a valid rate-limit profile "
+            "attestation."
+        )
     context = ExecutionContext(
         orchestrator=orchestrator,
         queue=queue,
         recorder=recorder,
         error_reporter=error_reporter,
-        rate_limit_profile=get_rate_limit_profile(llm.provider_name, config),
+        rate_limit_profile=rate_limit_profile,
         stats=stats,
         new_results=new_results,
         options=options,
@@ -1320,6 +1373,7 @@ def _build_dry_run_stats(
     materials=None,
     *,
     feasibility_notes: tuple[str, ...],
+    scan_diagnostics: "ScanDiagnostics | None" = None,
 ) -> dict:
     """Build the read-only dry-run stats dict from the shared plan."""
     scope_stats = _build_scope_stats(
@@ -1434,6 +1488,12 @@ def _build_dry_run_stats(
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
+        "files_skipped_large": (
+            scan_diagnostics.files_skipped_large if scan_diagnostics is not None else 0
+        ),
+        "files_skipped_unreadable": (
+            scan_diagnostics.files_skipped_unreadable if scan_diagnostics is not None else 0
+        ),
         "prompt_profile_scope_counts": _prompt_profile_scope_counts(
             plan, file_map, resolved_profile
         ),

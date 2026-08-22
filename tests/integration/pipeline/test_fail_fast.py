@@ -14,6 +14,7 @@ from codedoc.utils.errors import (
     ErrorReporter,
     LLMError,
 )
+from tests.support.provider_failures import provider_failure_error
 
 def test_parallel_contract_failures_do_not_enter_sequential_retry(
     tmp_path, monkeypatch
@@ -42,11 +43,11 @@ def test_parallel_contract_failures_do_not_enter_sequential_retry(
     assert stats["attempted_calls"] == 2
     assert stats["response_contract_failures"] == 2
 
-TERMINAL_BILLING = LLMError("openai", "Your credit balance is too low to continue")
+TERMINAL_BILLING = provider_failure_error("openai", "provider-quota-exhausted", status=429)
 
-GLOBAL_PERMANENT = LLMError("openai", "Incorrect API key provided")
+GLOBAL_PERMANENT = provider_failure_error("openai", "provider-authentication-rejected", status=401)
 
-INPUT_PERMANENT = LLMError("anthropic", "prompt is too long: 250000 tokens > 200000")
+INPUT_PERMANENT = provider_failure_error("anthropic", "provider-input-rejected", status=400)
 
 class _LLM:
     def __init__(self, name="openai"):
@@ -84,7 +85,7 @@ def _terminal_provider():
 
         def complete_json(self, prompt, system=""):
             # Route (a): the phrase is folded into the agent error message.
-            raise LLMError("openai", "Your credit balance is too low to continue")
+            raise provider_failure_error("openai", "provider-quota-exhausted", status=429)
 
         def complete(self, prompt, system="", temperature=0.1):
             return self.complete_json(prompt)

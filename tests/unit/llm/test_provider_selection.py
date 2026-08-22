@@ -66,6 +66,86 @@ def test_C13_api_key_lookup_consistent_with_detection(tmp_path, monkeypatch):
         "_provider_api_key must use the same prefixes and return the anthropic key"
     )
 
+class TestRateLimitProfileAttestation:
+    """Section 12.1 C2: the factory resolves one rate-limit profile and
+    passes its tuple into the adapter constructor, exposes the same
+    attached profile back to callers, and never requires pipeline.py to
+    mutate adapter signal state after construction."""
+
+    def test_direct_factory_promotion_passes_resolved_signals_to_the_adapter(
+        self, monkeypatch
+    ):
+        """A caller that constructs a provider directly through
+        create_provider -- never through run_pipeline -- must still receive
+        the resolved, configured rate-limit signals at construction time."""
+        from codedoc.llm.factory import create_provider
+
+        captured = {}
+
+        class FakeOpenAIProvider:
+            def __init__(self, api_key, model, base_url=None, **kwargs):
+                captured["rate_limit_signals"] = kwargs.get("rate_limit_signals")
+
+        monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)
+
+        create_provider(
+            {
+                "llm_mode": "api",
+                "llm_provider": "openai",
+                "model_name": "gpt-4o-mini",
+                "api_key": "openai-key",
+                "rate_limit_signals_add": ["my-custom-overload-signal"],
+            }
+        )
+        assert "my-custom-overload-signal" in captured["rate_limit_signals"]
+
+    def test_attested_injected_provider_matches_direct_factory_promotion(self, monkeypatch):
+        """attest_provider_execution's profile/tuple must be identical to
+        what create_provider would attach for the same config -- an
+        explicitly attested test double is indistinguishable from a real
+        factory-constructed provider for rate-limit purposes."""
+        from codedoc.llm.factory import (
+            attest_provider_execution,
+            constructed_rate_limit_profile,
+            create_provider,
+        )
+
+        class FakeOpenAIProvider:
+            def __init__(self, api_key, model, base_url=None, **kwargs):
+                pass
+
+        monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)
+
+        config = {
+            "llm_mode": "api",
+            "llm_provider": "openai",
+            "model_name": "gpt-4o-mini",
+            "api_key": "openai-key",
+            "rate_limit_signals_add": ["my-custom-overload-signal"],
+        }
+        real = create_provider(config)
+
+        class InjectedDouble:
+            pass
+
+        double = InjectedDouble()
+        attest_provider_execution(double, config)
+
+        real_profile = constructed_rate_limit_profile(real)
+        double_profile = constructed_rate_limit_profile(double)
+        assert real_profile == double_profile
+        assert double._rate_limit_signals == tuple(real_profile.signals)
+
+    def test_unattested_provider_has_no_rate_limit_profile(self):
+        """A provider that never went through create_provider or
+        attest_provider_execution must report no attached profile -- the
+        accessor pipeline.py's run_pipeline guards on, never a default or
+        inferred profile."""
+        from codedoc.llm.factory import constructed_rate_limit_profile
+
+        assert constructed_rate_limit_profile(object()) is None
+
+
 class TestProviderFactory:
     def test_selects_openai_provider_explicitly(self, monkeypatch):
         from codedoc.llm.factory import create_provider
@@ -73,7 +153,7 @@ class TestProviderFactory:
         captured = {}
 
         class FakeOpenAIProvider:
-            def __init__(self, api_key, model, base_url=None):
+            def __init__(self, api_key, model, base_url=None, **kwargs):
                 captured.update(
                     {"api_key": api_key, "model": model, "base_url": base_url}
                 )
@@ -99,7 +179,7 @@ class TestProviderFactory:
         captured = {}
 
         class FakeAnthropicProvider:
-            def __init__(self, api_key, model):
+            def __init__(self, api_key, model, **kwargs):
                 captured.update({"api_key": api_key, "model": model})
 
         monkeypatch.setattr(
@@ -126,7 +206,7 @@ class TestProviderFactory:
         captured = {}
 
         class FakeGeminiProvider:
-            def __init__(self, api_key, model):
+            def __init__(self, api_key, model, **kwargs):
                 captured.update({"api_key": api_key, "model": model})
 
         monkeypatch.setattr("codedoc.llm.api_provider.GeminiProvider", FakeGeminiProvider)
@@ -148,7 +228,7 @@ class TestProviderFactory:
         from codedoc.llm.factory import create_provider
 
         class FakeGeminiProvider:
-            def __init__(self, api_key, model):
+            def __init__(self, api_key, model, **kwargs):
                 self.api_key = api_key
                 self.model = model
 
@@ -182,7 +262,7 @@ class TestProviderFactory:
         captured = {}
 
         class FakeOpenAIProvider:
-            def __init__(self, api_key, model, base_url=None):
+            def __init__(self, api_key, model, base_url=None, **kwargs):
                 captured.update(
                     {"api_key": api_key, "model": model, "base_url": base_url}
                 )

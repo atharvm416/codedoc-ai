@@ -15,13 +15,11 @@ from codedoc.cli.cli import (
 from tests.support.feasibility_cases import _cross_file_profile
 from tests.support.feasibility_cases import _ReviewFake
 from codedoc.core.loader import load_config
-from codedoc.utils.errors import (
-    LLMError,
-)
 from tests.support.logging_sentinels import (
     assert_no_sentinels_leaked,
     sentinel_bearing_exception,
 )
+from tests.support.provider_failures import provider_failure_error
 
 @pytest.mark.parametrize(
     "argv",
@@ -626,7 +624,7 @@ def test_cli_exit_codes_for_unrecoverable_provider_error(
     def fake_pipeline(*args, **kwargs):
         if category == "terminal":
             raise _build_terminal_abort(
-                LLMError("openai", "insufficient_quota"),
+                provider_failure_error("openai", "provider-quota-exhausted", status=429),
                 "openai",
                 "terminal_billing",
             )

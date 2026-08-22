@@ -25,10 +25,8 @@ DISCOVERY_REEXPORTS = [
 ]
 
 EXECUTION_REEXPORTS = [
-    "_is_rate_limit_error",
     "_detect_limit_type",
     "_build_default_ladder",
-    "_parse_retry_after",
     "_process_and_record",
     "_process_descriptor_batch",
     "_process_files_sequentially",

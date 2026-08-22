@@ -67,6 +67,7 @@ from tests.support.execution_requests import (
 )
 from tests.support.providers import SmartFake
 from tests.support.profiles import INLINE
+from tests.support.provider_failures import provider_failure_error
 from tests.support.structure_extra import requires_structure_pack
 
 
@@ -854,6 +855,66 @@ def test_split_synthesis_retry_does_not_repeat_completed_leaves(
     assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
+def test_terminal_split_failure_leaves_later_planned_calls_unattempted(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 5.5's fourth accounting proof: a permanent early split failure
+    (a terminal provider fault on the first leaf) aborts the run before any
+    later leaf, reduction, or final call is ever attempted -- those calls
+    are correctly accounted as planned but unattempted, not silently dropped
+    or miscounted as failed."""
+    source = _large_python_source()
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+    division = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(division, max_content_chars=2000)
+    assert len(division.chunks) > 1, "test requires more than one leaf"
+
+    class TerminalOnFirstLeaf(SmartFake):
+        provider_name = "openai"
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.leaf_prompts: list[str] = []
+
+        def complete_json(self, prompt, system=""):
+            if "This is one bounded fragment of a larger" in prompt:
+                self.leaf_prompts.append(prompt)
+                if len(self.leaf_prompts) == 1:
+                    self.doc_calls += 1
+                    raise provider_failure_error(
+                        "openai", "provider-quota-exhausted", status=429
+                    )
+            return super().complete_json(prompt, system)
+
+    provider = TerminalOnFirstLeaf()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider
+    )
+
+    with pytest.raises(UnrecoverableProviderError) as caught:
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "main.py",
+                "large_file_strategy": "split",
+                "max_content_chars": 2000,
+                "max_parallel_files": 1,
+                "file_retry_attempts": 0,
+                "propagate_changes": False,
+                "output_dir": "docs",
+            },
+        )
+
+    planned = len(division.chunks) + _reduction_total(tree) + 1
+    stats = caught.value.stats
+    assert stats["total_calls_planned"] == planned
+    assert stats["attempted_logical_calls"] == 1
+    assert stats["planned_calls_not_attempted"] == planned - 1
+    assert (tmp_path / "docs" / "crash_recovery.json").exists()
+
+
 def test_split_response_correction_uses_the_originating_leaf_call(
     tmp_path, monkeypatch
 ) -> None:
@@ -966,7 +1027,7 @@ def test_mixed_ordinary_and_divided_files_resume_after_rate_limit_step_down(
                         self.failed = True
                         self.doc_calls += 1
                 if should_fail:
-                    raise LLMError("openai", "429 rate_limit_exceeded")
+                    raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
             return super().complete_json(prompt, system)
 
     provider = RateLimitSecondLargeLeaf()
@@ -1055,8 +1116,8 @@ def test_terminal_split_failure_cancels_pending_file_tasks_and_keeps_checkpoint(
         def process_leaf_chunk(self, chunk_request):
             self.leaf_calls += 1
             if self.leaf_calls == 2:
-                raise LLMError(
-                    "openai", "Your credit balance is too low to continue"
+                raise provider_failure_error(
+                    "openai", "provider-quota-exhausted", status=429
                 )
             return {"description": f"chunk {chunk_request.chunk_id}"}
 

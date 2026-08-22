@@ -368,6 +368,19 @@ large-file split execution:
         ),
     )
     parser.add_argument(
+        "--provider-request-timeout-s",
+        type=str,
+        default=None,
+        metavar="SECONDS",
+        dest="provider_request_timeout_s",
+        help=(
+            "Per connect/read/write/pool phase transport timeout for a single "
+            "provider request, in seconds (1-600 inclusive, default: 120). "
+            "Not a wall-clock deadline for the whole call. Must be a plain "
+            "ASCII decimal number (no sign, exponent, or digit grouping)."
+        ),
+    )
+    parser.add_argument(
         "--large-file-strategy",
         choices=["truncate", "split"],
         default=None,
@@ -544,6 +557,10 @@ def _print_dry_run_summary(stats: dict) -> None:
     print("\ncodedoc dry run — no files were written, no provider was contacted.")
     print(f"  Files scanned          : {stats.get('scanned', 0)}")
     print(f"  Files selected         : {stats.get('selected', 0)}")
+    if stats.get("files_skipped_large", 0):
+        print(f"  Files skipped (too large): {stats['files_skipped_large']}")
+    if stats.get("files_skipped_unreadable", 0):
+        print(f"  Files skipped (unreadable): {stats['files_skipped_unreadable']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Documentation scope    : {scope}")
     print(f"  Analysis mode          : {stats.get('analysis_mode', 'single')}")
@@ -685,6 +702,10 @@ def _print_run_summary(stats: dict) -> None:
         )
     if stats.get("resumed", 0):
         print(f"  Files resumed from recovery   : {stats['resumed']}")
+    if stats.get("files_skipped_large", 0):
+        print(f"  Files skipped (too large)     : {stats['files_skipped_large']}")
+    if stats.get("files_skipped_unreadable", 0):
+        print(f"  Files skipped (unreadable)    : {stats['files_skipped_unreadable']}")
     print(f"  Files failed     : {stats['failed']}")
     scope = stats.get("documentation_scope", "entry")
     print(f"  Scope            : {scope}")
@@ -844,6 +865,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.large_file_strategy is not None,
                 args.max_parallel_files is not None,
                 args.truncation_head_ratio is not None,
+                args.provider_request_timeout_s is not None,
                 args.verbose,
             )
         )
@@ -909,6 +931,8 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["max_parallel_files"] = args.max_parallel_files
     if args.truncation_head_ratio is not None:
         overrides["truncation_head_ratio"] = args.truncation_head_ratio
+    if args.provider_request_timeout_s is not None:
+        overrides["provider_request_timeout_s"] = args.provider_request_timeout_s
     if args.verbose:
         overrides["log_level"] = "DEBUG"
     if args.dry_run:

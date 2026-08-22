@@ -5,10 +5,10 @@ from __future__ import annotations
 import pytest
 from codedoc.core.execution import _process_one_file, _process_one_file_with_retries
 from codedoc.utils.errors import ResponseContractError, UnrecoverableProviderError
+from tests.support.provider_failures import provider_failure_error
 from tests.support.response_correction_cases import RoutingProvider
 from tests.support.response_correction_cases import _orch
 from tests.support.response_correction_cases import _request
-from tests.support.response_correction_cases import fake_provider_exception
 
 def test_correction_call_billing_fault_is_terminal(tmp_path):
     # A confirmed-unrecoverable fault on the correction call is a run-level
@@ -23,8 +23,8 @@ def test_correction_call_billing_fault_is_terminal(tmp_path):
     # identical terminal-abort path this test verifies.
     prov = RoutingProvider(
         fail_agents={"combined"},
-        raise_on_correction=fake_provider_exception(
-            "openai", "AuthenticationError", "invalid credentials"
+        raise_on_correction=provider_failure_error(
+            "openai", "provider-authentication-rejected", status=401
         ),
     )
     with pytest.raises(UnrecoverableProviderError):
@@ -48,8 +48,8 @@ def test_terminal_sibling_error_is_not_masked_by_contract_failure(tmp_path):
     prov = RoutingProvider(
         fail_agents={"structure"},
         raise_agents={
-            "dependency": fake_provider_exception(
-                "openai", "AuthenticationError", "invalid api key"
+            "dependency": provider_failure_error(
+                "openai", "provider-authentication-rejected", status=401
             )
         },
     )

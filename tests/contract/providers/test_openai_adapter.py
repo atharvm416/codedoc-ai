@@ -25,9 +25,11 @@ class TestAPIProviders:
                 return types.SimpleNamespace(choices=[FakeChoice()])
 
         class FakeOpenAI:
-            def __init__(self, api_key, base_url=None):
+            def __init__(self, api_key, base_url=None, timeout=None, max_retries=None):
                 captured["api_key"] = api_key
                 captured["base_url"] = base_url
+                captured["timeout"] = timeout
+                captured["max_retries"] = max_retries
                 self.chat = types.SimpleNamespace(
                     completions=FakeCompletions()
                 )

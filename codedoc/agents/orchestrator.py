@@ -460,6 +460,7 @@ class Orchestrator:
             "response_contract_final",
             "response_contract_diagnostic",
             "response_contract_correction_attempted",
+            "provider_failure",
         ):
             if marker_key in failure:
                 documentation[marker_key] = failure[marker_key]

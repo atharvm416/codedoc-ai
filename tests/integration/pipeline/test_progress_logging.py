@@ -123,7 +123,7 @@ class TestAgentProgressLogs:
 
 def test_D13_cli_summary_shows_compact_line_when_events(tmp_path, monkeypatch, capsys):
     """D13: CLI prints compact rate-limit line only when events occurred."""
-    from codedoc.utils.errors import LLMError
+    from tests.support.provider_failures import provider_failure_error
 
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
@@ -135,7 +135,9 @@ def test_D13_cli_summary_shows_compact_line_when_events(tmp_path, monkeypatch, c
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                raise LLMError("anthropic", "529 overloaded")
+                raise provider_failure_error(
+                    "anthropic", "provider-rate-limited", status=529, limit_type="overloaded"
+                )
             import json as _j
             if "key_concepts" in prompt:
                 return _j.dumps({"description": "ok", "role_in_system": "r",

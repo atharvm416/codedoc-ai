@@ -23,6 +23,7 @@ from dataclasses import dataclass
 from urllib.parse import urlsplit
 
 from codedoc.llm.base import LLMProvider
+from codedoc.llm.rate_limit_profile import RateLimitProfile, get_rate_limit_profile
 from codedoc.utils.errors import (
     CodeDocError,
     ConfigError,
@@ -54,6 +55,7 @@ _DEFAULT_MODELS = {
 
 _ENDPOINT_DEFAULT_SENTINEL = "provider-default"
 _EXECUTION_DESCRIPTOR_ATTRIBUTE = "_codedoc_provider_execution_descriptor"
+_RATE_LIMIT_PROFILE_ATTRIBUTE = "_codedoc_rate_limit_profile"
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,6 +193,16 @@ def constructed_provider_execution(
     return descriptor if isinstance(descriptor, ProviderExecutionDescriptor) else None
 
 
+def constructed_rate_limit_profile(provider: LLMProvider) -> RateLimitProfile | None:
+    """Return the same :class:`RateLimitProfile` the factory resolved and
+    passed into this provider's constructor, if present (section 5.5 / 12.1
+    C2). The pipeline reads this rather than re-resolving the profile, so
+    the profile driving execution and the signal tuple the adapter's own
+    exception boundary uses can never independently drift apart."""
+    profile = getattr(provider, _RATE_LIMIT_PROFILE_ATTRIBUTE, None)
+    return profile if isinstance(profile, RateLimitProfile) else None
+
+
 def attest_provider_execution(
     provider: object,
     config: dict,
@@ -200,12 +212,17 @@ def attest_provider_execution(
     The production factory attests its own concrete branch automatically.
     Alternate provider factories and network-free test doubles must call this
     helper explicitly; verification never infers an attestation from config.
+
+    Also resolves and attaches the same rate-limit profile (and its signal
+    tuple) that :func:`create_provider` would attach for this config, so an
+    explicitly attested test double is indistinguishable from a real
+    factory-constructed provider for section 5.5 purposes.
     """
-    setattr(
-        provider,
-        _EXECUTION_DESCRIPTOR_ATTRIBUTE,
-        describe_provider_execution(config),
-    )
+    descriptor = describe_provider_execution(config)
+    setattr(provider, _EXECUTION_DESCRIPTOR_ATTRIBUTE, descriptor)
+    rate_limit_profile = get_rate_limit_profile(descriptor.provider_kind, config)
+    setattr(provider, _RATE_LIMIT_PROFILE_ATTRIBUTE, rate_limit_profile)
+    provider._rate_limit_signals = tuple(rate_limit_profile.signals)
     return provider
 
 
@@ -257,8 +274,15 @@ def create_provider(config: dict) -> LLMProvider:
         # ProviderInitError (a ConfigError subclass → CLI exit code 2).
         try:
             expected = describe_provider_execution(config)
+            rate_limit_profile = get_rate_limit_profile(expected.provider_kind, config)
             result = _make_api(
-                provider, model, api_key, base_url, provider_prefixes
+                provider,
+                model,
+                api_key,
+                base_url,
+                provider_prefixes,
+                provider_request_timeout_s=config.get("provider_request_timeout_s", 120),
+                rate_limit_signals=tuple(rate_limit_profile.signals),
             )
             actual = constructed_provider_execution(result)
             if actual != expected:
@@ -266,6 +290,7 @@ def create_provider(config: dict) -> LLMProvider:
                     "LLM provider construction identity did not match the "
                     "resolved provider/model/effective-endpoint plan."
                 )
+            setattr(result, _RATE_LIMIT_PROFILE_ATTRIBUTE, rate_limit_profile)
             return result
         except ConfigError:
             raise
@@ -298,6 +323,9 @@ def _make_api(
     api_key: str,
     base_url: str | None,
     provider_prefixes: dict[str, list[str]] | None = None,
+    *,
+    provider_request_timeout_s: float = 120,
+    rate_limit_signals: tuple[str, ...] = (),
 ) -> LLMProvider:
     if not api_key:
         raise ConfigError(
@@ -314,12 +342,22 @@ def _make_api(
     if selected == "anthropic":
         from codedoc.llm.api_provider import AnthropicProvider
 
-        result = AnthropicProvider(api_key=api_key, model=effective_model)
+        result = AnthropicProvider(
+            api_key=api_key,
+            model=effective_model,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
+        )
         endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
     elif selected == "gemini":
         from codedoc.llm.api_provider import GeminiProvider
 
-        result = GeminiProvider(api_key=api_key, model=effective_model)
+        result = GeminiProvider(
+            api_key=api_key,
+            model=effective_model,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
+        )
         endpoint_identity = _ENDPOINT_DEFAULT_SENTINEL
     else:
         # OpenAI or compatible endpoint (default)
@@ -329,6 +367,8 @@ def _make_api(
             api_key=api_key,
             model=effective_model,
             base_url=base_url,
+            timeout=provider_request_timeout_s,
+            rate_limit_signals=rate_limit_signals,
         )
         endpoint_identity = effective_endpoint_identity(base_url)
 

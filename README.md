@@ -379,8 +379,8 @@ instruction schema instead of copying a partial configuration.
 | `propagate_changes` | Include selected dependents in change routing before the normal reusable-record checks. |
 | `rate_limit_adaptive` | Step file concurrency down when rate limits occur. |
 | `parallel_ladder` | Replace the adaptive concurrency ladder, or use `null` for the default. |
-| `respect_retry_after` | Honor a provider `Retry-After` hint. |
-| `retry_after_cap_s` | Cap the number of seconds honored from `Retry-After`. |
+| `respect_retry_after` | Honor a plain-seconds `Retry-After` hint from OpenAI or Anthropic; Gemini always uses computed backoff. |
+| `retry_after_cap_s` | Cap the number of seconds honored from `Retry-After` (OpenAI and Anthropic only). |
 | `skip_dirs` | Replace the directory-name skip list. |
 | `skip_dirs_add` | Add names to the resolved directory skip list. |
 | `skip_dirs_remove` | Remove names from the resolved directory skip list. |
@@ -395,8 +395,8 @@ instruction schema instead of copying a partial configuration.
 | `provider_prefixes_remove` | Remove provider model prefixes. |
 | `rate_limit_backoff_s` | Override the global minimum rate-limit backoff, or use `null`. |
 | `rate_limit_backoff_scale` | Override the global backoff scale, or use `null`. |
-| `rate_limit_signals_add` | Add error-message signals recognized as rate limits. |
-| `rate_limit_signals_remove` | Remove recognized rate-limit signals. |
+| `rate_limit_signals_add` | Add error-message signals that promote an otherwise-unmapped provider failure to rate-limit handling. |
+| `rate_limit_signals_remove` | Remove signals from that otherwise-unmapped rate-limit promotion. |
 | `ignore_paths` | Set project-relative paths to ignore. |
 | `max_content_chars` | Set the ordinary source ceiling and the ceiling for each split leaf, reduction manifest, and final manifest. |
 | `large_file_strategy` | Choose head-and-tail `truncate` handling or complete-source `split` planning, execution, completed reuse, and node recovery. |
@@ -407,6 +407,7 @@ instruction schema instead of copying a partial configuration.
 | `allow_partial` | Exit successfully after a completed run that contains file failures. |
 | `analysis_mode` | Choose the initial combined `single` path or the three-agent `triple` path for an ordinary file. |
 | `truncation_head_ratio` | Set the head fraction of head-and-tail truncation. |
+| `provider_request_timeout_s` | Set the per connect/read/write/pool phase provider request transport timeout in seconds (1-600). |
 | `response_correction_enabled` | Opt into one targeted correction call for an eligible rejected response. |
 | `prompt_profiles` | Customize inline single/triple requested output shapes. |
 
@@ -813,12 +814,26 @@ facts and inventing nothing.
 | `--force` | With `--init-config`, refresh only editable profiles. |
 | `--max-parallel-files N` | Set concurrent file processing (default `5`). |
 | `--truncation-head-ratio FLOAT` | Set the head/tail source truncation split. |
+| `--provider-request-timeout-s SECONDS` | Set the per-phase provider request transport timeout in seconds (1-600, default `120`). |
 | `--verbose`, `-v` | Enable debug logging. |
 | `--version` | Print the installed version and exit. |
 
 Ignore rules are resolved from `--ignore`/`ignore_paths` and the
 `--skip-dirs`/`--add-skip-dir`/`--remove-skip-dir` family. Paths are
 project-relative; skip-directory values are directory names.
+
+For example, documenting CodeDoc's own `codedoc/` source (whose name matches
+a default skip-dir) while writing output elsewhere:
+
+```powershell
+codedoc . --remove-skip-dir codedoc --output docs_output
+```
+
+The exact generated JSON, Markdown, and recovery target files are excluded
+from scanning by resolved-path equality; the output directory itself is not
+automatically excluded. Other supported source files co-located there remain
+scannable when ordinary skip rules allow them, while generated targets are
+never re-scanned as source.
 
 ## Providers and environment variables
 
@@ -851,6 +866,7 @@ environment variables. CodeDoc does not read `.env` files.
 | `CODEDOC_ANALYSIS_MODE` | `single` or `triple`. |
 | `CODEDOC_LARGE_FILE_STRATEGY` | `truncate`, or fresh `split` planning/execution in single mode. |
 | `CODEDOC_TRUNCATION_HEAD_RATIO` | Head fraction for source truncation. |
+| `CODEDOC_PROVIDER_REQUEST_TIMEOUT_S` | Provider request transport timeout in seconds (1-600). |
 
 Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
 `claude-haiku-4-5-20251001`, and Gemini `gemini-2.5-flash`. Select explicitly with

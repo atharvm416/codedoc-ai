@@ -156,6 +156,10 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
         "Head fraction (0<r<1) of the head+tail truncation split.",
     ),
     (
+        "provider_request_timeout_s",
+        "Per-phase provider request transport timeout in seconds (1-600).",
+    ),
+    (
         "response_correction_enabled",
         "Opt in to one targeted correction call per failed agent response.",
     ),

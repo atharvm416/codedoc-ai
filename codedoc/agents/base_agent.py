@@ -27,6 +27,8 @@ from codedoc.utils.errors import (
     CodeDocError,
     ResponseContractError,
     bounded_exception_summary,
+    find_provider_failure,
+    provider_failure_as_mapping,
 )
 from codedoc.utils.logger import get_logger
 
@@ -435,11 +437,20 @@ class BaseAgent(ABC):
         execution layer can re-raise a typed, non-retryable failure and accounting
         can distinguish an opt-out rejection from an exhausted correction.  Every
         other exception returns the historical ``{"error", "agent"}`` dict.
+
+        When *exc*'s chain carries a :class:`ProviderFailureEnvelope`
+        (section 5.4), it is serialized onto ``provider_failure`` so the
+        execution layer can reconstruct it after this dict round-trip --
+        the envelope would otherwise be lost the moment the exception is
+        reduced to a dict here.
         """
         error_text = (
             str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
         )
         result = {"error": error_text, "agent": self.agent_name}
+        failure = find_provider_failure(exc)
+        if failure is not None:
+            result["provider_failure"] = provider_failure_as_mapping(failure)
         if isinstance(exc, ResponseContractError):
             result["response_contract_final"] = True
             result["response_contract_correction_attempted"] = exc.correction_attempted
@@ -490,10 +501,19 @@ class BaseAgent(ABC):
         except CancelledError:
             raise
         except Exception as exc:
+            # Section 5.4: the same two-tier rule as _agent_error_result's own
+            # recorded-result text -- a CodeDocError (e.g. a bare LLMError
+            # raised outside _call_llm_counted's own wrapping) is already
+            # bounded by construction and renders unchanged via str(exc); only
+            # a genuinely foreign exception is reduced through
+            # bounded_exception_summary. Calling the summary unconditionally
+            # would discard a CodeDocError's canonical reason and misreport
+            # it as "unknown-error".
+            detail = str(exc) if isinstance(exc, CodeDocError) else bounded_exception_summary(exc)
             logger.warning(
                 "%s unexpected error on %s: %s",
                 self.agent_name,
                 file_path,
-                bounded_exception_summary(exc),
+                detail,
             )
             return self._agent_error_result(exc)

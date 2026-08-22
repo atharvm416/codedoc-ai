@@ -68,6 +68,7 @@ from codedoc.core.record_meta import (
     normalized_identity_value,
 )
 from codedoc.core.release_policy import current_split_release_policy
+from codedoc.core.scanner import ScanDiagnostics, exclude_path_key
 from codedoc.core.source_precheck import insufficient_source
 from codedoc.parser.factory import parse_source
 from codedoc.utils.errors import ConfigError, ParseError
@@ -596,6 +597,7 @@ def build_pipeline_plan(
     *,
     rebuild_source_inputs: Callable[[], PlanSourceInputs] | None = None,
     recovered_partials: Mapping[str, SplitTreeState] | None = None,
+    diagnostics: ScanDiagnostics | None = None,
 ) -> tuple[PipelinePlan, PlanMaterials]:
     """Compute the full routing plan for one pipeline run, read-only.
 
@@ -644,7 +646,7 @@ def build_pipeline_plan(
     """
     args = (
         file_map, graph, selected_rels, entry_rel, existing_docs, forced_paths, config,
-        resolved_profile, recovered_partials,
+        resolved_profile, recovered_partials, diagnostics,
     )
     try:
         return _build_pipeline_plan_once(*args)
@@ -661,7 +663,7 @@ def build_pipeline_plan(
             args = (
                 fresh.file_map, fresh.graph, fresh.selected_rels, fresh.entry_rel,
                 existing_docs, forced_paths, config, resolved_profile,
-                recovered_partials,
+                recovered_partials, diagnostics,
             )
         try:
             return _build_pipeline_plan_once(*args)
@@ -684,6 +686,7 @@ def _build_pipeline_plan_once(
     config: dict,
     resolved_profile: ResolvedProfile | None,
     recovered_partials: Mapping[str, SplitTreeState] | None,
+    diagnostics: ScanDiagnostics | None = None,
 ) -> tuple[PipelinePlan, PlanMaterials]:
     """One provider-free planning pass. See :func:`build_pipeline_plan`."""
     scanned_rels = frozenset(file_map)
@@ -725,15 +728,41 @@ def _build_pipeline_plan_once(
     # routing and request construction even for a file that would otherwise be
     # classified unchanged. The outer build_pipeline_plan() retries the entire
     # provider-free planning pass once; workers never perform either read.
-    routing_hashes = {
-        rel: compute_file_hash(file_map[rel]["path"])
-        for rel in selected_rels
-    }
+    routing_hashes: dict[str, str] = {}
     source_snapshots: dict[str, tuple[str, str]] = {}
     for rel in selected_rels:
-        snapshot = read_source_snapshot(file_map[rel]["path"])
-        if snapshot[0] != routing_hashes[rel]:
+        path = file_map[rel]["path"]
+        try:
+            routing_hash = compute_file_hash(path)
+            snapshot = read_source_snapshot(path)
+        except OSError as exc:
+            # Section 12.1 C5: a source read failure here happens after the
+            # scanner's own stat-based check already passed this file
+            # through -- e.g. a permission change or deletion racing the
+            # scan -- and must never escape as a raw, unbounded OSError.
+            # Detected and counted before any provider is constructed and
+            # before any recovery/output mutation, since this whole
+            # planning pass is read-only and runs ahead of both.
+            if diagnostics is not None:
+                diagnostics.record_unreadable(exclude_path_key(path))
+            if rel == entry_rel:
+                raise ConfigError(
+                    f"Entry file '{rel}' could not be read: {exc}. Check the "
+                    "path and its file permissions."
+                ) from exc
+            if rel in effective_forced:
+                raise ConfigError(
+                    f"force_files entry '{rel}' could not be read: {exc}. "
+                    "Check the path and its file permissions."
+                ) from exc
+            raise ConfigError(
+                f"Source file '{rel}' became unreadable while codedoc was "
+                f"planning this run: {exc}. Check its file permissions, or "
+                "exclude it via ignore_paths."
+            ) from exc
+        if snapshot[0] != routing_hash:
             raise _StaleSourceSnapshotError(rel)
+        routing_hashes[rel] = routing_hash
         source_snapshots[rel] = snapshot
     insufficient_source_reasons = {
         rel: reason

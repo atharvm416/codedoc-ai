@@ -68,8 +68,11 @@ def _install_openai(monkeypatch, rec, *, content='{"ok": true}', error=None):
             self.completions = _Completions()
 
     class OpenAI:
-        def __init__(self, api_key=None, base_url=None):
-            rec["init"] = {"api_key": api_key, "base_url": base_url}
+        def __init__(self, api_key=None, base_url=None, timeout=None, max_retries=None):
+            rec["init"] = {
+                "api_key": api_key, "base_url": base_url,
+                "timeout": timeout, "max_retries": max_retries,
+            }
             self.chat = _Chat()
 
     mod.OpenAI = OpenAI
@@ -88,8 +91,10 @@ def _install_anthropic(monkeypatch, rec, *, text='{"ok": true}', error=None):
             return _AnthropicResponse(text)
 
     class Anthropic:
-        def __init__(self, api_key=None):
-            rec["init"] = {"api_key": api_key}
+        def __init__(self, api_key=None, timeout=None, max_retries=None):
+            rec["init"] = {
+                "api_key": api_key, "timeout": timeout, "max_retries": max_retries,
+            }
             self.messages = _Messages()
 
     mod.Anthropic = Anthropic
@@ -106,7 +111,17 @@ def _install_gemini(monkeypatch, rec, *, text='{"ok": true}', error=None):
             self.__dict__.update(kwargs)
             rec.setdefault("configs", []).append(kwargs)
 
+    class HttpRetryOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class HttpOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
     gtypes.GenerateContentConfig = GenerateContentConfig
+    gtypes.HttpRetryOptions = HttpRetryOptions
+    gtypes.HttpOptions = HttpOptions
 
     class _Models:
         def generate_content(self, model, contents, config):
@@ -117,8 +132,8 @@ def _install_gemini(monkeypatch, rec, *, text='{"ok": true}', error=None):
             return _GeminiResponse(text)
 
     class Client:
-        def __init__(self, api_key=None):
-            rec["init"] = {"api_key": api_key}
+        def __init__(self, api_key=None, http_options=None):
+            rec["init"] = {"api_key": api_key, "http_options": http_options}
             self.models = _Models()
 
     genai.Client = Client

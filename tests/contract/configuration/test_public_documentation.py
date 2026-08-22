@@ -91,6 +91,33 @@ def test_readme_documents_every_long_flag_and_environment_variable():
     }
     assert not {name for name in env_vars if name not in readme}
 
+
+def test_generated_target_exclusion_is_not_documented_as_directory_wide():
+    """Section 5.7: only exact generated targets are excluded automatically.
+
+    Public documentation must not broaden that production contract into a
+    claim that the whole output directory is excluded, because supported
+    source files can intentionally be co-located there after removing an
+    ordinary skip-dir.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    normalized_readme = " ".join(readme.split())
+
+    assert "--remove-skip-dir codedoc --output docs_output" in readme
+    assert (
+        "exact generated JSON, Markdown, and recovery target files are excluded"
+        in normalized_readme
+    )
+    assert "output directory itself is not automatically excluded" in normalized_readme
+    assert "co-located there remain scannable" in normalized_readme
+
+    directory_wide_claim = re.compile(
+        r"\boutput directory is (?:always )?excluded\b", re.IGNORECASE
+    )
+    for public_path in (ROOT / "README.md", ROOT / "CHANGELOG.md"):
+        public_text = " ".join(public_path.read_text(encoding="utf-8").split())
+        assert directory_wide_claim.search(public_text) is None
+
 def test_entry_help_matches_optional_resolution_and_all_files_fallback():
     parser = build_parser()
     assert parser.parse_args([]).entry is None

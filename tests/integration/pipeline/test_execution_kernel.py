@@ -17,6 +17,7 @@ from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ErrorReporter, LLMError, UnrecoverableProviderError
 from tests.support.execution_requests import make_execution_requests
 from tests.support.pipeline_usage import write_py
+from tests.support.provider_failures import provider_failure_error
 from tests.support.providers import SmartFake
 
 
@@ -427,6 +428,48 @@ class TestPlannedIdReconciliation:
         assert stats["planned_calls_not_attempted"] == 0
         assert stats["additional_attempts"] == 1
 
+    def test_triple_mode_fail_then_success_reruns_all_three_siblings(
+        self, tmp_path, monkeypatch
+    ):
+        """Section 5.5's second accounting proof: unlike single mode, a triple
+        mode retry reruns all three siblings (structure, dependency,
+        documentation) together -- never just the one that failed. One
+        initial pass (1 failure + 2 successes) plus one full retry pass (3
+        successes) gives 3 unique logical calls but 6 total attempts."""
+        from tests.support.one_call_cases import _COMBINED_JSON, _CountingProvider
+
+        write_py(tmp_path / "main.py")
+
+        class _TripleFlakyOnce(_CountingProvider):
+            def complete_json(self, prompt, system=""):
+                self.calls += 1
+                if self.calls == 1:
+                    raise LLMError("openai", "temporary provider outage")
+                return self._raw
+
+        provider = _TripleFlakyOnce(raw=_COMBINED_JSON)
+        monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _cfg: provider)
+        stats = run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "main.py",
+                "analysis_mode": "triple",
+                "parallel_agents": False,
+                "file_retry_attempts": 1,
+                "max_parallel_files": 1,
+                "propagate_changes": False,
+            },
+        )
+
+        assert stats["checked"] == 1
+        assert stats["failed"] == 0
+        assert provider.calls == 6
+        assert stats["total_calls_planned"] == 3
+        assert stats["attempted_logical_calls"] == 3
+        assert stats["planned_calls_not_attempted"] == 0
+        assert stats["attempted_calls"] == 6
+        assert stats["additional_attempts"] == 3
+
     def test_allow_partial_completion_reconciles_with_nothing_unattempted(
         self, tmp_path, monkeypatch
     ):
@@ -486,7 +529,7 @@ class TestPlannedIdReconciliation:
                         raise LLMError("openai", "temporary provider outage")
                     return {"file_path": rel, "language": "python"}
                 if rel == "f1.py":
-                    raise LLMError("openai", "Your credit balance is too low to continue")
+                    raise provider_failure_error("openai", "provider-quota-exhausted", status=429)
                 return {"file_path": rel, "language": "python"}
 
         orch = _RetryThenTerminalOrch()
@@ -558,8 +601,8 @@ class TestPlannedIdReconciliation:
                 if rel == "f0.py" and self.calls_by_file[rel] == 1:
                     raise LLMError("openai", "temporary provider outage")
                 if rel == "f1.py":
-                    raise LLMError(
-                        "openai", "Your credit balance is too low to continue"
+                    raise provider_failure_error(
+                        "openai", "provider-quota-exhausted", status=429
                     )
                 return json.dumps({"description": "d"})
 

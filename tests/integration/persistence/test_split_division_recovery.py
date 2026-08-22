@@ -39,6 +39,7 @@ from codedoc.utils.errors import (
 )
 from tests.support.execution_requests import make_execution_request
 from tests.support.fixture_paths import FIXTURES_ROOT
+from tests.support.provider_failures import provider_failure_error
 from tests.support.providers import SmartFake
 from tests.support.run_metadata_cases import _view as run_metadata_view
 
@@ -449,8 +450,8 @@ def test_terminal_split_failure_preserves_stable_output_and_resumes_only_unpaid_
 
         def process_leaf_chunk(self, chunk_request):
             if self.completed == completed_before_terminal:
-                raise LLMError(
-                    "openai", "Your credit balance is too low to continue"
+                raise provider_failure_error(
+                    "openai", "provider-quota-exhausted", status=429
                 )
             self.completed += 1
             return {"description": f"chunk {chunk_request.chunk_id}"}

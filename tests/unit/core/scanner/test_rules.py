@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import pytest
 from tests.support.configuration_cases import _fake_provider
 
 def test_scan_respects_skip_dirs_list(tmp_path):
@@ -211,3 +212,555 @@ def test_P2_positional_list_language_resolved_from_fallback_map(tmp_path):
     files = scan_files(tmp_path, [".dart"])
     f = next(f for f in files if f["rel_path"] == "main.dart")
     assert f["language"] == "dart"  # from _FALLBACK_LANGUAGE_MAP
+
+
+# ---------------------------------------------------------------------------
+# Section 5.6: exact generated-target exclusion and scan diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_exclude_paths_matches_by_exact_equality_not_basename_or_prefix(tmp_path):
+    """A source file that merely shares the excluded file's basename (in a
+    different directory) or sits inside a same-named directory must NOT be
+    excluded -- only the exact resolved path is protected."""
+    from codedoc.core.scanner import exclude_path_key, scan_files
+
+    excluded_target = tmp_path / "out" / "codedoc.json"
+    excluded_target.parent.mkdir()
+    excluded_target.write_text("{}\n", encoding="utf-8")
+
+    # Same basename, different directory -- must still be scanned as source
+    # if it happened to have a supported extension (it does not here, but
+    # prove the exclusion set itself only matches the one exact path).
+    lookalike = tmp_path / "other" / "codedoc.json"
+    lookalike.parent.mkdir()
+    lookalike.write_text("{}\n", encoding="utf-8")
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    exclude_paths = {exclude_path_key(excluded_target)}
+    files = scan_files(
+        tmp_path,
+        extension_language_map={".py": "python", ".json": "json"},
+        exclude_paths=exclude_paths,
+    )
+    rels = {f["rel_path"] for f in files}
+    assert "main.py" in rels
+    assert "out/codedoc.json" not in rels
+    assert "other/codedoc.json" in rels, (
+        "A same-named file at a different exact path must not be excluded"
+    )
+
+
+def test_exclude_paths_protects_co_located_generated_targets(tmp_path):
+    """Co-located source/output directories remain supported: only the
+    exact generated file is excluded, every other file in that same
+    directory is still scanned normally."""
+    from codedoc.core.scanner import exclude_path_key, scan_files
+
+    (tmp_path / "codedoc.json").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    exclude_paths = {exclude_path_key(tmp_path / "codedoc.json")}
+    files = scan_files(
+        tmp_path,
+        extension_language_map={".py": "python", ".json": "json"},
+        exclude_paths=exclude_paths,
+    )
+    rels = {f["rel_path"] for f in files}
+    assert rels == {"main.py"}
+
+
+def test_scan_diagnostics_tracks_files_skipped_large(tmp_path):
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+
+    (tmp_path / "big.py").write_text("x" * 2048, encoding="utf-8")
+    (tmp_path / "small.py").write_text("x = 1\n", encoding="utf-8")
+
+    diagnostics = ScanDiagnostics()
+    files = scan_files(
+        tmp_path,
+        supported_extensions=[".py"],
+        max_file_size_kb=1,
+        diagnostics=diagnostics,
+    )
+    rels = {f["rel_path"] for f in files}
+    assert rels == {"small.py"}
+    assert diagnostics.files_skipped_large == 1
+    assert diagnostics.files_skipped_unreadable == 0
+
+
+def test_scan_diagnostics_tracks_unreadable_files_and_excludes_them(tmp_path, monkeypatch):
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+
+    (tmp_path / "good.py").write_text("x = 1\n", encoding="utf-8")
+    blocked = tmp_path / "blocked.py"
+    blocked.write_text("x = 1\n", encoding="utf-8")
+
+    original_stat = type(blocked).stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self.name == "blocked.py":
+            raise PermissionError("access denied")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(blocked), "stat", fake_stat)
+
+    diagnostics = ScanDiagnostics()
+    files = scan_files(
+        tmp_path,
+        supported_extensions=[".py"],
+        diagnostics=diagnostics,
+    )
+    rels = {f["rel_path"] for f in files}
+    assert rels == {"good.py"}
+    assert diagnostics.files_skipped_unreadable == 1
+    assert diagnostics.files_skipped_large == 0
+
+
+def test_scan_diagnostics_deduplicates_and_bounds_unreadable_warnings(tmp_path, monkeypatch, caplog):
+    """Warn individually for at most MAX_UNREADABLE_FILE_WARNINGS files, then
+    exactly one aggregate line for the rest -- never one line per file
+    beyond the bound, and never double-counted."""
+    import logging
+
+    from codedoc.core.scanner import MAX_UNREADABLE_FILE_WARNINGS, ScanDiagnostics, scan_files
+
+    total_unreadable = MAX_UNREADABLE_FILE_WARNINGS + 5
+    for i in range(total_unreadable):
+        (tmp_path / f"blocked_{i}.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "good.py").write_text("x = 1\n", encoding="utf-8")
+
+    original_stat = type(tmp_path).stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self.name.startswith("blocked_"):
+            raise PermissionError("access denied")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(tmp_path), "stat", fake_stat)
+
+    diagnostics = ScanDiagnostics()
+    with caplog.at_level(logging.WARNING, logger="codedoc.core.scanner"):
+        files = scan_files(
+            tmp_path,
+            supported_extensions=[".py"],
+            diagnostics=diagnostics,
+        )
+    rels = {f["rel_path"] for f in files}
+    assert rels == {"good.py"}
+    assert diagnostics.files_skipped_unreadable == total_unreadable
+
+    per_file_warnings = [
+        r for r in caplog.records if "Skipping unreadable file" in r.message
+    ]
+    aggregate_warnings = [
+        r for r in caplog.records if "more unreadable file" in r.message
+    ]
+    assert len(per_file_warnings) == MAX_UNREADABLE_FILE_WARNINGS
+    assert len(aggregate_warnings) == 1
+
+
+def test_scan_diagnostics_does_not_double_count_across_a_rescan(
+    tmp_path, monkeypatch, caplog
+):
+    """Section 12.1 C5: a shared ScanDiagnostics instance passed to two
+    scan_files calls against the same tree (as a rescan does) must count
+    each physical unreadable/large file once for the run, not once per
+    call."""
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+
+    (tmp_path / "good.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "big.py").write_text("x" * 2048, encoding="utf-8")
+    blocked = tmp_path / "blocked.py"
+    blocked.write_text("x = 1\n", encoding="utf-8")
+
+    original_stat = type(blocked).stat
+
+    def fake_stat(self, *args, **kwargs):
+        if self.name == "blocked.py":
+            raise PermissionError("access denied")
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(type(blocked), "stat", fake_stat)
+
+    diagnostics = ScanDiagnostics()
+    for _ in range(2):
+        files = scan_files(
+            tmp_path,
+            supported_extensions=[".py"],
+            max_file_size_kb=1,
+            diagnostics=diagnostics,
+        )
+        rels = {f["rel_path"] for f in files}
+        assert rels == {"good.py"}
+
+    assert diagnostics.files_skipped_unreadable == 1
+    assert diagnostics.files_skipped_large == 1
+    unreadable_warnings = [
+        record
+        for record in caplog.records
+        if "Skipping unreadable file" in record.message
+    ]
+    assert len(unreadable_warnings) == 1
+
+
+# ---------------------------------------------------------------------------
+# Section 5.6: pipeline-level skip_dirs / exact-output-exclusion integration
+#
+# Deliberately placed here rather than in test_config_precedence.py: that
+# file's own byte content is frozen source data for
+# tests/fixtures/split_state/completed_0_14_1.json,
+# completed_0_14_2.json, and recovery_0_14_1_completed_split.json (read via
+# Path(__file__).with_name(...) and hash-verified against those fixtures'
+# stored "hash" field) -- any edit there, even whitespace-only, invalidates
+# those frozen hashes.
+# ---------------------------------------------------------------------------
+
+
+def test_C7_remove_skip_dir_lets_a_co_located_output_directory_be_scanned(
+    tmp_path, monkeypatch
+):
+    """C7, section 5.6: ``--remove-skip-dir`` must actually work -- the
+    pipeline no longer unconditionally re-adds the output directory's
+    basename to skip_dirs.  A real source file co-located inside the same
+    directory as the generated output is scanned and documented; only the
+    exact generated targets (codedoc.json/codedoc.md/crash_recovery.json)
+    are protected, by exact-path equality, from ever being treated as
+    source themselves."""
+    from codedoc.pipeline import run_pipeline
+
+    pkg_dir = tmp_path / "codedoc"
+    pkg_dir.mkdir()
+    (pkg_dir / "helper.py").write_text("pass\n")
+    (tmp_path / "main.py").write_text("import codedoc.helper\n")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    run_pipeline(tmp_path, {
+        "entry_file": None,
+        "auto_entry_candidates": [],
+        "documentation_scope": "all",
+        "output_dir": "codedoc",
+        "skip_dirs_remove": ["codedoc"],
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+
+    out = tmp_path / "codedoc" / "codedoc.json"
+    assert out.exists()
+    result = json.loads(out.read_text(encoding="utf-8"))
+    scanned_paths = {f["path"] for f in result.get("files", [])}
+
+    assert "codedoc/helper.py" in scanned_paths
+    assert "codedoc/codedoc.json" not in scanned_paths
+    assert "codedoc/codedoc.md" not in scanned_paths
+    assert "codedoc/crash_recovery.json" not in scanned_paths
+
+
+def test_C7_default_skip_dirs_still_protects_the_output_directory_by_default(
+    tmp_path, monkeypatch
+):
+    """Without an explicit skip_dirs_remove, the default skip_dirs list
+    (which already includes "codedoc") still keeps the whole default output
+    directory out of the scan -- the fix only removes the *unconditional*
+    re-addition, not the ordinary default behavior."""
+    from codedoc.pipeline import run_pipeline
+
+    pkg_dir = tmp_path / "codedoc"
+    pkg_dir.mkdir()
+    (pkg_dir / "helper.py").write_text("pass\n")
+    (tmp_path / "main.py").write_text("pass\n")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    run_pipeline(tmp_path, {
+        "entry_file": "main.py",
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+
+    out = tmp_path / "codedoc" / "codedoc.json"
+    assert out.exists()
+    result = json.loads(out.read_text(encoding="utf-8"))
+    scanned_paths = {f["path"] for f in result.get("files", [])}
+    assert not any(p.startswith("codedoc/") for p in scanned_paths)
+
+
+def test_explicit_entry_file_colliding_with_output_target_raises_config_error(
+    tmp_path, monkeypatch
+):
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    with pytest.raises(ConfigError, match="generated output target"):
+        run_pipeline(tmp_path, {
+            "entry_file": "docs/codedoc.json",
+            "output_dir": "docs",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+
+def test_force_files_colliding_with_output_target_raises_config_error(tmp_path, monkeypatch):
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    with pytest.raises(ConfigError, match="generated output target"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "output_dir": "docs",
+            "force_files": ["docs/codedoc.md"],
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+
+def test_post_stat_read_failure_fails_boundedly_and_is_counted(tmp_path, monkeypatch):
+    """Section 12.1 C5: an ordinary file that passes the scanner's stat-based
+    check but fails to read later, during planning (e.g. a permission change
+    or deletion racing the scan), must never escape as a raw OSError -- it
+    fails boundedly with a ConfigError, detected and counted before any
+    provider is constructed."""
+    import codedoc.core.planning as planning
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("import other\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+
+    real_read_source_snapshot = planning.read_source_snapshot
+
+    def flaky_read_source_snapshot(path):
+        if path.name == "other.py":
+            raise PermissionError("access denied")
+        return real_read_source_snapshot(path)
+
+    monkeypatch.setattr(planning, "read_source_snapshot", flaky_read_source_snapshot)
+
+    def _forbidden_create_provider(_config):
+        raise AssertionError("create_provider must not be called before this failure")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", _forbidden_create_provider)
+
+    with pytest.raises(ConfigError, match="other.py"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "documentation_scope": "all",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+    assert not (tmp_path / "codedoc").exists()
+
+
+def test_unreadable_entry_file_raises_config_error_before_output_mutation(
+    tmp_path, monkeypatch
+):
+    """Section 12.1 C5: an explicitly-specified --entry file that cannot be
+    read fails with an actionable ConfigError, never a raw filesystem error,
+    and before any recovery file or output is created."""
+    import codedoc.core.planning as planning
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    real_read_source_snapshot = planning.read_source_snapshot
+
+    def flaky_read_source_snapshot(path):
+        if path.name == "main.py":
+            raise PermissionError("access denied")
+        return real_read_source_snapshot(path)
+
+    monkeypatch.setattr(planning, "read_source_snapshot", flaky_read_source_snapshot)
+
+    def _forbidden_create_provider(_config):
+        raise AssertionError("create_provider must not be called before this failure")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", _forbidden_create_provider)
+
+    with pytest.raises(ConfigError, match="Entry file 'main.py' could not be read"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+    assert not (tmp_path / "codedoc").exists()
+
+
+def test_unreadable_forced_file_raises_config_error_before_output_mutation(
+    tmp_path, monkeypatch
+):
+    """Section 12.1 C5: an unreadable force_files entry fails the same way
+    an unreadable entry file does -- an actionable ConfigError, before any
+    recovery file or output is created."""
+    import codedoc.core.planning as planning
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("import other\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("x = 1\n", encoding="utf-8")
+
+    real_read_source_snapshot = planning.read_source_snapshot
+
+    def flaky_read_source_snapshot(path):
+        if path.name == "other.py":
+            raise PermissionError("access denied")
+        return real_read_source_snapshot(path)
+
+    monkeypatch.setattr(planning, "read_source_snapshot", flaky_read_source_snapshot)
+
+    def _forbidden_create_provider(_config):
+        raise AssertionError("create_provider must not be called before this failure")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", _forbidden_create_provider)
+
+    with pytest.raises(ConfigError, match="force_files entry 'other.py' could not be read"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "documentation_scope": "all",
+            "force_files": ["other.py"],
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+    assert not (tmp_path / "codedoc").exists()
+
+
+def test_only_large_files_early_return_reports_counters_dry_and_real(tmp_path, monkeypatch):
+    """Section 12.1 C5: when scanning finds only oversized files (nothing
+    left in all_files), both the dry-run and the real-run early-return
+    stats must still surface files_skipped_large -- scanning already ran and
+    already knows this before either return path."""
+    from codedoc.pipeline import run_pipeline
+
+    (tmp_path / "big.py").write_text("x" * 2048, encoding="utf-8")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    dry_stats = run_pipeline(tmp_path, {
+        "max_file_size_kb": 1,
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "dry_run": True,
+    })
+    assert dry_stats["files_skipped_large"] == 1
+    assert dry_stats["files_skipped_unreadable"] == 0
+
+    real_stats = run_pipeline(tmp_path, {
+        "max_file_size_kb": 1,
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+    assert real_stats["files_skipped_large"] == 1
+    assert real_stats["files_skipped_unreadable"] == 0
+
+
+def test_opposite_format_sibling_is_excluded_even_when_not_the_active_format(
+    tmp_path, monkeypatch
+):
+    """Both the active and the opposite-format generated targets are always
+    excluded from scanning, regardless of the selected output_format, since
+    a cross-format resume can read the opposite-format sibling. A genuine
+    codedoc.md from an earlier "both"-format run must never be treated as
+    source once a later run selects only "json"."""
+    from codedoc.pipeline import run_pipeline
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _: _fake_provider())
+
+    run_pipeline(tmp_path, {
+        "entry_file": "main.py",
+        "output_dir": "docs",
+        "output_format": "both",
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+    assert (tmp_path / "docs" / "codedoc.md").exists()
+
+    stats = run_pipeline(tmp_path, {
+        "entry_file": "main.py",
+        "output_dir": "docs",
+        "output_format": "json",
+        "extension_language_map_add": {".md": "markdown"},
+        "parallel_agents": False,
+        "propagate_changes": False,
+    })
+
+    out = tmp_path / "docs" / "codedoc.json"
+    result = json.loads(out.read_text(encoding="utf-8"))
+    scanned_paths = {f["path"] for f in result.get("files", [])}
+    assert "docs/codedoc.md" not in scanned_paths
+    assert stats["checked"] + stats.get("reused", 0) + stats.get("skipped", 0) == 1
+
+def test_entry_file_failing_stat_raises_config_error_not_raw_oserror(
+    tmp_path, monkeypatch
+):
+    """Section 5.6 / 12.1 C5, stat-inspection counterpart: an explicitly
+    requested entry file whose own metadata cannot be read (EACCES on stat,
+    not ENOENT) must fail as an actionable ConfigError before any provider is
+    constructed, never as a raw PermissionError escaping detect_entry_file's
+    ``Path.exists()`` -- which swallows only the "doesn't exist"-shaped errno
+    set and re-raises EACCES."""
+    from pathlib import Path
+
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+    (tmp_path / "other.py").write_text("y = 2\n", encoding="utf-8")
+
+    real_stat = Path.stat
+
+    def denied_stat(self, *args, **kwargs):
+        if self.name == "main.py":
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+
+    def _forbidden_create_provider(_config):
+        raise AssertionError("create_provider must not be called before this failure")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", _forbidden_create_provider)
+
+    with pytest.raises(ConfigError, match="Entry file 'main.py' could not be read"):
+        run_pipeline(tmp_path, {
+            "entry_file": "main.py",
+            "documentation_scope": "all",
+            "parallel_agents": False,
+            "propagate_changes": False,
+        })
+
+    assert not (tmp_path / "codedoc").exists()
+
+def test_unreadable_auto_entry_candidate_is_skipped_not_fatal(tmp_path, monkeypatch):
+    """An auto-detection candidate is a guess, not a user request: one whose
+    stat fails is skipped like a missing one, so a single permission-restricted
+    file never aborts a run the user never asked to centre on it."""
+    from pathlib import Path
+
+    from codedoc.core.scanner import detect_entry_file
+
+    (tmp_path / "index.html").write_text("<html></html>\n", encoding="utf-8")
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    real_stat = Path.stat
+
+    def denied_stat(self, *args, **kwargs):
+        if self.name == "index.html":
+            raise PermissionError(13, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", denied_stat)
+
+    resolved = detect_entry_file(tmp_path, None, ["index.html", "main.py"])
+    assert resolved is not None
+    assert resolved.name == "main.py"

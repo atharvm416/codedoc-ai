@@ -17,6 +17,7 @@ from codedoc.agents.response_cleaning import clean_combined_response
 from codedoc.core.document import read_codedoc_document
 from codedoc.core.safe_writer import SafeWriter, _CRASH_SAFETY_BANNER
 from codedoc.utils.errors import ConfigError
+from tests.support.provider_failures import provider_failure_error
 from tests.support.versionless_documents import _assert_versionless
 from codedoc.core.document import records_by_path
 from codedoc.core.resume import (
@@ -63,7 +64,7 @@ class _RateLimitOrch:
     llm = _LLM()
 
     def process(self, request):
-        raise RuntimeError("429 rate limit exceeded")
+        raise provider_failure_error("openai", "provider-rate-limited", status=429)
 
 def test_A4_recorded_this_run_recovers_real_record(tmp_path):
     """A4: a file actually recorded THIS run whose future surfaces a rate-limit

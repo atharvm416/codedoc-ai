@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import json
 import pytest
-from codedoc.utils.errors import LLMError, UnrecoverableProviderError
+from codedoc.utils.errors import UnrecoverableProviderError
 from tests.support.clocks import capture_sleeps
+from tests.support.provider_failures import provider_failure_error
 from tests.support.recovery_rate_limit_runs import _patch_provider as recovery_rate_limit_patch_provider
 from tests.support.recovery_rate_limit_runs import _run
 
@@ -21,7 +22,7 @@ class _AlwaysRateLimit:
     provider_name = "openai"
 
     def complete_json(self, prompt, system=""):
-        raise LLMError("openai", "429 rate_limit_exceeded tokens per min")
+        raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt)
@@ -39,7 +40,7 @@ class _RateLimitOnceThenOk:
     def complete_json(self, prompt, system=""):
         self.calls += 1
         if self.calls == 1:
-            raise LLMError("openai", "429 rate_limit_exceeded")
+            raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
         if "key_concepts" in prompt:
             return json.dumps({
                 "description": "ok", "role_in_system": "r",
@@ -159,19 +160,22 @@ def test_non_adaptive_persistent_rate_limit_stops(
 def test_initial_sequential_uses_custom_rate_limit_signal(
     tmp_path, monkeypatch, captured_sleeps
 ):
-    """Configured signals must reach retries and the zero-progress bound."""
-    (tmp_path / "a.py").write_text("x = 1\n", encoding="utf-8")
+    """Configured signals must reach retries and the zero-progress bound.
 
-    class _CustomRateLimit:
-        provider_name = "openai"
+    Section 5.3 narrows configured rate-limit text signals to promotion at
+    the real adapter's own exception boundary -- they no longer apply to an
+    arbitrary local double that bypasses the adapter entirely.  This test
+    therefore goes through the real ``create_provider`` factory and a real
+    ``OpenAIProvider`` wrapping a fake SDK client, so the configured signal
+    is actually evaluated where section 5.3 requires it.
+    """
+    from tests.support.providers import _install_openai
 
-        def complete_json(self, prompt, system=""):
-            raise LLMError("openai", "custom throttle sentinel")
+    (tmp_path / "a.py").write_text("from b import x\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("x = 1\n", encoding="utf-8")
 
-        def complete(self, prompt, system="", temperature=0.1):
-            return self.complete_json(prompt)
-
-    _patch_provider(monkeypatch, _CustomRateLimit())
+    rec = {}
+    _install_openai(monkeypatch, rec, error=RuntimeError("custom throttle sentinel"))
     from codedoc.pipeline import run_pipeline
 
     with pytest.raises(UnrecoverableProviderError) as excinfo:
@@ -183,6 +187,8 @@ def test_initial_sequential_uses_custom_rate_limit_signal(
                 "parallel_agents": False,
                 "max_parallel_files": 1,
                 "file_retry_attempts": 0,
+                "llm_provider": "openai",
+                "api_key": "test-key",
                 "rate_limit_signals_add": ["custom throttle sentinel"],
             },
         )
@@ -222,8 +228,6 @@ def test_9_rate_limit_ladder_steps_down(tmp_path, monkeypatch):
     (tmp_path / "b.py").write_text("from c import y\nx=1\n")
     (tmp_path / "c.py").write_text("y=1\n")
 
-    from codedoc.utils.errors import LLMError
-
     call_count = {"n": 0}
 
     class RateLimitThenOk:
@@ -233,7 +237,7 @@ def test_9_rate_limit_ladder_steps_down(tmp_path, monkeypatch):
             call_count["n"] += 1
             # First 3 calls: rate-limit (during parallel batch at level 5)
             if call_count["n"] <= 3:
-                raise LLMError("openai", "429 rate_limit_exceeded tokens per min")
+                raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
             # After step-down: succeed
             if "key_concepts" in prompt:
                 return json.dumps({"description": "ok", "role_in_system": "r",
@@ -338,6 +342,46 @@ def test_9c_non_rate_limit_parallel_failures_counted_in_stats(tmp_path, monkeypa
     assert "error_log" not in stats
     assert not (tmp_path / "codedoc" / "error.log").exists()
 
+def test_envelope_less_rate_limit_shaped_text_never_re_enters_via_stats(tmp_path, monkeypatch):
+    """Section 12.1 R2: an envelope-less LLMError whose message text mimics
+    a rate-limit signal ("429 rate_limit_exceeded tokens per min") must
+    still classify as transient through the real retry/warning/stats path
+    -- proving the removed substring classifier cannot silently re-enter
+    through production code, not merely through a direct classifier call."""
+    (tmp_path / "a.py").write_text("x = 1\n")
+
+    from codedoc.utils.errors import LLMError
+
+    class AlwaysFailProvider:
+        provider_name = "openai"
+
+        def complete_json(self, prompt, system=""):
+            raise LLMError("openai", "429 rate_limit_exceeded tokens per min")
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    recovery_rate_limit_patch_provider(monkeypatch, AlwaysFailProvider())
+    from codedoc.pipeline import run_pipeline
+
+    stats = run_pipeline(tmp_path, {
+        "entry_file": "a.py",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "max_parallel_files": 1,
+        "rate_limit_adaptive": True,
+        "file_retry_attempts": 0,
+        "max_consecutive_failures": 10,
+    })
+
+    assert stats["failed"] == 1
+    assert "rate_limit_warnings" not in stats
+    assert stats["issues_recorded"] == stats["failed"]
+    persisted = json.loads(
+        (tmp_path / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    assert "rate_limit_warnings" not in persisted["last_run"]
+
 def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch, capsys):
     """Test 10b: step-down prints provider name and original max_parallel to stdout."""
     sleeps = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
@@ -346,13 +390,11 @@ def test_10b_user_notification_includes_provider_and_level(tmp_path, monkeypatch
     (tmp_path / "b.py").write_text("from c import y\nx=1\n")
     (tmp_path / "c.py").write_text("y=1\n")
 
-    from codedoc.utils.errors import LLMError
-
     class AlwaysRateLimitProvider:
         provider_name = "openai"
 
         def complete_json(self, prompt, system=""):
-            raise LLMError("openai", "429 rate_limit_exceeded")
+            raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
 
         def complete(self, prompt, system="", temperature=0.1):
             return self.complete_json(prompt)
@@ -398,11 +440,14 @@ def test_10b_no_warning_on_successful_run(tmp_path, monkeypatch, capsys):
 def _make_fake_provider_rate_limit_then_ok(
     fail_calls: int,
     provider_name: str = "openai",
-    signal: str = "429 rate_limit_exceeded tokens per min",
+    *,
+    reason_code: str = "provider-rate-limited",
+    status: int | None = 429,
+    limit_type: str | None = "tpm",
+    retry_after_s: float | None = None,
 ):
     """Fail with a rate-limit signal for the first *fail_calls*, then succeed."""
     import json as _json
-    from codedoc.utils.errors import LLMError
 
     call_count = {"n": 0}
 
@@ -414,7 +459,13 @@ def _make_fake_provider_rate_limit_then_ok(
     def _complete(self, prompt, system=""):
         call_count["n"] += 1
         if call_count["n"] <= fail_calls:
-            raise LLMError(provider_name, signal)
+            raise provider_failure_error(
+                provider_name,
+                reason_code,
+                status=status,
+                limit_type=limit_type,
+                retry_after_s=retry_after_s,
+            )
         if "key_concepts" in prompt:
             return _json.dumps({"description": "ok", "role_in_system": "r",
                                  "key_concepts": [], "usage_example": ""})
@@ -431,7 +482,6 @@ def _make_fake_provider_rate_limit_then_ok(
 
 def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
     """D9: When Retry-After hint is present, sleep uses that value."""
-    from codedoc.utils.errors import LLMError
     # Files must be >= 2 so we go parallel
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
@@ -443,8 +493,9 @@ def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                # Include Retry-After hint in the error message
-                raise LLMError("openai", "429 rate_limit. try again in 7.5s")
+                raise provider_failure_error(
+                    "openai", "provider-rate-limited", status=429, retry_after_s=7.5
+                )
             import json as _j
             if "key_concepts" in prompt:
                 return _j.dumps({"description": "ok", "role_in_system": "r",
@@ -483,8 +534,6 @@ def test_D9_inter_rung_sleep_uses_retry_after(tmp_path, monkeypatch):
 
 def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
     """D10: When no Retry-After hint, sleep uses profile.min_backoff_s × scale^rung."""
-    from codedoc.utils.errors import LLMError
-
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
 
@@ -495,7 +544,8 @@ def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                raise LLMError("openai", "429 rate_limit_exceeded")  # no Retry-After hint
+                # no Retry-After hint
+                raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
             import json as _j
             if "key_concepts" in prompt:
                 return _j.dumps({"description": "ok", "role_in_system": "r",
@@ -530,10 +580,151 @@ def test_D10_inter_rung_sleep_uses_profile_backoff(tmp_path, monkeypatch):
         f"Expected sleep ~4.0s from profile backoff, got sleeps={sleep_calls}"
     )
 
+def test_profile_selection_uses_attested_provider_kind_not_decorated_name(tmp_path, monkeypatch):
+    """Section 5.5: the rate-limit profile is selected from the attested
+    ProviderExecutionDescriptor.provider_kind, never the decorated
+    ``llm.provider_name`` display string. A decorated name like
+    "Anthropic(claude-test)" matches no PROVIDER_PROFILES key and would
+    silently fall back to the "default" union profile (min_backoff_s=5.0,
+    backoff_scale=1.5) instead of anthropic's own (10.0, 2.0)."""
+    (tmp_path / "a.py").write_text("from b import x\n")
+    (tmp_path / "b.py").write_text("x=1\n")
+
+    call_count = {"n": 0}
+
+    class DecoratedNameAnthropicProvider:
+        # Deliberately the decorated display form a real AnthropicProvider
+        # would report, not the plain attested provider_kind "anthropic".
+        provider_name = "Anthropic(claude-test)"
+
+        def complete_json(self, prompt, system=""):
+            call_count["n"] += 1
+            if call_count["n"] <= 2:
+                raise provider_failure_error(
+                    "anthropic", "provider-rate-limited", status=529, limit_type="overloaded"
+                )
+            import json as _j
+            if "key_concepts" in prompt:
+                return _j.dumps({"description": "ok", "role_in_system": "r",
+                                  "key_concepts": [], "usage_example": ""})
+            if "dependencies_analysis" in prompt:
+                return _j.dumps({"dependencies_analysis": {
+                    "internal": [], "external": [], "dependency_refs": [],
+                    "catalog_updates": [], "usage_notes": [], "warnings": []}})
+            return _j.dumps({"description": "ok", "role_in_system": "r",
+                              "functions": [], "classes": [], "exports": []})
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt)
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _: DecoratedNameAnthropicProvider()
+    )
+    sleep_calls = capture_sleeps(monkeypatch, "codedoc.core.execution.time.sleep")
+
+    from codedoc.pipeline import run_pipeline
+    run_pipeline(tmp_path, {
+        "entry_file": "a.py",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "max_parallel_files": 2,
+        "rate_limit_adaptive": True,
+        "file_retry_attempts": 0,
+        "respect_retry_after": False,
+        # Autouse conftest attestation resolves provider_kind from this key,
+        # independent of the decorated provider_name above.
+        "llm_provider": "anthropic",
+    })
+
+    # Anthropic's own profile: min(10.0 * 2.0**0, 30) = 10.0. The "default"
+    # union profile a decorated-name lookup would fall back to instead
+    # produces 5.0, so this distinguishes the two.
+    assert len(sleep_calls) > 0, "Profile backoff must trigger a sleep"
+    assert any(abs(s - 10.0) < 0.5 for s in sleep_calls), (
+        f"Expected anthropic's own ~10.0s backoff, got sleeps={sleep_calls}"
+    )
+
+
+def test_envelope_less_first_sibling_never_inherits_a_later_siblings_rate_limit(
+    tmp_path, monkeypatch
+):
+    """Section 12.1 C4's pipeline merge regression. In triple mode, the
+    first sibling (in fixed order) fails locally with no provider_failure
+    envelope while a later sibling fails with a rate-limited envelope. The
+    file's overall failure must classify as transient: it is counted as a
+    plain failure, produces no rate-limit warning, and triggers no
+    parallel-ladder step-down."""
+    from tests.support.provider_failures import provider_failure_error
+    from tests.support.response_correction_cases import RoutingProvider
+
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8")
+
+    provider = RoutingProvider(
+        raise_agents={
+            "structure": RuntimeError("local structure failure, no envelope"),
+            "dependency": provider_failure_error(
+                "openai", "provider-rate-limited", status=429
+            ),
+        },
+    )
+    _patch_provider(monkeypatch, provider)
+    from codedoc.pipeline import run_pipeline
+
+    stats = run_pipeline(tmp_path, {
+        "entry_file": "main.py",
+        "analysis_mode": "triple",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "file_retry_attempts": 0,
+        "llm_provider": "openai",
+    })
+
+    assert stats["failed"] == 1
+    assert stats.get("rate_limit_warnings", []) == []
+
+
+def test_run_pipeline_rejects_provider_missing_rate_limit_profile_attestation(
+    tmp_path, monkeypatch
+):
+    """Section 12.1 C2's unattested-rejection proof. A provider carrying a
+    valid execution descriptor attached by some path other than
+    attest_provider_execution -- so the autouse conftest fixture finds an
+    existing descriptor and never calls attest_provider_execution itself --
+    has no rate-limit profile attached. run_pipeline must fail closed with a
+    bounded ConfigError rather than silently running with an empty signal
+    tuple."""
+    from codedoc.llm.factory import _EXECUTION_DESCRIPTOR_ATTRIBUTE, describe_provider_execution
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    (tmp_path / "main.py").write_text("pass\n")
+
+    config = {
+        "entry_file": "main.py",
+        "llm_provider": "openai",
+        "model_name": "gpt-4o-mini",
+        "parallel_agents": False,
+        "propagate_changes": False,
+    }
+
+    class BareProvider:
+        provider_name = "openai(bare)"
+
+        def complete_json(self, prompt, system=""):
+            return "{}"
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return "{}"
+
+    provider = BareProvider()
+    setattr(provider, _EXECUTION_DESCRIPTOR_ATTRIBUTE, describe_provider_execution(config))
+    _patch_provider(monkeypatch, provider)
+
+    with pytest.raises(ConfigError, match="rate-limit profile"):
+        run_pipeline(tmp_path, config)
+
 def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
     """D11: rate_limit_backoff_s=0 must not trigger any time.sleep call."""
-    from codedoc.utils.errors import LLMError
-
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
 
@@ -544,7 +735,7 @@ def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if call_count["n"] <= 2:
-                raise LLMError("openai", "429 rate_limit")
+                raise provider_failure_error("openai", "provider-rate-limited", status=429)
             import json as _j
             if "key_concepts" in prompt:
                 return _j.dumps({"description": "ok", "role_in_system": "r",
@@ -581,8 +772,6 @@ def test_D11_backoff_s_zero_disables_sleep(tmp_path, monkeypatch):
 def test_D12_warning_dict_has_all_required_fields(tmp_path, monkeypatch):
     """D12: Rate-limit warning dict includes error_sample, limit_type,
     retry_after_s, sleep_s, event_number, rung_index."""
-    from codedoc.utils.errors import LLMError
-
     (tmp_path / "a.py").write_text("from b import x\n")
     (tmp_path / "b.py").write_text("x=1\n")
     (tmp_path / "c.py").write_text("y=1\n")
@@ -594,7 +783,7 @@ def test_D12_warning_dict_has_all_required_fields(tmp_path, monkeypatch):
         def complete_json(self, prompt, system=""):
             call_count["n"] += 1
             if call_count["n"] <= 3:
-                raise LLMError("openai", "429 rate_limit_exceeded tokens per min")
+                raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
             import json as _j
             if "key_concepts" in prompt:
                 return _j.dumps({"description": "ok", "role_in_system": "r",
@@ -640,6 +829,16 @@ def test_D12_warning_dict_has_all_required_fields(tmp_path, monkeypatch):
     assert w["error_sample"] != "", "error_sample must be non-empty"
     assert w["limit_type"] == "tpm", f"'tokens per min' must classify as 'tpm', got {w['limit_type']}"
     assert w["sleep_s"] >= 0
+
+    # Section 5.4: error_sample is canonical compact JSON of exactly
+    # reason_code, status, and retry_after_s -- never rendered provider text.
+    parsed_sample = json.loads(w["error_sample"])
+    assert set(parsed_sample) == {"reason_code", "status", "retry_after_s"}
+    assert parsed_sample["reason_code"] == "provider-rate-limited"
+    assert parsed_sample["status"] == 429
+    assert "," in w["error_sample"] and " " not in w["error_sample"], (
+        "error_sample must be compact JSON (no extraneous whitespace)"
+    )
 
 def test_D14_no_files_dropped_after_step_down(tmp_path, monkeypatch):
     """D14: All files are documented after a ladder step-down."""

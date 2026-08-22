@@ -23,6 +23,7 @@ for compatibility.
 from __future__ import annotations
 
 import concurrent.futures
+import json
 import logging
 import threading
 import time
@@ -34,9 +35,8 @@ from codedoc.agents.orchestrator import Orchestrator, assemble_final_result
 from codedoc.core.db import compute_file_hash
 from codedoc.core.error_classifier import (
     _classify_failure,
-    _detect_limit_type,
+    _detect_limit_type,  # noqa: F401  (re-exported: codedoc.pipeline._detect_limit_type)
     _find_insufficient_source_error,
-    _parse_retry_after,
     _raise_rate_limit_exhausted,
 )
 from codedoc.core.execution_model import (
@@ -83,6 +83,8 @@ from codedoc.utils.errors import (
     ResponseContractError,
     UnrecoverableProviderError,
     bounded_exception_summary,
+    find_provider_failure,
+    provider_failure_from_mapping,
 )
 from codedoc.utils.logger import get_logger
 
@@ -102,21 +104,9 @@ def _bounded_reason(exc: BaseException) -> str:
 # Compat re-exports (deprecated; import from error_classifier instead)
 # ---------------------------------------------------------------------------
 from codedoc.core.error_classifier import (  # noqa: F401, E402  (compat re-export)
-    _ACCESS_SIGNALS,
-    _CREDENTIAL_SIGNALS,
-    _DETECT_RPM_RE,
-    _DETECT_TPM_RE,
-    _GLOBAL_PERMANENT_SIGNALS,
-    _INPUT_PERMANENT_SIGNALS,
-    _MODEL_SIGNALS,
-    _RATE_LIMIT_SIGNALS,
-    _TERMINAL_BILLING_SIGNALS,
     _build_rate_limit_exhausted_abort,
     _build_terminal_abort,
-    _classify_permanent_error,
     _has_provider_or_agent_error,
-    _is_rate_limit_error,
-    _is_terminal_billing_error,
     _walk_chain,
 )
 
@@ -918,10 +908,12 @@ def execute_agent_files(context: ExecutionContext) -> None:
         remaining_requests = [d for d, _e in retry_rate_limited]
         exceptions = [e for _d, e in retry_rate_limited]
 
-        # Compute inter-rung sleep duration.
+        # Compute inter-rung sleep duration. Both sleep sites source
+        # retry_after_s from the envelope (section 5.4), never from text.
         retry_afters = [
-            ra for ra in (_parse_retry_after(e) for e in exceptions)
-            if ra is not None
+            failure.retry_after_s
+            for failure in (find_provider_failure(e) for e in exceptions)
+            if failure is not None and failure.retry_after_s is not None
         ]
         retry_after_s = max(retry_afters) if retry_afters else None
 
@@ -935,9 +927,27 @@ def execute_agent_files(context: ExecutionContext) -> None:
         else:
             sleep_s = 0.0
 
-        # Derive error sample and limit type from the first exception.
-        error_sample = str(exceptions[0])[:200] if exceptions else ""
-        limit_type = _detect_limit_type(error_sample) if error_sample else None
+        # Derive error_sample and limit_type from the first exception's
+        # envelope (section 5.4): error_sample is canonical compact JSON of
+        # exactly reason_code, status, and retry_after_s (JSON null for
+        # absent optional fields) -- never rendered provider text.
+        first_failure = find_provider_failure(exceptions[0]) if exceptions else None
+        error_sample = (
+            json.dumps(
+                {
+                    "reason_code": first_failure.reason_code if first_failure else None,
+                    "status": first_failure.status if first_failure else None,
+                    "retry_after_s": (
+                        first_failure.retry_after_s if first_failure else None
+                    ),
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if exceptions
+            else ""
+        )
+        limit_type = first_failure.limit_type if first_failure is not None else None
 
         event_number += 1
         warning = {
@@ -1443,7 +1453,8 @@ def _process_one_file_with_retries(
             if attempt < retry_attempts:
                 # Apply Retry-After sleep for rate-limit errors in sequential mode.
                 if respect_retry_after and verdict == "rate_limit":
-                    delay = _parse_retry_after(exc)
+                    failure = find_provider_failure(exc)
+                    delay = failure.retry_after_s if failure is not None else None
                     if delay is not None:
                         sleep_s = min(delay, retry_after_cap)
                         logger.info(
@@ -1535,7 +1546,31 @@ def _raise_result_errors(
                 diagnostic=diagnostic,
                 correction_attempted=correction_attempted,
             )
-        raise AgentError(orchestrator.__class__.__name__, rel_path, message)
+        agent_error = AgentError(orchestrator.__class__.__name__, rel_path, message)
+        # Section 5.4: restore the envelope this dict round-trip would
+        # otherwise discard, so downstream classification (rate-limit
+        # detection, retry-after sourcing) still sees it.
+        agent_error.provider_failure = _first_sibling_provider_failure(result)
+        raise agent_error
+
+
+def _first_sibling_provider_failure(result: dict):
+    """Return the first fixed-order sibling's reconstructed
+    :class:`~codedoc.utils.errors.ProviderFailureEnvelope`, or ``None`` when
+    that sibling carries no envelope.
+
+    Section 12.1 C4: stops at the first sibling with an error, in fixed
+    order (structure, dependencies_analysis, documentation) -- never skips
+    an envelope-less first error to inherit a later sibling's envelope,
+    which would misclassify the overall failure (e.g. reporting an
+    unrelated local failure as rate-limited) from metadata that belongs to
+    a different call entirely.
+    """
+    for key in ("structure", "dependencies_analysis", "documentation"):
+        value: Any = result.get(key, {})
+        if isinstance(value, dict) and value.get("error"):
+            return provider_failure_from_mapping(value.get("provider_failure"))
+    return None
 
 
 def _agent_errors(result: dict) -> list[str]:
@@ -1565,22 +1600,29 @@ def _terminal_sibling_error(result: dict, file_path: str) -> AgentError | None:
     """Return a non-contract terminal/global agent error, if one is present.
 
     Triple-mode agents return error dictionaries, which discard the original
-    exception type. Reclassify only unmarked sibling errors from their bounded
-    message before selecting a contract-final marker. Rate-limit and transient
-    siblings intentionally do not override the no-whole-file-retry contract.
+    exception type. Reclassifies every sibling error from its reconstructed
+    envelope, in fixed order (structure, dependencies_analysis,
+    documentation) -- section 5.4: the first terminal-billing/global
+    envelope wins even when that same sibling also carries
+    ``response_contract_final``, since a genuine run-level abort is never
+    masked by a contract failure on the very call that produced it. Rate-limit
+    and transient siblings intentionally do not override the
+    no-whole-file-retry contract.
     """
     for key in ("structure", "dependencies_analysis", "documentation"):
         value: Any = result.get(key, {})
-        if (
-            not isinstance(value, dict)
-            or not value.get("error")
-            or value.get("response_contract_final")
-        ):
+        if not isinstance(value, dict) or not value.get("error"):
             continue
         candidate = AgentError(
             str(value.get("agent", key)),
             file_path,
             str(value["error"]),
+        )
+        # Section 5.4: reconstruct the envelope this dict round-trip would
+        # otherwise discard, so classification reads the structured reason
+        # rather than always falling through to "transient".
+        candidate.provider_failure = provider_failure_from_mapping(
+            value.get("provider_failure")
         )
         if _classify_failure(candidate, None) in ("terminal_billing", "global"):
             return candidate

@@ -935,6 +935,7 @@ def test_actual_predecessor_completed_split_record_is_stale_under_v7(tmp_path, m
     # the patch is still active, not after it is undone.
     monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v5")
     monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 150656)
+    monkeypatch.setattr(record_meta, "REDUCER_PROMPT_REVISION", "file-reduction-v1")
     v5_identity = record_meta.expected_large_file_identity(
         source_chars=len(source), max_chars=2500, rel_path=rel_path,
         division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,

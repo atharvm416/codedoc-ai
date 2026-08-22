@@ -26,8 +26,9 @@ from codedoc.core.file_division import (
     build_division_plan,
     render_leaf_prompt_metadata,
 )
-from codedoc.utils.errors import AgentError, LLMError, ResponseContractError
+from codedoc.utils.errors import AgentError, LLMError, ResponseContractError, find_provider_failure
 from tests.support.execution_requests import make_execution_request
+from tests.support.provider_failures import provider_failure_error
 
 class _Provider:
     """Fake provider returning a fixed raw JSON string."""
@@ -780,7 +781,10 @@ def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
     terminal-billing provider fault is re-raised unchanged (as the AgentError
     the shared provider-call accounting path wraps it in, with the original
     LLMError as its cause) -- preserving the existing whole-run abort -- and
-    is never converted into a per-file response-contract failure."""
+    is never converted into a per-file response-contract failure. Section 5.3
+    forbids retaining raw provider text, so the structured envelope reachable
+    via ``find_provider_failure`` is asserted instead of the original
+    free-form message."""
     from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
     from codedoc.agents.response_diagnostics import CorrectionLedger
     from codedoc.core.usage import UsageAccumulator
@@ -788,8 +792,8 @@ def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
     request = _leaf_request(tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000)
     provider = _CorrectingProvider(
         first_response={"description": "ok", "functions": _over_cap_functions()},
-        corrected_error=LLMError(
-            "test-provider", "Your credit balance is too low to continue"
+        corrected_error=provider_failure_error(
+            "openai", "provider-quota-exhausted", status=429
         ),
     )
     agent = FileDocumentationAgent(provider, max_content_chars=1000)
@@ -801,6 +805,9 @@ def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
         agent.run_fragment(request)
 
     assert not isinstance(caught.value, ResponseContractError)
-    assert "credit balance is too low" in str(caught.value)
+    failure = find_provider_failure(caught.value)
+    assert failure is not None
+    assert failure.reason_code == "provider-quota-exhausted"
+    assert failure.status == 429
     assert isinstance(caught.value.__cause__, LLMError)
     assert provider.calls == 2

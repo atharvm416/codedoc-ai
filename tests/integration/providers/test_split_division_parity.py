@@ -43,6 +43,13 @@ def _normalized_prompts(prompts: list[str]) -> list[str]:
     ]
 
 
+class ScriptedSDKError(RuntimeError):
+    """A scripted-SDK-shaped failure (section 11.3): the real adapter catches
+    this and constructs its own outer envelope from the structured field it
+    carries, so it must not be substituted with ``provider_failure_error`` --
+    the adapter never adopts an injected inner envelope."""
+
+
 def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responder):
     if provider_name == "openai":
         module = types.ModuleType("openai")
@@ -60,7 +67,7 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
                 )
 
         class OpenAI:
-            def __init__(self, api_key=None, base_url=None):
+            def __init__(self, api_key=None, base_url=None, timeout=None, max_retries=None):
                 calls["init"] = {"api_key": api_key, "base_url": base_url}
                 self.chat = SimpleNamespace(completions=Completions())
 
@@ -78,7 +85,7 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
                 return SimpleNamespace(content=[SimpleNamespace(text=text)])
 
         class Anthropic:
-            def __init__(self, api_key=None):
+            def __init__(self, api_key=None, timeout=None, max_retries=None):
                 calls["init"] = {"api_key": api_key}
                 self.messages = Messages()
 
@@ -95,6 +102,14 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
             self.__dict__.update(kwargs)
             calls.setdefault("configs", []).append(kwargs)
 
+    class HttpRetryOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
+    class HttpOptions:
+        def __init__(self, **kwargs):
+            self.__dict__.update(kwargs)
+
     class Models:
         def generate_content(self, model, contents, config):
             call = {"model": model, "contents": contents, "config": config}
@@ -102,11 +117,13 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
             return SimpleNamespace(text=responder(contents))
 
     class Client:
-        def __init__(self, api_key=None):
+        def __init__(self, api_key=None, http_options=None):
             calls["init"] = {"api_key": api_key}
             self.models = Models()
 
     genai_types.GenerateContentConfig = GenerateContentConfig
+    genai_types.HttpRetryOptions = HttpRetryOptions
+    genai_types.HttpOptions = HttpOptions
     genai.Client = Client
     genai.types = genai_types
     google.genai = genai
@@ -337,7 +354,12 @@ def test_terminal_split_failure_and_recovery_are_provider_adapter_neutral(
             if "This is one bounded fragment of a larger" in prompt:
                 state["leaf_calls"] += 1
                 if state["leaf_calls"] == 2:
-                    raise RuntimeError("Your credit balance is too low to continue")
+                    failure = ScriptedSDKError("scripted provider failure")
+                    if provider_name in ("openai", "anthropic"):
+                        failure.status_code = 403
+                    else:  # gemini
+                        failure.code = 403
+                    raise failure
             return _valid_response(prompt)
 
         failed_calls: dict = {}

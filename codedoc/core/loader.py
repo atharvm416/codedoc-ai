@@ -281,6 +281,13 @@ DEFAULTS: dict[str, Any] = {
     # Must be a float strictly between 0.0 and 1.0 (exclusive).
     "truncation_head_ratio": 0.70,
     # -----------------------------------------------------------------------
+    # Provider request transport timeout
+    # -----------------------------------------------------------------------
+    # Per connect/read/write/pool phase transport timeout (seconds) passed to
+    # the provider SDK client, not a wall-clock deadline for the whole call.
+    # Must be a number in the inclusive range 1-600.
+    "provider_request_timeout_s": 120,
+    # -----------------------------------------------------------------------
     # Targeted response correction (opt-in, disabled by default)
     # -----------------------------------------------------------------------
     # When true, a single targeted corrective provider call is made for an
@@ -360,6 +367,7 @@ _ENV_KEY_MAP = {
     "CODEDOC_ALLOW_PARTIAL": "allow_partial",
     "CODEDOC_ANALYSIS_MODE": "analysis_mode",
     "CODEDOC_TRUNCATION_HEAD_RATIO": "truncation_head_ratio",
+    "CODEDOC_PROVIDER_REQUEST_TIMEOUT_S": "provider_request_timeout_s",
 }
 
 # Allowed values for the selectable per-file analysis mode.
@@ -1283,6 +1291,37 @@ def _validate(config: dict[str, Any], *, warn_missing_api_key: bool = True) -> N
             f"(exclusive); got {ratio_val!r}."
         )
     config["truncation_head_ratio"] = ratio_val
+
+    # provider_request_timeout_s — a per connect/read/write/pool phase
+    # transport timeout (seconds), inclusive range 1-600, default 120.
+    # Strictly ASCII decimal strings or non-boolean numeric values only:
+    # no sign, no exponent, no underscore digit grouping, no non-ASCII
+    # digits, no NaN/infinity. Never echoes the rejected input (section
+    # 5.5). Section 12.1 C3: the key is absent only when nothing overwrote
+    # DEFAULTS' own 120, which this dict.get default matches -- an explicit
+    # JSON/Python null (config-file or config_overrides) or an empty string
+    # (config-file or CLI text) must fail boundedly instead of silently
+    # defaulting; an empty environment variable remains absent, handled
+    # generically upstream by the "only truthy env values override" rule.
+    raw_timeout = config.get("provider_request_timeout_s", 120)
+    _timeout_error = ConfigError(
+        "provider_request_timeout_s must be a number between 1 and 600 (inclusive)."
+    )
+    if raw_timeout is None:
+        raise _timeout_error
+    if isinstance(raw_timeout, bool):
+        raise _timeout_error
+    if isinstance(raw_timeout, (int, float)):
+        timeout_val = float(raw_timeout)
+    elif isinstance(raw_timeout, str):
+        if not re.fullmatch(r"[0-9]+(\.[0-9]+)?", raw_timeout):
+            raise _timeout_error
+        timeout_val = float(raw_timeout)
+    else:
+        raise _timeout_error
+    if not math.isfinite(timeout_val) or not (1 <= timeout_val <= 600):
+        raise _timeout_error
+    config["provider_request_timeout_s"] = timeout_val
 
     # Inline prompt-customization profile. Structural profile validation happens
     # later in prompt_profiles.resolve_profile_source; here we only enforce that

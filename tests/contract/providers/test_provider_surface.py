@@ -74,7 +74,7 @@ def test_openai_compatible_base_url_reaches_openai_provider(monkeypatch):
     captured = {}
 
     class FakeOpenAIProvider:
-        def __init__(self, api_key, model, base_url=None):
+        def __init__(self, api_key, model, base_url=None, **kwargs):
             captured.update({"api_key": api_key, "model": model, "base_url": base_url})
 
     monkeypatch.setattr("codedoc.llm.api_provider.OpenAIProvider", FakeOpenAIProvider)

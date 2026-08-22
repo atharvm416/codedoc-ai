@@ -221,11 +221,11 @@ def test_pipeline_retries_failed_file_before_marking_failed(tmp_path, monkeypatc
 
 def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatch):
     """D8: retry_rate_limited contains (request, exception) tuples."""
-    from codedoc.utils.errors import LLMError
     from codedoc.pipeline import _process_descriptor_batch
     from codedoc.core.queue import ProcessingQueue
     from codedoc.core.safe_writer import SafeWriter
     from tests.support.execution_requests import make_execution_request
+    from tests.support.provider_failures import provider_failure_error
 
     (tmp_path / "main.py").write_text("x=1\n")
     descriptor = {
@@ -238,7 +238,7 @@ def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatc
     class RateLimitProvider:
         provider_name = "openai"
         def complete_json(self, prompt, system=""):
-            raise LLMError("openai", "429 rate_limit_exceeded tpm")
+            raise provider_failure_error("openai", "provider-rate-limited", status=429, limit_type="tpm")
         def complete(self, prompt, system="", temperature=0.1):
             return self.complete_json(prompt)
 
@@ -268,7 +268,7 @@ def test_D8_process_batch_returns_exception_with_descriptor(tmp_path, monkeypatc
     desc_back, exc_back = retry_rate_limited[0]
     assert desc_back is request, "Original request must be returned"
     # The exception may be AgentError wrapping LLMError — verify it carries
-    # the rate-limit signal so _is_rate_limit_error can detect it via chain walk.
+    # the rate-limit signal so find_provider_failure can detect it via chain walk.
     assert exc_back is not None, "Exception must be preserved (not None)"
     assert "429" in str(exc_back), (
         f"Rate-limit signal must be somewhere in the exception string: {exc_back!r}"
