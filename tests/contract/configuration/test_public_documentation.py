@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import ast
+import io
 import json
 import re
+import tokenize
 from pathlib import Path
 
 import codedoc
@@ -65,18 +68,67 @@ _INTERNAL_DOC_VOCABULARY = (
     "schema-1", "schema-2", "schema-3", "schema-4",
 )
 
-#: Matches a bare or `v`-prefixed release number. `\b\d` alone misses
-#: `v0.14.6`, because there is no word boundary between `v` and `0`.
-_RELEASE_NUMBER = re.compile(r"(?<![\w.])v?\d+\.\d+\.\d+(?![\w.])")
+#: Matches a bare or `v`-prefixed release number. The right boundary permits
+#: sentence punctuation but refuses a partial match inside a longer numeric
+#: component sequence.
+_RELEASE_NUMBER = re.compile(r"(?<![\w.])v?\d+\.\d+\.\d+(?!\w|\.\d)")
+
+#: Temporal wording that turns an evergreen guide or implementation comment
+#: into release history even when it does not spell out a release number.
+_RELEASE_HISTORY_WORDING = re.compile(
+    r"\b(?:before\s+this|this|current|previous|older)\s+release\b|"
+    r"\brelease-specific\b",
+    re.IGNORECASE,
+)
+
+#: Default-off language is incorrect for response correction. Keep this narrow
+#: so accurate opt-in/default-off descriptions of unrelated features remain
+#: valid implementation commentary.
+_STALE_CORRECTION_DEFAULT_WORDING = re.compile(
+    r"(?:\b(?:response\s+)?correction\b.{0,160}"
+    r"\b(?:opt[- ]in|disabled\s+by\s+default)\b)|"
+    r"(?:\b(?:opt[- ]in|disabled\s+by\s+default)\b.{0,160}"
+    r"\b(?:response\s+)?correction\b)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+#: Market-superlative and product-category claim *shapes* README/RUN_FLOW must
+#: never make about CodeDoc. Every alternative is a phrase, not a token: the
+#: bare words are legitimate in their ordinary senses and stay allowed --
+#: "cleaned up best-effort", a "Best use" table column, "AI assistants" /
+#: "coding assistants" as the audience, "triple-agent" / "three-agent"
+#: analysis, `parallel_agents`, "package indexes", "indexed by", "semantic
+#: boundaries" / "semantic review" / "semantic units". What is banned is a
+#: superlative assertion about the product ("the best ...", "best-in-class",
+#: "world-class", "industry-leading", "state-of-the-art", ...) or a claim that
+#: CodeDoc is an "autonomous [coding] agent", a "semantic index", or an
+#: "interactive assistant" -- categories CodeDoc is documented as *not* being.
+_UNSUPPORTED_CLAIM = re.compile(
+    r"""
+      \bthe\s+best\b
+    | \b(?:world|industry|market|best)[\s-]+(?:class|leading)\b
+    | \bbest[\s-]+in[\s-]+class\b
+    | \bworld['’]s\s+(?:best|leading|fastest)\b
+    | \bbest[\s-]+of[\s-]+breed\b
+    | \bstate[\s-]of[\s-]the[\s-]art\b
+    | \bcutting[\s-]edge\b
+    | \bsecond\s+to\s+none\b
+    | \bunrivall?ed\b
+    | \bautonomous(?:ly)?\b
+    | \bsemantic\s+index\b
+    | \binteractive\s+assistant\b
+    """,
+    re.IGNORECASE | re.VERBOSE,
+)
 
 
 def test_public_docs_carry_no_release_numbers_or_internal_revision_names():
     """README and RUN_FLOW document what CodeDoc offers and how to use it.
 
-    They are not a release history. A reader cannot act on "advances to
-    `leaf-capsule-v7`" or on "a fresh `0.14.3` run" -- the first names an
-    internal identity revision that exists only inside the source tree, and
-    the second dates the document the moment the next release ships. Both
+    They are not a release history. A reader cannot act on an internal
+    identity-revision advance or on a fresh package-version run -- the first
+    names an implementation detail that exists only inside the source tree,
+    and the second dates the document the moment the next release ships. Both
     belong in CHANGELOG.md, which has its own contract test
     (`test_release_documents_name_every_active_split_identity`) requiring the
     full identity roster there.
@@ -87,8 +139,224 @@ def test_public_docs_carry_no_release_numbers_or_internal_revision_names():
         text = path.read_text(encoding="utf-8")
         found = _RELEASE_NUMBER.findall(text)
         assert not found, f"{path.name} names release(s) {sorted(set(found))}"
+        historical = _RELEASE_HISTORY_WORDING.findall(text)
+        assert not historical, (
+            f"{path.name} contains release-history wording {sorted(set(historical))}"
+        )
         for token in _INTERNAL_DOC_VOCABULARY:
             assert token not in text, f"{path.name} names internal `{token}`"
+
+
+def test_release_number_guard_handles_sentence_punctuation_without_partial_matches():
+    for text in (
+        "Current release: 0.14.7.",
+        "Current release: v0.14.7.",
+        "Current release: 0.14.7",
+    ):
+        assert _RELEASE_NUMBER.search(text), text
+    assert not _RELEASE_NUMBER.search("Compatibility schema: 0.14.7.4")
+
+
+def _comment_and_docstring_records(path: Path):
+    """Yield source line and text for comment blocks and true docstrings."""
+    with tokenize.open(path) as source:
+        text = source.read()
+    source_lines = text.splitlines()
+    comment_records = []
+    block_line = None
+    block_end = None
+    block_parts = []
+
+    def flush_comment_block():
+        nonlocal block_line, block_end, block_parts
+        if block_line is not None:
+            comment_records.append((block_line, "\n".join(block_parts)))
+        block_line = None
+        block_end = None
+        block_parts = []
+
+    for token in tokenize.generate_tokens(io.StringIO(text).readline):
+        if token.type == tokenize.COMMENT:
+            line, column = token.start
+            is_full_line = not source_lines[line - 1][:column].strip()
+            if is_full_line and block_end is not None and line == block_end + 1:
+                block_parts.append(token.string)
+                block_end = line
+            elif is_full_line:
+                flush_comment_block()
+                block_line = line
+                block_end = line
+                block_parts = [token.string]
+            else:
+                flush_comment_block()
+                comment_records.append((line, token.string))
+    flush_comment_block()
+    yield from comment_records
+
+    tree = ast.parse(text, filename=str(path))
+    docstring_owners = (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+    for node in ast.walk(tree):
+        if isinstance(node, docstring_owners):
+            docstring = ast.get_docstring(node, clean=False)
+            if docstring is not None:
+                yield node.body[0].lineno, docstring
+
+
+def test_production_comments_and_docstrings_are_release_agnostic():
+    """Implementation explanations stay behavioral instead of dating changes."""
+    violations = []
+    for path in sorted((ROOT / "codedoc").rglob("*.py")):
+        for line, text in _comment_and_docstring_records(path):
+            normalized = " ".join(text.split())
+            releases = _RELEASE_NUMBER.findall(normalized)
+            history = _RELEASE_HISTORY_WORDING.findall(normalized)
+            if releases or history:
+                violations.append(
+                    f"{path.relative_to(ROOT)}:{line}: releases={releases!r}, "
+                    f"history={history!r}"
+                )
+    assert not violations, "Release-specific production commentary:\n" + "\n".join(
+        violations
+    )
+
+
+def test_production_response_correction_commentary_matches_default_on_policy():
+    """Production explanations cannot describe correction as default-off."""
+    assert _STALE_CORRECTION_DEFAULT_WORDING.search("Correction is opt-in.")
+    assert _STALE_CORRECTION_DEFAULT_WORDING.search(
+        "Response correction is disabled by default."
+    )
+    assert _STALE_CORRECTION_DEFAULT_WORDING.search(
+        "Response correction is\ndisabled by default."
+    )
+
+    violations = []
+    for path in sorted((ROOT / "codedoc").rglob("*.py")):
+        for line, text in _comment_and_docstring_records(path):
+            normalized = " ".join(text.split())
+            if _STALE_CORRECTION_DEFAULT_WORDING.search(normalized):
+                violations.append(f"{path.relative_to(ROOT)}:{line}: {normalized}")
+
+    assert not violations, "Stale correction-default commentary:\n" + "\n".join(
+        violations
+    )
+
+
+def test_public_docs_make_no_unsupported_superlative_or_product_category_claims():
+    """README and RUN_FLOW position CodeDoc as an incremental, reusable-state
+    documentation engine, described only through current, supported behaviour.
+
+    They therefore may not reach for an unsupported market superlative -- "the
+    best ...", "best-in-class", "world-class", "industry-leading",
+    "state-of-the-art" -- nor claim CodeDoc is a product category it is not: an
+    "autonomous [coding] agent", a "semantic index", or an "interactive
+    assistant". CodeDoc plans deterministically, sends only remaining work, and
+    stops; it does not act on its own initiative, it does not build or serve a
+    searchable index, and it holds no conversation. Such a claim would mislead a
+    reader about what they are getting, and it would date the moment it proved
+    untrue.
+
+    The ban is on the claim *shape*, not the words: "cleaned up best-effort", a
+    "Best use" table column, "AI assistants" / "coding assistants" as the
+    audience for the output, "triple-agent" / "three-agent" analysis,
+    `parallel_agents`, "package indexes", "indexed by", and "semantic
+    boundaries" / "semantic review" / "semantic units" are all current, correct
+    usage and stay allowed."""
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        # Whitespace-normalized so a claim wrapped across a line break is still
+        # one contiguous phrase, matching the sibling recovery-remedy test.
+        normalized = " ".join(path.read_text(encoding="utf-8").split())
+        hits = sorted({m.group(0).strip() for m in _UNSUPPORTED_CLAIM.finditer(normalized)})
+        assert not hits, (
+            f"{path.name} makes an unsupported market-superlative or "
+            f"product-category claim: {hits}"
+        )
+
+
+def test_readme_and_run_flow_position_codedoc_as_an_incremental_reusable_state_engine():
+    """The load-bearing claim of the product: CodeDoc treats documentation as
+    durable, reusable state and pays only for the remainder, rather than
+    regenerating every record from scratch on each run. A reader who loses that
+    framing cannot tell what CodeDoc is *for* -- it reads as just another
+    one-shot generator -- so it must be stated where a reader meets it, not left
+    implicit. Section 11 mutation check 28 requires that removing or gutting it
+    fail this contract; section 13's handoff requires confirming both public
+    documents present CodeDoc this way using only current behaviour.
+
+    README/RUN_FLOW asymmetry (deliberate, asserted here so the next auditor
+    reads the reasoning rather than re-deriving it): README is the product
+    document and states the positioning outright in its lede. RUN_FLOW's own
+    opening line scopes it to "the active phase ordering" -- it is a lifecycle
+    reference, not a pitch, and it never makes the positioning *statement*.
+    What it must instead show is that reuse and recovery are a first-class,
+    centrally-governed phase of every run, not an afterthought: a dedicated
+    "Split planning, reuse, and recovery" phase, a single "Cache and recovery
+    identity" predicate, zero-call reuse of a compatible record, and a resume
+    (not a restart) of an interrupted one. The pair collectively carries the
+    requirement; demanding the identical marketing vocabulary in a phase-order
+    document would be the substring-ban mistake in a new form. If a future
+    reviewer concludes RUN_FLOW must itself carry the positioning wording, that
+    is a documentation change for them and the independent auditor to make --
+    not something this contract should force by lowering the bar to a bare
+    grep."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
+
+    # --- README: the lede states the positioning outright. Located by anchor
+    # and asserted as one contiguous clause inside that one paragraph, so the
+    # word "incremental" scattered elsewhere in README (the Highlights list,
+    # the reuse section, ...) cannot satisfy this if the lede is gutted.
+    lede_anchor = "> **codedoc-ai is an incremental documentation engine"
+    assert lede_anchor in readme, "README.md lost its positioning lede"
+    # The lede is a Markdown blockquote; drop the "> " line prefixes before
+    # whitespace-normalizing so a clause spanning two quoted lines stays one
+    # contiguous phrase.
+    normalized_lede = " ".join(
+        _locate_paragraph(readme, lede_anchor).replace("> ", "").split()
+    )
+    assert "incremental documentation engine" in normalized_lede
+    assert (
+        "treats documentation as reusable state instead of regenerating it on "
+        "every run" in normalized_lede
+    ), "README lede no longer states the reusable-state-vs-regenerate positioning"
+    assert (
+        "reuses compatible completed records and recovery checkpoints"
+        in normalized_lede
+    )
+    assert "sends only the remaining provider-bound work" in normalized_lede
+
+    # --- RUN_FLOW: reuse/recovery documented as a first-class run phase. ---
+    assert (
+        "This document describes the active phase ordering" in run_flow
+    ), "RUN_FLOW.md lost its lifecycle-document framing"
+    assert "## Split planning, reuse, and recovery" in run_flow, (
+        "RUN_FLOW.md no longer gives reuse/recovery its own phase heading"
+    )
+    assert "## Cache and recovery identity" in run_flow, (
+        "RUN_FLOW.md no longer treats cache/reuse identity as its own phase"
+    )
+    normalized_predicate = " ".join(
+        _locate_paragraph(
+            run_flow,
+            "Ordinary per-file reuse uses one centralized predicate over content hash",
+        ).split()
+    )
+    assert "one centralized predicate over content hash" in normalized_predicate
+    assert "the registered cache identity" in normalized_predicate
+
+    normalized_reuse_boundary = " ".join(
+        _locate_paragraph(
+            run_flow,
+            "An exactly compatible same-path completed split record authorizes",
+        ).split()
+    )
+    assert (
+        "zero-call" in normalized_reuse_boundary
+        and "reuse" in normalized_reuse_boundary
+    ), "RUN_FLOW no longer states zero-call reuse of a compatible completed record"
+    assert "resumes only unpaid nodes" in normalized_reuse_boundary, (
+        "RUN_FLOW no longer states an interrupted run resumes rather than restarts"
+    )
 
 
 def test_public_docs_state_the_incompatible_recovery_remedies_in_user_terms():
@@ -289,14 +557,13 @@ def test_model_help_scopes_provider_auto_detection_to_auto():
 
 
 def test_release_documents_name_every_active_split_identity():
-    # The current release's own changelog section is the release manifest for
-    # this contract.  Internal planning documents are deliberately not part of
+    # The newest changelog section is the release manifest for this contract.
+    # Internal planning documents are deliberately not part of
     # the repository and must never be a source of current identity truth.
     # Locate the newest release section structurally -- it is whatever comes
     # first after the "# Changelog" title -- rather than matching one
     # version's exact heading text, so this test survives every version bump
-    # without needing to rewrite an earlier release's historical heading
-    # (e.g. the dateless-separator "## 0.14.2 2026-08-04").
+    # without needing to rewrite an earlier historical heading.
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
     release_sections = changelog.split("\n## ")[1:]
     assert release_sections, "CHANGELOG.md has no '## <version>' release heading."
@@ -340,8 +607,8 @@ def test_readme_and_run_flow_declare_split_fully_supported_without_qualifiers():
     recovery are fully supported, and the sentence making that claim must
     carry none of the disqualifying preview/fresh-only/dormant/
     recovery-preview/candidate/beta qualifiers. Checked sentence-by-sentence
-    so an unrelated historical sentence elsewhere in the document (e.g.
-    describing what `0.14.1` used to do) cannot fail this test."""
+    so an unrelated historical sentence elsewhere in the document cannot fail
+    this test."""
     for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
         text = path.read_text(encoding="utf-8")
         support_sentences = _sentences_containing(text, "fully supported")
@@ -361,8 +628,8 @@ def test_readme_and_run_flow_declare_split_fully_supported_without_qualifiers():
 
 
 def test_readme_and_run_flow_declare_ordinary_reuse_same_path_only():
-    """0.14.4: ordinary identical-content reuse (`files_reused_identical_content`)
-    is same-path only -- CodeDoc never copies documentation across paths, even
+    """Ordinary identical-content reuse (`files_reused_identical_content`) is
+    same-path only -- CodeDoc never copies documentation across paths, even
     for byte-identical content. README must no longer claim reuse "from
     another path"; RUN_FLOW's existing cross-path *split* sentence is a
     separate, unrelated claim and must stay exactly as it is."""
@@ -391,8 +658,8 @@ def test_readme_and_run_flow_declare_ordinary_reuse_same_path_only():
 
 
 def test_readme_and_run_flow_state_reason_codes_and_endpoint_authorization():
-    """0.14.4: a final response-contract failure names its closed reason
-    code, and a custom api_base_url requires runtime endpoint-trust approval
+    """A final response-contract failure names its closed reason code, and a
+    custom api_base_url requires runtime endpoint-trust approval
     that configuration can never satisfy -- both facts must be publicly
     documented, not just true internally."""
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -413,10 +680,10 @@ def test_readme_and_run_flow_state_reason_codes_and_endpoint_authorization():
 
 
 def test_security_md_recovery_sensitivity_wording_is_present_and_unchanged():
-    """Gate 17.13, assertion 4: the inherited `0.14.2` SECURITY.md wording
-    about `crash_recovery.json` sensitivity is present and untouched --
-    `0.14.3` declares no new security contract and must not become a second
-    owner of this text (preserved, not edited, by section 4A)."""
+    """Gate 17.13, assertion 4: the inherited SECURITY.md wording about
+    `crash_recovery.json` sensitivity remains present and untouched. This patch
+    declares no new security contract and must not become a second owner of
+    that text (preserved, not edited, by section 4A)."""
     security = (ROOT / "SECURITY.md").read_text(encoding="utf-8")
     assert "crash_recovery.json" in security
     assert "sensitive derived project information" in security
@@ -533,3 +800,284 @@ def test_readme_json_examples_are_valid_json():
     assert examples
     for example in examples:
         json.loads(example)
+
+
+def _github_heading_anchor(heading_text: str) -> str:
+    """Approximate GitHub's heading-to-anchor slug: lowercase, drop every
+    character that is not a word character, whitespace, or hyphen, then
+    hyphenate whitespace runs."""
+    slug = heading_text.strip().lower()
+    slug = re.sub(r"[^\w\s-]", "", slug)
+    slug = re.sub(r"\s+", "-", slug.strip())
+    return slug
+
+
+def test_readme_table_of_contents_links_resolve_to_headings():
+    """Every in-document `](#...)` link in README's Contents list must point at
+    a heading that exists in the file.
+
+    Written against the whole Contents list rather than one heading, so a future
+    section rename that leaves its table-of-contents entry pointing at a dead
+    anchor is caught without adding a one-off assertion for each rename."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+    contents = readme.split("## Contents", 1)[1].split("\n## ", 1)[0]
+    toc_anchors = re.findall(r"\]\(#([^)]+)\)", contents)
+    assert toc_anchors, "README Contents section exposes no anchor links to check."
+
+    heading_anchors = {
+        _github_heading_anchor(text)
+        for text in re.findall(r"^#{1,6}\s+(.*?)\s*$", readme, flags=re.MULTILINE)
+    }
+
+    unresolved = sorted(a for a in toc_anchors if a not in heading_anchors)
+    assert not unresolved, (
+        f"README Contents links with no matching heading anchor: {unresolved}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Section 11 mutation check 27 / section 7.1: source exactness is defined
+# against the canonical decoded snapshot, never the raw file. The paragraphs
+# that carry that -- the canonical-snapshot / BOM / replacement-decode /
+# newline-normalization statement, the separate original-byte content hash,
+# the explicit "no raw round-trip" disclaimer, the three local-subdivision
+# worked examples, and the zero CRLF-atomicity delta for a normal
+# filesystem-loaded file -- were previously unpinned, so mutation check 27
+# could not be falsified through README/RUN_FLOW. These contracts close that.
+# Located by section heading and whitespace-normalized (matching the sibling
+# recovery-remedy and positioning tests), never a whole-file snapshot.
+# ---------------------------------------------------------------------------
+
+_SEMANTIC_DIVISION_HEADING = "#### Semantic division and synthesis"
+_SPLIT_PLANNING_HEADING = "## Split planning, reuse, and recovery"
+
+
+def _doc_section(text: str, heading: str) -> str:
+    """Whitespace-normalized body between *heading* and the next heading of the
+    same or higher level."""
+    level = len(heading) - len(heading.lstrip("#"))
+    start = text.index(heading) + len(heading)
+    rest = text[start:]
+    ends = [
+        rest.index(marker)
+        for marker in ("\n" + "#" * k + " " for k in range(1, level + 1))
+        if marker in rest
+    ]
+    return " ".join(rest[: min(ends) if ends else len(rest)].split())
+
+
+def test_public_docs_define_source_exactness_against_the_canonical_decoded_snapshot():
+    """README's `Semantic division and synthesis` section must keep defining
+    split planning/reconstruction against the canonical decoded snapshot -- BOM
+    stripped, invalid UTF-8 replaced, CRLF and lone CR normalized to LF -- with
+    a separate content hash still binding the original bytes and an explicit
+    statement that the raw file is not preserved or round-tripped. RUN_FLOW's
+    split phase must at least carry the canonical-snapshot framing, exactly-once
+    leaf coverage, and the same newline normalization.
+
+    Mutation check 27: replacing this with a raw-file-preservation claim, or
+    deleting the BOM/replacement/newline sentence, must fail here."""
+    readme_section = _doc_section(
+        (ROOT / "README.md").read_text(encoding="utf-8"), _SEMANTIC_DIVISION_HEADING
+    )
+    run_flow_section = _doc_section(
+        (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8"), _SPLIT_PLANNING_HEADING
+    )
+
+    # Claim 1: canonical decoded snapshot is the reconstruction authority.
+    assert (
+        "reconstruction are defined against the **canonical decoded snapshot**"
+        in readme_section
+    )
+    assert "not its raw bytes" in readme_section
+    assert "measured in Unicode code points of that snapshot" in readme_section
+    assert "pieces of a divided file reconstruct it exactly" in readme_section
+    # Claim 2: UTF-8 BOM stripped.
+    assert "a leading byte-order mark is stripped" in readme_section
+    # Claim 3: invalid UTF-8 decoded with replacement.
+    assert (
+        "undecodable bytes become the Unicode replacement character"
+        in readme_section
+    )
+    # Claim 4: CRLF and lone CR normalized to LF before split planning.
+    assert r"`\r\n` and lone `\r` are normalized to `\n`" in readme_section
+    # Claim 5: the separate raw content hash still binds the original bytes.
+    assert (
+        "records a separate content hash over the file's original bytes"
+        in readme_section
+    )
+    # Claim 6: no promise to preserve or round-trip the raw source file.
+    assert (
+        "does not promise to preserve or round-trip the raw file itself"
+        in readme_section
+    )
+
+    # RUN_FLOW carries the framing and the same newline normalization.
+    assert (
+        "CodeDoc reads one canonical decoded snapshot per selected source file"
+        in run_flow_section
+    )
+    assert (
+        "Every source character belongs to exactly one planned leaf"
+        in run_flow_section
+    )
+    assert r"normalizes `\r\n` and lone `\r` to `\n` first" in run_flow_section
+
+
+def test_public_docs_state_the_local_subdivision_worked_examples():
+    """Both README and RUN_FLOW must keep all three section 5.6 worked
+    examples, stated against their anti-patterns so a reader cannot mistake the
+    behavior:
+
+    * a 2,010-character unit at B=1,000 becomes about 670 + 670 + 670, not
+      1,000 + 1,000 + 10;
+    * an 8,292-character span at B=2,000 becomes five locally balanced pieces,
+      not a power-of-two recursive halving into eight;
+    * given natural units of 1,243 / 482 / 285, only the 1,243 unit is
+      subdivided near 622 + 621 while the fitting 482 and 285 units keep their
+      exact bytes, ranges, and identities (and, README adds, may co-pack into a
+      767-character leaf call).
+
+    Mutation check 27: deleting these examples from either document must fail
+    here."""
+    readme_section = _doc_section(
+        (ROOT / "README.md").read_text(encoding="utf-8"), _SEMANTIC_DIVISION_HEADING
+    )
+    run_flow_section = _doc_section(
+        (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8"), _SPLIT_PLANNING_HEADING
+    )
+
+    for section, name in (
+        (readme_section, "README.md"),
+        (run_flow_section, "RUN_FLOW.md"),
+    ):
+        # 2,010 @ B=1,000 -> ~670 x 3, contrasted with 1,000 + 1,000 + 10.
+        assert "2,010-character unit at a 1,000-character ceiling" in section, name
+        assert "670 character" in section, name
+        assert "not 1,000 + 1,000 + 10" in section, name
+        # 8,292 @ B=2,000 -> five pieces, not eight by halving.
+        assert "8,292-character span at a 2,000-character ceiling" in section, name
+        assert "becomes five pieces" in section, name
+        assert "power-of-two" in section and "halving into eight" in section, name
+        # 1,243 / 482 / 285 -> only 1,243 subdivided (~622 + 621); others kept.
+        assert (
+            "natural units of 1,243, 482, and 285 characters" in section
+        ), name
+        assert "1,243-character unit is subdivided (about 622 + 621)" in section, name
+        assert (
+            "482 and 285 units keep their exact bytes, ranges, and identities"
+            in section
+        ), name
+
+    # README additionally states the fitting units may co-pack into one call.
+    assert (
+        "482 and 285 units keep their exact bytes, ranges, and identities and "
+        "may still share one 767-character leaf call" in readme_section
+    )
+
+
+def test_public_docs_state_zero_crlf_atomicity_delta_for_filesystem_loaded_files():
+    """Both documents must keep saying that the CRLF-atomicity extra-piece case
+    is a defensive, direct/internal-only path: a normal filesystem-loaded file
+    has already had CRLF and lone CR normalized to LF, so its reported
+    CRLF-atomicity delta is always zero.
+
+    Mutation check 27: changing that reported delta from "always zero" to
+    "potentially nonzero", or deleting RUN_FLOW's equivalent explanation, must
+    fail here."""
+    readme_section = _doc_section(
+        (ROOT / "README.md").read_text(encoding="utf-8"), _SEMANTIC_DIVISION_HEADING
+    )
+    run_flow_section = _doc_section(
+        (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8"), _SPLIT_PLANNING_HEADING
+    )
+
+    # The extra piece is described as defensive and CRLF-pair driven, not a
+    # normal outcome.
+    assert r"a `\r\n` pair is treated as one" in readme_section
+    assert "defensive subdivision may" in readme_section
+    assert "one extra piece" in readme_section and "one extra call" in readme_section
+    assert (
+        r"normal filesystem pipeline normalizes `\r\n` and lone `\r` to `\n` "
+        r"before planning, so that case cannot arise there and its reported "
+        r"count is always zero" in readme_section
+    )
+
+    assert r"A `\r\n` pair is indivisible for cut placement" in run_flow_section
+    assert (
+        "defensive subdivision may use one extra piece and one extra call"
+        in run_flow_section
+    )
+    assert (
+        r"normal filesystem pipeline normalizes `\r\n` and lone `\r` to `\n` "
+        r"first, so that count is always zero there" in run_flow_section
+    )
+
+
+#: An *affirmative* claim that CodeDoc preserves or round-trips the raw source
+#: bytes/file -- the shape mutation check 27 forbids. Every legitimate current
+#: use is either a different object (the generated JSON/Markdown "round trips",
+#: a completed cache record "round-trips unchanged") or an explicit negation
+#: ("does not promise to preserve or round-trip the raw file"), so the detector
+#: is scoped to a sentence that names the raw/original source file-or-bytes,
+#: makes a preservation/round-trip claim about it, and carries no negation.
+_RAW_SOURCE_TOKEN = re.compile(
+    r"\braw(?:[- ]source)?[- ](?:file|bytes?|source)\b"
+    r"|\boriginal(?:[- ]source)?[- ](?:file|bytes?)\b",
+    re.IGNORECASE,
+)
+_PRESERVATION_TOKEN = re.compile(
+    r"\b(?:preserv\w*|round[- ]?trip\w*|byte[- ]for[- ]byte|reproduc\w*|"
+    r"kept\s+intact|retained\s+verbatim|losslessly)\b",
+    re.IGNORECASE,
+)
+_PRESERVATION_NEGATION = re.compile(
+    r"\b(?:not|never|no|cannot|does\s+not|is\s+not|are\s+not|without|"
+    r"rather\s+than|instead\s+of)\b|n't\b",
+    re.IGNORECASE,
+)
+
+
+def _affirmative_raw_preservation_sentences(text: str) -> list[str]:
+    return [
+        sentence
+        for sentence in re.split(r"(?<=[.!?])\s+", " ".join(text.split()))
+        if _RAW_SOURCE_TOKEN.search(sentence)
+        and _PRESERVATION_TOKEN.search(sentence)
+        and not _PRESERVATION_NEGATION.search(sentence)
+    ]
+
+
+def test_public_docs_make_no_affirmative_raw_source_preservation_claim():
+    """Negative contract for mutation check 27: neither README nor RUN_FLOW may
+    claim CodeDoc preserves or round-trips the raw source bytes/file. The one
+    sentence that mentions the raw file must stay a negation."""
+    # Detector fires on the forbidden shape ...
+    assert _affirmative_raw_preservation_sentences(
+        "CodeDoc preserves the raw source file byte-for-byte across a run."
+    )
+    assert _affirmative_raw_preservation_sentences(
+        "The raw file round-trips exactly and the original bytes are reproduced."
+    )
+    # ... and stays silent on the real negated sentence and on unrelated
+    # round-trip uses (generated Markdown, completed cache records).
+    assert not _affirmative_raw_preservation_sentences(
+        "CodeDoc also records a separate content hash over the file's original "
+        "bytes for change detection; it does not promise to preserve or "
+        "round-trip the raw file itself."
+    )
+    assert not _affirmative_raw_preservation_sentences(
+        "The JSON has an embedded Markdown view for safe round trips."
+    )
+    assert not _affirmative_raw_preservation_sentences(
+        "A completed cache record round-trips unchanged and compares stale."
+    )
+
+    for path in (ROOT / "README.md", ROOT / "RUN_FLOW.md"):
+        offenders = _affirmative_raw_preservation_sentences(
+            path.read_text(encoding="utf-8")
+        )
+        assert not offenders, (
+            f"{path.name} affirmatively claims raw-source preservation: {offenders}"
+        )

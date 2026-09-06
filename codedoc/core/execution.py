@@ -48,6 +48,7 @@ from codedoc.core.execution_model import (
 )
 from codedoc.core.file_division import (
     REDUCER_PROMPT_REVISION,
+    DivisionInternalDefect,
     DivisionPlan,
     ReductionTreePlan,
     SplitTreeState,
@@ -365,7 +366,7 @@ def _process_fresh_divided_file(
 
     This retained policy-specific executor accepts no recovery writer, so a
     leaf/reducer/final result cannot become a resumable node checkpoint
-    accidentally. The current release selects the recovery-capable executor;
+    accidentally. The production pipeline selects the recovery-capable executor;
     ``completed_nodes`` remains run-local retry memory for explicit fresh-mode
     callers and is never serialized. The caller may persist only the fully
     assembled file-level result after this function returns successfully.
@@ -438,6 +439,15 @@ def _execute_divided_file(
     """Shared split kernel behind fresh and recovery-aware entry points."""
     if recovery_enabled and recorder is None:
         raise ValueError("recovery-aware split execution requires a recorder.")
+    if request.context.synthesis_manifest_chars != reduction_tree.synthesis_manifest_chars:
+        # Section 5.7/0B: a planned tree carries its own synthesis budget: an
+        # execution context built under a different one would silently
+        # validate reducer/final manifests against the wrong ceiling. Reject
+        # before any provider call rather than let the two quietly diverge.
+        raise DivisionInternalDefect(
+            "execution context synthesis budget does not match the planned "
+            "reduction tree."
+        )
     rel_path = request.rel_path
     split_content_hash = request.content_hash
     allowed_paths = resolved_synthesis_shape(
@@ -636,7 +646,7 @@ def _execute_divided_file(
             root_narratives=root_narratives,
             root_coverage_leaf_ids=final_node.leaf_ids,
             ledger=ledger,
-            max_chars=request.context.max_content_chars,
+            max_chars=reduction_tree.synthesis_manifest_chars,
         )
         final_result = orchestrator.synthesize_divided_file(
             request, division_plan.plan_digest, manifest_json

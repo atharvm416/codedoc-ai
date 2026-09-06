@@ -257,6 +257,10 @@ def test_partition_reconciles_when_a_run_stops_before_every_file_is_attempted(
             "file_retry_attempts": 0,
             "max_consecutive_failures": 2,
             "allow_partial": True,
+            # Deterministic malformed responses drive the consecutive-failure
+            # stop here; this partition-reconciliation test is not a correction
+            # test, so pin the default (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
         },
         fake=_AlwaysMalformed(),
     )

@@ -238,7 +238,12 @@ class TestBoundedSplitDiagnostics:
             content=source,
             source_budget_chars=max_content_chars,
         )
-        tree = build_reduction_tree(plan, max_content_chars=max_content_chars)
+        # Pair the tree with the request's carried synthesis budget (automatic
+        # 12,000 floor), as production planning does; the deprecated alias would
+        # carry the raw source value and be rejected by the execution guard.
+        tree = build_reduction_tree(
+            plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+        )
         assert len(plan.chunks) >= 2, "fixture must produce more than one leaf"
         return request, plan, tree
 

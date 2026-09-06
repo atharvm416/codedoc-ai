@@ -74,7 +74,7 @@ from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 # reprocessed exactly once under the current contract before reuse.
 ANALYSIS_REVISION = "file-doc-v3"
 
-# Rejected predecessor value from the 0.14.1 fresh-only split contract. Current
+# Rejected predecessor value from the former fresh-only split contract. Current
 # production code never stamps it, but the key remains registered so predecessor
 # records survive every public-format round trip and mismatch the current absent
 # expected value without inferring policy from the package version.
@@ -118,8 +118,8 @@ CACHE_IDENTITY_KEYS: frozenset[str] = frozenset(
 # here compares as its default value when absent from a record, so an omitted key
 # and an explicitly stored default are equivalent.  Keys not listed here default
 # to ``None`` when absent (the historical behaviour for the other identity keys).
-# ``_ordinary_path_identity`` is deliberately unregistered here: every pre-0.14.4
-# ordinary/truncate-path record lacks it, so an absent key must normalize to
+# ``_ordinary_path_identity`` is deliberately unregistered here: legacy
+# ordinary/truncate-path records lack it, so an absent key must normalize to
 # ``None`` and compare unequal to any expected (non-``None``) value -- leaving
 # every such legacy record invalid until it is regenerated under the current
 # path-bound contract (see ``_record_is_reusable``'s ``rel_path`` keyword).

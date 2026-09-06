@@ -12,10 +12,13 @@ from codedoc.agents.file_synthesis_agent import (
 from codedoc.core.execution_model import FileReductionExecutionRequest
 from codedoc.core.file_division import (
     MAX_REDUCTION_NARRATIVE_CHARS,
+    MAX_REDUCTION_NARRATIVE_TARGET_CHARS,
     REDUCTION_ENVELOPE_OVERHEAD_CHARS,
     DivisionInternalDefect,
     build_fact_ledger,
     final_synthesis_input,
+    maximum_distinct_narratives,
+    render_reduction_child_manifest,
     worst_case_reduction_manifest_chars,
 )
 from codedoc.core.prompt_profiles import (
@@ -80,6 +83,21 @@ class _CorrectingProvider:
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt, system)
+
+
+class _RecordingCorrectingProvider(_CorrectingProvider):
+    """`_CorrectingProvider` that also keeps every prompt it was sent, so a
+    correction-route assertion can inspect the prompt the real
+    `ResponseCorrectionAgent` actually built, not one the test reconstructs
+    itself."""
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt, system=""):
+        self.prompts.append(prompt)
+        return super().complete_json(prompt, system)
 
 
 def _shape(mode: str = "single"):
@@ -192,20 +210,48 @@ def test_synthesis_requires_resolved_shape_before_provider_call(tmp_path) -> Non
 def test_synthesis_manifest_ceiling_is_enforced_before_provider_call(
     tmp_path,
 ) -> None:
+    """Section 5.7: the final synthesis manifest is bounded by the automatically
+    carried synthesis budget (``max(B, 12000)``), never the raw source ceiling
+    ``B``. At ``B = 1000`` the carried budget is 12000, so a manifest well above
+    1000 -- up to and including exactly 12000 -- reaches the provider; only the
+    first value above 12000 is rejected, before any provider call, with a
+    diagnostic that names ``synthesis_manifest_chars`` rather than
+    ``max_content_chars``.
+    """
     request = make_execution_request(tmp_path, "large.py", max_content_chars=1000)
-    provider = _Provider()
-    agent = FileSynthesisAgent(provider, max_content_chars=1000)
+    assert request.context.max_content_chars == 1000
+    assert request.context.synthesis_manifest_chars == 12000
+    carried = request.context.synthesis_manifest_chars
     shape = resolved_synthesis_shape(request.context.resolved_shape_bundle)
 
-    with pytest.raises(ValueError, match="exceeds max_content_chars"):
-        agent.run(
+    # Above the source ceiling B=1000, up to and including the carried budget:
+    # accepted and delivered to the provider.
+    for manifest_len in (1001, carried):
+        assert manifest_len > request.context.max_content_chars
+        provider = _Provider()
+        agent = FileSynthesisAgent(provider, max_content_chars=1000)
+        result = agent.run(
             request.rel_path,
-            "x" * 1001,
+            "x" * manifest_len,
             shape,
             call_context=request.context,
         )
+        assert provider.calls == 1
+        assert result["description"] == "Synthesized file."
 
-    assert provider.calls == 0
+    # The first value above the carried budget: rejected before any provider use.
+    over_provider = _Provider()
+    over_agent = FileSynthesisAgent(over_provider, max_content_chars=1000)
+    with pytest.raises(ValueError) as caught:
+        over_agent.run(
+            request.rel_path,
+            "x" * (carried + 1),
+            shape,
+            call_context=request.context,
+        )
+    assert "synthesis_manifest_chars" in str(caught.value)
+    assert "max_content_chars" not in str(caught.value)
+    assert over_provider.calls == 0
 
 
 def test_triple_synthesis_shape_is_canonical_combined_union() -> None:
@@ -242,6 +288,31 @@ def _reduction_request(
         ordinal=1,
         child_ids=("chunk_" + "a" * 64, "chunk_" + "b" * 64),
         child_capsules=({"description": "a"}, {"description": "b"}),
+        reducer_revision="reducer-v1",
+        context=context,
+    )
+
+
+def _sized_reduction_request(
+    rel_path: str, context, child_count: int
+) -> FileReductionExecutionRequest:
+    """A ``FileReductionExecutionRequest`` whose child IDs and child capsules
+    both number *child_count*, so a caller passing *child_count* narratives has
+    an internally consistent fixture (D6/section 9)."""
+    child_ids = tuple(f"chunk_{index:064x}" for index in range(child_count))
+    return FileReductionExecutionRequest(
+        rel_path=rel_path,
+        division_plan_digest="division-plan:" + "1" * 64,
+        reduction_tree_digest="reduction-tree:" + "2" * 64,
+        node_id="node_" + "3" * 64,
+        phase="general",
+        unit_id=None,
+        level=1,
+        ordinal=1,
+        child_ids=child_ids,
+        child_capsules=tuple(
+            {"narrative": f"child narrative {index}"} for index in range(child_count)
+        ),
         reducer_revision="reducer-v1",
         context=context,
     )
@@ -324,31 +395,63 @@ def test_reduction_retry_reissues_a_byte_identical_prompt(tmp_path) -> None:
 def test_reduction_runtime_rejects_manifest_above_planned_ceiling(
     tmp_path,
 ) -> None:
-    ceiling = (
-        REDUCTION_ENVELOPE_OVERHEAD_CHARS
-        + worst_case_reduction_manifest_chars(2)
-        - 1
-    )
-    request = make_execution_request(
-        tmp_path,
-        "src/large.py",
-        max_content_chars=ceiling,
-    )
-    reduction_request = _reduction_request(request.rel_path, request.context)
-    provider = _Provider({"narrative": "Combined narrative."})
-    agent = FileSynthesisAgent(provider, max_content_chars=ceiling)
-    narratives = (
-        "a" * MAX_REDUCTION_NARRATIVE_CHARS,
-        "b" * MAX_REDUCTION_NARRATIVE_CHARS,
-    )
+    """Section 5.7: a reduction node's rendered child manifest is bounded by the
+    automatically carried synthesis budget, not the raw source ceiling. At
+    ``B = 1000`` the carried budget is 12000, so a rendered envelope well above
+    1000 -- up to the carried 12000 -- is accepted and reaches the provider; the
+    first envelope above 12000 is rejected with ``DivisionInternalDefect``
+    before any provider call. The boundary child count is derived from the real
+    ``render``/``worst_case`` functions, never hard-coded.
+    """
+    request = make_execution_request(tmp_path, "src/large.py", max_content_chars=1000)
+    assert request.context.max_content_chars == 1000
+    assert request.context.synthesis_manifest_chars == 12000
+    carried = request.context.synthesis_manifest_chars
 
+    def _envelope(child_count: int) -> int:
+        return (
+            worst_case_reduction_manifest_chars(child_count)
+            + REDUCTION_ENVELOPE_OVERHEAD_CHARS
+        )
+
+    # Largest child count whose worst-case rendered envelope still fits the
+    # carried synthesis budget; one more overflows it.
+    fitting = 2
+    while _envelope(fitting + 1) <= carried:
+        fitting += 1
+    assert _envelope(fitting) <= carried < _envelope(fitting + 1)
+    # The fitting envelope genuinely exceeds the source ceiling B=1000, so this
+    # is not the retired coupled behaviour where B alone bounded the reducer.
+    assert _envelope(fitting) > request.context.max_content_chars
+
+    fitting_narratives = maximum_distinct_narratives(fitting)
+    assert (
+        len(render_reduction_child_manifest(fitting_narratives))
+        + REDUCTION_ENVELOPE_OVERHEAD_CHARS
+        == _envelope(fitting)
+    )
+    accepted_provider = _Provider({"narrative": "Combined narrative."})
+    accepted_agent = FileSynthesisAgent(accepted_provider, max_content_chars=1000)
+    result = accepted_agent.run_reduction(
+        _sized_reduction_request(request.rel_path, request.context, fitting),
+        fitting_narratives,
+    )
+    assert result == {"narrative": "Combined narrative."}
+    assert accepted_provider.calls == 1
+
+    over_narratives = maximum_distinct_narratives(fitting + 1)
+    over_provider = _Provider({"narrative": "Combined narrative."})
+    over_agent = FileSynthesisAgent(over_provider, max_content_chars=1000)
     with pytest.raises(
         DivisionInternalDefect,
-        match="planned reduction child manifest exceeds",
+        match="synthesis_manifest_chars",
     ):
-        agent.run_reduction(reduction_request, narratives)
+        over_agent.run_reduction(
+            _sized_reduction_request(request.rel_path, request.context, fitting + 1),
+            over_narratives,
+        )
 
-    assert provider.calls == 0
+    assert over_provider.calls == 0
 
 
 def test_reduction_shape_block_states_the_narrative_bound() -> None:
@@ -528,3 +631,91 @@ def test_reduction_correction_terminal_fault_preserves_whole_run_abort(
     assert failure.status == 429
     assert isinstance(caught.value.__cause__, LLMError)
     assert provider.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# 0.14.7: reduction narrative headroom
+# ---------------------------------------------------------------------------
+# Section 4.3: `_REDUCTION_SHAPE_BLOCK` stated only the hard 300-character
+# cap, with nothing telling the model to aim below it. A generative length
+# target stated as an exact ceiling is approached and overshot -- the
+# observed corrected values of 302 and 305 chars against that cap were the
+# predictable result, not an outlier. The repair states a recommended target
+# below the cap in the one shape block both the initial and correction
+# reduction routes already share.
+
+
+def test_reduction_shape_block_states_a_recommended_target_below_the_bound() -> None:
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    assert MAX_REDUCTION_NARRATIVE_TARGET_CHARS < MAX_REDUCTION_NARRATIVE_CHARS
+    assert (
+        f"recommended maximum of {MAX_REDUCTION_NARRATIVE_TARGET_CHARS} characters"
+        in _REDUCTION_SHAPE_BLOCK
+    )
+    # The pre-existing hard-bound statement must survive verbatim.
+    assert (
+        f"narrative <= {MAX_REDUCTION_NARRATIVE_CHARS} characters"
+        in _REDUCTION_SHAPE_BLOCK
+    )
+
+
+def test_reduction_shape_block_states_rejection_is_full_never_trimmed() -> None:
+    """Section 5.2 clause 3: brevity is guidance, not cosmetic -- an
+    over-bound narrative is rejected whole, never trimmed to fit."""
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    assert "rejected in full" in _REDUCTION_SHAPE_BLOCK
+    assert "never trimmed" in _REDUCTION_SHAPE_BLOCK
+
+
+def test_reduction_correction_prompt_carries_the_same_headroom(tmp_path) -> None:
+    """The headroom must reach both routes: `run_reduction()` hands
+    `_REDUCTION_SHAPE_BLOCK` to `_finalize_fixed_response()` for the
+    correction call too, so putting the target only in the initial prompt
+    would leave a paid correction as the normal path for a large file
+    (section 5.2). This drives a real over-cap rejection through the real
+    correction component and inspects both prompts actually sent."""
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = make_execution_request(tmp_path, "src/large.py", max_content_chars=1000)
+    reduction_request = _reduction_request(request.rel_path, request.context)
+    provider = _RecordingCorrectingProvider(
+        first_response={"narrative": "x" * (MAX_REDUCTION_NARRATIVE_CHARS + 1)},
+        corrected_response={"narrative": "Corrected combined narrative."},
+    )
+    agent = FileSynthesisAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+    result = agent.run_reduction(reduction_request, ("First narrative.",))
+
+    assert result == {"narrative": "Corrected combined narrative."}
+    assert len(provider.prompts) == 2
+    for prompt in provider.prompts:
+        assert _REDUCTION_SHAPE_BLOCK in prompt
+
+
+def test_reduction_narrative_between_target_and_bound_is_accepted(tmp_path) -> None:
+    """The recommended target is guidance, not a second enforced bound -- a
+    narrative strictly between it and the hard bound must still be
+    accepted, with no correction call."""
+    request = make_execution_request(tmp_path, "src/large.py", max_content_chars=1000)
+    reduction_request = _reduction_request(request.rel_path, request.context)
+    narrative = "x" * (MAX_REDUCTION_NARRATIVE_TARGET_CHARS + 10)
+    assert (
+        MAX_REDUCTION_NARRATIVE_TARGET_CHARS
+        < len(narrative)
+        <= MAX_REDUCTION_NARRATIVE_CHARS
+    )
+    provider = _Provider({"narrative": narrative})
+    agent = FileSynthesisAgent(provider, max_content_chars=1000)
+
+    result = agent.run_reduction(reduction_request, ("First narrative.",))
+
+    assert result == {"narrative": narrative}
+    assert provider.calls == 1

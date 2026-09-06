@@ -62,7 +62,13 @@ def test_provider_malformed_response_fails_file(tmp_path, monkeypatch, provider_
 
     rec = {}
     installer(monkeypatch, rec, **{kw: "this is not json"})
-    stats = run_pipeline(project, _base_config(provider_name, model))
+    # This asserts a malformed response is TERMINAL. Pin the correction default
+    # so the flip does not silently route the file through a repair attempt
+    # (Section 10 / section 7.2.1 fail-closed implicit-default rule).
+    stats = run_pipeline(
+        project,
+        {**_base_config(provider_name, model), "response_correction_enabled": False},
+    )
     assert stats["checked"] == 0
     assert stats["failed"] == 1
 

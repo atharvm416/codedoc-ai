@@ -16,15 +16,22 @@ import pytest
 from codedoc.agents.orchestrator import Orchestrator
 from codedoc.agents.response_diagnostics import CorrectionLedger
 from codedoc.core.document import read_codedoc_document
+import codedoc.core.execution as execution
 from codedoc.core.execution import (
     _process_divided_file,
     _process_one_file_with_retries,
 )
+import codedoc.core.file_division as file_division
+import codedoc.core.record_meta as record_meta
+import codedoc.core.safe_writer as safe_writer_mod
 from codedoc.core.file_division import (
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    SplitTreeState,
     build_division_plan,
     build_reduction_tree,
     tree_node_state,
 )
+from codedoc.cli.cli import run_cli
 from codedoc.core.execution_model import CallManifestTracker, build_call_manifest
 from codedoc.core.project_view import json_from_view
 from codedoc.core.record_meta import ANALYSIS_REVISION
@@ -33,6 +40,7 @@ from codedoc.core.safe_writer import SafeWriter
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import (
     ConfigError,
+    InsufficientSourceError,
     LiveBackupWriteError,
     LLMError,
     UnrecoverableProviderError,
@@ -333,7 +341,12 @@ def test_resume_runs_only_unpaid_nodes_and_then_synthesis(tmp_path) -> None:
         content=source,
         source_budget_chars=2000,
     )
-    tree = build_reduction_tree(plan, max_content_chars=2000)
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), as production planning does; the deprecated alias would
+    # carry the raw source value and be rejected by the execution guard.
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+    )
     reduction_total = len(tree.unit_consolidation_nodes) + len(tree.general_nodes)
     assert len(plan.chunks) >= 2
     assert reduction_total >= 1
@@ -422,7 +435,12 @@ def test_terminal_split_failure_preserves_stable_output_and_resumes_only_unpaid_
         content=source,
         source_budget_chars=2000,
     )
-    tree = build_reduction_tree(plan, max_content_chars=2000)
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), as production planning does; the deprecated alias would
+    # carry the raw source value and be rejected by the execution guard.
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+    )
     assert len(plan.chunks) > completed_before_terminal
     stable = {
         "path": request.rel_path,
@@ -547,7 +565,12 @@ def test_stop_event_checkpoints_current_leaf_and_skips_remaining_provider_calls(
         content=source,
         source_budget_chars=2000,
     )
-    tree = build_reduction_tree(plan, max_content_chars=2000)
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), as production planning does; the deprecated alias would
+    # carry the raw source value and be rejected by the execution guard.
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+    )
     assert len(plan.chunks) >= 2
     writer = SafeWriter(
         tmp_path / "docs" / "crash_recovery.json",
@@ -598,7 +621,12 @@ def test_stop_event_prevents_response_correction_provider_call(tmp_path) -> None
         content=source,
         source_budget_chars=2000,
     )
-    tree = build_reduction_tree(plan, max_content_chars=2000)
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), as production planning does; the deprecated alias would
+    # carry the raw source value and be rejected by the execution guard.
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+    )
     manifest = build_call_manifest(
         (),
         (request.rel_path,),
@@ -805,7 +833,13 @@ def test_legacy_v1_split_partial_fails_closed_with_migration_guidance(
 
     message = str(blocked.value)
     assert "schema version 1" in message
-    assert "'main.py'" in message
+    # Section 8: bounded, JSON-escaped rendering -- the one affected path is
+    # a single ensure_ascii JSON string, with an exact total and a
+    # full-stream digest, never the old raw single-quoted interpolation.
+    assert json.dumps("main.py", ensure_ascii=True) in message
+    assert "'main.py'" not in message
+    assert "1 path" in message
+    assert "sha256:" in message
     assert "crash_recovery.json" in message
     assert "predecessor" in message
     assert recovery_path.read_bytes() == original_recovery
@@ -940,3 +974,1494 @@ def test_aliased_split_partial_paths_block_without_mutation_or_provider(
     assert provider_creations == []
     assert stable_path.read_bytes() == stable_before
     assert recovery_path.read_bytes() == recovery_before
+
+
+def test_cross_plan_transition_preserves_then_transactionally_supersedes_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 6.3 / 5.7, through the real ``run_pipeline`` / ``SafeWriter``
+    path: a schema-4 checkpoint written by one run becomes a *cross-plan
+    predecessor* for a later run whose reduction-tree digest moved (a
+    ``REDUCTION_PACKING_REVISION`` advance -- same file content, same
+    division-plan digest). The predecessor container is carried byte-for-byte
+    while a replacement is incomplete, never overwritten by a new node
+    checkpoint, preserved across a failed replacement together with the stable
+    output, and only transactionally superseded -- with its recovery file
+    removed -- after a clean replacement run completes. No paid predecessor
+    node is silently deleted merely because it was detected as stale.
+    """
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "analysis_mode": "single",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+
+    # ---- Pass 1: interrupted run writes a genuine one-leaf checkpoint. ----
+    first_calls = {"n": 0}
+
+    def fail_after_first_leaf(self, request):
+        first_calls["n"] += 1
+        if first_calls["n"] >= 2:
+            raise LLMError("interrupted after the first leaf")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_after_first_leaf)
+    stats1 = run_pipeline(tmp_path, config)
+    assert stats1["failed"] == 1
+    assert recovery_path.exists()
+    predecessor_partial = json.loads(recovery_path.read_text(encoding="utf-8"))[
+        "_codedoc"
+    ]["partial_files"]["main.py"]
+    predecessor_node_ids = [node["node_id"] for node in predecessor_partial["nodes"]]
+    assert len(predecessor_node_ids) == 1
+
+    def _documented_paths():
+        doc = json.loads(stable_path.read_text(encoding="utf-8"))
+        return {record.get("path") for record in doc.get("files", [])}
+
+    # main.py never completed, so it holds no published documentation record.
+    assert "main.py" not in _documented_paths()
+
+    # The exact pre-replacement bytes of BOTH persisted files.
+    recovery_before = recovery_path.read_bytes()
+    stable_before = stable_path.read_bytes()
+
+    # ---- Advance the reduction-packing revision: the next run's tree digest
+    # differs while content and the division-plan digest do not. ----
+    bumped = "reduction-packing-v5-next"
+    monkeypatch.setattr(file_division, "REDUCTION_PACKING_REVISION", bumped)
+    if hasattr(record_meta, "REDUCTION_PACKING_REVISION"):
+        monkeypatch.setattr(record_meta, "REDUCTION_PACKING_REVISION", bumped)
+
+    # ---- Pass 2a: the failed/interrupted cross-plan replacement. ----
+    def fail_every_leaf(self, request):
+        raise LLMError("second run also interrupted")
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_every_leaf)
+    stats2 = run_pipeline(tmp_path, config)
+    assert stats2["failed"] == 1
+    assert recovery_path.exists()
+
+    # Exact-byte contract (section 6.3): a failed/interrupted fresh replacement
+    # with carried predecessor state leaves the pre-run recovery file and the
+    # pre-run stable output BYTE-IDENTICAL -- no wrapper churn, no telemetry
+    # rewrite. Not json.loads equality, not selected-field equality, not
+    # record-absence, not canonical-JSON equality.
+    assert recovery_path.read_bytes() == recovery_before
+    assert stable_path.read_bytes() == stable_before
+
+    # Semantic guarantees retained:
+    carried_partial = json.loads(recovery_path.read_text(encoding="utf-8"))[
+        "_codedoc"
+    ]["partial_files"]["main.py"]
+    # predecessor partial remains present; its node IDs are exact; no current
+    # replacement checkpoint was appended; no paid predecessor node vanished.
+    assert carried_partial == predecessor_partial
+    assert [node["node_id"] for node in carried_partial["nodes"]] == predecessor_node_ids
+    assert len(carried_partial["nodes"]) == 1
+    # The failed file published no replacement documentation record.
+    assert "main.py" not in _documented_paths()
+
+    # ---- Pass 2b: a clean replacement run. Carry state is transactionally
+    # superseded and the recovery file is removed. ----
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", original_leaf)
+    stats3 = run_pipeline(tmp_path, config)
+    assert stats3["checked"] == 1
+    assert stats3["failed"] == 0
+    assert not recovery_path.exists()
+    record = json.loads(stable_path.read_text(encoding="utf-8"))["files"][0]
+    assert record["_large_file_identity"].startswith("large-file-v3:")
+    assert record["description"]
+
+
+def test_mixed_run_defers_unrelated_work_until_cross_plan_replacement_succeeds(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 6.3 mixed-file transaction boundary: a run that carries a
+    cross-plan predecessor for one split file AND has a second reachable
+    changed ordinary file treats the carried replacement as a prerequisite. If
+    that replacement fails, the unrelated file is NOT attempted or charged, and
+    BOTH the prior stable output and the recovery file stay BYTE-IDENTICAL. A
+    later successful retry supersedes the carried state and only then processes
+    the unrelated file normally, removing recovery on clean completion. No
+    ``SafeWriter`` method changes; ordinary and non-carry runs are unchanged.
+    """
+    big = "import helper\n" + "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(big, encoding="utf-8", newline="")
+    (tmp_path / "helper.py").write_text("HELPER = 1\n", encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "analysis_mode": "single",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    original_process = Orchestrator.process
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+
+    def _documented_paths():
+        if not stable_path.exists():
+            return set()
+        doc = json.loads(stable_path.read_text(encoding="utf-8"))
+        return {record.get("path") for record in doc.get("files", [])}
+
+    # ---- Pass 1: interrupt main.py's split -> a genuine one-leaf checkpoint. --
+    calls = {"leaf": 0}
+
+    def fail_after_first_leaf(self, request):
+        calls["leaf"] += 1
+        if calls["leaf"] >= 2:
+            raise LLMError("interrupted after the first leaf")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_after_first_leaf)
+    stats1 = run_pipeline(tmp_path, config)
+    assert stats1["failed"] == 1
+    assert recovery_path.exists()
+    predecessor_partial = json.loads(recovery_path.read_text(encoding="utf-8"))[
+        "_codedoc"
+    ]["partial_files"]["main.py"]
+    assert len(predecessor_partial["nodes"]) == 1
+    # helper.py was legitimately documented in this pass; its record is now
+    # part of the stable output that pass 2 must not disturb.
+    assert "helper.py" in _documented_paths()
+
+    def _helper_record():
+        doc = json.loads(stable_path.read_text(encoding="utf-8"))
+        return next(r for r in doc["files"] if r.get("path") == "helper.py")
+
+    helper_record_before = _helper_record()
+
+    # ---- Make main.py's partial a CROSS-PLAN predecessor; change helper.py. ---
+    monkeypatch.setattr(file_division, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+    if hasattr(record_meta, "REDUCTION_PACKING_REVISION"):
+        monkeypatch.setattr(record_meta, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+    (tmp_path / "helper.py").write_text(
+        "HELPER = 2  # changed\n", encoding="utf-8", newline=""
+    )
+
+    recovery_before = recovery_path.read_bytes()
+    stable_before = stable_path.read_bytes() if stable_path.exists() else None
+
+    helper_calls = {"n": 0}
+
+    def count_helper(self, request):
+        if getattr(request, "rel_path", None) == "helper.py":
+            helper_calls["n"] += 1
+        return original_process(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process", count_helper)
+
+    # ---- Pass 2: the carried replacement fails; helper.py must NOT run. ------
+    def fail_every_leaf(self, request):
+        raise LLMError("cross-plan replacement interrupted")
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_every_leaf)
+    stats2 = run_pipeline(tmp_path, config)
+
+    assert stats2["failed"] == 1  # only main.py failed
+    assert helper_calls["n"] == 0  # the unrelated file was never attempted/charged
+    assert stats2["checked"] == 0
+    # exact-byte preservation of BOTH persisted files
+    assert recovery_path.read_bytes() == recovery_before
+    assert stable_before is not None
+    assert stable_path.read_bytes() == stable_before
+    # helper.py's stale (pre-change) record is untouched -- not re-documented
+    assert _helper_record() == helper_record_before
+    # the carried predecessor container is still present and unchanged
+    carried = json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]["main.py"]
+    assert carried == predecessor_partial
+
+    # ---- Pass 3: a clean retry supersedes the carried state, then helper.py. -
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", original_leaf)
+    stats3 = run_pipeline(tmp_path, config)
+    assert stats3["failed"] == 0
+    assert stats3["checked"] >= 2
+    assert helper_calls["n"] == 1  # the deferred file is processed exactly once now
+    assert not recovery_path.exists()
+    assert {"main.py", "helper.py"} <= _documented_paths()
+
+
+def test_non_carry_split_failed_run_still_writes_stable_output_and_checkpoint(
+    tmp_path, monkeypatch
+) -> None:
+    """Isolation for section 6.3's exact-byte carry fix: a *non-carry* fresh
+    split run that fails a leaf must still (re)write ``codedoc.json`` and its
+    resumable ``crash_recovery.json`` checkpoint. The cross-plan-carry byte
+    guard must not have disabled stable-output writing for ordinary failed
+    split runs.
+    """
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "analysis_mode": "single",
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    calls = {"n": 0}
+
+    def fail_after_first_leaf(self, request):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            raise LLMError("interrupted after the first leaf")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_after_first_leaf)
+    stats = run_pipeline(tmp_path, config)
+
+    assert stats["failed"] == 1
+    assert stats["checked"] == 0
+    # Non-carry failed split run: stable output IS written and the checkpoint
+    # IS persisted (nothing about ordinary failed-run behaviour changed).
+    assert stable_path.exists()
+    assert recovery_path.exists()
+    partials = json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]
+    assert list(partials) == ["main.py"]
+    assert len(partials["main.py"]["nodes"]) == 1
+
+
+def test_ordinary_failed_run_still_writes_stable_output(tmp_path, monkeypatch) -> None:
+    """Isolation for section 6.3's exact-byte carry fix: an *ordinary*
+    (non-split) run whose only file fails must still write ``codedoc.json``.
+    """
+    (tmp_path / "main.py").write_text("x = 1\n", encoding="utf-8", newline="")
+    stable_path = tmp_path / "docs" / "codedoc.json"
+
+    class _BadJson:
+        provider_name = "bad-json"
+
+        def complete_json(self, prompt, system=""):
+            return "not json at all"
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt, system)
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: _BadJson())
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "analysis_mode": "single",
+            "propagate_changes": False,
+            "output_dir": "docs",
+            "file_retry_attempts": 0,
+            # Terminal ordinary failure is the subject; pin the correction
+            # default (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
+        },
+    )
+
+    assert stats["failed"] == 1
+    assert stats["checked"] == 0
+    assert stable_path.exists()
+
+
+def test_failed_completed_record_flush_rolls_back_carry_state_and_preserves_bytes(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 6.3: a clean replacement whose completed-record flush itself
+    fails must roll back the in-memory carry state (the predecessor stays
+    available) and leave the previous recovery bytes intact -- the atomic
+    writer never half-writes.
+    """
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    carried = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path="main.py",
+        content_hash=_CONTENT_HASH,
+        division_plan_digest=_PLAN_DIGEST,
+        reduction_tree_digest=_TREE_DIGEST,
+        nodes=(_leaf_node("main.py"),),
+    )
+    writer = SafeWriter(recovery_path, "json", "main.py", {})
+    writer.load(preloaded_carry_partials={"main.py": carried})
+    writer.initialize_empty()
+    recovery_before = recovery_path.read_bytes()
+    assert writer.get_tree_state("main.py") is None  # carry never validated
+
+    real_atomic = safe_writer_mod.atomic_write_text
+
+    def _boom(path, text):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", _boom)
+    with pytest.raises(LiveBackupWriteError):
+        writer.record("main.py", {"description": "replacement result"}, "0" * 64)
+    monkeypatch.setattr(safe_writer_mod, "atomic_write_text", real_atomic)
+
+    # In-memory carry state rolled back; predecessor still carried and resumable.
+    assert writer.has_partial_state()
+    # The previous recovery bytes are untouched -- the atomic writer never
+    # renamed a partial file into place.
+    assert recovery_path.read_bytes() == recovery_before
+    on_disk = json.loads(recovery_path.read_text(encoding="utf-8"))
+    assert "main.py" in on_disk["_codedoc"]["partial_files"]
+    assert len(on_disk["_codedoc"]["partial_files"]["main.py"]["nodes"]) == 1
+
+
+def test_two_phase_deferred_insufficient_source_skip_excludes_stale_record(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 6.3 two-phase boundary regression: a deferred file skipped in
+    phase two must be excluded from the published output exactly as the
+    single-phase path excludes an execution-time insufficient-source skip --
+    never republished from its stale predecessor record.
+
+    Phase one replaces a genuine cross-plan carried predecessor (``main.py``)
+    successfully; phase two then defers ``helper.py``, which raises a typed
+    ``InsufficientSourceError`` through the real execution routing and is
+    marked skipped on the *phase-two* ``ProcessingQueue``. Before the fix,
+    final assembly reads execution-time skip states from the *phase-one*
+    queue only, so the phase-two skip is invisible and the stale ``helper.py``
+    record is re-emitted into ``codedoc.json``. Ordinary single-phase skip
+    exclusion is covered by ``test_insufficient_source.py`` and is unchanged.
+    """
+    big = "import helper\n" + "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+    (tmp_path / "main.py").write_text(big, encoding="utf-8", newline="")
+    (tmp_path / "helper.py").write_text("HELPER = 1\n", encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "analysis_mode": "single",
+        "parallel_agents": False,
+        "max_parallel_files": 1,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    original_process = Orchestrator.process
+    real_process_one_file = execution._process_one_file
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+
+    def _documented_paths():
+        if not stable_path.exists():
+            return set()
+        doc = json.loads(stable_path.read_text(encoding="utf-8"))
+        return {record.get("path") for record in doc.get("files", [])}
+
+    # ---- Pass 1: interrupt main.py's split -> a genuine one-leaf checkpoint;
+    #      helper.py is documented normally and enters stable output. ----
+    calls = {"leaf": 0}
+
+    def fail_after_first_leaf(self, request):
+        calls["leaf"] += 1
+        if calls["leaf"] >= 2:
+            raise LLMError("interrupted after the first leaf")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_after_first_leaf)
+    stats1 = run_pipeline(tmp_path, config)
+    assert stats1["failed"] == 1
+    assert recovery_path.exists()
+    predecessor_partial = json.loads(recovery_path.read_text(encoding="utf-8"))[
+        "_codedoc"
+    ]["partial_files"]["main.py"]
+    assert len(predecessor_partial["nodes"]) == 1
+    assert "helper.py" in _documented_paths()
+
+    # ---- Make main.py's partial a CROSS-PLAN predecessor; change helper.py so
+    #      it is reachable agent work again (not a provider-free precheck skip). -
+    monkeypatch.setattr(file_division, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+    if hasattr(record_meta, "REDUCTION_PACKING_REVISION"):
+        monkeypatch.setattr(record_meta, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+    (tmp_path / "helper.py").write_text(
+        "HELPER = 2  # changed\n", encoding="utf-8", newline=""
+    )
+
+    # ---- Pass 2: phase one replaces main.py; phase two defers helper.py, which
+    #      raises a typed InsufficientSourceError through the real routing. ----
+    def process_one_file(request, orchestrator):
+        if request.rel_path == "helper.py":
+            raise InsufficientSourceError("helper.py", "empty_or_whitespace_only")
+        return real_process_one_file(request, orchestrator)
+
+    helper_provider_calls = {"n": 0}
+
+    def count_helper_process(self, request):
+        if getattr(request, "rel_path", None) == "helper.py":
+            helper_provider_calls["n"] += 1
+        return original_process(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", original_leaf)
+    monkeypatch.setattr(execution, "_process_one_file", process_one_file)
+    monkeypatch.setattr(Orchestrator, "process", count_helper_process)
+
+    stats2 = run_pipeline(tmp_path, config)
+
+    # main.py's carried replacement completed; helper.py was skipped, not failed.
+    assert stats2["failed"] == 0
+    assert stats2["checked"] == 1
+    assert stats2["skipped_insufficient_source"] == 1
+    # No provider work for helper.py after the typed insufficient-source verdict.
+    assert helper_provider_calls["n"] == 0
+
+    documented = _documented_paths()
+    # main.py's successful replacement is present with a fresh identity.
+    assert "main.py" in documented
+    main_record = next(
+        r for r in json.loads(stable_path.read_text(encoding="utf-8"))["files"]
+        if r.get("path") == "main.py"
+    )
+    assert main_record["_large_file_identity"].startswith("large-file-v3:")
+    # The deferred insufficient-source file is excluded -- NOT republished from
+    # its stale predecessor record (the pre-fix bug).
+    assert "helper.py" not in documented
+
+    # Selected-file completion accounting reconciles; last_run's
+    # insufficient-source count is right.
+    last_run = json.loads(stable_path.read_text(encoding="utf-8"))["last_run"]
+    assert last_run["files_skipped_insufficient_source"] == 1
+    assert last_run["files_failed"] == 0
+    assert last_run["files_selected"] == sum(
+        last_run[key]
+        for key in (
+            "files_documented_by_llm",
+            "files_failed",
+            "files_reused_unchanged",
+            "files_reused_identical_content",
+            "files_unattempted",
+            "files_skipped_insufficient_source",
+        )
+    )
+    assert stats2["unattempted_files"] == 0
+
+    # Recovery cleanup follows the existing successful-with-skip behaviour:
+    # main.py's carry was superseded by a clean replacement and nothing else
+    # holds partial state, so recovery is removed.
+    assert not recovery_path.exists()
+
+
+def test_multi_carry_completed_path_persists_while_failed_path_predecessor_is_preserved(
+    tmp_path, monkeypatch
+) -> None:
+    """Section 6.3 multi-carry contract (per-path) -- contract-freezing.
+
+    Recovery carries cross-plan predecessor partials for TWO oversized split
+    files. In a deterministic sequential run the first replacement completes
+    and the second fails. Plan sec 7.1 ("a completed replacement still flushes
+    transactionally") and plan sec 12 (checkpointing over carried state is
+    forbidden only *before* clean replacement) resolve the contract per carried
+    path, not per whole recovery file:
+
+      1. the failed path keeps its predecessor container unchanged;
+      2. no replacement checkpoint is written for the failed path;
+      3. the completed path transactionally supersedes its own predecessor and
+         persists as a completed recovery record;
+      4. that successfully paid work is not discarded;
+      5. stable project output stays byte-identical while any carry is incomplete;
+      6. recovery stays present while failed carried state remains;
+      7. the next run reuses the completed path with no provider call and retries
+         only the still-incomplete carried path;
+      8. when the remaining path succeeds, stable output publishes and recovery
+         is removed.
+
+    Current behaviour already satisfies this per-path contract, so this freezes
+    it rather than proving a fix.
+    """
+    helper_src = "\n".join(f"def h_{i}(): return {i}" for i in range(220)) + "\n"
+    main_src = (
+        "import helper\n"
+        + "\n".join(f"def m_{i}(): return {i}" for i in range(220))
+        + "\n"
+    )
+    (tmp_path / "helper.py").write_text(helper_src, encoding="utf-8", newline="")
+    (tmp_path / "main.py").write_text(main_src, encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "analysis_mode": "single",
+        "parallel_agents": False,
+        "max_parallel_files": 1,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+
+    # ---- Pass 1: interrupt the first leaf of EACH split file -> two genuine
+    #      one-leaf predecessor containers. ----
+    leaf_counts: dict = {}
+
+    def fail_first_leaf_per_file(self, request):
+        rel = getattr(request, "rel_path", None)
+        leaf_counts[rel] = leaf_counts.get(rel, 0) + 1
+        if leaf_counts[rel] >= 2:
+            raise LLMError(f"interrupted after first leaf of {rel}")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_first_leaf_per_file)
+    stats1 = run_pipeline(tmp_path, config)
+    assert stats1["failed"] == 2
+    partials1 = json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]
+    assert set(partials1) == {"helper.py", "main.py"}
+    assert len(partials1["helper.py"]["nodes"]) == 1
+    assert len(partials1["main.py"]["nodes"]) == 1
+    main_predecessor = partials1["main.py"]
+
+    # ---- Cross-plan revision transition: both partials become predecessors. ----
+    monkeypatch.setattr(file_division, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+    if hasattr(record_meta, "REDUCTION_PACKING_REVISION"):
+        monkeypatch.setattr(record_meta, "REDUCTION_PACKING_REVISION", "rp-v5-next")
+
+    stable_before = stable_path.read_bytes()
+
+    # ---- Pass 2: deterministic order (helper.py before main.py -- main imports
+    #      helper). helper.py replacement completes; main.py replacement fails. --
+    def fail_only_main_leaves(self, request):
+        if getattr(request, "rel_path", None) == "main.py":
+            raise LLMError("main.py replacement interrupted")
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", fail_only_main_leaves)
+    stats2 = run_pipeline(tmp_path, config)
+
+    assert stats2["checked"] == 1  # helper.py
+    assert stats2["failed"] == 1  # main.py
+    # (5) stable project output byte-identical while a carry is incomplete
+    assert stable_path.read_bytes() == stable_before
+    # (6) recovery still present
+    assert recovery_path.exists()
+    recovery2 = json.loads(recovery_path.read_text(encoding="utf-8"))
+    partials2 = recovery2["_codedoc"]["partial_files"]
+    # (1) + (2) failed path predecessor unchanged; no replacement checkpoint
+    assert list(partials2) == ["main.py"]
+    assert partials2["main.py"] == main_predecessor
+    assert len(partials2["main.py"]["nodes"]) == 1
+    # (3) completed path persisted as a completed recovery record
+    assert {r.get("path") for r in recovery2["files"]} == {"helper.py"}
+
+    # ---- Pass 3: retry. (7) helper.py reused with no provider call; only main.py
+    #      retried. (8) main.py succeeds -> stable publishes, recovery removed. --
+    provider_leaves: dict = {}
+
+    def count_leaves_per_file(self, request):
+        rel = getattr(request, "rel_path", None)
+        provider_leaves[rel] = provider_leaves.get(rel, 0) + 1
+        return original_leaf(self, request)
+
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", count_leaves_per_file)
+    stats3 = run_pipeline(tmp_path, config)
+
+    assert stats3["failed"] == 0
+    # (7) completed carried path reused with no provider call; only the
+    # still-incomplete carried path is retried.
+    assert provider_leaves.get("helper.py", 0) == 0
+    assert provider_leaves.get("main.py", 0) >= 1
+    # (4) the paid helper.py work from pass 2 was not discarded / re-executed
+    # (proved by the zero provider leaves above) and remains published.
+    document3 = json.loads(stable_path.read_text(encoding="utf-8"))
+    assert {r.get("path") for r in document3["files"]} == {"helper.py", "main.py"}
+    for record in document3["files"]:
+        assert record["_large_file_identity"].startswith("large-file-v3:")
+    # (8) clean whole-run completion publishes stable output and removes recovery.
+    assert not recovery_path.exists()
+
+
+# ===========================================================================
+# Section 5.8 / 6.3 correction round 2: dry-run is a read-only preview of the
+# SAME payable work and the SAME recovery-transition classification as a real
+# preflight, proven against a GENUINE on-disk crash_recovery.json produced by a
+# real interrupted split run. For every recovery-bearing case: the dry-run
+# leaves the recovery file BYTE-FOR-BYTE unchanged and writes / quarantines /
+# checkpoints / deletes nothing; the dry and real preflight snapshots are
+# field-for-field identical (recursively, minus the ``dry_run`` marker); and
+# the three §6.3 counters -- persisted ``split_reexecuted_nodes`` and the two
+# ephemeral ``split_recovery_discarded_predecessor_nodes`` /
+# ``split_recovery_replacement_nodes_planned`` -- carry the exact expected
+# integers.
+# ===========================================================================
+
+
+def _cr2_norm(value):
+    from types import MappingProxyType
+
+    if isinstance(value, (dict, MappingProxyType)):
+        return {k: _cr2_norm(v) for k, v in dict(value).items()}
+    if isinstance(value, (list, tuple)):
+        return [_cr2_norm(v) for v in value]
+    return value
+
+
+class _Cr2Stop(Exception):
+    pass
+
+
+def _cr2_source(lines: int = 1000) -> str:
+    return "\n".join(f"value_{i} = {i}" for i in range(lines)) + "\n"
+
+
+def _cr2_current_node_count(source: str, budget: int) -> int:
+    dp = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=budget
+    )
+    tr = build_reduction_tree(dp, synthesis_manifest_chars=12000)
+    return len(dp.chunks) + len(tr.all_nodes)
+
+
+def _cr2_write_interrupted_recovery(tmp_path, monkeypatch, *, budget, stop_after):
+    """Run a real split pipeline that fails after ``stop_after`` leaf
+    checkpoints, leaving a genuine on-disk crash_recovery.json. Returns
+    (config_without_budget, recovery_path, checkpointed_node_ids)."""
+    (tmp_path / "main.py").write_text(_cr2_source(), encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "analysis_mode": "single",
+        "max_content_chars": budget,
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    seen = {"n": 0}
+
+    def _fail_after(self, request):
+        if seen["n"] >= stop_after:
+            raise LLMError("interrupted for the recovery fixture")
+        seen["n"] += 1
+        return original_leaf(self, request)
+
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+        mp.setattr(Orchestrator, "process_leaf_chunk", _fail_after)
+        stats = run_pipeline(tmp_path, config)
+    assert stats["failed"] == 1
+    assert recovery_path.exists()
+    partial = json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]["main.py"]
+    node_ids = [n["node_id"] for n in partial["nodes"]]
+    assert len(node_ids) == stop_after
+    return config, recovery_path, node_ids
+
+
+def _cr2_capture(tmp_path, config, monkeypatch, *, dry):
+    """Capture the provider-free preflight snapshot for one run. dry=True hard-
+    fails on any provider/writer/output probe. dry=False allows a real completing
+    run but still proves the report preceded provider construction."""
+    events, snaps = [], []
+    import codedoc.pipeline as _pl
+
+    real_probe = _pl.preflight_output_accessibility
+
+    def _prov(_c):
+        events.append("provider")
+        if dry:
+            raise _Cr2Stop("provider constructed during dry-run preflight")
+        return SmartFake()
+
+    def _writer(*a, **k):
+        events.append("writer")
+        if dry:
+            raise _Cr2Stop("SafeWriter constructed during dry-run preflight")
+        return SafeWriter(*a, **k)
+
+    def _probe(*a, **k):
+        events.append("probe")
+        if dry:
+            raise _Cr2Stop("output probed during dry-run")
+        return real_probe(*a, **k)
+
+    err = None
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", _prov)
+        mp.setattr("codedoc.pipeline.SafeWriter", _writer)
+        mp.setattr("codedoc.pipeline.preflight_output_accessibility", _probe)
+        try:
+            run_pipeline(
+                tmp_path, {**config, "dry_run": dry},
+                plan_reporter=lambda s: (events.append("report"), snaps.append(_cr2_norm(s))),
+            )
+        except (_Cr2Stop, ConfigError) as exc:
+            err = exc
+    snap = snaps[0] if snaps else None
+    if snap is not None:
+        snap.pop("dry_run", None)
+    # An unexpected ConfigError (or a _Cr2Stop from a provider/writer/probe
+    # that should never have been constructed) is surfaced, never swallowed.
+    return snap, events, err
+
+
+_CR2_TRANSITION_CASES = {
+    # name: (predecessor_budget, stop_after, current_budget)
+    "compatible_current_partial": (2000, 3, 2000),   # same plan -> resume unpaid
+    "same_plan_stale_node": (2000, 3, 2000),         # (stale via bumped revision below)
+    "cross_plan_expansion": (8000, 1, 2000),         # 1 discarded  < many replacement
+    "cross_plan_contraction": (2000, 5, 8000),       # 5 discarded  > few replacement
+}
+
+
+@pytest.mark.parametrize("case", sorted(_CR2_TRANSITION_CASES))
+def test_cr2_recovery_transition_dry_real_parity_on_disk(tmp_path, monkeypatch, case):
+    pred_budget, stop_after, cur_budget = _CR2_TRANSITION_CASES[case]
+    config, recovery_path, checkpointed = _cr2_write_interrupted_recovery(
+        tmp_path, monkeypatch, budget=pred_budget, stop_after=stop_after
+    )
+    original_bytes = recovery_path.read_bytes()
+    source = _cr2_source()
+
+    is_cross_plan = case.startswith("cross_plan")
+    if is_cross_plan:
+        cur_node_ids = _cr2_current_node_count(source, cur_budget)
+        expected_discarded = stop_after
+        expected_replacement = cur_node_ids
+        expected_reexecuted = 0            # plan digest moved -> chunk IDs differ
+        expected_conflict = 1
+    elif case == "same_plan_stale_node":
+        # Bump the leaf prompt revision so the checkpointed leaves are stale
+        # under a matching plan/tree -> quarantine + re-run (no cross-plan carry).
+        monkeypatch.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-cr2-stale")
+        if hasattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION"):
+            monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-cr2-stale")
+        expected_discarded = 0             # not a cross-plan transition
+        expected_replacement = 0
+        expected_reexecuted = stop_after   # the stale checkpointed leaves re-run
+        expected_conflict = 1
+    else:  # compatible_current_partial
+        expected_discarded = 0
+        expected_replacement = 0
+        expected_reexecuted = 0
+        expected_conflict = 0
+
+    cfg = {**config, "max_content_chars": cur_budget}
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    stable_before = stable_path.read_bytes() if stable_path.exists() else None
+    dry_snap, dry_events, dry_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=True)
+
+    # a resolved-valid compatible/stale/cross-plan recovery is NOT an error
+    # scenario: neither mode raises, and no _Cr2Stop sentinel is swallowed.
+    assert dry_err is None
+
+    # BYTE preservation + no mutation after the dry run.
+    assert recovery_path.read_bytes() == original_bytes
+    assert (stable_path.read_bytes() if stable_path.exists() else None) == stable_before
+    assert dry_events == ["report"]
+
+    real_snap, real_events, real_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=False)
+    assert real_err is None
+    assert real_events[0] == "report"
+    if "provider" in real_events:
+        assert real_events.index("report") < real_events.index("provider")
+
+    # FULL recursive snapshot parity, minus the mode marker.
+    assert dry_snap is not None and real_snap is not None
+    assert dry_snap == real_snap
+
+    # exact §6.3 counter values on BOTH snapshots.
+    for snap in (dry_snap, real_snap):
+        assert snap["split_recovery_discarded_predecessor_nodes"] == expected_discarded
+        assert snap["split_recovery_replacement_nodes_planned"] == expected_replacement
+        assert snap["split_reexecuted_nodes"] == expected_reexecuted
+        assert snap["split_recovery_conflict_files"] == expected_conflict
+        assert snap["split_reexecuted_nodes"] <= snap["split_unpaid_nodes"]
+        if case == "cross_plan_contraction":
+            assert (
+                snap["split_recovery_discarded_predecessor_nodes"]
+                > snap["split_recovery_replacement_nodes_planned"]
+            )
+        # scenario-presence: prove the run actually entered this scenario.
+        if is_cross_plan:
+            assert snap["split_recovery_conflict_files"] == 1
+            assert snap["split_divided_files"] == 1
+            assert snap["total_calls_planned"] > 0
+        elif case == "same_plan_stale_node":
+            assert snap["split_quarantined_nodes"] >= stop_after
+            assert snap["split_reexecuted_nodes"] == stop_after
+        else:  # compatible_current_partial
+            assert snap["split_partial_files_resumed"] == 1
+            assert snap["split_restored_complete_chunks"] == stop_after
+            assert snap["split_recovery_conflict_files"] == 0
+
+
+def test_cli_prints_recovery_transition_counters_in_preflight_and_final_stats(
+    tmp_path, monkeypatch, capsys
+):
+    """F1 regression: ten test files already asserted
+    ``split_recovery_discarded_predecessor_nodes`` /
+    ``split_recovery_replacement_nodes_planned`` on the snapshot *dict* --
+    zero of them asserted the printed CLI text, so a presenter that silently
+    dropped both counters would have left the whole suite green. This test
+    exists to close exactly that hole: it asserts the terminal output of a
+    real ``run_cli`` invocation, not the snapshot.
+
+    Uses a genuine cross-plan *contraction* (predecessor budget 2000, 5
+    checkpointed leaves; current budget 8000) so ``discarded`` (5) is
+    strictly greater than ``replacement`` (fewer nodes fit the larger
+    budget) -- proving the two counters are rendered as independent counts,
+    never as a balanced pair."""
+    config, _recovery_path, _node_ids = _cr2_write_interrupted_recovery(
+        tmp_path, monkeypatch, budget=2000, stop_after=5
+    )
+    source = _cr2_source()
+    cur_budget = 8000
+    expected_discarded = 5
+    expected_replacement = _cr2_current_node_count(source, cur_budget)
+    assert expected_discarded > expected_replacement, (
+        "fixture must exercise a genuine contraction (discarded > replacement)"
+    )
+
+    (tmp_path / "codedoc.config.json").write_text(
+        json.dumps({**config, "max_content_chars": cur_budget}), encoding="utf-8"
+    )
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+
+    rc = run_cli([str(tmp_path), "--entry", "main.py"])
+    out = capsys.readouterr().out
+    assert rc == 0
+
+    expected_line = (
+        "Recovery transition (discarded/replacement): "
+        f"{expected_discarded} / {expected_replacement}"
+    )
+    preflight = out.split("Planned provider work (before calls)", 1)[1].split(
+        "\ncodedoc complete.", 1
+    )[0]
+    assert expected_line in preflight, "missing from the preflight summary"
+
+    final = out.split("\ncodedoc complete.", 1)[1]
+    assert expected_line in final, "missing from the final run summary"
+
+    # The two counts are never presented as if they must reconcile.
+    assert expected_discarded != expected_replacement
+
+
+def test_cli_prints_sorted_nonzero_closure_reasons_before_provider_construction(
+    tmp_path, monkeypatch, capsys
+):
+    """F1 regression (closure reasons half, F1b): section 5.8 builds six
+    ``split_closures_*`` aggregates naming why each leaf closed; before this
+    fix ``grep -c "split_closures" codedoc/cli/cli.py`` returned 0, so the
+    data existed only in the snapshot dict. This test independently captures
+    the genuine snapshot via ``plan_reporter`` (not a hand-typed guess) to
+    know the true nonzero reasons, then asserts the CLI's printed line
+    matches those exact counts, sorted, with zero-count reasons omitted --
+    matching the established ``Blocked reasons`` style."""
+    (tmp_path / "main.py").write_text(
+        _cr2_source(lines=1000), encoding="utf-8", newline=""
+    )
+    cfg = {
+        "entry_file": "main.py", "large_file_strategy": "split", "analysis_mode": "single",
+        "max_content_chars": 2000, "parallel_agents": False, "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    snaps = []
+    run_pipeline(
+        tmp_path, {**cfg, "dry_run": True},
+        plan_reporter=lambda s: snaps.append(s),
+    )
+    snap = snaps[0]
+    closure_map = {
+        "source-ceiling": snap["split_closures_source_ceiling"],
+        "metadata-ceiling": snap["split_closures_metadata_ceiling"],
+        "source-and-metadata-ceiling": snap["split_closures_source_and_metadata_ceiling"],
+        "oversized-unit-isolation": snap["split_closures_oversized_unit_isolation"],
+        "continuation": snap["split_closures_continuation"],
+        "end-of-file": snap["split_closures_end_of_file"],
+    }
+    nonzero = {name: count for name, count in closure_map.items() if count}
+    assert nonzero, "fixture produced no closures -- pick a genuine split scenario"
+    expected_line = "Closure reasons               : " + ", ".join(
+        f"{name}={count}" for name, count in sorted(nonzero.items())
+    )
+
+    (tmp_path / "codedoc.config.json").write_text(json.dumps(cfg), encoding="utf-8")
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _c: (_ for _ in ()).throw(
+            RuntimeError("provider must not be constructed")
+        ),
+    )
+
+    rc = run_cli([str(tmp_path), "--entry", "main.py"])
+    out = capsys.readouterr().out
+    assert "Planned provider work (before calls)" in out
+    assert expected_line in out
+    for name, count in closure_map.items():
+        if count == 0:
+            assert f"{name}=" not in out, f"zero-count reason {name!r} was rendered"
+    assert rc == 1
+
+
+def test_cr2_no_conflict_fresh_and_completed_reuse_transition_counters_are_zero(
+    tmp_path, monkeypatch
+):
+    """No-conflict fresh split work and a completed-current reuse both report
+    zero recovery-transition activity, identically in dry and real preflight."""
+    (tmp_path / "main.py").write_text(_cr2_source(), encoding="utf-8", newline="")
+    cfg = {
+        "entry_file": "main.py", "large_file_strategy": "split", "analysis_mode": "single",
+        "max_content_chars": 2000, "parallel_agents": False, "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    # fresh
+    d1, _e1, d1_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=True)
+    r1, _e2, r1_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=False)
+    assert d1_err is None and r1_err is None
+    assert d1 == r1
+    assert d1["split_recovery_discarded_predecessor_nodes"] == 0
+    assert d1["split_recovery_replacement_nodes_planned"] == 0
+    assert d1["split_reexecuted_nodes"] == 0
+    assert d1["split_divided_files"] == 1              # scenario presence: genuinely fresh
+    assert d1["total_calls_planned"] > 0
+
+    # completed-current reuse: the fresh real run above already wrote codedoc.json.
+    d2, _e3, d2_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=True)
+    r2, _e4, r2_err = _cr2_capture(tmp_path, cfg, monkeypatch, dry=False)
+    assert d2_err is None and r2_err is None
+    assert d2 == r2
+    assert d2["split_completed_files_reused"] == 1     # scenario presence: reuse happened
+    assert d2["total_calls_planned"] == 0
+    assert d2["split_recovery_discarded_predecessor_nodes"] == 0
+    assert d2["split_recovery_replacement_nodes_planned"] == 0
+
+
+def test_cr2_malformed_current_recovery_dry_real_error_text_is_identical_on_disk(
+    tmp_path, monkeypatch
+):
+    """A genuine on-disk crash_recovery.json whose current-schema container is
+    malformed: dry and real preflight raise the IDENTICAL ConfigError type and
+    exact text, at the recovery-load boundary (before any snapshot); no
+    reporter, no provider, no review, no writer, no output probe; dry leaves
+    the recovery file byte-for-byte unchanged."""
+    config, recovery_path, _ids = _cr2_write_interrupted_recovery(
+        tmp_path, monkeypatch, budget=2000, stop_after=2
+    )
+    payload = json.loads(recovery_path.read_text(encoding="utf-8"))
+    payload["_codedoc"]["partial_files"]["main.py"]["nodes"] = "not-a-list"
+    recovery_path.write_text(json.dumps(payload), encoding="utf-8")
+    original_bytes = recovery_path.read_bytes()
+
+    def _run(dry, reports, events):
+        with monkeypatch.context() as mp:
+            mp.setattr("codedoc.pipeline.create_provider",
+                       lambda _c: events.append("provider") or pytest.fail("provider"))
+            mp.setattr("codedoc.pipeline.SafeWriter",
+                       lambda *a, **k: events.append("writer") or pytest.fail("writer"))
+            mp.setattr("codedoc.pipeline.preflight_output_accessibility",
+                       lambda *a, **k: events.append("probe") or pytest.fail("probe"))
+            with pytest.raises(ConfigError) as exc:
+                run_pipeline(tmp_path, {**config, "dry_run": dry},
+                             plan_reporter=lambda s: reports.append(s))
+        return exc.value
+
+    dry_reports, dry_events = [], []
+    dry_err = _run(True, dry_reports, dry_events)
+    assert recovery_path.read_bytes() == original_bytes
+    assert dry_reports == [] and dry_events == []
+
+    real_reports, real_events = [], []
+    real_err = _run(False, real_reports, real_events)
+    assert real_reports == [] and real_events == []
+
+    assert type(dry_err) is type(real_err)
+    assert str(dry_err) == str(real_err)
+    assert recovery_path.read_bytes() == original_bytes
+
+
+# ===========================================================================
+# Defect 1 (P0): an oversized split file whose source later fits
+# ``max_content_chars`` routes as an ordinary whole-file call. Its paid
+# schema-4 checkpoints must still be carried byte-for-byte (planning Edit A),
+# and a carried path this run cannot complete must not withhold stable output
+# forever (pipeline Edit B). Every fixture below builds a GENUINE on-disk
+# schema-4 crash_recovery.json through the real ``run_pipeline`` / ``SafeWriter``
+# path -- no hand-authored recovery bytes.
+# ===========================================================================
+
+_D1_LOW_BUDGET = 2000    # the ~3.3k-char 220-line source splits at this ceiling
+_D1_HIGH_BUDGET = 5000   # ... and routes as an ordinary whole-file call at this one
+
+
+def _d1_source(prefix: str = "") -> str:
+    return prefix + "\n".join(f"value_{i} = {i}" for i in range(220)) + "\n"
+
+
+def _d1_write_split_partial(tmp_path, monkeypatch, *, prefix=""):
+    """Real interrupted split run at ``_D1_LOW_BUDGET`` -> a genuine one-leaf
+    on-disk crash_recovery.json. Returns
+    (config_at_low_budget, recovery_path, stable_path, predecessor_partial)."""
+    source = _d1_source(prefix)
+    assert _D1_LOW_BUDGET < len(source) < _D1_HIGH_BUDGET
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "analysis_mode": "single",
+        "max_content_chars": _D1_LOW_BUDGET,
+        "parallel_agents": False,
+        "propagate_changes": False,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    stable_path = tmp_path / "docs" / "codedoc.json"
+    original_leaf = Orchestrator.process_leaf_chunk
+    seen = {"n": 0}
+
+    def _fail_after_first_leaf(self, request):
+        seen["n"] += 1
+        if seen["n"] >= 2:
+            raise LLMError("interrupted after the first leaf (D1 fixture)")
+        return original_leaf(self, request)
+
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+        mp.setattr(Orchestrator, "process_leaf_chunk", _fail_after_first_leaf)
+        stats = run_pipeline(tmp_path, config)
+    assert stats["failed"] == 1
+    assert recovery_path.exists()
+    predecessor_partial = json.loads(recovery_path.read_text(encoding="utf-8"))[
+        "_codedoc"
+    ]["partial_files"]["main.py"]
+    assert len(predecessor_partial["nodes"]) == 1
+    return config, recovery_path, stable_path, predecessor_partial
+
+
+def _d1_partial_nodes_on_disk(recovery_path):
+    return json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]["main.py"]
+
+
+def test_d1_under_threshold_provider_init_failure_preserves_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Ceiling raised so the file routes ordinary + the provider factory raises:
+    the schema-4 recovery container is byte-identical and its partial is intact
+    (before Edit A, ``initialize_empty()`` flushed the banner over it before a
+    provider even existed)."""
+    config, recovery_path, stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+    stable_before = stable_path.read_bytes()
+
+    class _InitSentinel(Exception):
+        pass
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _c: (_ for _ in ()).throw(_InitSentinel("provider init sentinel")),
+    )
+    with pytest.raises(_InitSentinel):
+        run_pipeline(tmp_path, {**config, "max_content_chars": _D1_HIGH_BUDGET})
+
+    assert recovery_path.read_bytes() == recovery_before
+    assert stable_path.read_bytes() == stable_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+
+def test_d1_under_threshold_provider_call_failure_preserves_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Ceiling raised + the ordinary documentation call fails: the recovery file
+    still exists and is byte-identical (before the fix it was deleted outright)."""
+    config, recovery_path, _stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+
+    class _BadJson:
+        provider_name = "bad-json"
+
+        def complete_json(self, prompt, system=""):
+            return "not json at all"
+
+        def complete(self, prompt, system="", temperature=0.1):
+            return self.complete_json(prompt, system)
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: _BadJson())
+    stats = run_pipeline(
+        tmp_path,
+        {
+            **config,
+            "max_content_chars": _D1_HIGH_BUDGET,
+            # Terminal provider-call failure is the subject here; pin the
+            # correction default so the flip adds no incidental repair call
+            # (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
+        },
+    )
+    assert stats["failed"] == 1
+
+    assert recovery_path.exists()
+    assert recovery_path.read_bytes() == recovery_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+
+def test_d1_under_threshold_keyboard_interrupt_preserves_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Ceiling raised + a ``KeyboardInterrupt`` mid-run: the recovery bytes are
+    byte-identical and the partial survives."""
+    config, recovery_path, _stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+
+    def _interrupt(request, _orchestrator):
+        raise KeyboardInterrupt()
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    monkeypatch.setattr(execution, "_process_one_file", _interrupt)
+    with pytest.raises(KeyboardInterrupt):
+        run_pipeline(tmp_path, {**config, "max_content_chars": _D1_HIGH_BUDGET})
+
+    assert recovery_path.read_bytes() == recovery_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+
+def test_d1_under_threshold_failed_then_clean_replacement_supersedes(
+    tmp_path, monkeypatch
+) -> None:
+    """A failed ordinary replacement leaves the carried predecessor bytes
+    untouched; the subsequent clean ordinary replacement transactionally
+    supersedes it and removes recovery, publishing a fresh ordinary record."""
+    config, recovery_path, stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+    stable_before = stable_path.read_bytes()
+    high = {**config, "max_content_chars": _D1_HIGH_BUDGET}
+
+    # ---- failed ordinary replacement: predecessor + stable output untouched. --
+    def _interrupt(request, _orchestrator):
+        raise KeyboardInterrupt()
+
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+        mp.setattr(execution, "_process_one_file", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            run_pipeline(tmp_path, high)
+    assert recovery_path.read_bytes() == recovery_before
+    assert stable_path.read_bytes() == stable_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+    # ---- clean ordinary replacement: superseded, recovery removed. -----------
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(tmp_path, high)
+    assert stats["checked"] == 1
+    assert stats["failed"] == 0
+    assert not recovery_path.exists()
+    record = next(
+        r
+        for r in json.loads(stable_path.read_text(encoding="utf-8"))["files"]
+        if r.get("path") == "main.py"
+    )
+    assert record["description"]
+    # An ordinary whole-file record, not a split-identity one.
+    assert "_large_file_identity" not in record
+
+
+def test_d1_under_threshold_mixed_run_preserves_carry_and_publishes_unrelated(
+    tmp_path, monkeypatch
+) -> None:
+    """A carried under-threshold path alongside unrelated agent work: the
+    predecessor container is never flushed over by ``initialize_empty()``, both
+    files are documented, and recovery is removed once both records land."""
+    config, recovery_path, stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch, prefix="import helper\n"
+    )
+    recovery_before = recovery_path.read_bytes()
+    # helper.py is fresh, unrelated agent work for pass 2.
+    (tmp_path / "helper.py").write_text(
+        "HELPER = 2  # a real module\n", encoding="utf-8", newline=""
+    )
+
+    real_initialize_empty = SafeWriter.initialize_empty
+    captured = {}
+
+    def _capture_after_init(self):
+        result = real_initialize_empty(self)
+        captured["bytes_after_init"] = recovery_path.read_bytes()
+        return result
+
+    monkeypatch.setattr(SafeWriter, "initialize_empty", _capture_after_init)
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(
+        tmp_path, {**config, "max_content_chars": _D1_HIGH_BUDGET}
+    )
+
+    # initialize_empty() ran but did NOT rewrite the carried container.
+    assert captured["bytes_after_init"] == recovery_before
+    assert stats["failed"] == 0
+    documented = {
+        r.get("path")
+        for r in json.loads(stable_path.read_text(encoding="utf-8"))["files"]
+    }
+    assert {"main.py", "helper.py"} <= documented
+    assert not recovery_path.exists()
+
+
+def test_d1_under_threshold_forced_routing_preserves_then_supersedes(
+    tmp_path, monkeypatch
+) -> None:
+    """``force_files`` on the now-ordinary path: a failed forced run preserves
+    the predecessor bytes; a clean forced run supersedes it and removes
+    recovery."""
+    config, recovery_path, stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+    forced = {
+        **config,
+        "max_content_chars": _D1_HIGH_BUDGET,
+        "force_files": ["main.py"],
+    }
+
+    def _interrupt(request, _orchestrator):
+        raise KeyboardInterrupt()
+
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+        mp.setattr(execution, "_process_one_file", _interrupt)
+        with pytest.raises(KeyboardInterrupt):
+            run_pipeline(tmp_path, forced)
+    assert recovery_path.read_bytes() == recovery_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(tmp_path, forced)
+    assert stats["checked"] == 1
+    assert not recovery_path.exists()
+
+
+def test_d1_under_threshold_dry_and_real_preflight_parity(
+    tmp_path, monkeypatch
+) -> None:
+    """The recovery-aware preflight snapshot is field-for-field identical in dry
+    and real mode for the carried under-threshold path, and a dry run leaves the
+    predecessor bytes untouched and constructs no provider / writer / probe."""
+    config, recovery_path, stable_path, _predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    original_bytes = recovery_path.read_bytes()
+    stable_before = stable_path.read_bytes()
+    high = {**config, "max_content_chars": _D1_HIGH_BUDGET}
+
+    dry_snap, dry_events, dry_err = _cr2_capture(tmp_path, high, monkeypatch, dry=True)
+    assert dry_err is None
+    assert dry_events == ["report"]
+    assert recovery_path.read_bytes() == original_bytes
+    assert stable_path.read_bytes() == stable_before
+
+    real_snap, real_events, real_err = _cr2_capture(
+        tmp_path, high, monkeypatch, dry=False
+    )
+    assert real_err is None
+    assert real_events[0] == "report"
+    if "provider" in real_events:
+        assert real_events.index("report") < real_events.index("provider")
+    assert dry_snap is not None and real_snap is not None
+    assert dry_snap == real_snap
+
+
+def test_d1_insufficient_source_carried_path_still_publishes_unrelated_work(
+    tmp_path, monkeypatch
+) -> None:
+    """Edit B deadlock guard: a carried under-threshold path that this run
+    classifies as insufficient-source is skipped and never enters
+    ``new_results``. It must NOT withhold the run's stable output forever --
+    unrelated agent work is still published -- while its recovery stays
+    preserved."""
+    config, recovery_path, stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch, prefix="import helper\n"
+    )
+    recovery_before = recovery_path.read_bytes()
+    (tmp_path / "helper.py").write_text(
+        "HELPER = 2  # changed\n", encoding="utf-8", newline=""
+    )
+
+    import codedoc.core.planning as planning
+    real_insufficient = planning.insufficient_source
+
+    def _force_main_insufficient(content):
+        if content.startswith("import helper"):
+            return True, "d1_forced_insufficient"
+        return real_insufficient(content)
+
+    monkeypatch.setattr(planning, "insufficient_source", _force_main_insufficient)
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(
+        tmp_path, {**config, "max_content_chars": _D1_HIGH_BUDGET}
+    )
+
+    assert stats["failed"] == 0
+    assert stats["skipped_insufficient_source"] == 1
+    documented = {
+        r.get("path")
+        for r in json.loads(stable_path.read_text(encoding="utf-8"))["files"]
+    }
+    # Unrelated work is published despite the un-completable carried path
+    # (before Edit B, the carried path withheld stable output permanently).
+    assert "helper.py" in documented
+    assert "main.py" not in documented
+    # The carried predecessor is preserved, not deleted: its checkpoint nodes
+    # are still on disk unchanged (the recovery file is re-serialized as
+    # helper.py's completion is flushed, but the carried main.py partial rides
+    # through untouched). Before Edit A it was flushed away entirely.
+    assert recovery_path.exists()
+    assert _d1_partial_nodes_on_disk(recovery_path)["nodes"] == predecessor["nodes"]
+    assert recovery_before  # captured a genuine one-node predecessor
+
+
+def test_d1_negative_control_oversized_cross_plan_transition_is_unchanged(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression guard: a genuine oversized -> oversized cross-plan transition
+    still runs through the existing conflict path (not the Edit A preservation
+    sweep), reporting the three distinct §6.3 counters and
+    ``recovery_conflict_files == 1``, and preserving predecessor bytes on a
+    failed replacement."""
+    # Source oversized at BOTH budgets -> a true cross-plan transition, never
+    # the under-threshold ordinary route the Edit A sweep handles.
+    config, recovery_path, _ids = _cr2_write_interrupted_recovery(
+        tmp_path, monkeypatch, budget=8000, stop_after=1
+    )
+    original_bytes = recovery_path.read_bytes()
+    current_nodes = _cr2_current_node_count(_cr2_source(), 2000)
+    expanded = {**config, "max_content_chars": 2000}
+
+    # Counter snapshot via a NON-mutating dry preflight: the genuine conflict
+    # path (not the Edit A sweep) still reports the three distinct §6.3 counters.
+    dry_snap, dry_events, dry_err = _cr2_capture(
+        tmp_path, expanded, monkeypatch, dry=True
+    )
+    assert dry_err is None and dry_events == ["report"]
+    assert dry_snap is not None
+    assert dry_snap["split_recovery_conflict_files"] == 1
+    assert dry_snap["split_recovery_discarded_predecessor_nodes"] == 1
+    assert dry_snap["split_recovery_replacement_nodes_planned"] == current_nodes
+    assert dry_snap["split_reexecuted_nodes"] == 0
+    assert dry_snap["split_reexecuted_nodes"] <= dry_snap["split_unpaid_nodes"]
+    assert recovery_path.read_bytes() == original_bytes
+
+    # A failed real replacement leaves the predecessor container byte-identical.
+    def _fail_every_leaf(self, request):
+        raise LLMError("replacement interrupted")
+
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    monkeypatch.setattr(Orchestrator, "process_leaf_chunk", _fail_every_leaf)
+    stats = run_pipeline(tmp_path, expanded)
+    assert stats["failed"] == 1
+    assert recovery_path.read_bytes() == original_bytes
+
+
+# ---------------------------------------------------------------------------
+# Section 6.3 lines 1611-1613 / 1641-1645: content hash is one of the three
+# carry triggers, and preservation is not conditional on resumability. An
+# EDITED source (content hash no longer matches the partial) must be carried
+# byte-for-byte on BOTH routes -- the split branch already does this via
+# ``cross_plan_conflict``; the ordinary-routed sweep must agree.
+# ---------------------------------------------------------------------------
+
+_D1_EDITED_SUFFIX = "sentinel_edit_marker = 1\n"
+
+
+def test_d1_edited_source_under_threshold_provider_init_failure_preserves_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Regression: interrupted split leaves a 1-node partial; the source is then
+    EDITED (content hash changes) and the ceiling raised so the file routes as
+    an ordinary whole-file call; the second run fails at provider construction.
+    The recovery container must be byte-identical with its partial intact --
+    exactly as when the source is unchanged, and exactly as the still-oversized
+    control below. Before the completed-record guard swap this partial was
+    destroyed purely because the routing differed."""
+    config, recovery_path, _stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+
+    edited = _d1_source() + _D1_EDITED_SUFFIX
+    assert _D1_LOW_BUDGET < len(edited) < _D1_HIGH_BUDGET
+    (tmp_path / "main.py").write_text(edited, encoding="utf-8", newline="")
+
+    class _InitSentinel(Exception):
+        pass
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _c: (_ for _ in ()).throw(_InitSentinel("provider init sentinel")),
+    )
+    with pytest.raises(_InitSentinel):
+        run_pipeline(tmp_path, {**config, "max_content_chars": _D1_HIGH_BUDGET})
+
+    assert recovery_path.exists()
+    assert recovery_path.read_bytes() == recovery_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+
+def test_d1_edited_source_still_oversized_preserves_recovery(
+    tmp_path, monkeypatch
+) -> None:
+    """Control: the identical source edit with the file left oversized (ceiling
+    unchanged, so it routes split) is carried byte-for-byte on a failed second
+    run -- the pre-existing ``cross_plan_conflict`` path. This is the route the
+    regression above must now match: same edit, same paid nodes, same outcome
+    regardless of routing."""
+    config, recovery_path, _stable_path, predecessor = _d1_write_split_partial(
+        tmp_path, monkeypatch
+    )
+    recovery_before = recovery_path.read_bytes()
+
+    edited = _d1_source() + _D1_EDITED_SUFFIX
+    assert len(edited) > _D1_LOW_BUDGET  # still oversized at the low ceiling
+    (tmp_path / "main.py").write_text(edited, encoding="utf-8", newline="")
+
+    class _InitSentinel(Exception):
+        pass
+
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _c: (_ for _ in ()).throw(_InitSentinel("provider init sentinel")),
+    )
+    with pytest.raises(_InitSentinel):
+        run_pipeline(tmp_path, config)  # low ceiling -> still split
+
+    assert recovery_path.exists()
+    assert recovery_path.read_bytes() == recovery_before
+    assert _d1_partial_nodes_on_disk(recovery_path) == predecessor

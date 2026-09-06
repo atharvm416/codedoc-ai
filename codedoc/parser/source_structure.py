@@ -14,7 +14,17 @@ MAX_STRUCTURE_DIAGNOSTICS = 32
 MAX_STRUCTURE_DIAGNOSTIC_CHARS = 400
 MAX_STRUCTURE_NAME_CHARS = 240
 MAX_STRUCTURE_KIND_CHARS = 120
-MAX_STRUCTURE_SIGNATURE_CHARS = 600
+# The 2,000-character ceiling follows an AST-walk census of every declaration in
+# codedoc/ found 3 of 794 exceeding 600 (0.4%), the largest at 1,295
+# normalized / 1,395 raw characters (`scan_files` in `codedoc/core/scanner.py`).
+# 2,000 clears the stricter raw-span measure with 30% margin. This is a
+# backstop against a runaway response, not a limit real code is expected to
+# approach; the fixed leaf-fragment contract additionally makes a
+# declaration longer than even this bound answerable through a truthful
+# leading portion (see `_FRAGMENT_SIGNATURE_CONTRACT` in
+# `codedoc/agents/file_documentation_agent.py`), so raising it further would
+# only move, never remove, the rare case it backstops.
+MAX_STRUCTURE_SIGNATURE_CHARS = 2000
 
 
 def normalize_rel_path(rel_path: str) -> str:

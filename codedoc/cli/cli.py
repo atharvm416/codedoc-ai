@@ -29,6 +29,7 @@ Subsequent runs (entry read from the exact selected output when available):
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -36,9 +37,95 @@ from codedoc.utils.errors import CodeDocError, bounded_exception_summary
 
 _RECOVERY_REUSE_BOUNDARY = (
     "Compatible completed ordinary and split records may be reused, and "
-    "compatible current schema-4 split node checkpoints may resume. Forced, "
+    "compatible in-progress split checkpoints may resume. Forced, "
     "stale, identity-mismatched, legacy, foreign, or unsupported state is "
     "rerun or preserved and blocked according to the documented remedy."
+)
+
+# Section 5.8 lines 1365-1380: the real-run preflight reporter. The CLI hands
+# ``run_pipeline`` a ``plan_reporter`` that renders the ONE immutable snapshot
+# the pipeline builds before provider construction. The presenter below is a
+# pure read of that snapshot -- it never re-plans, re-reads the filesystem, or
+# re-sorts a descriptor stream (the retained lists arrive already ranked and
+# capped). ``json.dumps(..., ensure_ascii=True)`` renders every path so a
+# hostile-but-normalized project-relative path cannot inject a terminal line
+# (section 5.8 lines 1234-1237; matches ``scanner`` warning rendering).
+
+# Presenters turn ONLY the closed guidance codes into prose. The complete
+# vocabulary is nine codes across two frozen sets: the capacity/scanner-byte
+# codes (section 5.8 lines 1294-1304) and the scanner-admission codes
+# (section 5.8 lines 1440-1445, mirrored from
+# ``scanner._ADMISSION_REASON_GUIDANCE``). ``.get(code, code)`` stays as a
+# defensive fallback, but the map is complete.
+_GUIDANCE_PROSE = {
+    # Capacity + scanner-byte (section 5.8 lines 1294-1304).
+    "simplify-or-exclude": "simplify or exclude this file",
+    "raise-source-ceiling-or-split-source": (
+        "raise the source ceiling or split the source differently"
+    ),
+    "report-planning-capacity-defect": "report a planning-capacity defect",
+    "inspect-authoritative-metadata-or-exclude": (
+        "inspect/shorten authoritative path/import metadata, or exclude the file"
+    ),
+    "raise-scan-byte-limit-or-exclude": "raise the scan byte limit or exclude the file",
+    # Scanner admission (section 5.8 lines 1440-1445).
+    "fix-permissions-or-exclude": "fix the file permissions or exclude this file",
+    "adjust-ignore-or-entry": "adjust the ignore list or the entry setting",
+    "configure-extension-or-entry": (
+        "configure the extension mapping or the entry setting"
+    ),
+    "fix-entry-path": "fix the entry path",
+}
+
+# Mirrors ``file_division.PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS`` (20). Kept as a
+# local literal so the presenter has no import edge into the planning layer;
+# a contract test pins the two together.
+_PREFLIGHT_DISPLAY_CAP = 20
+
+# noqa: E731 -- module-level lambda, not a ``def`` (census idiom; see
+# ``pipeline._freeze_preflight`` / ``scanner._canonical_entry_rel``).
+_json_path = lambda _p: json.dumps(_p, ensure_ascii=True)  # noqa: E731
+
+# Flat detail categories: ``(snapshot prefix, section title, one-line renderer)``.
+# Each renderer is a pure function of one already-normalized descriptor mapping
+# and routes its path through ``_json_path`` -- never raw interpolation. The
+# nested ``split_plan`` category is rendered separately.
+_PREFLIGHT_FLAT_CATEGORIES = (
+    (
+        "truncate_plan",
+        "Truncate omissions",
+        lambda r: (
+            f"    {_json_path(r['path'])}: {r['source_chars']} source chars -> "
+            f"head {r['retained_head_chars']} + tail {r['retained_tail_chars']}, "
+            f"omitted {r['omitted_chars']} ({r['initial_calls']} initial call(s))"
+        ),
+    ),
+    (
+        "split_blocked",
+        "Capacity-blocked files",
+        lambda r: (
+            f"    {_json_path(r['path'])}: {r['reason']} in {r['phase']} "
+            f"(observed {r['observed']} vs limit {r['limit']}) -- "
+            + _GUIDANCE_PROSE.get(r["guidance_code"], r["guidance_code"])
+        ),
+    ),
+    (
+        "scanner_size_skip",
+        "Scanner byte-size skips",
+        lambda r: (
+            f"    {_json_path(r['path'])}: {r['observed']} bytes vs limit "
+            f"{r['limit']} -- "
+            + _GUIDANCE_PROSE.get(r["guidance_code"], r["guidance_code"])
+        ),
+    ),
+    (
+        "scanner_admission_skip",
+        "Scanner admission skips",
+        lambda r: (
+            f"    {_json_path(r['path'])}: {r['reason']} -- "
+            + _GUIDANCE_PROSE.get(r["guidance_code"], r["guidance_code"])
+        ),
+    ),
 )
 
 
@@ -125,15 +212,18 @@ large-file split execution:
   Oversized files are divided at local semantic or lexical boundaries with
   complete source coverage and a bounded reduction topology.
 
-  max_content_chars bounds each planned leaf, reducer manifest, and complete
-  final manifest. Planning never truncates split source or silently falls back
-  to truncate. It reports the first named provider-free capacity reason:
-  atom-cap, symbol-cap, unit-cap, chunk-cap, reduction-envelope-cap,
-  reduction-fan-in-cap, reduction-depth-cap, or
-  final-synthesis-envelope-cap. Exactly compatible same-path completed split
-  records are reused with zero calls; current schema-4 checkpoints resume only
-  unpaid nodes. Forced, stale, legacy, foreign, or unsupported state is rerun
-  or preserved and blocked. Under-threshold files retain ordinary execution.
+  max_content_chars is the ordinary/leaf source ceiling: a file whose canonical
+  decoded source exceeds it is routed by large_file_strategy. Reducer and
+  final-synthesis manifests use a separate automatic split synthesis ceiling of
+  at least 12,000 characters, which is not set directly. Planning never
+  truncates split source or silently falls back to truncate. It reports the
+  first named provider-free capacity reason: atom-cap, symbol-cap, unit-cap,
+  chunk-cap, reduction-envelope-cap, reduction-fan-in-cap, reduction-depth-cap,
+  or final-synthesis-envelope-cap. Exactly compatible same-path completed split
+  records are reused with zero calls; compatible in-progress split checkpoints
+  resume only unpaid nodes. Forced, stale, legacy, foreign, or unsupported
+  state is rerun or preserved and blocked. Under-threshold files retain
+  ordinary execution.
         """,
     )
 
@@ -388,8 +478,25 @@ large-file split execution:
         help=(
             "Oversized readable source handling: 'truncate' keeps the legacy "
             "head/tail behavior (default); 'split' enables provider-free "
-            "planning, paid execution, same-path completed split reuse, and current "
-            "schema-4 node recovery in single mode."
+            "planning, paid execution, same-path completed split reuse, and "
+            "in-progress split checkpoint recovery in single mode."
+        ),
+    )
+    parser.add_argument(
+        "--max-content-chars",
+        type=int,
+        default=None,
+        metavar="N",
+        dest="max_content_chars",
+        help=(
+            "Ordinary/leaf source ceiling in characters: a file whose canonical "
+            "decoded source exceeds N is routed by --large-file-strategy. Strict "
+            "integer, minimum 1000 (default: 12000). Overrides "
+            "CODEDOC_MAX_CONTENT_CHARS and the config file. "
+            "'--large-file-strategy split --max-content-chars 1000' is the "
+            "direct expression of when and how much source to split. It does not "
+            "set the automatic split synthesis ceiling used for reducer and "
+            "final-synthesis manifests."
         ),
     )
     parser.add_argument(
@@ -447,7 +554,7 @@ def _print_prompt_profile_dry_run(stats: dict) -> None:
     )
     print(f"    Documentation calls   : {documentation} planned")
     print(f"    Security-review calls : {review} planned")
-    print(f"    Total paid calls      : {documentation + review} planned")
+    print(f"    Initial provider calls: {documentation + review} planned")
     _print_feasibility_advisories(stats)
 
 
@@ -495,12 +602,10 @@ def _print_split_observability(
                 f"{reason}={count}" for reason, count in sorted(reasons.items())
             )
         )
-    pairs = stats.get("split_blocked_pairs", ())
-    if isinstance(pairs, (list, tuple)) and pairs:
-        print("    Blocked path/reason pairs:")
-        for pair in pairs:
-            if isinstance(pair, (list, tuple)) and len(pair) == 2:
-                print(f"      {pair[0]} ({pair[1]})")
+    # No path-bearing blocked-path presenter here: the retired uncapped
+    # ``split_blocked_pairs`` loop was dead in production. The bounded,
+    # normalized, JSON-escaped ``split_blocked`` category is rendered by the
+    # preflight reporter (section 5.8), not this summary.
     print(
         f"    Semantic units / chunks : {stats.get('split_units', 0)} / "
         f"{stats.get('split_chunks', 0)}"
@@ -534,6 +639,19 @@ def _print_split_observability(
     print(
         "    Recovery conflict files : "
         f"{stats.get('split_recovery_conflict_files', 0)}"
+    )
+    # Section 6.3: the two EPHEMERAL cross-plan recovery-transition counters.
+    # ``discarded`` counts every unique predecessor paid/quarantined node ID
+    # invalidated by the transition; ``replacement`` counts every current
+    # fresh node scheduled for the conflicting file. During a topology
+    # contraction discarded may legitimately exceed replacement (and vice
+    # versa during an expansion) -- never present them as if they must
+    # balance. Ephemeral: never persisted to ``last_run``. Printed
+    # unconditionally, like the sibling ``Recovery conflict files`` line above.
+    print(
+        "    Recovery transition (discarded/replacement): "
+        f"{stats.get('split_recovery_discarded_predecessor_nodes', 0)} / "
+        f"{stats.get('split_recovery_replacement_nodes_planned', 0)}"
     )
     print(
         "    Planned call categories: "
@@ -600,7 +718,17 @@ def _print_dry_run_summary(stats: dict) -> None:
             "empty or whitespace-only; no documentation call."
         )
     print(f"  Would call LLM for     : {stats.get('would_call_llm_for', 0)} file(s)")
-    print(f"  Estimated LLM calls    : {stats.get('estimated_calls', 0)}")
+    print(
+        "  Provider calls before retries : "
+        f"{stats.get('provider_calls_max_before_retries', 0)} "
+        "(exact initial manifest plus possible corrections and mandatory active "
+        "prompt-profile reviews; transport and file retries are additional and "
+        "excluded here)"
+    )
+    print(
+        f"  Estimated documentation calls : {stats.get('estimated_calls', 0)} "
+        "(documentation-only character heuristic; not the provider call total)"
+    )
     correction_enabled = stats.get("response_correction_enabled", False)
     if correction_enabled:
         print(
@@ -608,9 +736,10 @@ def _print_dry_run_summary(stats: dict) -> None:
             f"(up to {stats.get('response_correction_calls_possible_max', 0)} extra call(s))"
         )
         print(
-            f"  Worst-case LLM calls   : {stats.get('estimated_calls_max_with_correction', 0)} "
-            "(baseline + one correction per documentation call; worst case, not an "
-            "expected charge)"
+            "  Estimated documentation calls, with correction : "
+            f"{stats.get('estimated_calls_max_with_correction', 0)} "
+            "(documentation heuristic plus one correction each; a documentation "
+            "bound, not the provider call total)"
         )
     else:
         print("  Response correction    : disabled (0 possible extra calls)")
@@ -686,6 +815,298 @@ def _print_dry_run_summary(stats: dict) -> None:
             "  The corresponding real run would stop with exit code 2 before "
             "writing anything."
         )
+
+
+def _print_preflight_flat_category(
+    snapshot, prefix: str, title: str, line_fn, *, verbose: bool
+) -> None:
+    """Render one flat detail category (``truncate_plan`` / ``split_blocked`` /
+    ``scanner_size_skip`` / ``scanner_admission_skip``) from the snapshot.
+
+    ``{prefix}_details`` is the already-ranked, already-capped retained list;
+    ``{prefix}_details_total`` / ``_retained`` / ``_omitted`` / ``_digest`` are
+    the snapshot's own counts. Default output shows at most
+    ``_PREFLIGHT_DISPLAY_CAP`` records and always states how many more exist;
+    ``--verbose`` shows every retained record and, when the snapshot's 4096-item
+    cap dropped any, discloses that with the full-stream digest (section 5.8
+    lines 1306-1314, 1360-1363). Never re-sorts; never re-counts.
+    """
+    records = snapshot.get(f"{prefix}_details", ())
+    total = snapshot.get(f"{prefix}_details_total", 0)
+    retained = snapshot.get(f"{prefix}_details_retained", len(records))
+    omitted = snapshot.get(f"{prefix}_details_omitted", max(total - retained, 0))
+    if not records and not total:
+        return
+    shown = records if verbose else records[:_PREFLIGHT_DISPLAY_CAP]
+    print(f"  {title} ({total}):")
+    for record in shown:
+        print(line_fn(record))
+    hidden_by_display = len(records) - len(shown)
+    if hidden_by_display or omitted:
+        parts = []
+        if hidden_by_display:
+            parts.append(
+                f"{hidden_by_display} more not shown (display cap "
+                f"{_PREFLIGHT_DISPLAY_CAP}; use --verbose)"
+            )
+        if omitted:
+            parts.append(f"{omitted} dropped by the 4096-item snapshot cap")
+        print(
+            f"    ... {'; '.join(parts)}. Full-stream digest "
+            f"{snapshot.get(f'{prefix}_details_digest', '')}"
+        )
+
+
+def _print_split_plan_detail_records(snapshot, *, verbose: bool) -> None:
+    """Render the bounded nested ``split_plan`` per-file descriptors from the
+    snapshot. Default: one header line per retained file (already ranked by
+    descending initial calls, then leaf count, then path). ``--verbose`` adds
+    each file's ordered unit transform (``2010 -> 670 + 670 + 670``), the
+    CRLF-atomicity extra-piece delta, and each leaf's close reason. Pure read of
+    the immutable snapshot -- never re-planned, never re-ranked.
+    """
+    records = snapshot.get("split_plan_details", ())
+    files_total = snapshot.get("large_files_routed_split", len(records))
+    flat_omitted = snapshot.get("split_plan_details_omitted", 0)
+    if not records and not files_total:
+        return
+    shown = records if verbose else records[:_PREFLIGHT_DISPLAY_CAP]
+    print(f"  Split plan ({files_total} file(s), {len(records)} detailed):")
+    for record in shown:
+        print(
+            f"    {_json_path(record['path'])}: {record['source_chars']} source "
+            f"chars, {record['structural_mode']} mode; ceilings "
+            f"{record['source_ceiling_chars']} source / "
+            f"{record['synthesis_manifest_ceiling_chars']} synthesis; "
+            f"{record['initial_calls']} initial call(s) payable now "
+            f"(full tree: {record['reduction_calls']} reduction + "
+            f"{record['final_calls']} final call(s))"
+        )
+        if not verbose:
+            continue
+        for unit in record.get("units", ()):
+            pieces = unit.get("pieces", ())
+            # ``pieces_total`` counts every piece the division plan actually
+            # produced for this unit, independent of the 4096-item snapshot
+            # cap; ``pieces_retained``/``pieces_omitted`` describe only what
+            # survived that cap into ``pieces``. A unit that was never
+            # subdivided at all has ``pieces_total == 0`` -- that, not an
+            # empty retained list, is the correct "(not subdivided)" test: a
+            # subdivided unit whose pieces were entirely capped away still has
+            # ``pieces_total > 0`` and must not be reported as unsubdivided.
+            pieces_total = unit["pieces_total"]
+            pieces_omitted = unit["pieces_omitted"]
+            if pieces_total == 0:
+                transform = "(not subdivided)"
+            else:
+                joined_pieces = " + ".join(
+                    str(piece["payload_chars"]) for piece in pieces
+                )
+                if pieces_omitted:
+                    omission = (
+                        f"{pieces_omitted} of {pieces_total} piece(s) omitted by "
+                        f"the snapshot cap, digest {unit['pieces_digest']}"
+                    )
+                    transform = (
+                        f"{joined_pieces} + ... ({omission})"
+                        if joined_pieces
+                        else f"(all {omission})"
+                    )
+                else:
+                    transform = joined_pieces
+            extra = unit["atomicity_extra_piece_count"]
+            crlf = f", +{extra} CRLF-atomicity piece(s)" if extra else ""
+            print(
+                f"      unit {unit['unit_ordinal']}: {unit['natural_source_chars']}"
+                f" -> {transform}"
+                f"  [{unit['arithmetic_piece_count']} arithmetic /"
+                f" {unit['crlf_safe_piece_count']} CRLF-safe{crlf}]"
+            )
+        for leaf in record.get("leaves", ()):
+            constituents = ", ".join(
+                f"u{c['unit_ordinal']}={c['payload_chars']}"
+                for c in leaf.get("constituents", ())
+            )
+            print(
+                f"      leaf: {leaf['payload_chars']} chars, "
+                f"{leaf['start_boundary']}..{leaf['end_boundary']}, "
+                f"closed {leaf['close_reason']}"
+                + (f" [{constituents}]" if constituents else "")
+            )
+    hidden_by_display = len(records) - len(shown)
+    if hidden_by_display or flat_omitted:
+        parts = []
+        if hidden_by_display:
+            parts.append(
+                f"{hidden_by_display} more file(s) not shown (display cap "
+                f"{_PREFLIGHT_DISPLAY_CAP}; use --verbose)"
+            )
+        if flat_omitted:
+            parts.append(
+                f"{flat_omitted} flattened item(s) dropped by the 4096-item "
+                "snapshot cap"
+            )
+        print(
+            f"    ... {'; '.join(parts)}. Full-stream digest "
+            f"{snapshot.get('split_plan_details_digest', '')}"
+        )
+
+
+def _print_preflight_summary(snapshot, *, verbose: bool) -> None:
+    """Print the real-run ``Planned provider work (before calls)`` summary as a
+    pure function of the one immutable preflight snapshot the pipeline built and
+    handed to the reporter (section 5.8 lines 1365-1380). Every value is taken
+    from the snapshot verbatim: this presenter never calls planning, re-reads
+    the filesystem, re-derives a count, or re-sorts a descriptor stream. The
+    dry-run return uses the same snapshot from the same builder.
+    """
+    print("\nPlanned provider work (before calls)")
+
+    # Exact call topology (section 5.9 lines 1482-1517). The headline value is
+    # ``provider_calls_max_before_retries``; the two legacy documentation-only
+    # keys stay but are never labelled total/worst-case.
+    print(
+        "  Provider calls before retries : "
+        f"{snapshot.get('provider_calls_max_before_retries', 0)} "
+        "(exact initial manifest plus possible corrections and mandatory active "
+        "prompt-profile reviews; transport and file retries are additional and "
+        "excluded here)"
+    )
+    print(
+        "  Initial provider calls        : "
+        f"{snapshot.get('initial_provider_calls_planned', snapshot.get('total_calls_planned', 0))}"
+        f" ({snapshot.get('prompt_review_calls_planned', 0)} prompt-profile review + "
+        f"{snapshot.get('initial_documentation_calls_planned', 0)} documentation)"
+    )
+    if snapshot.get("correction_calls_possible_max", 0):
+        print(
+            "  Possible correction calls     : "
+            f"{snapshot.get('correction_calls_possible_max', 0)} "
+            "(at most one per rejected documentation response; not an expected charge)"
+        )
+    print(
+        "  File retry attempts           : "
+        f"{snapshot.get('file_retry_attempts', 0)} (additional; excluded above)"
+    )
+    print(
+        f"  Estimated documentation calls : {snapshot.get('estimated_calls', 0)} "
+        "(documentation-only heuristic; not the provider call total)"
+    )
+    if snapshot.get("response_correction_enabled", False):
+        print(
+            "  Estimated documentation calls, with correction : "
+            f"{snapshot.get('estimated_calls_max_with_correction', 0)} "
+            "(documentation bound, not the provider call total)"
+        )
+
+    strategy = snapshot.get("large_file_strategy_resolved")
+    if strategy is not None:
+        print(f"  Large-file strategy           : {strategy}")
+        print(
+            "  Source / synthesis ceiling    : "
+            f"{snapshot.get('large_file_source_ceiling_chars', 0)} / "
+            f"{snapshot.get('split_internal_manifest_budget_chars', 0)} chars"
+        )
+        print(
+            "  Oversize source files         : "
+            f"{snapshot.get('large_files_over_source_ceiling', 0)} "
+            f"({snapshot.get('large_files_routed_split', 0)} split, "
+            f"{snapshot.get('large_files_routed_truncate', 0)} truncate)"
+        )
+        # Section 6.3: the two EPHEMERAL cross-plan recovery-transition
+        # counters -- never persisted to ``last_run``. ``discarded`` counts
+        # every unique predecessor paid/quarantined node ID invalidated by the
+        # transition; ``replacement`` counts every current fresh node
+        # scheduled for the conflicting file. Discarded may legitimately
+        # exceed replacement during a topology contraction (and vice versa
+        # during an expansion) -- this is not an arithmetic decomposition.
+        # Printed unconditionally, like the route-wide lines around it.
+        print(
+            "  Recovery transition (discarded/replacement): "
+            f"{snapshot.get('split_recovery_discarded_predecessor_nodes', 0)} / "
+            f"{snapshot.get('split_recovery_replacement_nodes_planned', 0)}"
+        )
+        if snapshot.get("split_chunk_payload_chars_max", 0):
+            print(
+                "  Split leaf payload range      : "
+                f"{snapshot.get('split_chunk_payload_chars_min', 0)}-"
+                f"{snapshot.get('split_chunk_payload_chars_max', 0)} chars; cuts "
+                f"{snapshot.get('split_boundary_cuts_syntax', 0)} syntax / "
+                f"{snapshot.get('split_boundary_cuts_physical_line', 0)} line / "
+                f"{snapshot.get('split_boundary_cuts_balanced_codepoint', 0)} balanced; "
+                f"CRLF-atomicity extra chunks "
+                f"{snapshot.get('split_crlf_atomicity_extra_chunks', 0)}"
+            )
+        # Section 7.1 line 1841 / section 1 line 35: closure reasons name why
+        # each leaf actually closed, so a user can tell whether a tiny
+        # continuation was avoidable or which internal limit added calls.
+        # Filtered to observed reasons only, sorted, matching the established
+        # ``Blocked reasons`` style; omitted entirely when nothing closed.
+        closure_reasons = {
+            name: snapshot.get(key, 0)
+            for name, key in (
+                ("source-ceiling", "split_closures_source_ceiling"),
+                ("metadata-ceiling", "split_closures_metadata_ceiling"),
+                (
+                    "source-and-metadata-ceiling",
+                    "split_closures_source_and_metadata_ceiling",
+                ),
+                (
+                    "oversized-unit-isolation",
+                    "split_closures_oversized_unit_isolation",
+                ),
+                ("continuation", "split_closures_continuation"),
+                ("end-of-file", "split_closures_end_of_file"),
+            )
+            if snapshot.get(key, 0)
+        }
+        if closure_reasons:
+            print(
+                "  Closure reasons               : "
+                + ", ".join(
+                    f"{name}={count}"
+                    for name, count in sorted(closure_reasons.items())
+                )
+            )
+        if snapshot.get("large_files_routed_truncate", 0) or snapshot.get(
+            "truncate_omitted_source_chars", 0
+        ):
+            print(
+                "  Truncate retained / omitted   : "
+                f"{snapshot.get('truncate_retained_source_chars', 0)} / "
+                f"{snapshot.get('truncate_omitted_source_chars', 0)} chars"
+            )
+        reasons = snapshot.get("split_blocked_by_reason", {})
+        if reasons:
+            print(
+                "  Blocked reasons               : "
+                + ", ".join(f"{name}={reasons[name]}" for name in sorted(reasons))
+            )
+
+    _print_split_plan_detail_records(snapshot, verbose=verbose)
+    for prefix, title, line_fn in _PREFLIGHT_FLAT_CATEGORIES:
+        _print_preflight_flat_category(
+            snapshot, prefix, title, line_fn, verbose=verbose
+        )
+
+    # Cap-exceeded diagnostics are printed here, before the pipeline raises its
+    # deterministic error, so the failure is explainable (section 5.8 lines
+    # 1378-1380). The pipeline already invokes this reporter before the raise.
+    if snapshot.get("max_files_exceeded"):
+        print(
+            "  WARNING: "
+            f"{snapshot.get('max_files_candidate_files', 0)} paid-file candidate(s) "
+            f"exceed --max-files {snapshot.get('max_files', 0)}; the run stops with "
+            "exit code 2 before any provider call."
+        )
+    if snapshot.get("max_planned_calls_exceeded"):
+        print(
+            "  WARNING: "
+            f"{snapshot.get('total_calls_planned', 0)} initially planned call(s) "
+            f"exceed --max-planned-calls {snapshot.get('max_planned_calls', 0)}; the "
+            "run stops with exit code 2 before any provider call."
+        )
+    sys.stdout.flush()
 
 
 def _print_run_summary(stats: dict) -> None:
@@ -858,6 +1279,7 @@ def run_cli(argv: list[str] | None = None) -> int:
                 args.dry_run,
                 args.max_files is not None,
                 args.max_planned_calls is not None,
+                args.max_content_chars is not None,
                 bool(args.force_files),
                 args.allow_partial,
                 args.no_parallel,
@@ -941,6 +1363,11 @@ def run_cli(argv: list[str] | None = None) -> int:
         overrides["max_files"] = args.max_files
     if args.max_planned_calls is not None:
         overrides["max_planned_calls"] = args.max_planned_calls
+    if args.max_content_chars is not None:
+        # CLI surface only: load_config already applies the strict-int and
+        # minimum-1000 validation and the CLI > env > config > default
+        # precedence for max_content_chars.
+        overrides["max_content_chars"] = args.max_content_chars
     if args.force_files:
         overrides["force_files"] = args.force_files
     if args.allow_partial:
@@ -954,6 +1381,18 @@ def run_cli(argv: list[str] | None = None) -> int:
             config_overrides=overrides,
             confirm_risky=_confirm_risky_prompt_customization,
             trust_api_base_url=args.trust_api_base_url,
+            # Section 5.8 lines 1365-1372: real runs get the preflight reporter,
+            # which prints the "Planned provider work (before calls)" summary
+            # from the pipeline's one immutable snapshot before any provider is
+            # constructed. Dry-run keeps its own review-and-exit summary below
+            # (same snapshot builder) and must not double-print.
+            plan_reporter=(
+                None
+                if args.dry_run
+                else lambda snapshot: _print_preflight_summary(
+                    snapshot, verbose=bool(args.verbose)
+                )
+            ),
         )
 
         if stats.get("dry_run"):
@@ -991,7 +1430,7 @@ def run_cli(argv: list[str] | None = None) -> int:
         # The pipeline attaches the exact selected crash-recovery path to
         # the interrupt as ``recovery_path`` only when that file exists on disk.
         # The stable output is never touched mid-run, so it is always preserved;
-        # we report the recovery path and the release-specific reuse boundary.
+        # we report the recovery path and the identity-specific reuse boundary.
         recovery_path = getattr(exc, "recovery_path", None)
         if recovery_path:
             print(
@@ -1018,7 +1457,7 @@ def run_cli(argv: list[str] | None = None) -> int:
 
         if isinstance(exc, UnrecoverableProviderError):
             # A doomed-run safe stop — not an unexpected crash. Completed
-            # file-level results are in recovery, subject to the release-specific
+            # file-level results are in recovery, subject to the identity-specific
             # reuse boundary below. A *terminal*
             # abort (billing/credentials/model/access) is a setup/credentials
             # class problem → exit 2 (consistent

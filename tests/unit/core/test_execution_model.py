@@ -46,6 +46,7 @@ def _context(**overrides) -> AgentCallContext:
     defaults = dict(
         analysis_mode="single",
         max_content_chars=12000,
+        synthesis_manifest_chars=12000,
         truncation_head_ratio=0.70,
         resolved_shape_bundle=_bundle(),
     )
@@ -173,8 +174,16 @@ class TestConstructorContracts:
         "overrides, match",
         [
             ({"analysis_mode": "quadruple"}, "unsupported analysis mode"),
-            ({"max_content_chars": 0}, "greater than zero"),
-            ({"max_content_chars": -1}, "greater than zero"),
+            ({"max_content_chars": 0}, "max_content_chars must be a positive integer"),
+            ({"max_content_chars": -1}, "max_content_chars must be a positive integer"),
+            (
+                {"synthesis_manifest_chars": 0},
+                "synthesis_manifest_chars must be a positive integer",
+            ),
+            (
+                {"synthesis_manifest_chars": -1},
+                "synthesis_manifest_chars must be a positive integer",
+            ),
             ({"truncation_head_ratio": 0.0}, "between zero and one"),
             ({"truncation_head_ratio": 1.0}, "between zero and one"),
         ],
@@ -182,6 +191,66 @@ class TestConstructorContracts:
     def test_agent_call_context_rejects_invalid_values(self, overrides, match):
         with pytest.raises(ValueError, match=match):
             _context(**overrides)
+
+    @pytest.mark.parametrize(
+        "field", ["max_content_chars", "synthesis_manifest_chars"]
+    )
+    @pytest.mark.parametrize(
+        "value",
+        [
+            0,
+            -1,
+            -12000,
+            True,
+            False,
+            1.0,
+            12000.0,
+            -1.5,
+            "12000",
+            "1",
+            None,
+            [],
+            (1,),
+        ],
+        ids=[
+            "zero",
+            "negative-one",
+            "negative-large",
+            "bool-true",
+            "bool-false",
+            "float-one",
+            "float-positive",
+            "float-negative",
+            "str-number",
+            "str-one",
+            "none",
+            "empty-list",
+            "tuple",
+        ],
+    )
+    def test_agent_call_context_ceilings_must_be_strict_positive_integers(
+        self, field, value
+    ):
+        """Section 5.7: ``max_content_chars`` and ``synthesis_manifest_chars``
+        are strict positive integers. ``bool`` (``True``/``False``), any float,
+        strings, ``None``, and other non-integers are rejected with a
+        deliberate ``ValueError`` naming the field -- never silently coerced,
+        never left to an accidental comparison ``TypeError``."""
+        with pytest.raises(
+            ValueError, match=f"{field} must be a positive integer"
+        ):
+            _context(**{field: value})
+
+    @pytest.mark.parametrize(
+        "field", ["max_content_chars", "synthesis_manifest_chars"]
+    )
+    @pytest.mark.parametrize("value", [1, 2, 1000, 12000, 999999])
+    def test_agent_call_context_accepts_ordinary_positive_integer_ceilings(
+        self, field, value
+    ):
+        ctx = _context(**{field: value})
+        assert getattr(ctx, field) == value
+        assert type(getattr(ctx, field)) is int
 
     def test_agent_call_context_rejects_a_bundle_from_another_mode(self):
         triple_bundle = ResolvedProfile("triple", None).resolve_bundle(

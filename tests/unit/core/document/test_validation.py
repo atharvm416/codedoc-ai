@@ -32,6 +32,14 @@ from tests.support.run_metadata_cases import _partition_sum
 from tests.support.run_metadata_cases import _split_record, _split_stats
 from tests.support.json_document_cases import _view as json_contract_view
 from tests.support.fixture_paths import FIXTURES_ROOT
+from codedoc.core.document import (
+    _partial_files_from_meta as _s8_partial_files_from_meta,
+)
+from codedoc.core.file_division import (
+    EMPTY_PLAN_DETAILS_DIGEST as _S8_EMPTY_DIGEST,
+    PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS as _S8_CAP,
+    canonical_stream_digest as _s8_stream_digest,
+)
 
 _SPLIT_STATE_FIXTURES = FIXTURES_ROOT / "split_state"
 
@@ -902,3 +910,99 @@ def test_foreign_json_with_legacy_schema_but_no_codedoc_shape_fails_closed(tmp_p
     assert not _is_codedoc_owned(path)
     with pytest.raises(ConfigError):
         read_codedoc_document(path)
+
+# ===========================================================================
+# Section 8 (group B dependency): bounded, full-stream-digested legacy
+# (schema version 1) split-partial evidence from _partial_files_from_meta.
+# Plan 0.14.7 sections 5.8 / 7.1: replace the uncapped legacy_split_partial_rels
+# tuple with an exact total, at most PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS retained
+# normalized paths (in the container's own sorted(...) order), the exact omitted
+# count, and one framed streaming details_digest over EVERY legacy path -- all
+# folded in during the single existing container pass so no complete legacy-path
+# collection survives it.
+# ===========================================================================
+
+
+
+def _s8_legacy_container(rel_path: str) -> dict:
+    """A structurally-minimal predecessor (schema version 1) ordered-prefix
+    container: is_legacy_split_partial() keys on schema_version == 1 plus a
+    'completed_chunks' member."""
+    return {
+        "schema_version": 1,
+        "owner": "codedoc-ai",
+        "rel_path": rel_path,
+        "completed_chunks": [["chunk_" + "a" * 58, '{"description": "legacy"}']],
+    }
+
+
+def test_s8_partial_files_from_meta_reports_no_legacy_evidence_when_none_present():
+    """Zero legacy containers -> an all-empty evidence value whose digest is
+    exactly the shared canonical [] digest, never a missing key or sentinel."""
+    _partials, evidence = _s8_partial_files_from_meta({"partial_files": {}})
+    assert evidence.total == 0
+    assert evidence.retained == ()
+    assert evidence.omitted == 0
+    assert evidence.details_digest == _S8_EMPTY_DIGEST
+
+
+def test_s8_partial_files_from_meta_legacy_evidence_is_bounded_and_full_stream_digested():
+    """A many-path legacy container publishes the exact total, at most
+    PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS retained paths in the container's own
+    sorted() traversal order, the exact omitted count, and a details_digest
+    computed over EVERY legacy path (not the retained subset)."""
+    count = _S8_CAP + 7
+    raw = {}
+    order = list(range(count))
+    order = order[9:] + order[:9]  # shuffled insertion order
+    for i in order:
+        rel = f"pkg/legacy_{i:02d}.py"
+        raw[rel] = _s8_legacy_container(rel)
+
+    _partials, evidence = _s8_partial_files_from_meta({"partial_files": raw})
+
+    ordered_paths = sorted(raw)  # the exact container pass order
+    assert evidence.total == count
+    assert evidence.omitted == count - _S8_CAP
+    assert len(evidence.retained) == _S8_CAP
+    assert list(evidence.retained) == ordered_paths[:_S8_CAP]
+    assert evidence.details_digest == _s8_stream_digest(ordered_paths)
+    assert evidence.details_digest != _s8_stream_digest(list(evidence.retained))
+
+
+def test_s8_partial_files_from_meta_legacy_digest_uses_container_order_not_normalized_order():
+    """The stream's canonical order is the container's sorted(raw) key order,
+    deliberately NOT re-sorted into normalized order (a second sort would
+    reintroduce the O(N) allocation being removed)."""
+    from codedoc.parser.source_structure import normalize_rel_path
+
+    raw = {
+        "m/b.py": _s8_legacy_container("m/b.py"),
+        "m\\a.py": _s8_legacy_container("m/a.py"),
+    }
+    ordered_raw_keys = sorted(raw)  # ['m/b.py', 'm\\a.py']  ('/' 0x2F < '\\' 0x5C)
+    normalized_in_raw_order = [normalize_rel_path(k) for k in ordered_raw_keys]
+
+    _partials, evidence = _s8_partial_files_from_meta({"partial_files": raw})
+    assert evidence.total == 2
+    assert list(evidence.retained) == normalized_in_raw_order
+    assert evidence.details_digest == _s8_stream_digest(normalized_in_raw_order)
+    assert evidence.details_digest != _s8_stream_digest(sorted(normalized_in_raw_order))
+
+
+def test_s8_partial_files_from_meta_legacy_hostile_path_is_retained_raw_for_later_escaping():
+    """A hostile-but-valid legacy path is normalized and retained verbatim;
+    escaping is the remedy renderer's job, and the digest stays canonical."""
+    hostile = (
+        "pkg/ev" + chr(10) + "il" + chr(9) + chr(0x1B) + chr(0x202E) + '"' + chr(0xE9) + ".py"
+    )
+    raw = {
+        hostile: _s8_legacy_container(hostile),
+        "pkg/plain.py": _s8_legacy_container("pkg/plain.py"),
+    }
+    ordered = sorted(raw)
+    _partials, evidence = _s8_partial_files_from_meta({"partial_files": raw})
+    assert evidence.total == 2
+    assert set(evidence.retained) == set(ordered)
+    assert any(chr(10) in p and chr(0x202E) in p for p in evidence.retained)
+    assert evidence.details_digest == _s8_stream_digest(ordered)

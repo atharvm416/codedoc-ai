@@ -173,7 +173,7 @@ _FRAGMENT_SYSTEM = (
 # clause therefore resolves against the visible source alone: the correction
 # prompt renders no fragment position, no continuation flag, and no
 # known-symbol line, and a clause conditioned on one of those would be
-# unanchored exactly where the 0.14.5 failure was never repaired.  Declaration
+# unanchored in exactly the failure mode this contract closes. Declaration
 # visibility, not fragment position, is the test: a lexical chunk holding only
 # the interior of a large exported array reports `fragment 1 of 1` with both
 # continuation flags false, so "continuation" cannot be the condition.
@@ -213,6 +213,66 @@ _FRAGMENT_EXPORT_CONTRACT = (
     "source you cannot see."
 )
 
+# Shared split-leaf signature contract. Rendered inside
+# `_FRAGMENT_SHAPE_BLOCK` for the same reason `_FRAGMENT_EXPORT_CONTRACT` is:
+# so it reaches the initial leaf prompt and the one targeted correction
+# prompt byte-identically -- the correction route receives the shape block
+# and nothing else from `_FRAGMENT_PROMPT_TEMPLATE`. Previously, the
+# fragment rules demanded an exact copy of the visible declaration while the
+# shape block separately capped `signature` at
+# `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (600); CodeDoc's own source contains real
+# declarations longer than that, so for those no truthful response existed --
+# unsatisfiable by construction. The hard bound is therefore raised
+# (see `MAX_STRUCTURE_SIGNATURE_CHARS` in `codedoc/parser/source_structure.py`)
+# and keeps the contract satisfiable at any bound by making a fully visible
+# over-bound declaration answerable through a leading shortened portion,
+# rather than relying on the bound alone happening to be large enough. The
+# hard bound is rendered from the constant, never a literal, so the stated
+# ceiling can never drift from the enforced one. Every clause below resolves
+# against the visible source alone, for the same reason the export contract
+# does: the correction prompt renders no fragment position, no continuation
+# flag, and no known-symbol line.
+_FRAGMENT_SIGNATURE_CONTRACT = (
+    "\nSignature contract for the optional \"signature\" field on a "
+    "function, method, or class:\n"
+    "- A signature is source-backed declaration text visible in THIS "
+    "fragment. Never infer a missing prefix, suffix, name, parameter, "
+    "type, delimiter, or arity from another continuation, parser "
+    "metadata, language convention, or general knowledge.\n"
+    "- When the complete declaration is visible in this fragment, copy it "
+    "in full when it is at or below the hard bound stated below. Shorten "
+    "only a fully visible declaration that exceeds the hard bound, using "
+    "its leading source-backed portion, preferably roughly 600-1,000 "
+    "characters and never more than the hard bound; never pad, extend, or "
+    "invent text to reach that length. That range is guidance for "
+    "shortening an over-bound declaration -- it is not a minimum, a "
+    "second enforced limit, or permission to shorten a fully visible "
+    "declaration that already fits; a fully visible declaration between "
+    "that range and the hard bound is reported in full.\n"
+    "- When only part of a declaration is visible in this fragment, "
+    "report only the contiguous signature text actually visible here, in "
+    "source order and at or below the hard bound. Do not reconstruct the "
+    "rest and do not copy text from a different continuation. If this "
+    "fragment exposes no declaration text that can truthfully populate "
+    "the field, omit it. Partial visibility, not the declaration's "
+    "whole-file length, controls this rule.\n"
+    "- Reported text carries types and arity only as far as the visible "
+    "text extends. Two long declarations sharing a name may be identical "
+    "in their visible or leading portion and differ only later, so a "
+    "shortened or partial signature cannot by itself distinguish them: "
+    "the parser-owned source range, scope, and semantic-unit identity "
+    "remain authoritative, and a partial or shortened signature is only "
+    "a matching hint, never the declaration's identity.\n"
+    "- Omit \"signature\" only when the language expresses none, or this "
+    "fragment exposes no usable declaration text. Length alone is never a "
+    "reason to omit a fully visible declaration, and continuation status "
+    "is never permission to infer invisible text.\n"
+    f"- The hard bound is {MAX_LEAF_SYMBOL_SIGNATURE_CHARS} characters; a "
+    "signature above it is rejected in full. The 600-1,000 range above is "
+    "guidance for shortening an over-bound declaration, not a second "
+    "enforced bound."
+)
+
 _FRAGMENT_SHAPE_BLOCK = (
     "Return exactly this fixed internal JSON shape (never the final "
     'file-level shape):\n{\n  "description": "<required, non-empty; a '
@@ -232,7 +292,7 @@ _FRAGMENT_SHAPE_BLOCK = (
     f"{MAX_LEAF_SYMBOL_DESCRIPTION_CHARS} characters; exports <= "
     f"{MAX_LEAF_EXPORT_ITEMS} items; each export <= "
     f"{MAX_LEAF_EXPORT_ITEM_CHARS} characters."
-) + _FRAGMENT_EXPORT_CONTRACT
+) + _FRAGMENT_SIGNATURE_CONTRACT + _FRAGMENT_EXPORT_CONTRACT
 
 _FRAGMENT_PROMPT_TEMPLATE = """This is one bounded fragment of a larger {language} file. It is NOT the \
 whole file.
@@ -264,10 +324,6 @@ fragment you cannot see, even when this fragment continues a larger unit
 directly visible
 - functions and classes must be ones actually visible and defined in this \
 fragment
-- include "signature" for every function or method whose language expresses \
-one, copied from the visible declaration (parameter types/arity), so that \
-overloads sharing a name stay distinguishable; omit it only when the \
-language has no signature or the declaration is not visible here
 - If this fragment continues into a later fragment, describe only the \
 portion visible here
 - If the fragment contains only comments, whitespace, or other \

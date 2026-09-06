@@ -14,6 +14,7 @@ from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import site
 import subprocess
@@ -49,30 +50,97 @@ def _repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _canonical_distribution_name(name: object) -> str:
+    """PEP 503 name normalization: case-fold and collapse every run of ``-``,
+    ``_`` or ``.`` to a single hyphen, so ``codedoc_ai``, ``Codedoc-AI`` and
+    ``codedoc..ai`` all compare equal to ``codedoc-ai``."""
+    text = name if isinstance(name, str) else ""
+    return re.sub(r"[-_.]+", "-", text.strip()).lower()
+
+
+def _distribution_owns_imported_package(dist: object, package_path: Path) -> bool:
+    """True when *dist*'s own metadata says it installed the exact
+    ``codedoc/__init__.py`` file that was imported -- the origin binding a bare
+    ``importlib.metadata.version("codedoc-ai")`` lookup does not provide."""
+    try:
+        located = Path(dist.locate_file("codedoc/__init__.py")).resolve()
+    except Exception:
+        return False
+    return located == package_path
+
+
+def _origin_bound_distribution(
+    package_path: Path, package_site_root: Path
+) -> object:
+    """Return the single installed ``codedoc-ai`` distribution that both owns
+    the imported package file and lives under the same site-packages root.
+
+    Distinct, stable failures for the three ways this can go wrong:
+
+    * ``codedoc-ai-distribution-not-found`` -- no ``codedoc-ai`` distribution
+      is installed at all;
+    * ``codedoc-ai-distribution-origin-mismatch`` -- one or more are installed
+      but none is co-located with the imported package (e.g. only a
+      repository-local ``codedoc_ai.egg-info`` shadow, or an install under a
+      different site root);
+    * ``codedoc-ai-distribution-ambiguous`` -- more than one qualifies.
+    """
+    named = [
+        dist
+        for dist in importlib_metadata.distributions()
+        if _canonical_distribution_name(_distribution_name(dist)) == "codedoc-ai"
+    ]
+    if not named:
+        raise SmokeFailure("codedoc-ai-distribution-not-found")
+    origin_bound = [
+        dist
+        for dist in named
+        if _distribution_owns_imported_package(dist, package_path)
+        and _distribution_is_under(dist, package_site_root)
+    ]
+    if not origin_bound:
+        raise SmokeFailure("codedoc-ai-distribution-origin-mismatch")
+    if len(origin_bound) > 1:
+        raise SmokeFailure("codedoc-ai-distribution-ambiguous")
+    return origin_bound[0]
+
+
+def _distribution_name(dist: object) -> object:
+    try:
+        return dist.metadata["Name"]
+    except Exception:
+        return getattr(dist, "name", None)
+
+
+def _distribution_is_under(dist: object, root: Path) -> bool:
+    """Whether *dist*'s on-disk metadata directory sits under *root*.  A
+    non-path distribution (no ``_path``) is not rejected on this basis alone --
+    :func:`_distribution_owns_imported_package` is the authoritative bind."""
+    origin = getattr(dist, "_path", None)
+    if origin is None:
+        return True
+    try:
+        return _is_within(Path(origin).resolve(), root)
+    except Exception:
+        return False
+
+
 def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, Path]:
     """Prove product imports and the console script come from this environment.
 
     This deliberately runs before changing directory or importing project
     content.  The harness itself may live in the checkout; the product under
-    test may not.
+    test may not.  Distribution metadata is bound to the imported package's
+    own origin, so a repository-local ``codedoc_ai.egg-info`` (or any other
+    unrelated ``codedoc-ai`` install) cannot stand in for the real one.
     """
     import codedoc
 
     package_path = Path(codedoc.__file__).resolve()
     module_version = codedoc.__version__
-    metadata_version = importlib_metadata.version("codedoc-ai")
     if not isinstance(module_version, str) or not module_version:
         raise SmokeFailure("candidate-module-version-missing")
-    if metadata_version != module_version:
-        raise SmokeFailure(
-            "candidate-module-metadata-version-mismatch: "
-            f"{module_version!r} != {metadata_version!r}"
-        )
-    if expected_version is not None and module_version != expected_version:
-        raise SmokeFailure(
-            f"candidate-version-mismatch: installed {module_version!r} "
-            f"!= expected --candidate-version {expected_version!r}"
-        )
+
     repository = _repository_root()
     site_roots = {
         Path(value).resolve()
@@ -81,8 +149,27 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
     }
     if _is_within(package_path, repository):
         raise SmokeFailure("installed-origin-check-failed")
-    if not any(_is_within(package_path, root) for root in site_roots):
+    package_site_root = next(
+        (root for root in site_roots if _is_within(package_path, root)),
+        None,
+    )
+    if package_site_root is None:
         raise SmokeFailure("site-packages-origin-check-failed")
+
+    distribution = _origin_bound_distribution(package_path, package_site_root)
+    distribution_version = distribution.version
+    if not isinstance(distribution_version, str) or not distribution_version:
+        raise SmokeFailure("candidate-distribution-version-missing")
+    if distribution_version != module_version:
+        raise SmokeFailure(
+            "candidate-module-metadata-version-mismatch: "
+            f"{module_version!r} != {distribution_version!r}"
+        )
+    if expected_version is not None and module_version != expected_version:
+        raise SmokeFailure(
+            f"candidate-version-mismatch: installed {module_version!r} "
+            f"!= expected --candidate-version {expected_version!r}"
+        )
 
     script_name = "codedoc.exe" if os.name == "nt" else "codedoc"
     located = shutil.which(script_name) or shutil.which("codedoc")
@@ -102,7 +189,10 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
         errors="backslashreplace",
         check=False,
     )
-    expected_output = f"codedoc {module_version}"
+    # Compared against the origin-bound distribution version, which the checks
+    # above have already tied to codedoc.__version__ and, when supplied, to
+    # --candidate-version.
+    expected_output = f"codedoc {distribution_version}"
     if version_result.returncode != 0 or version_result.stdout.strip() != expected_output:
         raise SmokeFailure(
             "candidate-console-version-mismatch: "
@@ -361,13 +451,43 @@ def _scenario_fresh_split(root: Path) -> None:
     _assert_private(project, captured)
 
 
+#: The installed signature-acceptance boundary. Lengths track the frozen
+#: live-validation fixture's real 1,520-character declaration and the exact
+#: serialized-response hard bound; one code point past it fails closed. The
+#: separate 600-character leaf-prompt hint clamp is asserted on its own, never
+#: folded into this matrix.
+_SIGNATURE_BOUND_MATRIX: tuple[tuple[int, bool], ...] = (
+    (1520, False),
+    (2000, False),
+    (2001, True),
+)
+
+
+def _assert_prompt_signature_hint_is_600() -> None:
+    """The internal leaf-prompt signature hint stays clamped at 600 characters
+    no matter how large the serialized-response bound becomes. Its own
+    diagnostic reason, distinct from the response-acceptance boundary."""
+    from codedoc.core.file_division import MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS
+
+    if MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS != 600:
+        raise SmokeFailure(
+            "prompt-signature-hint-chars-not-600: "
+            f"{MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS!r}"
+        )
+
+
 def _scenario_signature_bound(root: Path) -> None:
-    """Section 18: a bounded 552-character model leaf signature is accepted
-    with response correction disabled, a synthetic parser-aligned
-    600-character boundary succeeds, and 601 characters fails closed with no
-    truncated public fact -- exercised through the installed artifact, not
-    only at the source level."""
-    for signature_chars, expect_failure in ((552, False), (600, False), (601, True)):
+    """The installed artifact accepts a serialized leaf ``signature`` up to the
+    hard bound and rejects one past it, fail-closed, with no truncated public
+    fact -- exercised end to end, not only at the source level.
+
+    Response correction stays disabled here so the boundary observed is the
+    cleaner's, not a repair's. The separate leaf-prompt signature-hint clamp
+    is verified independently (:func:`_assert_prompt_signature_hint_is_600`)
+    with its own diagnostic.
+    """
+    _assert_prompt_signature_hint_is_600()
+    for signature_chars, expect_failure in _SIGNATURE_BOUND_MATRIX:
         project = root / f"signature-{signature_chars}"
         project.mkdir()
         project.joinpath("main.py").write_text(_large_source(), encoding="utf-8")
@@ -393,6 +513,133 @@ def _scenario_signature_bound(root: Path) -> None:
             if "signature" in output_text:
                 raise SmokeFailure(f"signature-{signature_chars}-private-field-published")
         _assert_private(project, captured)
+
+
+#: Frozen facts of the single tracked live-validation source fixture
+#: (plan section 9.3). Verified before every installed use so a drifted or
+#: substituted fixture fails loudly rather than silently changing the topology.
+_LIVE_FIXTURE_REL_PARTS = (
+    "tests",
+    "fixtures",
+    "live_validation",
+    "oversized_signature.py",
+)
+_LIVE_FIXTURE_BYTES = 2317
+_LIVE_FIXTURE_SHA256 = (
+    "cfbf8716bcab26e996d6d467997eeb57fe53b172d21a9831d8fd42f623b24da1"
+)
+
+#: The exact resolved dry-run topology for that fixture at
+#: ``max_content_chars=1000`` with the response-correction key absent, taken
+#: from the real production planning path (plan section 9.3). Every value is a
+#: stat key the installed product itself publishes.
+_LIVE_FIXTURE_DRY_RUN_TOPOLOGY: dict[str, object] = {
+    "dry_run": True,
+    "large_file_strategy_resolved": "split",
+    "large_file_source_ceiling_chars": 1000,
+    "split_internal_manifest_budget_chars": 12000,
+    "file_retry_attempts": 0,
+    "split_divided_files": 1,
+    "split_chunks": 3,
+    "split_oversized_units": 1,
+    "unit_documentation_calls_planned": 3,
+    "split_unit_consolidation_calls_planned": 1,
+    "split_general_reduction_calls_planned": 0,
+    "split_final_synthesis_calls_planned": 1,
+    "initial_provider_calls_planned": 5,
+    "initial_documentation_calls_planned": 5,
+    "documentation_calls_planned": 5,
+    "total_calls_planned": 5,
+    "prompt_review_calls_planned": 0,
+    "split_boundary_cuts_balanced_codepoint": 1,
+    "split_boundary_cuts_syntax": 0,
+    "split_boundary_cuts_physical_line": 0,
+    "split_crlf_atomicity_extra_chunks": 0,
+    "max_planned_calls": 5,
+    "max_planned_calls_exceeded": False,
+    "correction_calls_possible_max": 5,
+    "provider_calls_max_before_retries": 10,
+    "retries_included_in_ceiling": False,
+}
+
+
+def _load_frozen_live_fixture() -> bytes:
+    """Read the tracked live-validation fixture from the checkout and verify
+    its exact byte length and SHA-256 before any use."""
+    import hashlib
+
+    path = _repository_root().joinpath(*_LIVE_FIXTURE_REL_PARTS)
+    if not path.is_file():
+        raise SmokeFailure("live-fixture-missing")
+    raw = path.read_bytes()
+    if len(raw) != _LIVE_FIXTURE_BYTES:
+        raise SmokeFailure(
+            f"live-fixture-size-mismatch: {len(raw)} != {_LIVE_FIXTURE_BYTES}"
+        )
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != _LIVE_FIXTURE_SHA256:
+        raise SmokeFailure(f"live-fixture-hash-mismatch: {digest}")
+    return raw
+
+
+def _scenario_live_fixture_dry_run(root: Path) -> None:
+    """Plan section 9.3: the frozen live-validation fixture, planned through the
+    installed product's normal config-file loading path with the
+    ``response_correction_enabled`` key absent, resolves the exact five-call
+    split dry-run topology, enables correction by default, constructs no
+    provider, and leaves no output or recovery behind.
+    """
+    raw = _load_frozen_live_fixture()
+    project = root / "live-fixture-dry-run"
+    project.mkdir()
+    project.joinpath("main.py").write_bytes(raw)
+    config = _write_config(
+        project,
+        large_file_strategy="split",
+        max_content_chars=1000,
+        allow_partial=False,
+        dry_run=True,
+        max_planned_calls=5,
+    )
+    config_text = project.joinpath("codedoc.config.json").read_text(encoding="utf-8")
+    if "response_correction_enabled" in config or "response_correction_enabled" in config_text:
+        raise SmokeFailure("live-fixture-config-pins-correction-key")
+
+    before = _snapshot(project)
+    # Empty overrides: the resolved configuration comes only from the file plus
+    # DEFAULTS, so the absent response-correction key genuinely exercises the
+    # default-on resolution.  ``forbid_provider`` turns any provider
+    # construction into an immediate failure.
+    stats, captured = _run_in_process(project, {}, forbid_provider=True)
+
+    if stats.get("response_correction_enabled") is not True:
+        raise SmokeFailure(
+            "live-fixture-correction-default-not-enabled: "
+            f"{stats.get('response_correction_enabled')!r}"
+        )
+
+    mismatch = {
+        key: (stats.get(key, "<missing>"), expected)
+        for key, expected in _LIVE_FIXTURE_DRY_RUN_TOPOLOGY.items()
+        if stats.get(key, "<missing>") != expected
+    }
+    if mismatch:
+        raise SmokeFailure(f"live-fixture-dry-run-topology-mismatch: {mismatch}")
+
+    if _snapshot(project) != before:
+        raise SmokeFailure("live-fixture-dry-run-mutated-project")
+    if project.joinpath("docs", "codedoc.json").exists():
+        raise SmokeFailure("live-fixture-dry-run-wrote-output")
+    if project.joinpath("docs", "crash_recovery.json").exists():
+        raise SmokeFailure("live-fixture-dry-run-wrote-recovery")
+
+    fixture_markers = (
+        "merge_resolved_configuration",
+        "provider: str | None = None, model: str | None = None",
+    )
+    if any(marker in captured for marker in fixture_markers):
+        raise SmokeFailure("live-fixture-source-leaked-into-diagnostics")
+    _assert_private(project, captured)
 
 
 def _scenario_completed_reuse(root: Path) -> None:
@@ -1762,8 +2009,8 @@ def _child_run(project: Path, cli_args: list[str]) -> int:
     return _invoke_child_cli(cli_main, cli_args)
 
 
-def _run_all() -> int:
-    _package_path, console_path = _prove_installed_origin()
+def _run_all(candidate_version: str) -> int:
+    _package_path, console_path = _prove_installed_origin(candidate_version)
     original_cwd = Path.cwd()
     with tempfile.TemporaryDirectory(prefix="codedoc-installed-smoke-") as temp_name:
         neutral_root = Path(temp_name).resolve()
@@ -1774,6 +2021,7 @@ def _run_all() -> int:
             _scenario_truncate(neutral_root)
             _scenario_fresh_split(neutral_root)
             _scenario_signature_bound(neutral_root)
+            _scenario_live_fixture_dry_run(neutral_root)
             _scenario_redirected_verbose(neutral_root)
             _scenario_completed_reuse(neutral_root)
             _scenario_interrupt_resume(neutral_root)
@@ -1809,7 +2057,7 @@ def main(argv: list[str] | None = None) -> int:
         "--candidate-version",
         help=(
             "Exact candidate version installed under this interpreter. "
-            "Required for --scenario cross-version."
+            "Required for --scenario all and --scenario cross-version."
         ),
     )
     parser.add_argument(
@@ -1846,7 +2094,9 @@ def main(argv: list[str] | None = None) -> int:
         _prove_installed_origin(args.candidate_version)
         _scenario_cross_version(work, args.peer_python.resolve(), args.peer_version)
         return 0
-    return _run_all()
+    if args.candidate_version is None:
+        raise SmokeFailure("scenario-all-requires-candidate-version")
+    return _run_all(args.candidate_version)
 
 
 if __name__ == "__main__":

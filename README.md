@@ -23,7 +23,7 @@ Markdown, or both.
 - [Configuration](#configuration)
   - [Configuration reference](#configuration-reference)
   - [Large files](#large-files)
-  - [Response correction](#response-correction-opt-in)
+  - [Response correction](#response-correction)
 - [Command-line options](#command-line-options)
 - [Providers and environment variables](#providers-and-environment-variables)
 - [Inline instructions](#inline-instructions)
@@ -398,7 +398,7 @@ instruction schema instead of copying a partial configuration.
 | `rate_limit_signals_add` | Add error-message signals that promote an otherwise-unmapped provider failure to rate-limit handling. |
 | `rate_limit_signals_remove` | Remove signals from that otherwise-unmapped rate-limit promotion. |
 | `ignore_paths` | Set project-relative paths to ignore. |
-| `max_content_chars` | Set the ordinary source ceiling and the ceiling for each split leaf, reduction manifest, and final manifest. |
+| `max_content_chars` | The ordinary and split-leaf **source** ceiling only. Reducer and final-synthesis manifests use a separate automatic synthesis ceiling of at least 12,000 characters, not set directly. |
 | `large_file_strategy` | Choose head-and-tail `truncate` handling or complete-source `split` planning, execution, completed reuse, and node recovery. |
 | `dry_run` | Plan without writes, provider construction, or provider calls. |
 | `max_files` | Cap files with unpaid provider work; `0` is unlimited. |
@@ -408,7 +408,7 @@ instruction schema instead of copying a partial configuration.
 | `analysis_mode` | Choose the initial combined `single` path or the three-agent `triple` path for an ordinary file. |
 | `truncation_head_ratio` | Set the head fraction of head-and-tail truncation. |
 | `provider_request_timeout_s` | Set the per connect/read/write/pool phase provider request transport timeout in seconds (1-600). |
-| `response_correction_enabled` | Opt into one targeted correction call for an eligible rejected response. |
+| `response_correction_enabled` | **Enabled by default.** One targeted correction call per rejected response; set `false` to opt out. |
 | `prompt_profiles` | Customize inline single/triple requested output shapes. |
 
 `supported_extensions` is not emitted by `--init-config`. The loader accepts an
@@ -472,11 +472,17 @@ plan and completed identity are path-bound. An explicit force bypasses reuse
 and recovery for that path while preserving prior stable output and recovery
 until replacement succeeds.
 
-Split leaf signatures are private, internal matching metadata only — never
-part of any public schema. They are bounded to the parser-aligned
-600-character ceiling; a model-returned signature over that bound fails
-through the normal correction/failure contract and is never silently
-truncated into a shortened accepted value.
+Split leaf signatures are internal split matching metadata only — never part of
+any public schema, and never present in `codedoc.json` or the Markdown. They are
+bounded to a 2,000-character ceiling; a model-returned signature over that bound
+fails through the normal correction/failure contract and is never silently
+truncated into a shortened accepted value. When a fully visible declaration is
+longer than the ceiling, the model is asked to report only its leading
+source-backed portion — roughly 600 to 1,000 characters, and never above the
+ceiling — so the declaration is recorded shortened rather than dropped. A
+signature shortened this way is a truthful, expected answer, never an omission
+and never a system-applied cut; a fully visible declaration that already fits
+the ceiling is always recorded in full.
 
 Each accepted leaf, reduction, and final-synthesis result is checkpointed only
 after it has been cleaned and validated. A compatible interrupted run resumes
@@ -516,9 +522,14 @@ partial nodes, while completed cache reuse remains provider-agnostic. Files at
 or below `max_content_chars` continue through the ordinary whole-file path.
 
 A split dry-run scans the canonical source snapshot, builds the same
-deterministic semantic or lexical chunks, verifies complete coverage, constructs
-the bounded reduction topology, and reports planned call categories and capacity
-reasons. It makes no provider call and performs no persistent write.
+deterministic semantic or lexical chunks, verifies complete coverage, and
+constructs the bounded reduction topology. For a resolved-valid
+`single + split` route it is a read-only preview of the same payable work a
+real run would do at the same repository state: it loads completed records and
+`crash_recovery.json`, classifies them through the same reuse and node-recovery
+rules, and reports the remaining call categories and capacity reasons over the
+unpaid nodes only. It makes no provider call, and it never creates, rewrites,
+quarantines, replaces, or removes recovery or any other file.
 
 The optional `structure` installation extra provides syntax-aware planning
 boundaries for supported languages:
@@ -583,8 +594,8 @@ large enough to take the split path:
   still in progress, because fragments produced under the previous contract
   are not reused. Run with `--dry-run` first to see the exact call count;
   later runs reuse normally again; and
-- set `"response_correction_enabled": true` to allow one repair call per
-  rejected response.
+- one repair call per rejected response is made automatically; set
+  `"response_correction_enabled": false` to turn it off.
 
 #### Routing overview
 
@@ -657,24 +668,48 @@ The diagram describes both provider-free planning and active split execution.
 
 #### Semantic division and synthesis
 
+Split planning and reconstruction are defined against the **canonical decoded
+snapshot** of the file, not its raw bytes. That snapshot is produced once per
+run: a leading byte-order mark is stripped, undecodable bytes become the Unicode
+replacement character, and `\r\n` and lone `\r` are normalized to `\n`. Every
+leaf, coverage check, and boundary offset is measured in Unicode code points of
+that snapshot, and the pieces of a divided file reconstruct it exactly. CodeDoc
+also records a separate content hash over the file's original bytes for change
+detection; it does not promise to preserve or round-trip the raw file itself.
+
 A non-empty provider-bound file at or below `max_content_chars` uses the
 ordinary whole-file single-mode request, whether `split` is selected or not.
 With `split`, an oversized file is instead divided at semantic boundaries first
 (functions, classes, top-level declarations), derived locally and
-deterministically from the canonical decoded snapshot: a semantic unit that
-fits stays whole in one chunk; an
-oversized unit is divided into explicit continuation chunks, with
-`max_content_chars` as the hard ceiling per chunk. Complete adjacent lines fill
-continuation chunks up to that ceiling; a physical line is split only when the
-line itself is oversized. Several adjacent fitting semantic units may share one
-packed leaf call, but they retain their own identities and remain separate in
-`split_units`; a packed call group is not a replacement semantic unit. Packing
-also applies a fixed ceiling to the exact ordered unit/range metadata rendered
-in the leaf prompt. A chunk closes before that metadata would exceed its
-ceiling, so every unit and range remains explicit without allowing short
-lexical atoms to create an unbounded prompt. The optional structure package
-described above supplies syntax-aware boundaries; the same complete lexical
-fallback and runtime-offline guarantees apply to execution as well as dry-run.
+deterministically from the canonical decoded snapshot. A semantic unit that fits
+`max_content_chars` stays whole in one chunk and keeps its exact canonical
+bytes, source range, and identity. Only a semantic unit whose own source exceeds
+`max_content_chars` is subdivided, and it is subdivided toward a balanced piece
+length rather than filled greedily to the ceiling: each cut is placed at a
+nested syntax boundary or a physical-line boundary within about ten percent of
+the balanced target, and at the nearest safe character boundary otherwise. Every
+piece stays at or below `max_content_chars`. So one indivisible 2,010-character
+unit at a 1,000-character ceiling becomes three pieces of about 670 characters
+each, not 1,000 + 1,000 + 10; an 8,292-character span at a 2,000-character
+ceiling becomes five pieces, never a power-of-two halving into eight. Given
+natural units of 1,243, 482, and 285 characters, only the 1,243-character unit
+is subdivided (about 622 + 621); the 482 and 285 units keep their exact bytes,
+ranges, and identities and may still share one 767-character leaf call. Several
+adjacent fitting semantic units may share one packed leaf call, but they retain
+their own identities and remain separate in `split_units`; a packed call group
+is not a replacement semantic unit, and CodeDoc does not promise that co-packed
+units are byte-identical to a global concatenation. For cut placement a `\r\n`
+pair is treated as one indivisible unit, so a defensive subdivision may
+occasionally use one extra piece — and one extra call — rather than split the
+pair; the normal filesystem pipeline normalizes `\r\n` and lone `\r` to `\n`
+before planning, so that case cannot arise there and its reported count is
+always zero. Packing also applies a fixed ceiling to the exact ordered
+unit/range metadata rendered in the leaf prompt. A chunk closes before that
+metadata would exceed its ceiling, so every unit and range remains explicit
+without allowing short lexical atoms to create an unbounded prompt. The optional
+structure package described above supplies syntax-aware boundaries; the same
+complete lexical fallback and runtime-offline guarantees apply to execution as
+well as dry-run.
 
 A very large file can require several paid hierarchical reduction calls above
 its leaf chunks before final synthesis: chunks belonging to the same oversized
@@ -690,7 +725,8 @@ have explicit prompt-visible bounds (a leaf accepts up to 32 functions and up
 to 32 classes, matching the same count of known-symbol names the leaf prompt
 may list), and no separately parsed whole-file imports reach a leaf or reducer
 request. A combined reduction narrative is capped at 300 characters, and the
-reducer prompt states that bound explicitly so a truthful longer narrative is
+reducer prompt states that bound explicitly — together with a recommended
+260-character target to write toward — so a truthful longer narrative is
 never rejected without the model having been told the limit. A response that
 exceeds a fixed leaf or reduction fact bound is rejected through the normal
 correction/failure contract instead of being silently truncated or published
@@ -708,8 +744,15 @@ contracts. Before publication or format conversion, functions, classes, and
 exports are projected through the ordinary file-level schema and limits;
 internal signatures, source provenance, IDs, and ranges are never public.
 
-The ceiling applies independently to every leaf source input, reduction
-manifest, and complete final-synthesis manifest. Final capacity is planned from
+`max_content_chars` is the source ceiling for every ordinary whole-file request
+and every split leaf input. Reduction manifests and the complete final-synthesis
+manifest use a separate automatic synthesis ceiling — the larger of
+`max_content_chars` and a fixed 12,000-character floor — so lowering the source
+ceiling below 12,000 never shrinks internal synthesis below its safe default
+size, and raising it above 12,000 raises both. Both are **content** ceilings;
+the complete provider prompt is always larger than either, because it also
+carries system instructions, shape rules, metadata, and framing, and neither
+ceiling is a provider context-window guarantee. Final capacity is planned from
 the actual path, language, and parser-derived imports plus distinct
 maximum-size root narratives and the largest bounded fact ledger reachable
 from the planned leaves. If needed, only the already-lossy ledger synopsis is
@@ -719,21 +762,35 @@ are never dropped. If those authoritative fields cannot fit, planning reports
 
 #### Capacity and failure behavior
 
-An extremely large file can instead block provider-free, before any call, with
-one of eight named capacity reasons reported in a fixed evaluation order
-(`atom-cap`, `symbol-cap`, `unit-cap`, `chunk-cap`,
+The `max_file_size_kb` scanner limit is applied first, in bytes, during
+scanning. A file rejected there is a scan skip — it never reaches
+character-based split planning and never produces a capacity reason below.
+
+Past that gate, an extremely large file can instead block provider-free, before
+any call, with one of eight named capacity reasons reported in a fixed
+evaluation order (`atom-cap`, `symbol-cap`, `unit-cap`, `chunk-cap`,
 `reduction-envelope-cap`, `reduction-fan-in-cap`, `reduction-depth-cap`,
 `final-synthesis-envelope-cap`) — split never silently falls back to
 truncation. A blocked file makes no provider call and is excluded from
 `max_files`; dry-run reports every blocked path and reason with exit 0, while a
-real run stops before writing or contacting a provider. Inspect
-the reported reason before choosing a remedy:
-raising `max_content_chars` can reduce chunk count or relax reduction
-envelopes/fan-in when the provider supports the larger input, but it does not
-change atom or symbol counts. Reducing/refactoring the source addresses
-structural caps; choosing `truncate` is appropriate only when incomplete-source
-analysis is acceptable. Lowering `max_content_chars` can create more leaves,
-more reduction levels, and more paid calls even though each call is smaller.
+real run stops before writing or contacting a provider. Inspect the reported
+reason before choosing a remedy, because they do not share one:
+
+- `atom-cap`, `symbol-cap`, and `unit-cap` are structural counts — simplify or
+  exclude the file; a larger ceiling does not change them.
+- `chunk-cap` is the only reason a larger `max_content_chars` (when the provider
+  supports the larger input) or splitting the source differently can clear.
+- `reduction-envelope-cap`, `reduction-fan-in-cap`, and `reduction-depth-cap`
+  cannot be reached by a legal source ceiling alone under supported settings;
+  if one occurs, report it as an internal planning-capacity defect rather than
+  raising the source ceiling.
+- `final-synthesis-envelope-cap` means the authoritative path, language, or
+  import metadata will not fit — inspect and shorten those inputs or exclude the
+  file; report it if they are already ordinary.
+
+Choosing `truncate` is appropriate only when incomplete-source analysis is
+acceptable. Lowering `max_content_chars` can create more leaves, more reduction
+levels, and more paid calls even though each call is smaller.
 A genuine internal division-plan defect is a different, rarer case — a
 programming-invariant failure, not a capacity outcome. It propagates uncaught
 and aborts the whole run (dry or real) before any provider or writer side
@@ -784,7 +841,7 @@ preserve compatible leaves and reducers but rerun final synthesis. Provider,
 model, or effective-endpoint changes invalidate partial nodes; completed cache
 reuse remains provider-agnostic.
 
-### Response correction (opt-in)
+### Response correction
 
 Provider responses must satisfy a deterministic JSON contract: the requested
 keys, the requested types, a non-empty value for every required field, and at
@@ -795,16 +852,28 @@ user-facing error states which contract failed, not merely that one did; it
 still includes no source text, prompt text, raw or truncated provider
 response, credential, endpoint, or per-field removal detail.
 
-Response correction is **disabled by default**. Set
-`"response_correction_enabled": true` to opt into at most **one** targeted
-correction call per failed agent response — a single extra paid provider call
-that asks the model to repair the response to the exact schema, preserving valid
-facts and inventing nothing.
+Response correction is **enabled by default**. It makes at most **one** targeted
+correction call per rejected response — a single extra paid provider call that
+asks the model to repair the response to the exact schema, preserving valid
+facts and inventing nothing. Set `"response_correction_enabled": false` to turn
+correction off, so a rejected response fails the file with no correction call.
 
-- With correction **off** (the default), a rejected response receives no
-  correction call; the file fails without a correction-triggered retry.
-- With correction **on**, one repair call is made for that agent response; if the
-  repair also fails the contract, the file fails without a further retry.
+- With correction **on** (the default), one repair call is made per rejected
+  response; if the repair also fails the contract, the file fails without a
+  further retry. Worst case this adds one call for every rejected documentation
+  response — up to a 100% increase over the initially planned documentation
+  calls — counted per rejected agent, leaf, reducer, or final response, not per
+  source file, so one split file can make more than one correction call.
+- With correction **off**, a rejected response receives no correction call; the
+  file fails without a correction-triggered retry.
+- The default applies only when the key is absent. An existing project
+  configuration that sets `response_correction_enabled` to `false` — including
+  one generated before the default changed — stays off and is never rewritten
+  by an ordinary run; only a freshly generated configuration template carries
+  the new default.
+- `max_planned_calls` authorizes only the initially planned calls; corrections
+  and `file_retry_attempts` transport retries are both outside it, so it is not
+  a hard final-billing ceiling.
 - Correction is **not** a factuality bypass. Malformed output or a missing or
   empty required field can still fail a file whether correction is on or off.
 - `file_retry_attempts` remains the policy for transport, rate-limit, and other
@@ -844,6 +913,7 @@ facts and inventing nothing.
 | `--no-parallel` | Disable within-file parallel agents in triple mode. |
 | `--analysis-mode {single,triple}` | Select one combined call or the three-agent path. |
 | `--large-file-strategy {truncate,split}` | Use head/tail truncation or deterministic complete-source split planning/execution with same-path reuse and node recovery in single mode. |
+| `--max-content-chars N` | Set the ordinary/leaf source ceiling in characters; a file whose canonical decoded source exceeds it is routed by `--large-file-strategy`. Strict integer, minimum 1000. It does not set the automatic split synthesis ceiling used for reducer and final-synthesis manifests. |
 | `--init-config` | Create the complete active config and exit. |
 | `--force` | With `--init-config`, refresh only editable profiles. |
 | `--max-parallel-files N` | Set concurrent file processing (default `5`). |
@@ -891,7 +961,7 @@ environment variables. CodeDoc does not read `.env` files.
 | `CODEDOC_MAX_PARALLEL_FILES` | File concurrency. |
 | `CODEDOC_FILE_RETRY_ATTEMPTS` | Per-file retry attempts. |
 | `CODEDOC_MAX_CONSECUTIVE_FAILURES` | Consecutive-failure abort threshold. |
-| `CODEDOC_MAX_CONTENT_CHARS` | Ordinary source ceiling and split leaf/reduction/final-manifest ceiling. |
+| `CODEDOC_MAX_CONTENT_CHARS` | Ordinary and split-leaf source ceiling only; reducer and final manifests use a separate automatic ceiling of at least 12,000 characters. |
 | `CODEDOC_DRY_RUN` | Planning-only mode. |
 | `CODEDOC_MAX_FILES` | Unpaid-provider-work file cap (`0` means unlimited). |
 | `CODEDOC_MAX_PLANNED_CALLS` | Safety cap on initially planned LLM calls, including prompt-customization reviews and initial documentation calls (`0` = unlimited). Checked before provider creation; retries and corrections are excluded. |
@@ -1062,8 +1132,8 @@ file no longer discards a resumable run. Compatible completed ordinary and split
 records may be reused. A compatible split container is validated in plan
 order; valid siblings remain reusable, rejected nodes are retained in a
 bounded, non-executable set-aside map, and affected ancestors rerun. A
-container written by a CodeDoc version whose recovery format this release does
-not read is rejected on that format alone, before any node is read. Provider changes
+container written by a CodeDoc version whose recovery format is unsupported by
+this build is rejected on that format alone, before any node is read. Provider changes
 invalidate partial nodes but not a compatible completed record. Imports-only
 changes retain compatible leaves and reducers while rerunning final synthesis.
 A foreign, completed, unsupported, or identity-mismatched recovery file blocks
@@ -1096,8 +1166,40 @@ bypasses reuse and recovery for the selected file while preserving prior state
 until replacement succeeds. In split mode the dry run reports exact ordinary-file, leaf,
 unit-consolidation, general-reduction, and final-synthesis call counts;
 structural routing and capacity-block reasons; and a deterministic worst-case
-final-synthesis input estimate rather than a tokenizer-exact prediction. Split
-dry-run does not inspect or reuse split recovery.
+final-synthesis input estimate rather than a tokenizer-exact prediction. For a
+resolved-valid `single + split` route the dry run reads completed records and
+`crash_recovery.json` and classifies them exactly as a real run does, so its
+reported payable work matches a real run at the same state and a fail-closed
+recovery container raises the same error in dry-run as in a real run; it still
+writes nothing and constructs no provider. A separately resolved
+ordinary/truncate run keeps its established dry-run behaviour and is not changed
+by this. A real run prints the same
+`Planned provider work (before calls)` summary from the same snapshot builder
+before any provider is constructed or any documentation call is made, so a run
+that is about to be capped or blocked is explained before it fails; `--dry-run`
+remains the review-and-exit path that never proceeds to calls.
+
+Default output shows the resolved strategy, the source ceiling, split/truncate
+routing counts, the effective source and synthesis ceilings, the aggregate
+oversize size range and block reasons, retained and omitted truncation
+character totals, and a bounded per-file summary ordered most-work-first, with
+an explicit count of how many files were omitted from that summary. `--verbose`
+adds every retained file and its ordered piece transforms — including
+`2010 -> 670 + 670 + 670`, metadata-driven chunk closures, any continuation-cut
+call delta, and truncation head/tail/omission counts — and states the omitted
+count and a full-stream digest whenever the retained list is capped.
+
+Scanner diagnostics describe only the final authoritative scan generation for a
+run. When a detected concurrent source change triggers one complete rebuild,
+that rebuild's scan atomically replaces the earlier scan's totals and details
+rather than merging the two, so exact counts and the reported digest never
+double-count a file across generations. An explicit entry that exists but
+admits no source — an empty explicit directory, or explicit targets that are
+all size-skipped, unreadable, ignored, unsupported, or missing — still
+publishes that final generation's bounded scanner evidence and an empty
+payable-work report before the established "no files" error is raised, in both
+`--dry-run` and a real run, so a dead entry is explained rather than only
+rejected.
 
 Issues are bounded in memory and reported through terminal/log output. Hard-error
 summaries are included in completed JSON or Markdown; warning-only issues are

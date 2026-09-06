@@ -31,7 +31,12 @@ from pathlib import Path
 import pytest
 
 from codedoc.core.document import read_codedoc_document
-from codedoc.core.file_division import SPLIT_PARTIAL_SCHEMA_VERSION, ReductionNodeState
+from codedoc.core.file_division import (
+    PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS,
+    SPLIT_PARTIAL_SCHEMA_VERSION,
+    ReductionNodeState,
+    canonical_stream_digest,
+)
 from codedoc.core.record_meta import ANALYSIS_REVISION
 from codedoc.core.resume import build_recovery_identity
 from codedoc.core.safe_writer import SafeWriter
@@ -288,11 +293,23 @@ def test_current_schema4_partial_still_resumes_normally(tmp_path) -> None:
     retain it rather than only proving the JSON parses.
 
     Because the fixture's leaf digests bind `LEAF_CAPSULE_SCHEMA_REVISION`,
-    every advance of that revision regenerates exactly those two fields --
-    `execution_identity_digest` and `input_digest` -- from this same
-    reconstruction, keeping the fixture a genuine *current*-generation
-    checkpoint. `0.14.6` did so for `leaf-capsule-v7` -> `leaf-capsule-v8`,
-    as `0.14.4` did for `v6` -> `v7`. Nothing else in the fixture changes.
+    every advance of that revision regenerates the affected fields from this
+    same reconstruction, keeping the fixture a genuine *current*-generation
+    checkpoint. `0.14.4` (`v6` -> `v7`) and `0.14.6` (`v7` -> `v8`) each
+    touched only `execution_identity_digest` and `input_digest` on the one
+    retained node, because only the leaf-capsule revision moved. `0.14.7`
+    (`v8` -> `v9`) also advances `PACKER_SCHEMA_REVISION`
+    (`division-packer-v5` -> `v6`) and `REDUCTION_PACKING_REVISION`
+    (`reduction-packing-v4` -> `v5`) and adds the leaf-prompt
+    signature-hint bound into the division-plan digest (section 5.4) --
+    all three feed `division_plan_digest`/`reduction_tree_digest`, and the
+    packer change also shifts where `pack_chunks` places a continuation
+    boundary for this exact 220-line/2000-char-budget source, so the
+    regenerated fixture's retained leaf carries a genuinely different
+    `node_id` (chunk identity) this time, not merely refreshed digests
+    under an unchanged chunk boundary. Every field below was produced by
+    calling the four production functions named above -- none is
+    hand-computed.
 
     That reconstruction runs the real parser (`structural_mode == "syntax"`
     for this source when the optional `structure` extra is installed), so
@@ -348,7 +365,6 @@ def test_current_schema4_partial_still_resumes_normally(tmp_path) -> None:
         prompt_profile_digest=resolved_config.get("_prompt_profile_digest", ""),
         imports_digest="",
         language="python",
-        max_content_chars=2000,
     )
     assert quarantine == ()
     assert tuple(n.node_id for n in retained) == tuple(state.by_id())
@@ -557,5 +573,155 @@ def test_malformed_current_schema_container_fails_closed(tmp_path, monkeypatch) 
     blocked = run(monkeypatch)
 
     assert "unknown or missing field" in str(blocked.value)
+    assert provider_creations == []
+    assert recovery_path.read_bytes() == original
+
+# ===========================================================================
+# Section 8: the predecessor (schema version 1) split-partial remedy that a
+# resolved-valid split real-run (and, after this section, a split dry-run)
+# reaches is bounded and JSON-escaped -- exact total, at most
+# PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS retained paths each rendered as one
+# ensure_ascii=True JSON string, the omitted count, and a full-stream
+# details_digest over every legacy path. Diagnostic memory does not grow with
+# the omitted path count and hostile path bytes cannot inject a terminal line.
+# ===========================================================================
+
+_S8_LEGACY_CAP = PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS
+
+
+def _s8_legacy_container(rel_path: str) -> dict:
+    return {
+        "schema_version": 1,
+        "owner": "codedoc-ai",
+        "rel_path": rel_path,
+        "completed_chunks": [["chunk_" + "a" * 58, '{"description": "legacy"}']],
+    }
+
+
+def test_s8_legacy_schema1_many_path_remedy_is_bounded_and_full_stream_digested(
+    tmp_path, monkeypatch
+) -> None:
+    count = _S8_LEGACY_CAP + 6
+    recovery_path = _prepare_recovery(tmp_path)
+    containers = {
+        f"pkg/legacy_{i:02d}.py": _s8_legacy_container(f"pkg/legacy_{i:02d}.py")
+        for i in range(count)
+    }
+    _splice_partial_files(recovery_path, containers)
+    original = recovery_path.read_bytes()
+
+    run, provider_creations, _nodes, plan_calls, writer_constructions = _run_blocked(
+        tmp_path
+    )
+    blocked = run(monkeypatch)
+    message = str(blocked.value)
+
+    ordered = sorted(containers)
+    # Exact total, exact omitted, bounded retention.
+    assert f"{count}" in message
+    assert f"{count - _S8_LEGACY_CAP} more" in message
+    rendered = [json.dumps(p, ensure_ascii=True) for p in ordered]
+    for shown in rendered[:_S8_LEGACY_CAP]:
+        assert shown in message
+    # The omitted paths are NOT individually rendered.
+    for hidden in rendered[_S8_LEGACY_CAP:]:
+        assert hidden not in message
+    # Full-stream digest over EVERY legacy path, in container sorted() order.
+    assert canonical_stream_digest(ordered) in message
+    assert canonical_stream_digest(ordered[:_S8_LEGACY_CAP]) not in message
+    # Preserve-first wording and both remedies intact.
+    assert "schema version 1" in message
+    assert "predecessor" in message
+    assert "re-run the exact predecessor CodeDoc build" in message
+    assert "move" in message and "delete it" in message
+    # Nothing mutated / planned / constructed.
+    assert provider_creations == []
+    assert plan_calls == []
+    assert writer_constructions == []
+    assert recovery_path.read_bytes() == original
+    assert not (tmp_path / "docs" / "codedoc.json").exists()
+
+
+def test_s8_legacy_schema1_remedy_rendered_message_stays_bounded_as_omitted_count_grows(
+    tmp_path, monkeypatch
+) -> None:
+    """The RENDERED remedy string (not a memory measurement) stays bounded as
+    the legacy-container size grows: at most PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS
+    JSON-escaped paths, an exact total, an exact omitted count, and one
+    full-stream digest -- so between a small and a very large container the
+    message differs only by the integer/hex-digest fields, never by carrying
+    more path text. The production structural contract behind it (no complete
+    legacy-path list / set / joined string retained by
+    ``_partial_files_from_meta``) is asserted directly."""
+    from codedoc.core.document import _partial_files_from_meta
+
+    def _message_for(n: int) -> tuple[str, object]:
+        rp = _prepare_recovery(tmp_path / f"n{n}")
+        containers = {
+            f"pkg/legacy_{i:04d}.py": _s8_legacy_container(f"pkg/legacy_{i:04d}.py")
+            for i in range(n)
+        }
+        _splice_partial_files(rp, containers)
+        _partials, evidence = _partial_files_from_meta({"partial_files": containers})
+        run, _pc, _nc, _plc, _wc = _run_blocked(tmp_path / f"n{n}")
+        return str(run(monkeypatch).value), evidence
+
+    small_n, large_n = _S8_LEGACY_CAP + 5, _S8_LEGACY_CAP + 380
+    small, small_ev = _message_for(small_n)
+    large, large_ev = _message_for(large_n)
+
+    # Structural contract: only the bounded retained subset is materialised.
+    for n, ev in ((small_n, small_ev), (large_n, large_ev)):
+        assert ev.total == n
+        assert len(ev.retained) == _S8_LEGACY_CAP <= PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS
+        assert ev.omitted == n - _S8_LEGACY_CAP
+        assert isinstance(ev.retained, tuple)
+        # digest is recomputed over EVERY path (sorted-container order), not the
+        # retained subset -- and differs from the retained-only digest.
+        every = sorted(f"pkg/legacy_{i:04d}.py" for i in range(n))
+        assert ev.details_digest == canonical_stream_digest(every)
+        assert ev.details_digest != canonical_stream_digest(list(ev.retained))
+
+    # Rendered message: identical bounded path payload; only counts + digest move.
+    assert large.count('"pkg/legacy_') == _S8_LEGACY_CAP
+    assert small.count('"pkg/legacy_') == _S8_LEGACY_CAP
+    assert f"{small_n}" in small and f"{large_n}" in large
+    assert f"{small_ev.omitted} more" in small and f"{large_ev.omitted} more" in large
+    assert small_ev.details_digest in small and large_ev.details_digest in large
+    # The 400-path message is only longer by the integer/hex-digest fields.
+    assert len(large) - len(small) < 40
+    # preserve-first prose intact; no unbounded raw join.
+    assert "re-run the exact predecessor CodeDoc build" in small
+    assert "', '" not in large  # no raw comma-joined single-quoted path list
+
+
+def test_s8_legacy_schema1_hostile_path_remedy_is_json_escaped_single_field(
+    tmp_path, monkeypatch
+) -> None:
+    hostile = (
+        "pkg/ev" + chr(10) + "il" + chr(9) + chr(0x1B) + chr(0x202E) + '"' + chr(0x5C) + ".py"
+    )
+    recovery_path = _prepare_recovery(tmp_path)
+    _splice_partial_files(
+        recovery_path,
+        {hostile: _s8_legacy_container(hostile), "pkg/plain.py": _s8_legacy_container("pkg/plain.py")},
+    )
+    original = recovery_path.read_bytes()
+
+    run, provider_creations, _nodes, _plan_calls, _writer = _run_blocked(tmp_path)
+    message = str(run(monkeypatch).value)
+
+    # No raw control / bidi / newline / tab from the path reaches the message.
+    for raw_ch in (chr(10), chr(9), chr(0x1B), chr(0x202E)):
+        assert raw_ch not in message
+    # The hostile path appears exactly as one ensure_ascii JSON rendering of its
+    # normalized form (normalize_rel_path collapses the lone backslash to '/').
+    from codedoc.parser.source_structure import normalize_rel_path
+
+    assert json.dumps(normalize_rel_path(hostile), ensure_ascii=True) in message
+    assert json.dumps("pkg/plain.py", ensure_ascii=True) in message
+    # Exactly one rendered field per retained path -> no injected extra line.
+    assert message.count("\n") == 0
+    assert "schema version 1" in message
     assert provider_creations == []
     assert recovery_path.read_bytes() == original

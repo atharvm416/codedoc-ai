@@ -224,35 +224,36 @@ def test_fixed_leaf_losslessness_survives_bounded_diagnostic_overflow():
 
 
 def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
-    """Section 2A: the private response-field bound now equals the parser's
-    600-character `SemanticUnitIdentity.signature` ceiling, not the prior
-    256-character short-item bound.  A 552-character model-returned signature
-    (the installed 0.14.2 TestPyPI observation) and the exact 600-character
-    boundary are both accepted; 601 is rejected as `fixed_cap_exceeded` and
-    the response is not silently truncated into a shortened accepted fact."""
-    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+    """Section 2A / 0.14.7 section 5.4: the private response-field bound now
+    equals the parser's `SemanticUnitIdentity.signature` ceiling, raised from
+    600 to 2,000 characters (section 3.2's AST-walk census of real
+    declarations). A 1,952-character model-returned signature and the exact
+    2,000-character boundary are both accepted; 2,001 is rejected as
+    `fixed_cap_exceeded` and the response is not silently truncated into a
+    shortened accepted fact."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 2000
 
-    accepted_552 = _run_leaf_capsule(
+    accepted_near_bound = _run_leaf_capsule(
         {
             "description": "visible facts",
-            "functions": [{"name": "f", "signature": "s" * 552}],
+            "functions": [{"name": "f", "signature": "s" * 1952}],
         }
     )
-    assert accepted_552["functions"][0]["signature"] == "s" * 552
+    assert accepted_near_bound["functions"][0]["signature"] == "s" * 1952
 
-    accepted_600 = _run_leaf_capsule(
+    accepted_2000 = _run_leaf_capsule(
         {
             "description": "visible facts",
-            "functions": [{"name": "f", "signature": "s" * 600}],
+            "functions": [{"name": "f", "signature": "s" * 2000}],
         }
     )
-    assert accepted_600["functions"][0]["signature"] == "s" * 600
+    assert accepted_2000["functions"][0]["signature"] == "s" * 2000
 
     with pytest.raises(ResponseContractError) as caught:
         _run_leaf_capsule(
             {
                 "description": "visible facts",
-                "functions": [{"name": "f", "signature": "s" * 601}],
+                "functions": [{"name": "f", "signature": "s" * 2001}],
             }
         )
     diagnostic = caught.value.diagnostic
@@ -268,7 +269,7 @@ def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
     # (a leak through `detail` would not have been caught by field names
     # alone).
     full_diagnostic_json = json.dumps(diagnostic.as_summary())
-    assert "s" * 601 not in full_diagnostic_json
+    assert "s" * 2001 not in full_diagnostic_json
     assert "s" * 100 not in full_diagnostic_json
 
 

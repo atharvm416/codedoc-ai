@@ -12,6 +12,7 @@ import pytest
 
 from codedoc.core.execution import _process_one_file_with_retries
 from codedoc.core.file_division import (
+    MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS,
     build_division_plan,
     build_reduction_tree,
     leaf_execution_identity,
@@ -184,9 +185,12 @@ def test_fresh_sequential_retry_observes_stop_before_next_leaf(tmp_path) -> None
         content=source,
         source_budget_chars=2000,
     )
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), as production planning does; the deprecated alias would
+    # carry the raw source value and be rejected by the execution guard.
     tree = build_reduction_tree(
         plan,
-        max_content_chars=2000,
+        synthesis_manifest_chars=request.context.synthesis_manifest_chars,
         language="python",
         imports=(),
     )
@@ -489,9 +493,14 @@ def test_current_release_resumes_an_existing_valid_node_checkpoint(
         content=source,
         source_budget_chars=2000,
     )
+    # Match the synthesis budget production planning carries (automatic 12,000
+    # floor), so the checkpoint's reduction-tree digest equals what a resuming
+    # build_pipeline_plan computes -- otherwise the section 6.3 cross-plan
+    # fresh-preserve predicate would (correctly) treat this same-plan
+    # checkpoint as a transition and re-run every leaf.
     tree = build_reduction_tree(
         plan,
-        max_content_chars=2000,
+        synthesis_manifest_chars=max(2000, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
         language="python",
         imports=(),
     )

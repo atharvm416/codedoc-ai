@@ -37,11 +37,14 @@ from the outputs this module coordinates — is ever published.
 from __future__ import annotations
 
 import hashlib
+import heapq
 import json
 import re
 import unicodedata
+from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
-from typing import Iterable, Literal, Mapping, Sequence
+from types import MappingProxyType
+from typing import Iterable, Iterator, Literal, Mapping, Sequence
 
 from codedoc.parser.source_structure import (
     Atom,
@@ -68,7 +71,15 @@ from codedoc.core.result_assembly import flat_combined_result
 
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
-PACKER_SCHEMA_REVISION = "division-packer-v5"
+PACKER_SCHEMA_REVISION = "division-packer-v6"
+# Advanced from v5: an oversized semantic unit's continuation pieces are now
+# produced by deterministic local boundary-aware subdivision (section 5.6)
+# instead of fixed-window budget-stride slicing -- a 2,010-character span at
+# B=1,000 now yields 670+670+670, never the old 1,000+1,000+10 tail. Every
+# chunk also now carries a closed `close_reason` and `start_boundary`/
+# `end_boundary` pair bound into this same revision's plan payload, so a v5
+# division plan's bytes, ranges, and chunk boundaries cannot validate as a
+# current v6 plan even where a piece's raw text happens to be unchanged.
 # Advanced from v7: the fixed fragment shape block now carries the shared
 # module-export contract (`_FRAGMENT_EXPORT_CONTRACT`), which reaches the
 # initial leaf prompt and the one targeted correction prompt alike, so the
@@ -81,19 +92,50 @@ PACKER_SCHEMA_REVISION = "division-packer-v5"
 # came to equal MAX_KNOWN_SYMBOLS_PER_CHUNK (32, up from 12). v6 had advanced
 # from v5: the fixed leaf response signature ceiling matched the existing
 # 600-character parser/semantic-unit ceiling.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v8"
+# Advanced from v8: the v8 fixed fragment shape block had no satisfiable
+# fully-visible / partial-fragment signature contract -- it demanded an exact
+# copy of the visible declaration while separately capping `signature` at
+# `MAX_LEAF_SYMBOL_SIGNATURE_CHARS`, so a declaration longer than that bound
+# (CodeDoc's own source contains several) had no truthful accepted response.
+# v9 carries the new shared `_FRAGMENT_SIGNATURE_CONTRACT`
+# (`file_documentation_agent.py`), rendered into `_FRAGMENT_SHAPE_BLOCK` so it
+# reaches the initial leaf prompt and the one targeted correction prompt
+# byte-identically: a fully visible over-bound declaration is answerable
+# through a truthful leading source-backed portion, and a partially visible
+# declaration reports only the contiguous text visible in its own fragment.
+# The response/parser hard bound is 2,000
+# (`MAX_STRUCTURE_SIGNATURE_CHARS`), while the duplicate parser-owned prompt
+# hint stays independently capped at 600
+# (`MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS`). The fixed fragment prompt bytes
+# versioned by this revision changed, so a v8 leaf checkpoint -- which may
+# carry an omitted signature the repaired contract would have retained --
+# cannot validate as a current v9 checkpoint.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v9"
 # Advanced from v5. Bound into final-node execution identity, the final-node
 # exact input digest, and the completed split identity; a ledger revision
 # change alone reruns final synthesis but preserves compatible leaves and
 # reducers (they consume narratives, not the final structured ledger).
 LEDGER_SCHEMA_REVISION = "fact-ledger-v6"
 REDUCTION_CAPSULE_SCHEMA_REVISION = "reduction-capsule-v1"
-REDUCTION_PACKING_REVISION = "reduction-packing-v4"
+# Advanced from v4. Owns the reduction tree's versioned identity: the
+# independently carried synthesis-manifest budget (section 5.7), the reduction
+# fan-in, every reduction/final node ID, and the tree digest -- all of which
+# now bind ``reduction-packing-v5``. A tree built under v4, or under a
+# user-starved synthesis budget, is therefore not a current checkpoint: a
+# schema-4 partial whose reduction-tree digest differs is carried byte-for-byte
+# into cross-plan fresh-preserve (section 6.3) rather than validated, and a
+# completed split identity moves transitively through the supplied tree digest.
+REDUCTION_PACKING_REVISION = "reduction-packing-v5"
 # Advanced from v1: the rendered reduction shape block now states the
 # MAX_REDUCTION_NARRATIVE_CHARS bound explicitly (initial and correction
 # routes alike), so a v1 reducer checkpoint cannot validate as a current v2
 # checkpoint.
-REDUCER_PROMPT_REVISION = "file-reduction-v2"
+# Advanced from v2: the rendered reduction shape block now also states a
+# recommended narrative target below MAX_REDUCTION_NARRATIVE_CHARS (initial
+# and correction routes alike), giving the model headroom instead of an exact
+# ceiling to overshoot -- so a v2 reducer checkpoint cannot validate as a
+# current v3 checkpoint.
+REDUCER_PROMPT_REVISION = "file-reduction-v3"
 FINAL_SYNTHESIS_REVISION = "file-synthesis-v3"
 # Advanced from v5 to division-execution-v6 alongside the leaf/ledger bumps
 # above.
@@ -140,7 +182,22 @@ MAX_LEAF_EXPORT_ITEM_CHARS = 256
 # ledger's semantic key uses it to keep same-named overloads distinct (D7/section 8).
 # Without it the cleaner would strip the only field that separates
 # `run(int)` from `run(str)`, and the ledger would silently publish one fact.
+# Aliased to the parser ceiling on the measured basis -- an AST-walk census of
+# every declaration in codedoc/ found
+# 3 of 794 over 600 (0.4%), the largest 1,295 normalized / 1,395 raw
+# characters -- so the accepted-response bound and the parser/matching bound
+# move together and cannot drift. The separate 600-character prompt hint below
+# keeps this raise from growing rendered leaf metadata or paid-call counts.
 MAX_LEAF_SYMBOL_SIGNATURE_CHARS = MAX_STRUCTURE_SIGNATURE_CHARS
+# Bounds only the duplicate parser-owned signature *hint* rendered
+# into leaf prompt metadata by `_leaf_prompt_unit_value()` -- never a model
+# response, the local full matching signature, or any public field. Keeps a
+# raised full signature bound (600 -> 2,000) from silently growing rendered
+# metadata, chunk packing, or paid-call counts: the section 4.8 production
+# fixture must produce identical chunk counts/sizes whether the full
+# matching signature is 600 or 2,000 characters, because only this
+# independent 600-character hint reaches prompt metadata either way.
+MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS = 600
 
 MAX_LEAF_PROMPT_METADATA_CHARS = 32 * 1024
 
@@ -195,6 +252,15 @@ MAX_LEAF_CAPSULE_CANONICAL_CHARS = len(
 )
 del _MAX_LEAF_CAPSULE
 MAX_REDUCTION_NARRATIVE_CHARS = 300
+# Guidance, not enforcement -- a recommended target the reduction
+# shape block asks the model to write toward, comfortably below the hard
+# bound above. A generative length target stated as an exact ceiling is
+# approached and overshot: corrected narratives were observed at 302 and 305
+# characters against this 300-character cap. Roughly 13% below the cap: wider
+# than that observed 2-5 character overshoot, and still leaves a usable
+# combined narrative. Only MAX_REDUCTION_NARRATIVE_CHARS is enforced -- see
+# `_REDUCTION_SHAPE_BLOCK` in `file_synthesis_agent.py`.
+MAX_REDUCTION_NARRATIVE_TARGET_CHARS = 260
 MAX_REDUCTION_CAPSULE_CANONICAL_CHARS = len(
     json.dumps(
         {
@@ -225,6 +291,40 @@ MAX_REDUCTION_TREE_DEPTH = 6
 # when the measured value is strictly greater than the threshold.
 SPLIT_COMPLEXITY_ADVISORY_CHUNKS = 24
 SPLIT_COMPLEXITY_ADVISORY_REDUCTION_DEPTH = 2
+
+# The deterministic near-target window (section 5.6) for preferring a
+# syntax/line boundary over the exact balanced code-point fallback when
+# locally subdividing one oversized semantic unit. Not user-configurable.
+LOCAL_SPLIT_BOUNDARY_TOLERANCE_PERCENT = 10
+
+# Internal reducer/final manifest budget floor.
+# `effective_split_manifest_chars = max(max_content_chars,
+# MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)` preserves the default synthesis
+# capacity even when a user sets a smaller `max_content_chars` source ceiling,
+# so a legal source budget can no longer starve the internal summary tree
+# (section 4.7). Not a public configuration key.
+MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS = 12000
+
+# Independent value-safe diagnostic-presentation
+# policies. They live beside the split-planning policies here because the
+# bounded recovery-error evidence and every provider-free diagnostic producer
+# import from this module. They bound only how many descriptors a preflight or
+# error message retains/prints and never source selection, chunking, reduction
+# topology, call counts, cache/revision identity, or which recovery containers
+# are accepted, quarantined, resumed, preserved, or rejected. At either limit
+# a producer still publishes an exact total, retained/omitted counts, and one
+# integrity digest over the complete deterministic descriptor stream so
+# truncation is explicit without pretending retained display order is the
+# integrity contract.
+#
+# `PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS` is the default (non-verbose) per-category
+# record count. `MAX_EPHEMERAL_PLAN_DETAIL_ITEMS` is the hard flattened per-
+# category item budget: one split file header, unit summary, continuation-piece
+# descriptor, leaf descriptor, constituent-unit pair, truncate record, or
+# blocked record each costs one item; constant total/retained/omitted/digest
+# metadata is free overhead.
+PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS = 20
+MAX_EPHEMERAL_PLAN_DETAIL_ITEMS = 4096
 
 # Node-keyed split-partial container schema version.  Distinct from the
 # enclosing run-level `_RECOVERY_IDENTITY_VERSION` (resume.py), which stays 1
@@ -269,6 +369,81 @@ BLOCKED_REASON_ORDER: tuple[BlockedReason, ...] = (
     "final-synthesis-envelope-cap",
 )
 
+# Frozen closed reason -> phase / guidance-code
+# mappings for a measured capacity block. A raise site chooses only the reason;
+# `SplitCapacityBlocked` derives `phase` and `guidance_code` from these single
+# authorities so no caller can pair a reason with an inconsistent phase or
+# guidance. (Scanner `scanner-byte` / `scanner-admission` phases and their
+# guidance codes are a later section and deliberately absent here.)
+BLOCKED_REASON_PHASE: Mapping[BlockedReason, str] = MappingProxyType(
+    {
+        "atom-cap": "division-structure",
+        "symbol-cap": "division-structure",
+        "unit-cap": "division-packing",
+        "chunk-cap": "division-packing",
+        "reduction-envelope-cap": "reduction-envelope",
+        "reduction-fan-in-cap": "reduction-fan-in",
+        "reduction-depth-cap": "reduction-depth",
+        "final-synthesis-envelope-cap": "final-synthesis",
+    }
+)
+BLOCKED_REASON_GUIDANCE: Mapping[BlockedReason, str] = MappingProxyType(
+    {
+        "atom-cap": "simplify-or-exclude",
+        "symbol-cap": "simplify-or-exclude",
+        "unit-cap": "simplify-or-exclude",
+        "chunk-cap": "raise-source-ceiling-or-split-source",
+        "reduction-envelope-cap": "report-planning-capacity-defect",
+        "reduction-fan-in-cap": "report-planning-capacity-defect",
+        "reduction-depth-cap": "report-planning-capacity-defect",
+        "final-synthesis-envelope-cap": "inspect-authoritative-metadata-or-exclude",
+    }
+)
+BLOCKED_PHASE_VALUES: frozenset[str] = frozenset(BLOCKED_REASON_PHASE.values())
+BLOCKED_GUIDANCE_VALUES: frozenset[str] = frozenset(BLOCKED_REASON_GUIDANCE.values())
+BLOCKED_DESCRIPTOR_FIELDS: tuple[str, ...] = (
+    "path",
+    "reason",
+    "phase",
+    "observed",
+    "limit",
+    "guidance_code",
+)
+
+# Section 5.6: how a continuation cut inside one oversized semantic unit was
+# chosen. Outer chunk edges additionally use "file-start"/"file-end" (the
+# file's own boundary) and "semantic-unit" (a fitting unit's own natural
+# edge, never an internal cut) -- see `ChunkBoundary` below.
+CutBoundaryKind = Literal["syntax", "physical-line", "balanced-codepoint"]
+ChunkBoundary = Literal[
+    "file-start", "file-end", "semantic-unit", "syntax", "physical-line", "balanced-codepoint"
+]
+CHUNK_BOUNDARY_VALUES: frozenset[str] = frozenset(
+    {"file-start", "file-end", "semantic-unit", "syntax", "physical-line", "balanced-codepoint"}
+)
+
+# Section 5.6's frozen close-reason precedence: `continuation` outranks every
+# other reason, then `oversized-unit-isolation`, then the source/metadata
+# ceiling reasons, then `end-of-file` only when nothing else forced closure.
+CloseReason = Literal[
+    "continuation",
+    "oversized-unit-isolation",
+    "source-ceiling",
+    "metadata-ceiling",
+    "source-and-metadata-ceiling",
+    "end-of-file",
+]
+CLOSE_REASON_VALUES: frozenset[str] = frozenset(
+    {
+        "continuation",
+        "oversized-unit-isolation",
+        "source-ceiling",
+        "metadata-ceiling",
+        "source-and-metadata-ceiling",
+        "end-of-file",
+    }
+)
+
 
 class DuplicateCanonicalKeyError(ValueError):
     pass
@@ -287,15 +462,88 @@ class SplitCapacityBlocked(Exception):
     """One requested-split file cannot be completely planned, provider-free.
 
     Carries the single first-failing named reason under the frozen evaluation
-    order.  Never a truncate fallback: a real run must raise `ConfigError`
-    listing every blocked `(rel_path, reason)` pair before any provider or
-    writer is created; a dry run reports the same pairs without mutation.
+    order plus its measured evidence (section 5.8): the closed ``phase`` and
+    ``guidance_code`` derived from the reason, and the real integer
+    ``observed`` / ``limit`` measurement for that reason. Never a truncate
+    fallback: a real run must raise `ConfigError` naming every blocked file --
+    with bounded, JSON-escaped paths -- before any provider or writer is
+    created; a dry run reports the same bounded evidence without mutation.
+
+    ``observed`` / ``limit`` are keyword-only and required: every production
+    raise site supplies the real measurement for its reason (actual count
+    versus structural cap; required envelope/manifest versus synthesis
+    ceiling; computed child capacity versus the required minimum two; required
+    depth/level versus the maximum tree depth). Placeholder zeroes and
+    optional-missing measurement fields are rejected.
     """
 
-    def __init__(self, rel_path: str, reason: BlockedReason) -> None:
+    def __init__(
+        self,
+        rel_path: str,
+        reason: BlockedReason,
+        *,
+        observed: int,
+        limit: int,
+    ) -> None:
+        if reason not in BLOCKED_REASON_PHASE:
+            raise ValueError(f"unknown split capacity reason {reason!r}.")
         self.rel_path = normalize_rel_path(rel_path)
         self.reason = reason
-        super().__init__(f"{self.rel_path}: blocked by capacity reason {reason!r}")
+        self.phase = BLOCKED_REASON_PHASE[reason]
+        self.guidance_code = BLOCKED_REASON_GUIDANCE[reason]
+        self.observed = _real_int(observed, "observed", minimum=0)
+        self.limit = _real_int(limit, "limit", minimum=0)
+        super().__init__(
+            f"{self.rel_path}: blocked by capacity reason {reason!r} "
+            f"(phase {self.phase}, observed {self.observed}, "
+            f"limit {self.limit}, guidance {self.guidance_code})"
+        )
+
+    @property
+    def detail(self) -> dict:
+        """The value-safe descriptor carried through planning to preflight."""
+        return blocked_split_descriptor(
+            path=self.rel_path,
+            reason=self.reason,
+            phase=self.phase,
+            observed=self.observed,
+            limit=self.limit,
+            guidance_code=self.guidance_code,
+        )
+
+
+def blocked_split_descriptor(
+    *,
+    path: str,
+    reason: str,
+    phase: str,
+    observed: int,
+    limit: int,
+    guidance_code: str,
+) -> dict:
+    """One immutable value-safe capacity-block descriptor (section 5.8).
+
+    Exactly ``path`` / ``reason`` / ``phase`` / ``observed`` / ``limit`` /
+    ``guidance_code``; no source text, prompt, signature, identifier, range,
+    credential, provider response, or absolute path. ``path`` is the
+    normalized project-relative POSIX form; presenters must render it through
+    one ``json.dumps(path, ensure_ascii=True)`` field, never interpolate it
+    raw.
+    """
+    if reason not in BLOCKED_REASON_PHASE:
+        raise ValueError(f"unknown split capacity reason {reason!r}.")
+    if phase != BLOCKED_REASON_PHASE[reason]:
+        raise ValueError("blocked descriptor phase does not match its reason.")
+    if guidance_code != BLOCKED_REASON_GUIDANCE[reason]:
+        raise ValueError("blocked descriptor guidance does not match its reason.")
+    return {
+        "path": normalize_rel_path(path),
+        "reason": reason,
+        "phase": phase,
+        "observed": _real_int(observed, "observed", minimum=0),
+        "limit": _real_int(limit, "limit", minimum=0),
+        "guidance_code": guidance_code,
+    }
 
 
 class SplitRecoveryStateError(ValueError):
@@ -372,6 +620,42 @@ def _digest(prefix: str, value: object) -> str:
 def _domain_id(prefix: str, value: object) -> str:
     digest = hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     return f"{prefix}_{digest}"
+
+
+def canonical_stream_digest(descriptors: Iterable[object]) -> str:
+    """One incremental SHA-256 over a complete canonical descriptor stream.
+
+    Section 5.8's frozen framing rule: feed UTF-8 ``[``; then each descriptor's
+    package :func:`canonical_json`, comma-separated; then UTF-8 ``]``; publish
+    ``"sha256:" + hexdigest``. Empty input hashes canonical ``[]``.
+
+    Properties this framing guarantees and callers rely on:
+
+    * every occurrence is hashed, including exact duplicates -- never
+      deduplicated;
+    * order is significant -- no XOR, modular sum, or other commutative
+      multiset accumulator;
+    * the caller streams descriptors from the immutable plan one at a time --
+      this function never materializes the full list or a joined string.
+
+    The stream is the integrity contract and is independent of any display
+    ranking: two different canonical streams can only share this digest by a
+    SHA-256 collision.
+    """
+    hasher = hashlib.sha256()
+    hasher.update(b"[")
+    first = True
+    for descriptor in descriptors:
+        if not first:
+            hasher.update(b",")
+        first = False
+        hasher.update(canonical_json(descriptor).encode("utf-8"))
+    hasher.update(b"]")
+    return f"sha256:{hasher.hexdigest()}"
+
+
+# The digest every empty diagnostic category publishes: canonical ``[]``.
+EMPTY_PLAN_DETAILS_DIGEST = canonical_stream_digest(())
 
 
 DETERMINISTIC_IMPORTS_REVISION = "deterministic-imports-v1"
@@ -492,6 +776,9 @@ class ChunkPlan:
     known_symbols: tuple[str, ...]
     payload: str
     payload_chars: int
+    close_reason: CloseReason
+    start_boundary: ChunkBoundary
+    end_boundary: ChunkBoundary
 
     def __post_init__(self) -> None:
         _id_text(self.chunk_id, "chunk_id", "chunk")
@@ -499,6 +786,16 @@ class ChunkPlan:
         _real_int(self.unit_chunk_count, "unit_chunk_count", minimum=1)
         _real_int(self.global_index, "global_index")
         _real_int(self.global_count, "global_count", minimum=1)
+        if self.close_reason not in CLOSE_REASON_VALUES:
+            raise ValueError("chunk close_reason is not a recognized reason.")
+        if self.close_reason != "continuation" and self.unit_chunk_count > 1:
+            raise ValueError(
+                "a continuation piece must close with reason 'continuation'."
+            )
+        if self.start_boundary not in CHUNK_BOUNDARY_VALUES:
+            raise ValueError("chunk start_boundary is not a recognized boundary.")
+        if self.end_boundary not in CHUNK_BOUNDARY_VALUES:
+            raise ValueError("chunk end_boundary is not a recognized boundary.")
         if self.unit_chunk_index >= self.unit_chunk_count:
             raise ValueError("unit_chunk_index must be within unit_chunk_count.")
         if self.global_index >= self.global_count:
@@ -562,11 +859,17 @@ class ChunkPlan:
 
 
 def _leaf_prompt_unit_value(unit: SemanticUnitIdentity) -> dict:
+    # Render only a compact matching hint here, never the full bounded
+    # signature: `unit.signature` keeps its full 2,000-character local
+    # matching value for `build_fact_ledger`, but this is the one place that
+    # value reaches leaf prompt metadata, and metadata sizing/chunk packing
+    # must never grow with the full-signature bound. No truncation marker
+    # and no new JSON key -- either would itself change metadata sizing.
     return {
         "unit_id": unit.unit_id,
         "kind": unit.kind,
         "qualified_name": unit.qualified_name,
-        "signature": unit.signature,
+        "signature": unit.signature[:MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS],
         "source_range": unit.source_range.to_public(),
     }
 
@@ -908,69 +1211,441 @@ def _chunk_group_unit_id(
     )
 
 
-def _source_segments(
+_LINE_BREAK_SINGLE_CHARS = frozenset("\n\v\f\x1c\x1d\x1e\x85  ")
+
+
+def _splitline_boundary_offsets(text: str) -> tuple[int, ...]:
+    """Code-point offsets where ``text.splitlines(keepends=True)`` would cut.
+
+    A one-pass offset-only scan: never materializes the copied line strings
+    ``splitlines()`` itself would allocate (section 5.6 point 4).
+    """
+    boundaries: list[int] = []
+    index = 0
+    length = len(text)
+    while index < length:
+        char = text[index]
+        if char == "\r":
+            if index + 1 < length and text[index + 1] == "\n":
+                boundaries.append(index + 2)
+                index += 2
+            else:
+                boundaries.append(index + 1)
+                index += 1
+            continue
+        if char in _LINE_BREAK_SINGLE_CHARS:
+            boundaries.append(index + 1)
+            index += 1
+            continue
+        index += 1
+    return tuple(boundaries)
+
+
+def _crlf_pair_start_offsets(text: str) -> tuple[int, ...]:
+    """Sorted code-point offsets where a ``\\r\\n`` pair begins."""
+    starts: list[int] = []
+    index = 0
+    length = len(text)
+    while index < length - 1:
+        if text[index] == "\r" and text[index + 1] == "\n":
+            starts.append(index)
+            index += 2
+        else:
+            index += 1
+    return tuple(starts)
+
+
+class _CrlfSafety:
+    """CRLF-pair-aware safe-boundary arithmetic for one oversized span.
+
+    Uses only the span's CRLF pair offsets -- never a boundary table
+    proportional to its length (section 5.6's ``O(C + P + k)`` auxiliary-space
+    requirement). A normal canonically-loaded filesystem span has zero pairs,
+    so every offset is trivially safe and this class is a defensive no-op.
+    """
+
+    __slots__ = ("length", "pair_starts", "_unsafe")
+
+    def __init__(self, text: str) -> None:
+        self.length = len(text)
+        self.pair_starts = _crlf_pair_start_offsets(text)
+        self._unsafe = tuple(start + 1 for start in self.pair_starts)
+
+    def is_unsafe(self, offset: int) -> bool:
+        index = bisect_left(self._unsafe, offset)
+        return index < len(self._unsafe) and self._unsafe[index] == offset
+
+    def is_pair_start(self, offset: int) -> bool:
+        index = bisect_left(self.pair_starts, offset)
+        return index < len(self.pair_starts) and self.pair_starts[index] == offset
+
+    def furthest_safe_at_most(self, target: int) -> int:
+        target = min(target, self.length)
+        if target < 0:
+            raise DivisionInternalDefect("no safe boundary below the span start.")
+        return target - 1 if self.is_unsafe(target) else target
+
+    def nearest_safe_at_least(self, target: int) -> int:
+        target = max(target, 0)
+        if target > self.length:
+            raise DivisionInternalDefect("no safe boundary above the span end.")
+        return target + 1 if self.is_unsafe(target) else target
+
+
+def _closest_offset_in_window(
+    sorted_offsets: Sequence[int], low: int, high: int, target: int
+) -> int | None:
+    """Return the offset in *sorted_offsets* within the closed ``[low, high]``
+    interval nearest *target*, resolving an equal-distance tie to the smaller
+    (earlier) offset; ``None`` when the interval holds no offset.
+
+    Section 5.6: the preferred-candidate lists are collected and sorted once,
+    and every cut resolves its balance window here with two bisect probes plus
+    an O(1) neighbour comparison -- the search never rescans the complete
+    candidate list per cut.
+    """
+    if low > high:
+        return None
+    left = bisect_left(sorted_offsets, low)
+    right = bisect_right(sorted_offsets, high)
+    if left >= right:
+        return None
+    pivot = bisect_left(sorted_offsets, target, left, right)
+    best: int | None = None
+    best_key: tuple[int, int] | None = None
+    for index in (pivot - 1, pivot):
+        if left <= index < right:
+            candidate = sorted_offsets[index]
+            key = (abs(candidate - target), candidate)
+            if best_key is None or key < best_key:
+                best_key = key
+                best = candidate
+    return best
+
+
+def _local_subdivision_cuts(
+    text: str,
+    budget: int,
+    syntax_candidates: frozenset[int] = frozenset(),
+) -> tuple[tuple[int, CutBoundaryKind], ...]:
+    """Return the ordered internal cuts locally subdividing one oversized span.
+
+    Only this individually oversized span is subdivided (section 5.6): an
+    adjacent fitting unit is never redistributed into or borrowed from. Each
+    cut is ``(code_point_offset, kind)``; an empty result means *text* already
+    fits within *budget*. Operates purely in Python code-point (``str``)
+    coordinates -- the caller maps chosen offsets back to UTF-8 byte offsets
+    in one pass (:func:`_codepoint_offsets_to_bytes`).
+    """
+    length = len(text)
+    if length <= budget:
+        return ()
+    safety = _CrlfSafety(text)
+
+    k_safe = 0
+    position = 0
+    while position < length:
+        end = safety.furthest_safe_at_most(min(position + budget, length))
+        if end <= position:
+            raise DivisionInternalDefect(
+                "no safe forward-progress boundary within the source budget."
+            )
+        position = end
+        k_safe += 1
+
+    # earliest_start_fits[r]: smallest suffix-start whose suffix can still be
+    # split into at most r safe pieces (backward furthest-reach).
+    earliest_start_fits = [length] * (k_safe + 1)
+    position = length
+    for remaining in range(1, k_safe + 1):
+        position = safety.nearest_safe_at_least(max(position - budget, 0))
+        earliest_start_fits[remaining] = position
+
+    # latest_start_atoms[r]: largest suffix-start whose suffix still contains
+    # at least r non-empty atoms (a CRLF pair counts as one atom).
+    latest_start_atoms = [length] * (k_safe + 1)
+    position = length
+    for remaining in range(1, k_safe + 1):
+        if position - 2 >= 0 and safety.is_pair_start(position - 2):
+            position -= 2
+        else:
+            position -= 1
+        latest_start_atoms[remaining] = max(position, 0)
+
+    # Section 5.6: collect the bounded preferred-boundary tiers once, drop any
+    # offset that would fall inside a CRLF pair, and keep each tier sorted so
+    # every cut's balance-window search below is an O(log C) bisect rather than
+    # an O(C) rescan of the complete candidate list. `C` is the
+    # preferred-candidate count and `P` the CRLF-pair count, giving O(k log(C +
+    # P)) selection cost across all cuts.
+    line_offsets = sorted(
+        offset
+        for offset in set(_splitline_boundary_offsets(text))
+        if offset < length and not safety.is_unsafe(offset)
+    )
+    syntax_offsets = sorted(
+        offset
+        for offset in syntax_candidates
+        if 0 < offset < length and not safety.is_unsafe(offset)
+    )
+
+    cuts: list[tuple[int, CutBoundaryKind]] = []
+    start = 0
+    remaining_pieces = k_safe
+    while remaining_pieces > 1:
+        span_left = length - start
+        target = -(-span_left // remaining_pieces)  # ceil(span_left / remaining_pieces)
+        tolerance = max(1, target // LOCAL_SPLIT_BOUNDARY_TOLERANCE_PERCENT)
+        window_low, window_high = target - tolerance, target + tolerance
+        max_end = min(start + budget, length)
+        next_remaining = remaining_pieces - 1
+        target_offset = start + target
+        # The admissible endpoint set is the intersection of three closed
+        # integer intervals: the non-empty/<=budget constraint, and the
+        # exact-suffix feasibility bounds for the remaining pieces. Preferred
+        # candidates must additionally land in the balance window.
+        feasible_low = max(start + 1, earliest_start_fits[next_remaining])
+        feasible_high = min(max_end, latest_start_atoms[next_remaining])
+
+        chosen: int | None = None
+        chosen_kind: CutBoundaryKind | None = None
+        for kind, tier in (("syntax", syntax_offsets), ("physical-line", line_offsets)):
+            pick = _closest_offset_in_window(
+                tier,
+                max(start + window_low, feasible_low),
+                min(start + window_high, feasible_high),
+                target_offset,
+            )
+            if pick is not None:
+                chosen = pick
+                chosen_kind = kind
+                break
+        if chosen is None:
+            if feasible_low > feasible_high:
+                raise DivisionInternalDefect(
+                    "no admissible endpoint remains for the next continuation piece."
+                )
+            # `balanced-codepoint` fallback (section 5.6 point 5): the nearest
+            # feasible code-point endpoint to the balanced target, moved by one
+            # only to keep a CRLF pair intact. Clamping into the feasibility
+            # interval is O(1) -- the suffix is never rescanned per candidate.
+            candidate = min(max(target_offset, feasible_low), feasible_high)
+            if safety.is_unsafe(candidate):
+                lower, upper = candidate - 1, candidate + 1
+                if lower >= feasible_low and not safety.is_unsafe(lower):
+                    candidate = lower
+                elif upper <= feasible_high and not safety.is_unsafe(upper):
+                    candidate = upper
+                else:
+                    raise DivisionInternalDefect(
+                        "no CRLF-safe balanced endpoint within the feasible window."
+                    )
+            chosen = candidate
+            chosen_kind = "balanced-codepoint"
+        cuts.append((chosen, chosen_kind))
+        start = chosen
+        remaining_pieces -= 1
+    return tuple(cuts)
+
+
+def _codepoint_offsets_to_bytes(
+    span: "bytes | memoryview", code_point_offsets: Sequence[int]
+) -> dict[int, int]:
+    """Map local code-point offsets to local UTF-8 byte offsets in one forward
+    scan over the already-encoded *span* (section 5.6 point 6): count only
+    UTF-8 leading bytes and record a byte position solely at each requested
+    code-point offset. ``O(len(span))`` time, ``O(len(code_point_offsets))``
+    space -- never re-encodes a prefix and never a table proportional to every
+    source character."""
+    targets = sorted(set(code_point_offsets))
+    result: dict[int, int] = {}
+    target_index = 0
+    code_point_index = 0
+    for byte_index, byte_value in enumerate(span):
+        if (byte_value & 0xC0) != 0x80:
+            while target_index < len(targets) and targets[target_index] == code_point_index:
+                result[targets[target_index]] = byte_index
+                target_index += 1
+            code_point_index += 1
+    while target_index < len(targets) and targets[target_index] == code_point_index:
+        result[targets[target_index]] = len(span)
+        target_index += 1
+    return result
+
+
+def _byte_offsets_to_codepoints(
+    data: "bytes | memoryview", byte_offsets: Sequence[int]
+) -> dict[int, int]:
+    """Map local UTF-8 byte offsets to local code-point offsets by counting
+    only UTF-8 leading bytes in one forward pass over the already-encoded
+    ``SourceIndex.data`` span (section 5.6 point 6)."""
+    targets = sorted(set(byte_offsets))
+    result: dict[int, int] = {}
+    target_index = 0
+    code_point_index = 0
+    for index, byte_value in enumerate(data):
+        while target_index < len(targets) and targets[target_index] == index:
+            result[targets[target_index]] = code_point_index
+            target_index += 1
+        if (byte_value & 0xC0) != 0x80:
+            code_point_index += 1
+    while target_index < len(targets) and targets[target_index] == len(data):
+        result[targets[target_index]] = code_point_index
+        target_index += 1
+    return result
+
+
+def _oversized_unit_pieces(
     source_index: SourceIndex,
     start_byte: int,
     end_byte: int,
     budget: int,
-) -> Iterable[tuple[SourceRange, str]]:
-    """Yield budget-filled, code-point-safe owning pieces for one byte range.
+    syntax_candidate_bytes: frozenset[int],
+) -> tuple[tuple[SourceRange, str, CutBoundaryKind | None, CutBoundaryKind | None], ...]:
+    """Locally subdivide one oversized semantic unit's exact source span.
 
-    Complete adjacent physical lines are accumulated until adding the next
-    line would cross *budget*. Only an individual line that exceeds the budget
-    is split by code-point count. This preserves preferred lexical boundaries
-    without turning every physical line into its own paid chunk.
+    Returns ordered ``(range, payload, left_cut_kind, right_cut_kind)``
+    pieces, where a ``None`` cut kind means that side is the unit's own
+    natural edge rather than an internal continuation cut.
     """
-    source = source_index.slice(start_byte, end_byte)
-    offset = start_byte
-    physical_lines = source.splitlines(keepends=True) or ([source] if source else [])
-    pending: list[str] = []
-    pending_chars = 0
+    text = source_index.slice(start_byte, end_byte)
+    # Section 5.6 point 6: reuse the one canonical encoding held by
+    # `SourceIndex.data`. This zero-copy view of the oversized span's bytes
+    # feeds both the byte->code-point scan for syntax candidates and the later
+    # code-point->byte scan for the chosen cuts; the span is never re-encoded.
+    span = memoryview(source_index.data)[start_byte:end_byte]
+    local_syntax_offsets = sorted(
+        offset - start_byte for offset in syntax_candidate_bytes
+    )
+    syntax_code_points: frozenset[int] = frozenset()
+    if local_syntax_offsets:
+        byte_to_cp = _byte_offsets_to_codepoints(span, local_syntax_offsets)
+        syntax_code_points = frozenset(byte_to_cp.values())
 
-    def emit(piece: str) -> tuple[SourceRange, str]:
-        nonlocal offset
-        piece_end = offset + len(piece.encode("utf-8"))
-        result = source_index.range(offset, piece_end), piece
-        offset = piece_end
-        return result
+    cuts = _local_subdivision_cuts(text, budget, syntax_code_points)
+    if not cuts:
+        return ((source_index.range(start_byte, end_byte), text, None, None),)
 
-    for line in physical_lines:
-        if len(line) > budget:
-            if pending:
-                yield emit("".join(pending))
-                pending = []
-                pending_chars = 0
-            for index in range(0, len(line), budget):
-                yield emit(line[index : index + budget])
+    cut_code_points = [offset for offset, _ in cuts]
+    byte_map = _codepoint_offsets_to_bytes(span, cut_code_points)
+
+    pieces: list[tuple[SourceRange, str, CutBoundaryKind | None, CutBoundaryKind | None]] = []
+    piece_start_cp = 0
+    piece_start_byte = start_byte
+    left_kind: CutBoundaryKind | None = None
+    for offset_cp, kind in cuts:
+        cut_byte = start_byte + byte_map[offset_cp]
+        piece_text = text[piece_start_cp:offset_cp]
+        piece_range = source_index.range(piece_start_byte, cut_byte)
+        pieces.append((piece_range, piece_text, left_kind, kind))
+        piece_start_cp = offset_cp
+        piece_start_byte = cut_byte
+        left_kind = kind
+    final_range = source_index.range(piece_start_byte, end_byte)
+    pieces.append((final_range, text[piece_start_cp:], left_kind, None))
+    return tuple(pieces)
+
+
+def _nested_syntax_candidate_bytes(
+    atom: Atom, symbols: Sequence[SymbolFact]
+) -> frozenset[int]:
+    """Deduplicated start/end byte offsets of every symbol strictly nested
+    inside *atom* (section 5.6 point 4); the owning atom's own outer
+    start/end never participate, because a symbol sharing that exact edge is
+    excluded by the strict inequality below."""
+    offsets: set[int] = set()
+    for symbol in symbols:
+        if symbol.atom_id != atom.atom_id:
             continue
-        if pending and pending_chars + len(line) > budget:
-            yield emit("".join(pending))
-            pending = []
-            pending_chars = 0
-        pending.append(line)
-        pending_chars += len(line)
-    if pending:
-        yield emit("".join(pending))
-    if offset != end_byte:
-        raise DivisionInternalDefect("chunk segmentation lost source bytes.")
+        if atom.range.start_byte < symbol.range.start_byte < atom.range.end_byte:
+            offsets.add(symbol.range.start_byte)
+        if atom.range.start_byte < symbol.range.end_byte < atom.range.end_byte:
+            offsets.add(symbol.range.end_byte)
+    return frozenset(offsets)
+
+
+def _known_symbols_by_chunk(
+    symbols: Sequence[SymbolFact],
+    chunk_range_lists: Sequence[Sequence[SourceRange]],
+) -> tuple[tuple[str, ...], ...]:
+    """Resolve every planned chunk's ``known_symbols`` in one sorted-start
+    linear sweep (section 8, workstream 0A).
+
+    *chunk_range_lists* holds, per planned chunk in source order, that chunk's
+    ordered owning ranges. Across the whole plan those ranges are a gap-free,
+    non-overlapping partition of the canonical source, so each symbol's
+    declaration start falls in exactly one chunk under the half-open rule
+    ``range.start_byte <= symbol.start_byte < range.end_byte`` -- a symbol
+    beginning exactly on a continuation cut belongs only to the following
+    chunk.
+
+    The sweep sorts the symbol starts once by ``(start_byte, original_index)``,
+    advances a single monotone pointer over the source-ordered range list to
+    record the owning chunk of every original symbol index, then walks the
+    original ``symbols`` tuple exactly once to emit each chunk's names in
+    original tuple order with first-seen qualified-name dedup and the
+    ``MAX_KNOWN_SYMBOLS_PER_CHUNK`` cap. No step rescans or re-bisects the full
+    symbol list per chunk, and the input tuple is not assumed to be
+    source-sorted.
+    """
+    chunk_count = len(chunk_range_lists)
+    names_by_chunk: list[list[str]] = [[] for _ in range(chunk_count)]
+    if not symbols or not chunk_count:
+        return tuple(tuple(names) for names in names_by_chunk)
+
+    # Flat, start-sorted (start_byte, end_byte, chunk_index) view of every
+    # planned owning range. For a valid source partition this is already
+    # ascending; the explicit sort only guards a caller that supplies ranges
+    # out of order and costs O(m log m) for m <= MAX_CHUNKS_PER_FILE ranges.
+    flat_ranges = sorted(
+        (source_range.start_byte, source_range.end_byte, chunk_index)
+        for chunk_index, ranges in enumerate(chunk_range_lists)
+        for source_range in ranges
+    )
+    range_total = len(flat_ranges)
+
+    ordered_symbol_indexes = sorted(
+        range(len(symbols)), key=lambda i: (symbols[i].range.start_byte, i)
+    )
+
+    owning_chunk: list[int | None] = [None] * len(symbols)
+    range_pointer = 0
+    for symbol_index in ordered_symbol_indexes:
+        start_byte = symbols[symbol_index].range.start_byte
+        while range_pointer < range_total and flat_ranges[range_pointer][1] <= start_byte:
+            range_pointer += 1
+        if range_pointer < range_total and flat_ranges[range_pointer][0] <= start_byte:
+            owning_chunk[symbol_index] = flat_ranges[range_pointer][2]
+
+    seen_by_chunk: list[set[str]] = [set() for _ in range(chunk_count)]
+    for symbol_index, symbol in enumerate(symbols):
+        chunk_index = owning_chunk[symbol_index]
+        if chunk_index is None:
+            continue
+        names = names_by_chunk[chunk_index]
+        if len(names) == MAX_KNOWN_SYMBOLS_PER_CHUNK:
+            continue
+        name = symbol.qualified_name
+        seen = seen_by_chunk[chunk_index]
+        if name in seen:
+            continue
+        seen.add(name)
+        names.append(name)
+    return tuple(tuple(names) for names in names_by_chunk)
 
 
 def _known_symbols_for(
-    symbols: tuple[SymbolFact, ...], ranges: list[SourceRange]
+    symbols: Sequence[SymbolFact], ranges: Sequence[SourceRange]
 ) -> tuple[str, ...]:
-    names: list[str] = []
-    seen: set[str] = set()
-    for symbol in symbols:
-        if symbol.qualified_name in seen:
-            continue
-        if any(
-            r.start_byte <= symbol.range.start_byte < r.end_byte for r in ranges
-        ):
-            seen.add(symbol.qualified_name)
-            names.append(symbol.qualified_name)
-            if len(names) == MAX_KNOWN_SYMBOLS_PER_CHUNK:
-                return tuple(names)
-    return tuple(names)
+    """Single-chunk convenience wrapper over :func:`_known_symbols_by_chunk`.
+
+    Retained for direct/function-boundary callers; production packing resolves
+    every chunk together through the batch sweep. Ordered, first-seen
+    deduplicated, and capped at ``MAX_KNOWN_SYMBOLS_PER_CHUNK``; a symbol whose
+    start equals a range end (a cut) belongs to the following piece, never this
+    one.
+    """
+    return _known_symbols_by_chunk(symbols, [list(ranges)])[0]
 
 
 def pack_chunks(
@@ -983,14 +1658,15 @@ def pack_chunks(
 
     Adjacent small semantic units are packed together until the character
     budget would be exceeded (D4). A single semantic unit whose own source
-    exceeds the budget is divided into deterministic, budget-filled
-    continuation chunks that prefer complete-line boundaries; every fragment
-    shares that unit's stable identity.
+    exceeds the budget is locally subdivided near a balanced target,
+    preferring a nested-syntax or physical-line boundary within a 10% window
+    (section 5.6); every fragment shares that unit's stable identity.
     """
     _real_int(source_budget_chars, "source_budget_chars", minimum=1)
     rel_path = normalize_rel_path(rel_path)
     content = "".join(atom.source for atom in atoms)
     source_index = SourceIndex(content)
+    total_source_bytes = len(source_index.data)
     primary_symbol_by_atom: dict[str, SymbolFact] = {}
     for symbol in symbols:
         primary_symbol_by_atom.setdefault(symbol.atom_id, symbol)
@@ -1022,7 +1698,10 @@ def pack_chunks(
 
     # Each spec: (source units, call-group ID, ranges, payload,
     # continuation_before, continuation_after, group_chunk_index,
-    # group_chunk_count).
+    # group_chunk_count, close_reason, left_cut_kind, right_cut_kind). The
+    # cut kinds are only ever set for a continuation piece; a fitting-unit
+    # group's boundary is resolved from file-start/file-end/semantic-unit
+    # alone.
     specs: list[
         tuple[
             tuple[SemanticUnitIdentity, ...],
@@ -1033,13 +1712,16 @@ def pack_chunks(
             bool,
             int,
             int,
+            CloseReason,
+            CutBoundaryKind | None,
+            CutBoundaryKind | None,
         ]
     ] = []
     pending: list[Atom] = []
     pending_chars = 0
     pending_metadata_entry_chars = 0
 
-    def flush_pending() -> None:
+    def flush_pending(close_reason: CloseReason) -> None:
         nonlocal pending, pending_chars, pending_metadata_entry_chars
         if not pending:
             return
@@ -1047,7 +1729,9 @@ def pack_chunks(
         group_unit_id = _chunk_group_unit_id(rel_path, units)
         ranges = [atom.range for atom in pending]
         payload = "".join(atom.source for atom in pending)
-        specs.append((units, group_unit_id, ranges, payload, False, False, 0, 1))
+        specs.append(
+            (units, group_unit_id, ranges, payload, False, False, 0, 1, close_reason, None, None)
+        )
         pending = []
         pending_chars = 0
         pending_metadata_entry_chars = 0
@@ -1055,15 +1739,18 @@ def pack_chunks(
     for atom in atoms:
         atom_chars = len(atom.source)
         if atom_chars > source_budget_chars:
-            flush_pending()
+            flush_pending("oversized-unit-isolation")
             unit = units_by_atom[atom.atom_id]
-            pieces = list(
-                _source_segments(
-                    source_index, atom.range.start_byte, atom.range.end_byte, source_budget_chars
-                )
+            syntax_candidates = _nested_syntax_candidate_bytes(atom, symbols)
+            pieces = _oversized_unit_pieces(
+                source_index,
+                atom.range.start_byte,
+                atom.range.end_byte,
+                source_budget_chars,
+                syntax_candidates,
             )
             count = len(pieces)
-            for piece_index, (source_range, piece) in enumerate(pieces):
+            for piece_index, (source_range, piece, left_kind, right_kind) in enumerate(pieces):
                 metadata_chars = (
                     metadata_base_chars
                     + _leaf_prompt_metadata_entry_chars(
@@ -1086,6 +1773,9 @@ def pack_chunks(
                         piece_index < count - 1,
                         piece_index,
                         count,
+                        "continuation",
+                        left_kind,
+                        right_kind,
                     )
                 )
             continue
@@ -1095,11 +1785,17 @@ def pack_chunks(
             + metadata_entry_chars_by_atom[atom.atom_id]
             + 3 * len(pending)
         )
-        if pending and (
-            pending_chars + atom_chars > source_budget_chars
-            or candidate_metadata_chars > MAX_LEAF_PROMPT_METADATA_CHARS
-        ):
-            flush_pending()
+        chars_overflow = pending and (pending_chars + atom_chars > source_budget_chars)
+        metadata_overflow = pending and (
+            candidate_metadata_chars > MAX_LEAF_PROMPT_METADATA_CHARS
+        )
+        if chars_overflow or metadata_overflow:
+            if chars_overflow and metadata_overflow:
+                flush_pending("source-and-metadata-ceiling")
+            elif chars_overflow:
+                flush_pending("source-ceiling")
+            else:
+                flush_pending("metadata-ceiling")
             candidate_metadata_chars = (
                 metadata_base_chars
                 + metadata_entry_chars_by_atom[atom.atom_id]
@@ -1113,9 +1809,16 @@ def pack_chunks(
         pending_metadata_entry_chars += metadata_entry_chars_by_atom[
             atom.atom_id
         ]
-    flush_pending()
+    flush_pending("end-of-file")
 
     total = len(specs)
+    # Workstream 0A: resolve every chunk's known symbols in one sorted-start
+    # linear sweep over the source-ordered planned ranges -- never a per-chunk
+    # rescan or bisect of the full symbol list. `specs[k][2]` is chunk k's
+    # ordered owning-range list.
+    known_symbols_by_chunk = _known_symbols_by_chunk(
+        symbols, [spec[2] for spec in specs]
+    )
     chunks: list[ChunkPlan] = []
     for global_index, (
         semantic_units,
@@ -1126,8 +1829,11 @@ def pack_chunks(
         cont_after,
         uidx,
         ucount,
+        close_reason,
+        left_kind,
+        right_kind,
     ) in enumerate(specs):
-        known_symbols = _known_symbols_for(symbols, ranges)
+        known_symbols = known_symbols_by_chunk[global_index]
         chunk_id = _domain_id(
             "chunk",
             {
@@ -1138,6 +1844,18 @@ def pack_chunks(
                 "ranges": [r.to_public() for r in ranges],
             },
         )
+        if ranges[0].start_byte == 0:
+            start_boundary: ChunkBoundary = "file-start"
+        elif cont_before:
+            start_boundary = left_kind
+        else:
+            start_boundary = "semantic-unit"
+        if ranges[-1].end_byte == total_source_bytes:
+            end_boundary: ChunkBoundary = "file-end"
+        elif cont_after:
+            end_boundary = right_kind
+        else:
+            end_boundary = "semantic-unit"
         chunks.append(
             ChunkPlan(
                 chunk_id=chunk_id,
@@ -1153,6 +1871,9 @@ def pack_chunks(
                 known_symbols=known_symbols,
                 payload=payload,
                 payload_chars=len(payload),
+                close_reason=close_reason,
+                start_boundary=start_boundary,
+                end_boundary=end_boundary,
             )
         )
     return tuple(chunks)
@@ -1197,9 +1918,16 @@ def build_division_plan(
         ) from exc
 
     if len(structure.atoms) > MAX_ATOMS_PER_FILE:
-        raise SplitCapacityBlocked(rel_path, "atom-cap")
+        raise SplitCapacityBlocked(
+            rel_path, "atom-cap", observed=len(structure.atoms), limit=MAX_ATOMS_PER_FILE
+        )
     if len(structure.symbols) > MAX_SYMBOLS_PER_FILE:
-        raise SplitCapacityBlocked(rel_path, "symbol-cap")
+        raise SplitCapacityBlocked(
+            rel_path,
+            "symbol-cap",
+            observed=len(structure.symbols),
+            limit=MAX_SYMBOLS_PER_FILE,
+        )
 
     try:
         chunks = pack_chunks(rel_path, structure.atoms, structure.symbols, source_budget_chars)
@@ -1213,9 +1941,16 @@ def build_division_plan(
     # Unit capacity applies to authoritative source semantic units, never to
     # the packed leaf-call groups used only for execution efficiency.
     if len(distinct_units(chunks)) > MAX_UNITS_PER_FILE:
-        raise SplitCapacityBlocked(rel_path, "unit-cap")
+        raise SplitCapacityBlocked(
+            rel_path,
+            "unit-cap",
+            observed=len(distinct_units(chunks)),
+            limit=MAX_UNITS_PER_FILE,
+        )
     if len(chunks) > MAX_CHUNKS_PER_FILE:
-        raise SplitCapacityBlocked(rel_path, "chunk-cap")
+        raise SplitCapacityBlocked(
+            rel_path, "chunk-cap", observed=len(chunks), limit=MAX_CHUNKS_PER_FILE
+        )
 
     digest_payload = _plan_payload(
         rel_path, language, content, source_budget_chars, structure, chunks
@@ -1269,6 +2004,12 @@ def _plan_payload(
             "chunks": MAX_CHUNKS_PER_FILE,
             "known_symbols_per_chunk": MAX_KNOWN_SYMBOLS_PER_CHUNK,
             "leaf_prompt_metadata_chars": MAX_LEAF_PROMPT_METADATA_CHARS,
+            # Internal developer policy that bounds the
+            # duplicate parser-owned signature hint rendered into leaf prompt
+            # metadata. Bound into the division-plan digest here so changing it
+            # invalidates the division/completed-split identity even though it
+            # never changes a byte of selected source or a paid-call count.
+            "leaf_prompt_signature_hint_chars": MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS,
         },
         "structural_mode": structure.structural_mode,
         "chunks": [
@@ -1285,6 +2026,9 @@ def _plan_payload(
                 "continuation_before": chunk.continuation_before,
                 "continuation_after": chunk.continuation_after,
                 "payload_chars": chunk.payload_chars,
+                "close_reason": chunk.close_reason,
+                "start_boundary": chunk.start_boundary,
+                "end_boundary": chunk.end_boundary,
             }
             for chunk in chunks
         ],
@@ -1345,11 +2089,13 @@ class ReductionTreePlan:
     final_node: ReductionNodePlan
     tree_digest: str
     packing_revision: str
+    synthesis_manifest_chars: int
 
     def __post_init__(self) -> None:
         rel_path = normalize_rel_path(self.rel_path)
         _digest_text(self.division_plan_digest, "division_plan_digest", prefix="division-plan")
         _real_int(self.max_fan_in, "max_fan_in", minimum=2)
+        _real_int(self.synthesis_manifest_chars, "synthesis_manifest_chars", minimum=1)
         _digest_text(self.tree_digest, "tree_digest", prefix="reduction-tree")
         if self.final_node.phase != "final" or self.final_node.node_type != "final":
             raise ValueError("reduction tree final_node must be phase/type 'final'.")
@@ -1474,23 +2220,48 @@ def worst_case_reduction_manifest_chars(child_count: int) -> int:
 def build_reduction_tree(
     plan: DivisionPlan,
     *,
-    max_content_chars: int,
+    synthesis_manifest_chars: int | None = None,
+    max_content_chars: int | None = None,
     language: str = "",
     imports: Sequence[str] = (),
 ) -> ReductionTreePlan:
     """Build the complete deterministic reduction tree for *plan*.
+
+    *synthesis_manifest_chars* is the effective internal reducer/final
+    manifest budget (section 5.7) -- normally
+    ``max(source_max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)``,
+    computed by the caller. *max_content_chars* is a deprecated
+    mutually-exclusive alias retained only for direct function-boundary
+    callers (tests, the installed-artifact harness); production split
+    callers must pass *synthesis_manifest_chars*. Exactly one of the two
+    must be supplied.
 
     Raises `SplitCapacityBlocked` with the appropriate reduction-phase reason
     when no complete tree can be planned provider-free.  Topology, node IDs,
     and exact call counts are final before any provider is created (D6).
     """
     rel_path = plan.rel_path
-    _real_int(max_content_chars, "max_content_chars", minimum=1)
+    if (synthesis_manifest_chars is None) == (max_content_chars is None):
+        raise ValueError(
+            "build_reduction_tree requires exactly one of synthesis_manifest_chars "
+            "or the deprecated max_content_chars alias."
+        )
+    effective_synthesis_chars = (
+        synthesis_manifest_chars
+        if synthesis_manifest_chars is not None
+        else max_content_chars
+    )
+    _real_int(effective_synthesis_chars, "synthesis_manifest_chars", minimum=1)
 
-    if REDUCTION_ENVELOPE_OVERHEAD_CHARS >= max_content_chars:
-        raise SplitCapacityBlocked(rel_path, "reduction-envelope-cap")
+    if REDUCTION_ENVELOPE_OVERHEAD_CHARS >= effective_synthesis_chars:
+        raise SplitCapacityBlocked(
+            rel_path,
+            "reduction-envelope-cap",
+            observed=REDUCTION_ENVELOPE_OVERHEAD_CHARS,
+            limit=effective_synthesis_chars,
+        )
     available_manifest_chars = (
-        max_content_chars - REDUCTION_ENVELOPE_OVERHEAD_CHARS
+        effective_synthesis_chars - REDUCTION_ENVELOPE_OVERHEAD_CHARS
     )
     per_child_chars = (
         len(REDUCTION_MANIFEST_ITEM_PREFIX)
@@ -1504,7 +2275,9 @@ def build_reduction_tree(
         available_manifest_chars + len(REDUCTION_MANIFEST_ITEM_SEPARATOR)
     ) // per_child_chars
     if max_fan_in < 2:
-        raise SplitCapacityBlocked(rel_path, "reduction-fan-in-cap")
+        raise SplitCapacityBlocked(
+            rel_path, "reduction-fan-in-cap", observed=max(max_fan_in, 0), limit=2
+        )
     if (
         worst_case_reduction_manifest_chars(max_fan_in)
         > available_manifest_chars
@@ -1545,7 +2318,12 @@ def build_reduction_tree(
         while len(current_ids) > 1:
             level += 1
             if level > MAX_REDUCTION_TREE_DEPTH:
-                raise SplitCapacityBlocked(rel_path, "reduction-depth-cap")
+                raise SplitCapacityBlocked(
+                    rel_path,
+                    "reduction-depth-cap",
+                    observed=level,
+                    limit=MAX_REDUCTION_TREE_DEPTH,
+                )
             nodes, current_ids, current_leaves = _pack_level(
                 rel_path,
                 plan.plan_digest,
@@ -1559,7 +2337,12 @@ def build_reduction_tree(
             for node in nodes:
                 depth = 1 + max(node_depths[child_id] for child_id in node.child_ids)
                 if depth > MAX_REDUCTION_TREE_DEPTH:
-                    raise SplitCapacityBlocked(rel_path, "reduction-depth-cap")
+                    raise SplitCapacityBlocked(
+                        rel_path,
+                        "reduction-depth-cap",
+                        observed=depth,
+                        limit=MAX_REDUCTION_TREE_DEPTH,
+                    )
                 node_depths[node.node_id] = depth
             unit_consolidation_nodes.extend(nodes)
         unit_root_ids[uid] = current_ids[0]
@@ -1576,36 +2359,49 @@ def build_reduction_tree(
             imports=normalized_imports,
             root_count=len(current_ids),
             leaf_count=len(plan.chunks),
-            max_chars=max_content_chars,
+            max_chars=effective_synthesis_chars,
         )
-        > max_content_chars
+        > effective_synthesis_chars
         and len(current_ids) > 1
     ):
         level += 1
         if level > MAX_REDUCTION_TREE_DEPTH:
-            raise SplitCapacityBlocked(rel_path, "reduction-depth-cap")
+            raise SplitCapacityBlocked(
+                rel_path,
+                "reduction-depth-cap",
+                observed=level,
+                limit=MAX_REDUCTION_TREE_DEPTH,
+            )
         nodes, current_ids, current_leaves = _pack_level(
             rel_path, plan.plan_digest, "general", None, level, current_ids, current_leaves, max_fan_in
         )
         for node in nodes:
             depth = 1 + max(node_depths[child_id] for child_id in node.child_ids)
             if depth > MAX_REDUCTION_TREE_DEPTH:
-                raise SplitCapacityBlocked(rel_path, "reduction-depth-cap")
+                raise SplitCapacityBlocked(
+                    rel_path,
+                    "reduction-depth-cap",
+                    observed=depth,
+                    limit=MAX_REDUCTION_TREE_DEPTH,
+                )
             node_depths[node.node_id] = depth
         general_nodes.extend(nodes)
 
-    if (
-        worst_case_final_synthesis_chars(
-            rel_path=rel_path,
-            language=language,
-            imports=normalized_imports,
-            root_count=len(current_ids),
-            leaf_count=len(plan.chunks),
-            max_chars=max_content_chars,
+    final_manifest_required = worst_case_final_synthesis_chars(
+        rel_path=rel_path,
+        language=language,
+        imports=normalized_imports,
+        root_count=len(current_ids),
+        leaf_count=len(plan.chunks),
+        max_chars=effective_synthesis_chars,
+    )
+    if final_manifest_required > effective_synthesis_chars:
+        raise SplitCapacityBlocked(
+            rel_path,
+            "final-synthesis-envelope-cap",
+            observed=final_manifest_required,
+            limit=effective_synthesis_chars,
         )
-        > max_content_chars
-    ):
-        raise SplitCapacityBlocked(rel_path, "final-synthesis-envelope-cap")
 
     final_leaf_ids = tuple(leaf for leaves in current_leaves for leaf in leaves)
     final_node_id = _reduction_node_id(
@@ -1636,6 +2432,7 @@ def build_reduction_tree(
             "revision": REDUCTION_PACKING_REVISION,
             "division_plan_digest": plan.plan_digest,
             "max_fan_in": max_fan_in,
+            "synthesis_manifest_chars": effective_synthesis_chars,
             "unit_consolidation": [
                 (node.node_id, node.phase, node.unit_id, node.level, node.ordinal, node.child_ids)
                 for node in unit_consolidation_nodes
@@ -1656,6 +2453,7 @@ def build_reduction_tree(
         final_node=final_node,
         tree_digest=tree_digest,
         packing_revision=REDUCTION_PACKING_REVISION,
+        synthesis_manifest_chars=effective_synthesis_chars,
     )
 
 
@@ -1678,6 +2476,1346 @@ def reduction_depth(tree: ReductionTreePlan) -> int:
         return value
 
     return max((depth_of(child) for child in tree.final_node.child_ids), default=0)
+
+
+# ---------------------------------------------------------------------------
+# Section 5.4 / 5.8: provider-free value-safe diagnostic substrate
+# ---------------------------------------------------------------------------
+# Everything below is a pure function of the immutable division plan /
+# reduction tree (plus the already-resolved ceilings and truncate/blocked
+# facts planning already computed). It never reads source text back, never
+# constructs a provider, and never affects chunking, reduction topology, call
+# counts, cache/revision identity, or recovery. It is the reusable foundation
+# later sections consume for scanner diagnostics, real preflight reporting,
+# CLI presentation, dry/real recovery parity, and billing.
+
+_PREFERRED_CUT_KINDS: frozenset[str] = frozenset({"syntax", "physical-line"})
+
+# The frozen descriptor field allowlists (section 5.8). A descriptor may
+# contain *only* these keys -- never source text, prompt text, signatures,
+# symbol/unit/chunk/node IDs, names/qualified names, source ranges/line/column/
+# byte offsets, credentials, provider responses, or an absolute path.
+SPLIT_PLAN_FILE_FIELDS: tuple[str, ...] = (
+    "path",
+    "source_chars",
+    "structural_mode",
+    "source_ceiling_chars",
+    "synthesis_manifest_ceiling_chars",
+    "reduction_levels",
+    "reduction_calls",
+    "final_calls",
+    "initial_calls",
+    "units",
+    "leaves",
+)
+SPLIT_PLAN_UNIT_FIELDS: tuple[str, ...] = (
+    "unit_ordinal",
+    "natural_source_chars",
+    "arithmetic_piece_count",
+    "crlf_safe_piece_count",
+    "atomicity_extra_piece_count",
+    "pieces",
+)
+SPLIT_PLAN_PIECE_FIELDS: tuple[str, ...] = (
+    "payload_chars",
+    "start_boundary",
+    "end_boundary",
+    "boundary_constrained_small",
+)
+SPLIT_PLAN_LEAF_FIELDS: tuple[str, ...] = (
+    "payload_chars",
+    "close_reason",
+    "start_boundary",
+    "end_boundary",
+    "constituents",
+)
+SPLIT_PLAN_CONSTITUENT_FIELDS: tuple[str, ...] = ("unit_ordinal", "payload_chars")
+TRUNCATE_PLAN_FIELDS: tuple[str, ...] = (
+    "path",
+    "source_chars",
+    "resolved_strategy",
+    "retained_head_chars",
+    "retained_tail_chars",
+    "omitted_chars",
+    "initial_calls",
+)
+
+
+def _atom_chars_by_id(plan: "DivisionPlan") -> dict[str, int]:
+    return {atom.atom_id: len(atom.source) for atom in plan.atoms}
+
+
+def _unit_natural_chars(
+    unit: "SemanticUnitIdentity", atom_chars: Mapping[str, int]
+) -> int:
+    return sum(atom_chars[atom_id] for atom_id in unit.atom_ids)
+
+
+def _boundary_constrained_small(piece: "ChunkPlan", source_budget_chars: int) -> bool:
+    """Section 5.6: a continuation piece is boundary-constrained-small only when
+    it is adjacent on either side to a ``syntax`` / ``physical-line`` cut *and*
+    ``2 * payload_chars < B``. Equality at half the budget is not small; a
+    piece beside only ``balanced-codepoint`` cuts is never labelled. The
+    per-piece boolean is naturally counted once even for a middle piece
+    adjacent to two preferred cuts."""
+    near_preferred = (
+        piece.start_boundary in _PREFERRED_CUT_KINDS
+        or piece.end_boundary in _PREFERRED_CUT_KINDS
+    )
+    return near_preferred and (2 * piece.payload_chars < source_budget_chars)
+
+
+# --- shared typed stream-item builders (one authority for both the from-plan
+# --- generator and the from-detail generator, so the category digest is
+# --- byte-identical whichever path produced it) -----------------------------
+
+
+def _stream_file_item(
+    path: str,
+    *,
+    source_chars: int,
+    structural_mode: str,
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    reduction_levels: int,
+    reduction_calls: int,
+    final_calls: int,
+    initial_calls: int,
+    unit_count: int,
+    leaf_count: int,
+) -> dict:
+    return {
+        "t": "split-file",
+        "path": path,
+        "source_chars": source_chars,
+        "structural_mode": structural_mode,
+        "source_ceiling_chars": source_ceiling_chars,
+        "synthesis_manifest_ceiling_chars": synthesis_manifest_ceiling_chars,
+        "reduction_levels": reduction_levels,
+        "reduction_calls": reduction_calls,
+        "final_calls": final_calls,
+        "initial_calls": initial_calls,
+        "unit_count": unit_count,
+        "leaf_count": leaf_count,
+    }
+
+
+def _stream_unit_item(
+    path: str,
+    unit_ordinal: int,
+    *,
+    natural_source_chars: int,
+    arithmetic_piece_count: int,
+    crlf_safe_piece_count: int,
+    atomicity_extra_piece_count: int,
+    piece_count: int,
+) -> dict:
+    return {
+        "t": "split-unit",
+        "path": path,
+        "unit_ordinal": unit_ordinal,
+        "natural_source_chars": natural_source_chars,
+        "arithmetic_piece_count": arithmetic_piece_count,
+        "crlf_safe_piece_count": crlf_safe_piece_count,
+        "atomicity_extra_piece_count": atomicity_extra_piece_count,
+        "piece_count": piece_count,
+    }
+
+
+def _stream_piece_item(
+    path: str,
+    unit_ordinal: int,
+    piece_ordinal: int,
+    *,
+    payload_chars: int,
+    start_boundary: str,
+    end_boundary: str,
+    boundary_constrained_small: bool,
+) -> dict:
+    return {
+        "t": "split-piece",
+        "path": path,
+        "unit_ordinal": unit_ordinal,
+        "piece_ordinal": piece_ordinal,
+        "payload_chars": payload_chars,
+        "start_boundary": start_boundary,
+        "end_boundary": end_boundary,
+        "boundary_constrained_small": boundary_constrained_small,
+    }
+
+
+def _stream_leaf_item(
+    path: str,
+    leaf_ordinal: int,
+    *,
+    payload_chars: int,
+    close_reason: str,
+    start_boundary: str,
+    end_boundary: str,
+    constituent_count: int,
+) -> dict:
+    return {
+        "t": "split-leaf",
+        "path": path,
+        "leaf_ordinal": leaf_ordinal,
+        "payload_chars": payload_chars,
+        "close_reason": close_reason,
+        "start_boundary": start_boundary,
+        "end_boundary": end_boundary,
+        "constituent_count": constituent_count,
+    }
+
+
+def _stream_constituent_item(
+    path: str,
+    leaf_ordinal: int,
+    constituent_ordinal: int,
+    *,
+    unit_ordinal: int,
+    payload_chars: int,
+) -> dict:
+    return {
+        "t": "split-constituent",
+        "path": path,
+        "leaf_ordinal": leaf_ordinal,
+        "constituent_ordinal": constituent_ordinal,
+        "unit_ordinal": unit_ordinal,
+        "payload_chars": payload_chars,
+    }
+
+
+def _piece_digest_members(pieces: "Iterable[Mapping]") -> list[dict]:
+    """The complete canonical member list a unit's ``pieces_digest`` hashes:
+    every piece's frozen 4-field descriptor, in order."""
+    return [
+        {
+            "payload_chars": piece["payload_chars"],
+            "start_boundary": piece["start_boundary"],
+            "end_boundary": piece["end_boundary"],
+            "boundary_constrained_small": piece["boundary_constrained_small"],
+        }
+        for piece in pieces
+    ]
+
+
+def _constituent_digest_members(constituents: "Iterable[Mapping]") -> list[dict]:
+    return [
+        {"unit_ordinal": item["unit_ordinal"], "payload_chars": item["payload_chars"]}
+        for item in constituents
+    ]
+
+
+def _unit_digest_member(unit: Mapping) -> dict:
+    """One member of a file's ``units_digest`` stream: the unit's scalar fields
+    plus its **actual complete ordered ``pieces`` list** (Round 3 P1 -- not a
+    ``pieces_total`` / ``pieces_digest`` summary)."""
+    return {
+        "unit_ordinal": unit["unit_ordinal"],
+        "natural_source_chars": unit["natural_source_chars"],
+        "arithmetic_piece_count": unit["arithmetic_piece_count"],
+        "crlf_safe_piece_count": unit["crlf_safe_piece_count"],
+        "atomicity_extra_piece_count": unit["atomicity_extra_piece_count"],
+        "pieces": _piece_digest_members(unit["pieces"]),
+    }
+
+
+def _leaf_digest_member(leaf: Mapping) -> dict:
+    """One member of a file's ``leaves_digest`` stream: the leaf's scalar
+    fields plus its **actual complete ordered ``constituents`` list**."""
+    return {
+        "payload_chars": leaf["payload_chars"],
+        "close_reason": leaf["close_reason"],
+        "start_boundary": leaf["start_boundary"],
+        "end_boundary": leaf["end_boundary"],
+        "constituents": _constituent_digest_members(leaf["constituents"]),
+    }
+
+
+def _nested_metadata(members: list[dict], retained: int) -> dict:
+    """The four sibling integrity fields for one nested list: exact total,
+    retained count, omitted count, and a digest over the *complete* canonical
+    member stream (never only the retained members)."""
+    total = len(members)
+    return {
+        "total": total,
+        "retained": retained,
+        "omitted": total - retained,
+        "digest": canonical_stream_digest(members),
+    }
+
+
+class _WorstFirst:
+    """Wrap a best-first ascending rank tuple so a plain ``heapq`` min-heap
+    keeps the best ``K`` entries: ``heap[0]`` is the *worst* retained entry, so
+    ``heappushpop`` evicts it when a better candidate arrives. Fixed-size heap
+    ==> O(N log K) ranking in O(K) space, no full sort of the descriptors."""
+
+    __slots__ = ("rank",)
+
+    def __init__(self, rank: tuple) -> None:
+        self.rank = rank
+
+    def __lt__(self, other: "_WorstFirst") -> bool:
+        # "less than" inside the heap means "worse", i.e. a larger rank tuple.
+        return self.rank > other.rank
+
+
+@dataclass(frozen=True, slots=True)
+class RoutePlanEntry:
+    """One oversized file's resolved route in the provider-free route-plan view
+    (section 5.8 / 5.9). Carried on ``PlanMaterials`` in canonical
+    normalized-path-ascending order, sourced from the same memoized division
+    outcome, source snapshot, identity checks, and recovery classification
+    execution uses -- never reconstructed from persisted display fields.
+
+    ``route`` is ``"split"`` / ``"truncate"`` / ``"blocked"``. ``payable`` is
+    whether the file still needs at least one fresh initial provider call.
+    ``split_payable_calls`` is the exact recovery-aware count of current planned
+    node IDs not retained as valid completed nodes (``route == "split"``);
+    ``0`` is a valid exact value for a completed/reused or fully-recovered
+    file. ``division_plan`` / ``reduction_tree`` are the immutable production
+    objects (never copies); ``blocked_detail`` is the value-safe measured
+    capacity-block descriptor.
+    """
+
+    rel_path: str
+    source_chars: int
+    route: str
+    payable: bool
+    split_payable_calls: int = 0
+    division_plan: object | None = None
+    reduction_tree: object | None = None
+    blocked_detail: "Mapping[str, object] | None" = None
+
+
+def split_plan_unit_summaries(plan: "DivisionPlan") -> tuple[dict, ...]:
+    """Ordered per-semantic-unit summaries for one split file (section 5.8).
+
+    ``pieces`` holds a subdivided unit's ordered continuation-piece
+    descriptors; a fitting unit that was never locally subdivided carries an
+    empty ``pieces`` list. ``arithmetic_piece_count`` is ``ceil(L / B)``;
+    ``crlf_safe_piece_count`` is the proven minimum safe count actually used;
+    ``atomicity_extra_piece_count`` is their non-negative difference (zero for
+    every canonical filesystem-loaded source).
+    """
+    atom_chars = _atom_chars_by_id(plan)
+    units = plan.units
+    budget = plan.source_budget_chars
+    pieces_by_unit: dict[str, list["ChunkPlan"]] = {}
+    for chunk in plan.chunks:
+        if chunk.unit_chunk_count > 1:
+            pieces_by_unit.setdefault(chunk.semantic_units[0].unit_id, []).append(chunk)
+    for chunk_list in pieces_by_unit.values():
+        chunk_list.sort(key=lambda chunk: chunk.unit_chunk_index)
+
+    summaries: list[dict] = []
+    for ordinal, unit in enumerate(units):
+        natural = _unit_natural_chars(unit, atom_chars)
+        arithmetic = -(-natural // budget) if natural else 1
+        unit_pieces = pieces_by_unit.get(unit.unit_id, ())
+        crlf_safe = len(unit_pieces) if unit_pieces else 1
+        extra = crlf_safe - arithmetic
+        if extra < 0:
+            raise DivisionInternalDefect(
+                "crlf-safe piece count fell below the arithmetic minimum."
+            )
+        pieces = [
+            {
+                "payload_chars": piece.payload_chars,
+                "start_boundary": piece.start_boundary,
+                "end_boundary": piece.end_boundary,
+                "boundary_constrained_small": _boundary_constrained_small(
+                    piece, budget
+                ),
+            }
+            for piece in unit_pieces
+        ]
+        meta = _nested_metadata(_piece_digest_members(pieces), len(pieces))
+        summaries.append(
+            {
+                "unit_ordinal": ordinal,
+                "natural_source_chars": natural,
+                "arithmetic_piece_count": arithmetic,
+                "crlf_safe_piece_count": crlf_safe,
+                "atomicity_extra_piece_count": extra,
+                "pieces": pieces,
+                "pieces_total": meta["total"],
+                "pieces_retained": meta["retained"],
+                "pieces_omitted": meta["omitted"],
+                "pieces_digest": meta["digest"],
+            }
+        )
+    return tuple(summaries)
+
+
+def split_plan_leaf_descriptors(plan: "DivisionPlan") -> tuple[dict, ...]:
+    """Ordered per-paid-leaf-call descriptors for one split file (section 5.8).
+
+    Each leaf carries only its outer paid-call edges and ordered constituent
+    ``{unit_ordinal, payload_chars}`` pairs: for a continuation piece the sole
+    constituent is that piece's own contribution; for a fitting (possibly
+    co-packed) leaf, one constituent per owned semantic unit whose
+    ``payload_chars`` sum to the leaf payload.
+    """
+    atom_chars = _atom_chars_by_id(plan)
+    ordinal_by_unit = {unit.unit_id: index for index, unit in enumerate(plan.units)}
+    leaves: list[dict] = []
+    for chunk in sorted(plan.chunks, key=lambda chunk: chunk.global_index):
+        if chunk.unit_chunk_count > 1:
+            constituents = [
+                {
+                    "unit_ordinal": ordinal_by_unit[chunk.semantic_units[0].unit_id],
+                    "payload_chars": chunk.payload_chars,
+                }
+            ]
+        else:
+            constituents = sorted(
+                (
+                    {
+                        "unit_ordinal": ordinal_by_unit[unit.unit_id],
+                        "payload_chars": _unit_natural_chars(unit, atom_chars),
+                    }
+                    for unit in chunk.semantic_units
+                ),
+                key=lambda item: item["unit_ordinal"],
+            )
+        meta = _nested_metadata(
+            _constituent_digest_members(constituents), len(constituents)
+        )
+        leaves.append(
+            {
+                "payload_chars": chunk.payload_chars,
+                "close_reason": chunk.close_reason,
+                "start_boundary": chunk.start_boundary,
+                "end_boundary": chunk.end_boundary,
+                "constituents": constituents,
+                "constituents_total": meta["total"],
+                "constituents_retained": meta["retained"],
+                "constituents_omitted": meta["omitted"],
+                "constituents_digest": meta["digest"],
+            }
+        )
+    return tuple(leaves)
+
+
+def split_plan_file_header(
+    rel_path: str,
+    plan: "DivisionPlan",
+    tree: "ReductionTreePlan",
+    *,
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    initial_calls: int | None = None,
+) -> dict:
+    """The scalar-only split file record (no unit/leaf lists).
+
+    Used for the O(F) ranking pass before nested descriptors are built, so the
+    diagnostics layer never materializes every descriptor merely to rank the
+    top file headers.
+    """
+    reduction_calls = len(tree.unit_consolidation_nodes) + len(tree.general_nodes)
+    final_calls = 1
+    reduction_levels = max(
+        (node.level for node in tree.all_intermediate_nodes), default=0
+    )
+    computed_initial = len(plan.chunks) + reduction_calls + final_calls
+    return {
+        "path": normalize_rel_path(rel_path),
+        "source_chars": plan.source_chars,
+        "structural_mode": plan.structural_mode,
+        "source_ceiling_chars": _real_int(
+            source_ceiling_chars, "source_ceiling_chars", minimum=1
+        ),
+        "synthesis_manifest_ceiling_chars": _real_int(
+            synthesis_manifest_ceiling_chars,
+            "synthesis_manifest_ceiling_chars",
+            minimum=1,
+        ),
+        "reduction_levels": reduction_levels,
+        "reduction_calls": reduction_calls,
+        "final_calls": final_calls,
+        # Section 5.9 / Defect B: the recovery-aware exact unpaid initial-call
+        # count. Zero is a valid exact value (a completed/reused or
+        # fully-recovered split file) and must not be floored to one.
+        "initial_calls": (
+            computed_initial
+            if initial_calls is None
+            else _real_int(initial_calls, "initial_calls", minimum=0)
+        ),
+    }
+
+
+def split_plan_file_detail(
+    rel_path: str,
+    plan: "DivisionPlan",
+    tree: "ReductionTreePlan",
+    *,
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    initial_calls: int | None = None,
+) -> dict:
+    """The complete ordered split-plan detail for one file (section 5.8 F).
+
+    Carries the frozen field allowlist (normalized path, decoded source
+    character count, structural mode, both effective ceilings, reduction
+    levels/calls, final calls, exact initial calls, ordered semantic-unit
+    summaries, ordered leaf descriptors) plus, for every nested list, its own
+    ``*_total`` / ``*_retained`` / ``*_omitted`` / ``*_digest`` integrity
+    metadata (section 5.8 / Defect D). This helper retains every member, so
+    each ``*_retained`` equals its ``*_total`` and every ``*_omitted`` is zero;
+    the bounded assembler is what produces a partial retention.
+    """
+    header = split_plan_file_header(
+        rel_path,
+        plan,
+        tree,
+        source_ceiling_chars=source_ceiling_chars,
+        synthesis_manifest_ceiling_chars=synthesis_manifest_ceiling_chars,
+        initial_calls=initial_calls,
+    )
+    units = [dict(summary) for summary in split_plan_unit_summaries(plan)]
+    leaves = [dict(leaf) for leaf in split_plan_leaf_descriptors(plan)]
+    header["units"] = units
+    units_meta = _nested_metadata([_unit_digest_member(u) for u in units], len(units))
+    header["units_total"] = units_meta["total"]
+    header["units_retained"] = units_meta["retained"]
+    header["units_omitted"] = units_meta["omitted"]
+    header["units_digest"] = units_meta["digest"]
+    header["leaves"] = leaves
+    leaves_meta = _nested_metadata(
+        [_leaf_digest_member(leaf) for leaf in leaves], len(leaves)
+    )
+    header["leaves_total"] = leaves_meta["total"]
+    header["leaves_retained"] = leaves_meta["retained"]
+    header["leaves_omitted"] = leaves_meta["omitted"]
+    header["leaves_digest"] = leaves_meta["digest"]
+    return header
+
+
+class _StreamHasher:
+    """Incremental SHA-256 over the section 5.8 framed descriptor stream:
+    UTF-8 ``[``, each member's :func:`canonical_json` comma-separated, ``]``.
+    Used everywhere a digest is built one descriptor at a time so no complete
+    list or joined string is ever materialized."""
+
+    __slots__ = ("_h", "_first")
+
+    def __init__(self) -> None:
+        self._h = hashlib.sha256()
+        self._h.update(b"[")
+        self._first = True
+
+    def add(self, descriptor: object) -> None:
+        if not self._first:
+            self._h.update(b",")
+        self._first = False
+        self._h.update(canonical_json(descriptor).encode("utf-8"))
+
+    def finish(self) -> str:
+        self._h.update(b"]")
+        return f"sha256:{self._h.hexdigest()}"
+
+
+def _actual_member_frame(scalars: Mapping, arr_key: str) -> tuple[bytes, bytes]:
+    """The exact ``(prefix, suffix)`` bytes wrapping the inner array so that
+    ``prefix + b','.join(canonical_json(item)) + suffix`` is byte-identical to
+    ``canonical_json({**scalars, arr_key: [items]})``.
+
+    Round 3 P1: a nested-digest member (``units_digest`` / ``leaves_digest``)
+    is hashed as its *actual complete list* -- scalar fields plus the full
+    ordered inner list -- but the inner array is streamed one item at a time,
+    never materialized. Key ordering and string escaping are delegated to
+    ``json.dumps`` by taking the frame verbatim from ``canonical_json`` on the
+    same member with an empty array.
+    """
+    empty = canonical_json({**dict(scalars), arr_key: []})
+    marker = f'"{arr_key}":[]'
+    if empty.count(marker) != 1:
+        raise DivisionInternalDefect(
+            "nested-digest member scalar collides with the array key marker."
+        )
+    index = empty.index(marker)
+    return (
+        (empty[:index] + marker[:-1]).encode("utf-8"),      # ...,"pieces":[
+        ("]" + empty[index + len(marker):]).encode("utf-8"),  # ],"unit_ordinal":N}
+    )
+
+
+def _breadth_first_quotas(caps: Sequence[int], budget: int) -> list[int]:
+    """Exact ranked round-robin / breadth-first allocation of *budget*
+    positions across retained files whose total nested capacities are *caps*
+    (already in rank order). One position per active file per round, in rank
+    order, skipping a file the moment it reaches its capacity, until the budget
+    is spent or every file is exhausted -- so a short last-ranked file's unused
+    capacity is reclaimed by the earlier, still-active files, and an odd final
+    partial round favours the earlier-ranked file.
+
+    O(budget + len(caps)) time, O(len(caps)) space -- pure scalar arrays, no
+    per-file descriptor iterator alive.
+    """
+    quotas = [0] * len(caps)
+    remaining = max(int(budget), 0)
+    active = [index for index, cap in enumerate(caps) if cap > 0]
+    while remaining > 0 and active:
+        still: list[int] = []
+        for index in active:
+            if remaining <= 0:
+                still.append(index)
+                continue
+            quotas[index] += 1
+            remaining -= 1
+            if quotas[index] < caps[index]:
+                still.append(index)
+        active = still
+    return quotas
+
+
+def iter_split_plan_stream_items(
+    file_details: Iterable[Mapping],
+) -> Iterator[dict]:
+    """Flat typed canonical descriptor stream for the ``split_plan`` category
+    digest, built from already-materialized file detail dicts (section 5.8).
+
+    The bounded assembler does *not* use this path -- it streams straight from
+    the immutable plans via :func:`_iter_split_file_stream`. This helper stays
+    for callers that already hold full detail dicts; both paths emit
+    byte-identical items via the shared ``_stream_*_item`` builders.
+    """
+    for detail in file_details:
+        path = detail["path"]
+        yield _stream_file_item(
+            path,
+            source_chars=detail["source_chars"],
+            structural_mode=detail["structural_mode"],
+            source_ceiling_chars=detail["source_ceiling_chars"],
+            synthesis_manifest_ceiling_chars=detail["synthesis_manifest_ceiling_chars"],
+            reduction_levels=detail["reduction_levels"],
+            reduction_calls=detail["reduction_calls"],
+            final_calls=detail["final_calls"],
+            initial_calls=detail["initial_calls"],
+            unit_count=len(detail["units"]),
+            leaf_count=len(detail["leaves"]),
+        )
+        for unit in detail["units"]:
+            yield _stream_unit_item(
+                path,
+                unit["unit_ordinal"],
+                natural_source_chars=unit["natural_source_chars"],
+                arithmetic_piece_count=unit["arithmetic_piece_count"],
+                crlf_safe_piece_count=unit["crlf_safe_piece_count"],
+                atomicity_extra_piece_count=unit["atomicity_extra_piece_count"],
+                piece_count=len(unit["pieces"]),
+            )
+            for piece_ordinal, piece in enumerate(unit["pieces"]):
+                yield _stream_piece_item(
+                    path,
+                    unit["unit_ordinal"],
+                    piece_ordinal,
+                    payload_chars=piece["payload_chars"],
+                    start_boundary=piece["start_boundary"],
+                    end_boundary=piece["end_boundary"],
+                    boundary_constrained_small=piece["boundary_constrained_small"],
+                )
+        for leaf_ordinal, leaf in enumerate(detail["leaves"]):
+            yield _stream_leaf_item(
+                path,
+                leaf_ordinal,
+                payload_chars=leaf["payload_chars"],
+                close_reason=leaf["close_reason"],
+                start_boundary=leaf["start_boundary"],
+                end_boundary=leaf["end_boundary"],
+                constituent_count=len(leaf["constituents"]),
+            )
+            for constituent_ordinal, constituent in enumerate(leaf["constituents"]):
+                yield _stream_constituent_item(
+                    path,
+                    leaf_ordinal,
+                    constituent_ordinal,
+                    unit_ordinal=constituent["unit_ordinal"],
+                    payload_chars=constituent["payload_chars"],
+                )
+
+
+def _iter_split_unit_items(plan: "DivisionPlan") -> Iterator[tuple]:
+    """Lazily yield, in source order, straight from ``plan.chunks`` / atoms:
+
+    * ``("unit", unit_ordinal, {5 scalar fields}, piece_count)``
+    * ``("piece", unit_ordinal, piece_ordinal, {4 fields})``  (subdivided units)
+
+    Auxiliary state is O(nesting_depth): three integer cursors and nothing
+    that grows with the file's chunk count. Every atom is exactly one semantic
+    unit (source order == ``distinct_units`` order), so a unit's natural
+    character count is ``len(plan.atoms[ordinal].source)`` -- no atom index.
+    A subdivided unit's continuation chunks are consecutive and already in
+    ``unit_chunk_index`` order.
+    """
+    atoms = plan.atoms
+    chunks = plan.chunks
+    budget = plan.source_budget_chars
+    total_chunks = len(chunks)
+    unit_ordinal = 0
+    index = 0
+    while index < total_chunks:
+        chunk = chunks[index]
+        if chunk.unit_chunk_count > 1:
+            count = chunk.unit_chunk_count
+            natural = len(atoms[unit_ordinal].source)
+            arithmetic = -(-natural // budget) if natural else 1
+            extra = count - arithmetic
+            if extra < 0:
+                raise DivisionInternalDefect(
+                    "crlf-safe piece count fell below the arithmetic minimum."
+                )
+            yield (
+                "unit",
+                unit_ordinal,
+                {
+                    "unit_ordinal": unit_ordinal,
+                    "natural_source_chars": natural,
+                    "arithmetic_piece_count": arithmetic,
+                    "crlf_safe_piece_count": count,
+                    "atomicity_extra_piece_count": extra,
+                },
+                count,
+            )
+            for piece_ordinal in range(count):
+                piece = chunks[index + piece_ordinal]
+                if (
+                    piece.unit_chunk_index != piece_ordinal
+                    or piece.group_unit_id != chunk.group_unit_id
+                ):
+                    raise DivisionInternalDefect(
+                        "continuation chunks are not consecutive and ordered."
+                    )
+                yield (
+                    "piece",
+                    unit_ordinal,
+                    piece_ordinal,
+                    {
+                        "payload_chars": piece.payload_chars,
+                        "start_boundary": piece.start_boundary,
+                        "end_boundary": piece.end_boundary,
+                        "boundary_constrained_small": _boundary_constrained_small(
+                            piece, budget
+                        ),
+                    },
+                )
+            index += count
+            unit_ordinal += 1
+        else:
+            for _semantic_unit in chunk.semantic_units:
+                natural = len(atoms[unit_ordinal].source)
+                arithmetic = -(-natural // budget) if natural else 1
+                extra = 1 - arithmetic
+                if extra < 0:
+                    raise DivisionInternalDefect(
+                        "crlf-safe piece count fell below the arithmetic minimum."
+                    )
+                yield (
+                    "unit",
+                    unit_ordinal,
+                    {
+                        "unit_ordinal": unit_ordinal,
+                        "natural_source_chars": natural,
+                        "arithmetic_piece_count": arithmetic,
+                        "crlf_safe_piece_count": 1,
+                        "atomicity_extra_piece_count": extra,
+                    },
+                    0,
+                )
+                unit_ordinal += 1
+            index += 1
+
+
+def _iter_split_leaf_items(plan: "DivisionPlan") -> Iterator[tuple]:
+    """Lazily yield, in call order, straight from ``plan.chunks`` / atoms:
+
+    * ``("leaf", leaf_ordinal, {4 scalar fields}, constituent_count)``
+    * ``("constituent", leaf_ordinal, constituent_ordinal, {2 fields})``
+
+    Auxiliary state is O(nesting_depth): one integer cursor tracking the first
+    unit ordinal each chunk owns (advanced by the number of *new* units the
+    chunk introduces -- zero for a non-final continuation piece).
+    """
+    atoms = plan.atoms
+    unit_cursor = 0
+    for leaf_ordinal, chunk in enumerate(plan.chunks):
+        if chunk.unit_chunk_count > 1:
+            constituent_count = 1
+        else:
+            constituent_count = len(chunk.semantic_units)
+        yield (
+            "leaf",
+            leaf_ordinal,
+            {
+                "payload_chars": chunk.payload_chars,
+                "close_reason": chunk.close_reason,
+                "start_boundary": chunk.start_boundary,
+                "end_boundary": chunk.end_boundary,
+            },
+            constituent_count,
+        )
+        if chunk.unit_chunk_count > 1:
+            yield (
+                "constituent",
+                leaf_ordinal,
+                0,
+                {"unit_ordinal": unit_cursor, "payload_chars": chunk.payload_chars},
+            )
+            if chunk.unit_chunk_index == chunk.unit_chunk_count - 1:
+                unit_cursor += 1
+        else:
+            for offset in range(len(chunk.semantic_units)):
+                yield (
+                    "constituent",
+                    leaf_ordinal,
+                    offset,
+                    {
+                        "unit_ordinal": unit_cursor + offset,
+                        "payload_chars": len(atoms[unit_cursor + offset].source),
+                    },
+                )
+            unit_cursor += len(chunk.semantic_units)
+
+
+def _iter_split_file_stream(
+    rel_path: str,
+    plan: "DivisionPlan",
+    tree: "ReductionTreePlan",
+    *,
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    initial_calls: int,
+) -> Iterator[dict]:
+    """The frozen typed descriptor stream for ONE split file, generated lazily
+    from the immutable division plan via :func:`_iter_split_unit_items` /
+    :func:`_iter_split_leaf_items`. Auxiliary state is O(nesting_depth) -- one
+    typed item at a time, no atom/unit index, no per-unit list.
+    """
+    path = normalize_rel_path(rel_path)
+    reduction_calls = len(tree.unit_consolidation_nodes) + len(tree.general_nodes)
+    reduction_levels = max(
+        (node.level for node in tree.all_intermediate_nodes), default=0
+    )
+    yield _stream_file_item(
+        path,
+        source_chars=plan.source_chars,
+        structural_mode=plan.structural_mode,
+        source_ceiling_chars=source_ceiling_chars,
+        synthesis_manifest_ceiling_chars=synthesis_manifest_ceiling_chars,
+        reduction_levels=reduction_levels,
+        reduction_calls=reduction_calls,
+        final_calls=1,
+        initial_calls=initial_calls,
+        # #units == #atoms (each atom is exactly one semantic unit, source order)
+        unit_count=len(plan.atoms),
+        leaf_count=len(plan.chunks),
+    )
+    for item in _iter_split_unit_items(plan):
+        if item[0] == "unit":
+            _kind, ordinal, scalars, piece_count = item
+            yield _stream_unit_item(
+                path,
+                ordinal,
+                natural_source_chars=scalars["natural_source_chars"],
+                arithmetic_piece_count=scalars["arithmetic_piece_count"],
+                crlf_safe_piece_count=scalars["crlf_safe_piece_count"],
+                atomicity_extra_piece_count=scalars["atomicity_extra_piece_count"],
+                piece_count=piece_count,
+            )
+        else:
+            _kind, unit_ordinal, piece_ordinal, piece = item
+            yield _stream_piece_item(
+                path,
+                unit_ordinal,
+                piece_ordinal,
+                payload_chars=piece["payload_chars"],
+                start_boundary=piece["start_boundary"],
+                end_boundary=piece["end_boundary"],
+                boundary_constrained_small=piece["boundary_constrained_small"],
+            )
+    for item in _iter_split_leaf_items(plan):
+        if item[0] == "leaf":
+            _kind, leaf_ordinal, scalars, constituent_count = item
+            yield _stream_leaf_item(
+                path,
+                leaf_ordinal,
+                payload_chars=scalars["payload_chars"],
+                close_reason=scalars["close_reason"],
+                start_boundary=scalars["start_boundary"],
+                end_boundary=scalars["end_boundary"],
+                constituent_count=constituent_count,
+            )
+        else:
+            _kind, leaf_ordinal, constituent_ordinal, constituent = item
+            yield _stream_constituent_item(
+                path,
+                leaf_ordinal,
+                constituent_ordinal,
+                unit_ordinal=constituent["unit_ordinal"],
+                payload_chars=constituent["payload_chars"],
+            )
+
+
+def _scalar_split_header(
+    rel_path: str,
+    plan: "DivisionPlan",
+    tree: "ReductionTreePlan",
+    *,
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    initial_calls: int,
+) -> dict:
+    reduction_calls = len(tree.unit_consolidation_nodes) + len(tree.general_nodes)
+    reduction_levels = max(
+        (node.level for node in tree.all_intermediate_nodes), default=0
+    )
+    return {
+        "path": normalize_rel_path(rel_path),
+        "source_chars": plan.source_chars,
+        "structural_mode": plan.structural_mode,
+        "source_ceiling_chars": _real_int(
+            source_ceiling_chars, "source_ceiling_chars", minimum=1
+        ),
+        "synthesis_manifest_ceiling_chars": _real_int(
+            synthesis_manifest_ceiling_chars,
+            "synthesis_manifest_ceiling_chars",
+            minimum=1,
+        ),
+        "reduction_levels": reduction_levels,
+        "reduction_calls": reduction_calls,
+        "final_calls": 1,
+        "initial_calls": _real_int(initial_calls, "initial_calls", minimum=0),
+    }
+
+
+def _unpack_split_route_entry(entry: object) -> tuple:
+    """Accept either a ``RoutePlanEntry`` (route == 'split') or a raw
+    ``(rel_path, division_plan, reduction_tree, source_ceiling,
+    synthesis_ceiling, initial_calls)`` tuple."""
+    if isinstance(entry, RoutePlanEntry):
+        return (
+            entry.rel_path,
+            entry.division_plan,
+            entry.reduction_tree,
+            entry.division_plan.source_budget_chars,
+            entry.reduction_tree.synthesis_manifest_chars,
+            entry.split_payable_calls,
+        )
+    rel_path, plan, tree, source_ceiling, synthesis_ceiling, initial_calls = entry
+    return (rel_path, plan, tree, source_ceiling, synthesis_ceiling, initial_calls)
+
+
+def build_split_plan_diagnostics(
+    route_entries: Iterable[object],
+    *,
+    item_budget: int | None = None,
+) -> dict:
+    """Bounded ``split_plan`` category from a **one-shot iterable** of split
+    route entries already in canonical normalized-path-ascending order.
+
+    Single streaming pass: every file's descriptor stream is folded into the
+    category digest incrementally (``O(N)`` hash, ``O(1)`` state) while a
+    fixed-size worst-first heap keeps at most ``budget // 2`` ranked file
+    references (bounded plan pointers only, never descriptor copies -->
+    ``O(K)`` space, ``O(N log K)`` ranking). Nested descriptors for the
+    retained files are then streamed from those immutable plans; the remaining
+    budget is spent breadth-first, alternating each file's unit/piece stream
+    with its leaf/constituent stream. ``details_digest`` covers the complete
+    flattened typed stream regardless of retention; every retained nested list
+    additionally publishes its own ``*_total`` / ``*_retained`` / ``*_omitted``
+    / ``*_digest`` over its complete canonical member stream.
+    """
+    budget = MAX_EPHEMERAL_PLAN_DETAIL_ITEMS if item_budget is None else item_budget
+    half = max(budget // 2, 0)
+
+    category = _StreamHasher()
+    total = 0
+    heap: list = []
+    seq = 0
+    for raw in route_entries:
+        rel_path, plan, tree, sc, mc, ic = _unpack_split_route_entry(raw)
+        ic = _real_int(ic, "initial_calls", minimum=0)
+        file_items = 0
+        for item in _iter_split_file_stream(
+            rel_path,
+            plan,
+            tree,
+            source_ceiling_chars=sc,
+            synthesis_manifest_ceiling_chars=mc,
+            initial_calls=ic,
+        ):
+            category.add(item)
+            total += 1
+            file_items += 1
+        if half <= 0:
+            continue
+        # nested_capacity = this file's flattened nested descriptor count
+        # (units + pieces + leaves + constituents) = file_items - 1 header.
+        # A single scalar carried in the bounded heap entry, so ranked
+        # breadth-first quotas can be computed with O(K) scalar arrays.
+        nested_capacity = file_items - 1
+        rank = (-ic, -len(plan.chunks), normalize_rel_path(rel_path))
+        node = (
+            _WorstFirst(rank),
+            seq,
+            (rel_path, plan, tree, sc, mc, ic, nested_capacity),
+        )
+        seq += 1
+        if len(heap) < half:
+            heapq.heappush(heap, node)
+        else:
+            heapq.heappushpop(heap, node)
+    details_digest = category.finish()
+
+    # Retained files, best-first by the frozen display ranking (<= budget // 2).
+    retained_refs = sorted(heap, key=lambda entry: entry[0].rank)
+
+    # True ranked breadth-first allocation of the remaining budget: one position
+    # per active file per round, in rank order, reclaiming a short file's unused
+    # capacity for the earlier still-active files. Computed from O(K) scalar
+    # capacity/quota arrays -- no per-file descriptor iterator is alive here.
+    # Each retained file is then a single streaming re-traversal of its
+    # immutable plan honouring its exact quota (unit/piece stream alternating
+    # with leaf/constituent stream); the complete-list nested digests are folded
+    # into incremental member encoders. Nothing scales with a file's chunk
+    # count: auxiliary memory is O(K + nesting_depth).
+    caps = [entry[2][6] for entry in retained_refs]
+    quotas = _breadth_first_quotas(caps, max(budget - len(retained_refs), 0))
+
+    retained_details: list[dict] = []
+    retained_flat = len(retained_refs)
+    for quota, (_worst, _order, (rel_path, plan, tree, sc, mc, ic, _cap)) in zip(
+        quotas, retained_refs
+    ):
+        shell, placed = _stream_retained_split_file(
+            rel_path, plan, tree, sc, mc, ic, quota
+        )
+        retained_flat += placed
+        retained_details.append(shell)
+
+    return {
+        "details": retained_details,
+        "details_total": total,
+        "details_retained": retained_flat,
+        "details_omitted": total - retained_flat,
+        "details_digest": details_digest,
+    }
+
+
+def _stream_retained_split_file(
+    rel_path: str,
+    plan: "DivisionPlan",
+    tree: "ReductionTreePlan",
+    source_ceiling_chars: int,
+    synthesis_manifest_ceiling_chars: int,
+    initial_calls: int,
+    allowance: int,
+) -> tuple[dict, int]:
+    """Build ONE retained split-file detail by a single streaming re-traversal
+    of the immutable plan. Returns ``(shell, placed_flattened_item_count)``.
+
+    ``allowance`` bounds how many flattened nested items (unit / piece / leaf /
+    constituent) may enter ``shell`` -- alternating the unit/piece stream with
+    the leaf/constituent stream. Every unit and leaf, retained or not, is
+    folded into the ``units_digest`` / ``leaves_digest`` sub-hashers (and each
+    unit's pieces / each leaf's constituents into their own sub-hasher), so the
+    published nested digests cover the complete canonical lists while only one
+    unit's / one leaf's O(1) accumulator is live at a time.
+    """
+    shell = _scalar_split_header(
+        rel_path,
+        plan,
+        tree,
+        source_ceiling_chars=source_ceiling_chars,
+        synthesis_manifest_ceiling_chars=synthesis_manifest_ceiling_chars,
+        initial_calls=initial_calls,
+    )
+    shell["units"] = []
+    shell["leaves"] = []
+
+    # ``units_digest`` / ``leaves_digest`` hash the ACTUAL complete unit / leaf
+    # members -- scalar fields plus the full ordered inner ``pieces`` /
+    # ``constituents`` list (Round 3 P1) -- but the inner array is streamed one
+    # item at a time via ``_actual_member_frame`` (the scalar prefix/suffix
+    # come verbatim from ``canonical_json`` on the empty-array member, so key
+    # ordering and escaping are delegated to ``json.dumps``). Only one member's
+    # O(1) frame is live at a time. The per-unit ``pieces_digest`` / per-leaf
+    # ``constituents_digest`` continue to hash the actual ordered inner
+    # descriptors.
+    units_digest_h = hashlib.sha256()
+    units_digest_h.update(b"[")
+    leaves_digest_h = hashlib.sha256()
+    leaves_digest_h.update(b"[")
+    state = {
+        "units_total": 0,
+        "leaves_total": 0,
+        "placed_units": {},
+        "placed_leaves": {},
+        "u_ordinal": None,
+        "u_members_seen": 0,
+        "u_suffix": None,
+        "u_item_first": True,
+        "u_piece_hasher": None,
+        "u_piece_total": 0,
+        "l_index": None,
+        "l_members_seen": 0,
+        "l_suffix": None,
+        "l_item_first": True,
+        "l_cons_hasher": None,
+        "l_cons_total": 0,
+    }
+
+    def _finalize_unit() -> None:
+        if state["u_ordinal"] is None:
+            return
+        units_digest_h.update(state["u_suffix"])
+        digest = state["u_piece_hasher"].finish()
+        unit_shell = state["placed_units"].get(state["u_ordinal"])
+        if unit_shell is not None:
+            retained_pieces = len(unit_shell["pieces"])
+            unit_shell["pieces_total"] = state["u_piece_total"]
+            unit_shell["pieces_retained"] = retained_pieces
+            unit_shell["pieces_omitted"] = state["u_piece_total"] - retained_pieces
+            unit_shell["pieces_digest"] = digest
+        state["u_ordinal"] = None
+        state["u_suffix"] = None
+        state["u_piece_hasher"] = None
+        state["u_piece_total"] = 0
+
+    def _finalize_leaf() -> None:
+        if state["l_index"] is None:
+            return
+        leaves_digest_h.update(state["l_suffix"])
+        digest = state["l_cons_hasher"].finish()
+        leaf_shell = state["placed_leaves"].get(state["l_index"])
+        if leaf_shell is not None:
+            retained_cons = len(leaf_shell["constituents"])
+            leaf_shell["constituents_total"] = state["l_cons_total"]
+            leaf_shell["constituents_retained"] = retained_cons
+            leaf_shell["constituents_omitted"] = (
+                state["l_cons_total"] - retained_cons
+            )
+            leaf_shell["constituents_digest"] = digest
+        state["l_index"] = None
+        state["l_suffix"] = None
+        state["l_cons_hasher"] = None
+        state["l_cons_total"] = 0
+
+    def _consume_unit(item: tuple):
+        if item[0] == "unit":
+            _finalize_unit()
+            _kind, ordinal, scalars, _piece_count = item
+            if state["u_members_seen"]:
+                units_digest_h.update(b",")
+            state["u_members_seen"] += 1
+            prefix, suffix = _actual_member_frame(scalars, "pieces")
+            units_digest_h.update(prefix)
+            state["u_suffix"] = suffix
+            state["u_item_first"] = True
+            state["u_ordinal"] = ordinal
+            state["u_piece_hasher"] = _StreamHasher()
+            state["u_piece_total"] = 0
+            state["units_total"] += 1
+            return ("unit", scalars)
+        _kind, unit_ordinal, _piece_ordinal, piece = item
+        if not state["u_item_first"]:
+            units_digest_h.update(b",")
+        state["u_item_first"] = False
+        units_digest_h.update(canonical_json(piece).encode("utf-8"))
+        state["u_piece_hasher"].add(piece)
+        state["u_piece_total"] += 1
+        return ("piece", unit_ordinal, piece)
+
+    def _consume_leaf(item: tuple):
+        if item[0] == "leaf":
+            _finalize_leaf()
+            _kind, index, scalars, _con_count = item
+            if state["l_members_seen"]:
+                leaves_digest_h.update(b",")
+            state["l_members_seen"] += 1
+            prefix, suffix = _actual_member_frame(scalars, "constituents")
+            leaves_digest_h.update(prefix)
+            state["l_suffix"] = suffix
+            state["l_item_first"] = True
+            state["l_index"] = index
+            state["l_cons_hasher"] = _StreamHasher()
+            state["l_cons_total"] = 0
+            state["leaves_total"] += 1
+            return ("leaf", index, scalars)
+        _kind, index, _con_ordinal, constituent = item
+        if not state["l_item_first"]:
+            leaves_digest_h.update(b",")
+        state["l_item_first"] = False
+        leaves_digest_h.update(canonical_json(constituent).encode("utf-8"))
+        state["l_cons_hasher"].add(constituent)
+        state["l_cons_total"] += 1
+        return ("constituent", index, constituent)
+
+    def _place(placeable: tuple) -> bool:
+        kind = placeable[0]
+        if kind == "unit":
+            scalars = placeable[1]
+            unit_shell = dict(scalars)
+            unit_shell["pieces"] = []
+            shell["units"].append(unit_shell)
+            state["placed_units"][scalars["unit_ordinal"]] = unit_shell
+            return True
+        if kind == "piece":
+            parent = state["placed_units"].get(placeable[1])
+            if parent is None:
+                return False
+            parent["pieces"].append(
+                {key: placeable[2][key] for key in SPLIT_PLAN_PIECE_FIELDS}
+            )
+            return True
+        if kind == "leaf":
+            leaf_shell = dict(placeable[2])
+            leaf_shell["constituents"] = []
+            shell["leaves"].append(leaf_shell)
+            state["placed_leaves"][placeable[1]] = leaf_shell
+            return True
+        parent = state["placed_leaves"].get(placeable[1])
+        if parent is None:
+            return False
+        parent["constituents"].append(
+            {key: placeable[2][key] for key in SPLIT_PLAN_CONSTITUENT_FIELDS}
+        )
+        return True
+
+    unit_gen = _iter_split_unit_items(plan)
+    leaf_gen = _iter_split_leaf_items(plan)
+    ug_done = lg_done = False
+    turn_unit = True
+    placed_count = 0
+    while placed_count < allowance and not (ug_done and lg_done):
+        if turn_unit and not ug_done:
+            raw = next(unit_gen, None)
+            if raw is None:
+                ug_done = True
+            else:
+                if _place(_consume_unit(raw)):
+                    placed_count += 1
+            turn_unit = False
+        elif not turn_unit and not lg_done:
+            raw = next(leaf_gen, None)
+            if raw is None:
+                lg_done = True
+            else:
+                if _place(_consume_leaf(raw)):
+                    placed_count += 1
+            turn_unit = True
+        else:
+            turn_unit = not turn_unit
+
+    # Drain the remainder for the nested full-list digests (no placement).
+    for raw in unit_gen:
+        _consume_unit(raw)
+    _finalize_unit()
+    for raw in leaf_gen:
+        _consume_leaf(raw)
+    _finalize_leaf()
+
+    units_total = state["units_total"]
+    leaves_total = state["leaves_total"]
+    units_digest_h.update(b"]")
+    leaves_digest_h.update(b"]")
+    shell["units_total"] = units_total
+    shell["units_retained"] = len(shell["units"])
+    shell["units_omitted"] = units_total - len(shell["units"])
+    shell["units_digest"] = f"sha256:{units_digest_h.hexdigest()}"
+    shell["leaves_total"] = leaves_total
+    shell["leaves_retained"] = len(shell["leaves"])
+    shell["leaves_omitted"] = leaves_total - len(shell["leaves"])
+    shell["leaves_digest"] = f"sha256:{leaves_digest_h.hexdigest()}"
+    return shell, placed_count
+
+
+def build_flat_plan_diagnostics(
+    records: Iterable[Mapping],
+    *,
+    rank_key,
+    item_budget: int | None = None,
+) -> dict:
+    """Bounded flat diagnostic category (``truncate_plan`` / ``split_blocked``).
+
+    *records* is a **one-shot iterable** of value-safe descriptors already in
+    canonical order (normalized path ascending, then the closed category reason
+    where it applies). One streaming pass: each record is folded into the
+    full-stream digest incrementally and pushed through a fixed-size worst-first
+    heap keyed by *rank_key* (the frozen display ranking). Only that retained
+    heap is sorted for presentation -- the complete record collection is never
+    materialized. ``details_digest`` covers the complete canonical stream.
+    """
+    budget = MAX_EPHEMERAL_PLAN_DETAIL_ITEMS if item_budget is None else item_budget
+    category = _StreamHasher()
+    total = 0
+    heap: list = []
+    seq = 0
+    for record in records:
+        category.add(record)
+        total += 1
+        if budget <= 0:
+            continue
+        node = (_WorstFirst(tuple(rank_key(record))), seq, dict(record))
+        seq += 1
+        if len(heap) < budget:
+            heapq.heappush(heap, node)
+        else:
+            heapq.heappushpop(heap, node)
+    retained = [record for _worst, _order, record in sorted(heap, key=lambda n: n[0].rank)]
+    return {
+        "details": retained,
+        "details_total": total,
+        "details_retained": len(retained),
+        "details_omitted": total - len(retained),
+        "details_digest": category.finish(),
+    }
+
+
+def truncate_plan_descriptor(
+    *,
+    path: str,
+    source_chars: int,
+    resolved_strategy: str,
+    max_content_chars: int,
+    head_ratio: float,
+    marker_chars: int,
+    initial_calls: int,
+) -> dict:
+    """One value-safe truncate routing descriptor (section 5.8 G).
+
+    ``retained_head_chars`` / ``retained_tail_chars`` / ``omitted_chars`` use
+    exactly the execution truncation arithmetic (``truncate_for_llm``): the
+    marker is reserved inside the ceiling, the head takes ``int(budget *
+    head_ratio)``, the tail the remainder, and everything else is omitted.
+    """
+    source_chars = _real_int(source_chars, "source_chars", minimum=0)
+    max_content_chars = _real_int(max_content_chars, "max_content_chars", minimum=1)
+    if source_chars <= max_content_chars:
+        head = source_chars
+        tail = 0
+    elif max_content_chars <= marker_chars:
+        head = max_content_chars
+        tail = 0
+    else:
+        budget = max_content_chars - marker_chars
+        head = int(budget * head_ratio)
+        tail = budget - head
+    omitted = source_chars - head - tail
+    if omitted < 0:
+        head = source_chars
+        tail = 0
+        omitted = 0
+    return {
+        "path": normalize_rel_path(path),
+        "source_chars": source_chars,
+        "resolved_strategy": resolved_strategy,
+        "retained_head_chars": head,
+        "retained_tail_chars": tail,
+        "omitted_chars": omitted,
+        "initial_calls": _real_int(initial_calls, "initial_calls", minimum=0),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3389,7 +5527,6 @@ def validate_recovered_tree(
     imports: Sequence[str] = (),
     language: str = "",
     resolved_shape: object | None = None,
-    max_content_chars: int | None = None,
     existing_quarantine: Sequence[QuarantineEntry] = (),
 ) -> tuple[tuple[ReductionNodeState, ...], tuple[QuarantineEntry, ...]]:
     """Full section-11 topological validation of one file's recovered nodes.
@@ -3405,6 +5542,11 @@ def validate_recovered_tree(
     narrative extraction and final-manifest assembly) rather than trusting
     the checkpoint's own claim. A node whose recomputed input digest no
     longer matches is rejected, which prunes every ancestor in turn.
+
+    The recomputed final manifest is bounded by ``tree.synthesis_manifest_chars``
+    (section 5.7) -- never a separately supplied source ceiling -- so recovery
+    validation can never reconstruct a final manifest under a different budget
+    than the one *tree* was actually planned with.
 
     Returns ``(retained_nodes, quarantine_entries)``. A node reached through
     a known planned ID that fails validation is quarantined (bounded,
@@ -3555,7 +5697,7 @@ def validate_recovered_tree(
                 root_narratives=refine_narrative_inputs(raw_narratives),
                 root_coverage_leaf_ids=final_node.leaf_ids,
                 ledger=ledger,
-                max_chars=max_content_chars,
+                max_chars=tree.synthesis_manifest_chars,
             )
             _keep(
                 node,

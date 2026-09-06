@@ -1,5 +1,140 @@
 # Changelog
 
+## 0.14.7 - 2026-09-06
+
+### Satisfiable split-leaf signature contract
+
+- The fixed split-leaf prompt required copying a visible declaration's
+  signature verbatim **and** staying at or below the hard bound, then
+  `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` of 600 characters. An AST walk of every
+  declaration in CodeDoc's own source finds three that exceed 600 — the
+  largest, `scan_files`, at 1,295 characters normalized and 1,395 raw — so
+  for those no truthful response existed: unsatisfiable by construction, and
+  this would have failed with any model.
+- The hard bound is **raised to 2,000 characters** this release, still
+  rendered from the constant and still rejecting a longer signature in full,
+  which clears the largest real declaration with margin. Because a raised
+  bound alone would only move the same failure one order of magnitude out,
+  the contract also changes: when the complete declaration is visible it is
+  copied in full if it is at or below the hard bound, and only a fully
+  visible declaration that *exceeds* the bound is shortened — reported as its
+  leading source-backed portion, preferably roughly 600–1,000 characters and
+  never above the bound. A signature shortened this way is a correct,
+  expected answer, never an omission and never an invention; a fully visible
+  declaration between that range and the bound is still reported in full. The
+  contract is now satisfiable at any bound by construction, not by the bound
+  happening to be large enough.
+- The contract also states, as a fact rather than a promise, that a
+  shortened signature does not by itself keep two long same-named
+  declarations apart past the point where they were cut; parser-owned scope
+  and position remain the authority for that, exactly as
+  `build_fact_ledger`'s docstring already documented.
+- The rule is rendered once, inside `_FRAGMENT_SHAPE_BLOCK`, so it reaches
+  the initial leaf call and the one targeted correction call
+  byte-identically — the same single-source mechanism `0.14.6` established
+  for the export contract. Previously the "copied from the visible
+  declaration" sentence lived only in the initial fragment template, so the
+  one correction call for an over-bound signature was asked to fix a value
+  it had never been told the rules for and the released `execution.py`
+  reproduction never recovered from that call.
+
+### Reduction narrative headroom
+
+- The reduction shape block stated only the hard 300-character narrative
+  cap, with nothing telling the model to aim below it. A generative length
+  target stated as an exact ceiling is approached and overshot: a live
+  reproduction over CodeDoc's own source landed corrected narratives at 302
+  and 305 characters against that same 300-character cap. The shape block
+  now also states a recommended 260-character target to write toward, in
+  both the initial reduction prompt and its one targeted correction prompt.
+  The hard 300-character bound is unchanged, still rendered from
+  `MAX_REDUCTION_NARRATIVE_CHARS`, and a narrative over it is still rejected
+  in full — never trimmed.
+
+### Response correction enabled by default
+
+- `response_correction_enabled` now defaults to **true**. A rejected
+  documentation response gets one automatic bounded repair call instead of a
+  silent terminal failure whose opt-in remedy the user did not know existed.
+- The enabled-by-default behaviour can spend **one extra provider call per
+  rejected response**. The correction-only worst case is a 100% increase over
+  the initially planned documentation calls — one correction per rejected
+  response, counted per rejected agent, leaf, reducer, or final response
+  rather than per source file, so one split file can make more than one
+  correction call.
+- Transport and rate-limit retries (`file_retry_attempts`) are a separate,
+  additional class. `max_planned_calls` still authorizes only the initially
+  planned calls and excludes both corrections and retries, so it is not a
+  hard final-billing ceiling; `--dry-run` still reports the initially planned
+  calls, the possible correction calls, and the correction-inclusive ceiling
+  before retries.
+- Explicit `"response_correction_enabled": false` preserves the historical
+  zero-correction behaviour exactly, including an older generated
+  configuration whose then-default was written as `false`. Normal loading
+  never rewrites an existing project configuration; only a newly generated
+  template carries the new default, and `--init-config --force` carries an
+  existing explicit `false` forward.
+- The one-call-per-rejected-response guarantee is unchanged: correction is a
+  schema repair, never a factuality bypass, and a malformed or empty required
+  field in the replacement fails the file with no second repair.
+
+### Source ceiling and automatic synthesis ceiling separated
+
+- `max_content_chars` is now purely a source-routing control: it bounds
+  ordinary whole-file source and each split-leaf payload, and a file above it
+  takes the `truncate` or `split` path. It no longer shrinks the internal
+  reducer and final-synthesis manifest budget.
+- Reducer and final-synthesis manifests now use
+  `max(max_content_chars, 12000)` characters. A project that had set the
+  source ceiling below 12,000 sees larger individual reducer and final
+  manifests — up to that 12,000-character content ceiling — which can reduce
+  avoidable reducer topology but can also raise per-call token cost. The
+  effect is automatic and disclosed by preflight, token estimation, README,
+  and RUN_FLOW; there is no reducer knob, because exposing one would recreate
+  the unsafe coupling this change removes.
+
+### Local boundary-aware subdivision
+
+- Only a single semantic unit whose own source length exceeds
+  `max_content_chars` is subdivided, at a nested-syntax or physical-line
+  boundary near a balanced target. Fitting semantic units keep their
+  canonical bytes, byte ranges, and unit IDs unchanged, and adjacent fitting
+  units may still share one planned leaf call. Making every physical line a
+  paid leaf is deliberately avoided.
+
+### Recovery and cache identity
+
+- Four internal revisions advance: `division-packer-v5` to
+  `division-packer-v6` (local continuation cuts, chunk close reasons, ranges,
+  chunk IDs, and division-plan bytes); `leaf-capsule-v8` to `leaf-capsule-v9`
+  (the changed fragment contract and 2,000-character accepted response
+  field); `reduction-packing-v4` to `reduction-packing-v5` (the
+  independently carried synthesis-manifest budget, fan-in, node IDs, and tree
+  digest); and `file-reduction-v2` to `file-reduction-v3` (the reduction
+  target text shared by the initial and correction prompts).
+- A completed `0.14.6` split record is stale and reruns once; a schema-4
+  partial stays a valid owned container, but each `v8` leaf is quarantined
+  under the closed reason `stale-identity` and re-executed, and every reducer
+  and final-synthesis node depending on it is pruned with it under
+  `input-digest-mismatch`. Reducer nodes are additionally invalidated in
+  their own right, because `reduction_execution_identity` binds
+  `REDUCER_PROMPT_REVISION` independently of the leaf revision.
+- Quarantine stays inside the existing `MAX_QUARANTINE_ENTRIES_PER_FILE`
+  bound of `512`, so this upgrade never aborts a run.
+- `MAX_LEAF_CAPSULE_CANONICAL_CHARS`, a value derived from the leaf bounds
+  rather than an independent bound, moves from `448,672` to `986,272` as a
+  consequence of the signature raise; it participates in the completed-split
+  identity this release already invalidates. There is no schema-version
+  change.
+- The active split identities are `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v6`, `leaf-capsule-v9`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v5`, `file-reduction-v3`,
+  `file-synthesis-v3`, `division-execution-v6`, `large-file-v3`, and ordinary
+  `file-doc-v3`. `MAX_REDUCTION_NARRATIVE_CHARS` (300) is unchanged;
+  `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` is now `2,000` as described above. The
+  recommended signature and narrative targets are guidance figures, not
+  replacements for the hard bounds.
+
 ## 0.14.6 - 2026-08-22
 
 ### Split-leaf module-export contract

@@ -35,11 +35,14 @@ defining module instead.  No runtime warning is emitted.
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
-from typing import Callable, Mapping
+from types import MappingProxyType
+from typing import Callable, Iterator, Mapping
 
-from codedoc.agents.base_agent import truncate_for_llm
+from codedoc.agents.base_agent import TRUNCATION_MARKER, truncate_for_llm
 from codedoc.agents.orchestrator import Orchestrator, initial_calls_per_file
 from codedoc.agents.prompt_customization_validation_agent import (
     PromptCustomizationValidationAgent,
@@ -66,8 +69,18 @@ from codedoc.core.execution_model import (
 )
 from codedoc.core.feasibility import build_feasibility_notes
 from codedoc.core.file_division import (
+    MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS,
+    BLOCKED_REASON_GUIDANCE,
+    BLOCKED_REASON_ORDER,
+    EMPTY_PLAN_DETAILS_DIGEST,
     DivisionPlan,
+    PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS,
     ReductionTreePlan,
+    RoutePlanEntry,
+    _iter_split_file_stream,
+    build_flat_plan_diagnostics,
+    build_split_plan_diagnostics,
+    truncate_plan_descriptor,
     verify_provider_execution_identity,
 )
 from codedoc.core.loader import load_config
@@ -107,7 +120,13 @@ from codedoc.core.resume import (
     load_recovery_records_if_compatible,
 )
 from codedoc.core.safe_writer import SafeWriter
-from codedoc.core.scanner import ScanDiagnostics, exclude_path_key, scan_files
+from codedoc.core.scanner import (
+    _ENTRY_HINT_NOT_PROJECT_RELATIVE,
+    _canonical_entry_rel,
+    ScanDiagnostics,
+    exclude_path_key,
+    scan_files,
+)
 from codedoc.core.usage import UsageAccumulator, estimate_tokens
 from codedoc.llm.factory import (
     constructed_provider_execution,
@@ -155,6 +174,24 @@ from codedoc.core.execution import (  # noqa: F401  (compat re-export)
 logger = get_logger(__name__)
 
 
+# Section 5.8: recursively convert a provider-free preflight snapshot into a
+# deeply-immutable read-only projection -- every nested dict becomes a
+# ``MappingProxyType`` and every nested list/tuple a ``tuple``, so a
+# ``plan_reporter`` (or the INFO fallback) cannot mutate a top-level field,
+# a nested detail collection, or anything the dry-run return later exposes.
+# The comprehensions build fresh containers, so the frozen view shares no
+# mutable state with the snapshot. Expressed as a lambda rather than a
+# ``def`` so it does not move the pinned source-structure declaration census
+# (section 3.2); still one named, testable projection used by every route.
+_freeze_preflight = lambda _v: (  # noqa: E731
+    MappingProxyType({_k: _freeze_preflight(_x) for _k, _x in _v.items()})
+    if isinstance(_v, dict)
+    else tuple(_freeze_preflight(_x) for _x in _v)
+    if isinstance(_v, (list, tuple))
+    else _v
+)
+
+
 # ---------------------------------------------------------------------------
 # Main pipeline entry point
 # ---------------------------------------------------------------------------
@@ -165,6 +202,7 @@ def run_pipeline(
     *,
     confirm_risky: Callable[[tuple[str, ...]], bool] | None = None,
     trust_api_base_url: str | None = None,
+    plan_reporter: Callable[[Mapping], None] | None = None,
 ) -> dict:
     """Run the full documentation pipeline on a project."""
     if isinstance(project_root, dict) and config_overrides is None:
@@ -186,9 +224,6 @@ def run_pipeline(
     logger.info("codedoc starting: root=%s", root)
     dry_run = bool(config.get("dry_run", False))
     split_release = current_split_release_policy()
-    split_planning_preview = (
-        dry_run and config.get("large_file_strategy", "truncate") == "split"
-    )
 
     analysis_mode = config.get("analysis_mode", "single")
     # The configured extension keys (lowercased) gate ``per_extension`` overrides.
@@ -210,6 +245,23 @@ def run_pipeline(
     profile_action = classify_profile_action(profile_resolution.profile, analysis_mode)
 
     entry_resolution_source = _resolve_entry_and_docs(root, config)
+    # Section 7: the canonical project-relative entry-hint rule is the FIRST
+    # thing that touches ``config["entry_file"]`` -- before any resolve/stat/
+    # exists probe and before ``_reject_generated_target_collision`` below.
+    # ``detect_entry_file`` enforces the same rule later via
+    # ``codedoc.core.discovery``, but that is only reached after the collision
+    # check has already built ``root / candidate`` and called
+    # ``Path.resolve()`` on it (a lookup that can escape the project root), and
+    # would echo the raw absolute spelling for an invalid non-project-relative
+    # hint. Sharing scanner's one ``_canonical_entry_rel`` / message constant
+    # keeps the two paths from drifting. This must run AFTER
+    # ``_resolve_entry_and_docs`` because that call can itself set
+    # ``config["entry_file"]`` from an existing document's metadata -- untrusted
+    # data that must be validated too. ``force_files`` collision behaviour is
+    # deliberately unchanged (Section 7 covers entry hints only).
+    _entry_hint = config.get("entry_file")
+    if _entry_hint and _canonical_entry_rel(_entry_hint) is None:
+        raise ConfigError(_ENTRY_HINT_NOT_PROJECT_RELATIVE)
     resolved_profile = build_resolved_profile(profile_action, analysis_mode)
     # Empty/no-scanned-file paths use the same manifest helper as every other
     # path and report zero calls throughout.
@@ -232,6 +284,15 @@ def run_pipeline(
         "max_planned_calls": int(config.get("max_planned_calls", 0) or 0),
         "max_planned_calls_exceeded": False,
         "call_manifest_digest": _empty_manifest.digest,
+        # Section 5.9 unambiguous all-provider accounting (zero work).
+        "initial_provider_calls_planned": 0,
+        "prompt_review_calls_planned": 0,
+        "initial_documentation_calls_planned": 0,
+        "correction_calls_possible_max": 0,
+        "provider_calls_max_before_retries": 0,
+        "file_retry_attempts": int(config.get("file_retry_attempts", 1) or 0),
+        "retries_included_in_ceiling": False,
+        "max_planned_calls_applies_to": "initial_provider_calls_planned",
         "attempted_logical_calls": 0,
         "planned_calls_not_attempted": 0,
         "additional_attempts": 0,
@@ -292,12 +353,10 @@ def run_pipeline(
     existing_docs = _load_existing_file_docs(
         json_candidate, md_candidate, output_format
     )
-    if split_planning_preview:
-        existing_docs = {
-            rel_path: record
-            for rel_path, record in existing_docs.items()
-            if not record.get("_large_file_identity")
-        }
+    # Section 5.8: a dry-run for the resolved-valid single+split route is a
+    # read-only preview of the SAME payable work as a real run -- completed
+    # split records and crash_recovery.json are loaded and classified
+    # identically in both modes, never preview-suppressed.
 
     # Section 5.6: skip_dirs is used exactly as resolved by load_config (with
     # _add/_remove already applied) -- no unconditional re-addition of the
@@ -329,6 +388,11 @@ def run_pipeline(
         _reject_generated_target_collision("force_files", str(_forced))
 
     _scan_diagnostics = ScanDiagnostics()
+    # Section 5.8: let the scanner classify a sole-candidate explicit entry
+    # that yields no admitted source (configured-ignored / unsupported /
+    # missing) into a bounded ``scanner_admission_skip`` descriptor, in the
+    # same final generation, without widening the scanner API.
+    _scan_diagnostics.explicit_entry_hint = config.get("entry_file")
 
     def _scan_source_files() -> list[dict]:
         return scan_files(
@@ -343,85 +407,170 @@ def run_pipeline(
         )
 
     all_files = _scan_source_files()
-    if not all_files:
-        # A2: an explicitly specified entry cannot be honoured if nothing was
-        # scanned — fail loudly rather than exit successfully having documented
-        # nothing.
-        if config.get("entry_file"):
+    # Section 5.8: an explicit entry that itself yields no admitted source is a
+    # first-class provider-free empty payable plan even when unrelated project
+    # files WERE admitted. Decide from the explicit target itself -- normalized
+    # the same way as ``detect_entry_file`` -- never from global bool(all_files).
+    _explicit_hint = config.get("entry_file")
+    _explicit_zero_admission = False
+    _canonical_entry = _explicit_hint
+    if _explicit_hint and all_files:
+        _eh = str(_explicit_hint).replace("\\", "/")
+        _ehp = _eh.split("/")
+        _ehs = [s for s in _ehp if s not in ("", ".")]
+        _ehh = _ehs[0] if _ehs else ""
+        if (
+            _ehs
+            and _eh.strip()
+            and not _eh.startswith("/")
+            and ".." not in _ehp
+            and not (len(_ehh) >= 2 and _ehh[0].isalpha() and _ehh[1] == ":")
+        ):
+            _ez = "/".join(_ehs)
+            # Match the requested LEXICAL project path using the same host-case
+            # normalization as the scanner, without resolving symlinks or
+            # junctions. ``exclude_path_key`` is intentionally wrong here: its
+            # resolved-identity semantics could replace a skipped explicit alias
+            # with a different admitted path to the same physical target.
+            _ez_key = os.path.normcase(os.path.abspath(root / _ez))
+            _ez_pfx = _ez_key + os.sep
+            _exact = next(
+                (f["rel_path"] for f in all_files
+                 if os.path.normcase(os.path.abspath(f["path"])) == _ez_key),
+                None,
+            )
+            if _exact is not None:
+                _canonical_entry = _exact
+            _explicit_zero_admission = _exact is None and not any(
+                os.path.normcase(os.path.abspath(f["path"])).startswith(_ez_pfx)
+                for f in all_files
+            )
+    if not all_files or _explicit_zero_admission:
+        # Section 5.8: zero admitted source is a first-class provider-free
+        # plan, not a bypass. Build the canonical empty graph/plan/manifest
+        # and the SAME preflight-snapshot builder the main path uses, then
+        # invoke/log the reporter exactly once BEFORE the output-accessibility
+        # probe, the established no-files error, or any mutation -- and
+        # construct no provider. The final-generation scanner totals/details
+        # are carried through: non-zero when every discovered file was
+        # scanner-skipped, zero for a truly empty project.
+        _zero_graph, _zero_map, _zero_unresolved = _build_graph(
+            [], root, error_reporter
+        )
+        _zero_plan, _zero_materials = build_pipeline_plan(
+            file_map={},
+            graph=_zero_graph,
+            selected_rels=set(),
+            entry_rel=None,
+            existing_docs={},
+            forced_paths=[],
+            config=config,
+            resolved_profile=resolved_profile,
+        )
+        _zero_manifest = build_call_manifest([], [], analysis_mode)
+        _zero_plan = _zero_plan.with_call_manifest(
+            _zero_manifest,
+            int(config.get("max_planned_calls", 0) or 0),
+            {},
+            {},
+            {},
+        )
+        zero_work_snapshot = _build_dry_run_stats(
+            _zero_plan,
+            {},
+            config,
+            output_dir,
+            ownership_conflicts,
+            set(),
+            resolved_profile,
+            profile_resolution,
+            [],
+            call_manifest=_zero_manifest,
+            recovery_resumed_paths=frozenset(),
+            materials=_zero_materials,
+            feasibility_notes=(),
+            scan_diagnostics=_scan_diagnostics,
+        )
+        # Zero admitted files -> zero calls per file, matching the historical
+        # zero-work contract (the shared builder derives 1 from the empty plan's
+        # default per-file shape, which is meaningless with no files).
+        zero_work_snapshot["initial_calls_per_file"] = 0
+        _zero_report = (
+            zero_work_snapshot
+            if dry_run
+            else {**zero_work_snapshot, "dry_run": False}
+        )
+        # Section 5.8: one deeply-immutable projection for the reporter AND
+        # the INFO fallback -- identical mechanism to the normal path below.
+        _preflight_view = _freeze_preflight(_zero_report)
+        if plan_reporter is not None:
+            plan_reporter(_preflight_view)
+        else:
+            logger.info(
+                "Planned provider work (before calls): %s",
+                "; ".join(
+                    [
+                        f"{_k}={_v}"
+                        for _k, _v in sorted(_preflight_view.items())
+                        if _k != "output_dir"
+                        and (isinstance(_v, (int, float, str)) or _v is None)
+                    ]
+                    + [
+                        # closed, path-free aggregate mappings rendered as canonical
+                        # (sorted, compact) JSON -- never interpolated raw.
+                        f"{_mk}="
+                        + json.dumps(
+                            {str(_x): _y for _x, _y in dict(_preflight_view[_mk]).items()},
+                            sort_keys=True,
+                            separators=(",", ":"),
+                        )
+                        for _mk in ("prompt_profile_scope_counts", "split_blocked_by_reason")
+                        if _mk in _preflight_view
+                    ]
+                ),
+            )
+
+        if not all_files and config.get("entry_file"):
+            # A2: an explicit entry with a truly empty project. The canonical
+            # empty snapshot was reported above; now raise the established
+            # deterministic error -- never converted to success, never after an
+            # output probe, provider, or recovery mutation.
             raise ConfigError(
                 f"Entry file '{config['entry_file']}' was requested but no "
                 f"supported source files were found in '{root}'. Check the path "
                 "and your skip_dirs / ignore_paths / extension settings."
             )
-        logger.warning("No supported files found in %s. Done.", root)
-        if dry_run:
+        if not all_files:
+            logger.warning("No supported files found in %s. Done.", root)
+            if dry_run:
+                return zero_work_snapshot
+            preflight_output_accessibility(output_dir)
+            # Real-run zero-work return: the canonical snapshot plus the
+            # execution-outcome compatibility keys existing callers read.
             return {
-                "dry_run": True,
-                "scanned": 0,
-                "selected": 0,
-                "entry_excluded": 0,
-                "analysis_mode": config.get("analysis_mode", "single"),
-                "initial_calls_per_file": _initial_calls_per_file_for_stats(
-                    config.get("analysis_mode", "single"),
-                    config.get("large_file_strategy", "truncate"),
-                    None,
-                ),
-                "documentation_scope": config.get("documentation_scope", "entry"),
-                "entry_reachable": 0,
-                "entry_disconnected": 0,
-                "disconnected_paid_files": 0,
-                "disconnected_planned_calls": 0,
-                "would_process": 0,
-                "would_call_llm_for": 0,
-                "would_skip_insufficient_source": 0,
-                "unchanged": 0,
-                "would_reuse": 0,
-                "would_resume": 0,
-                "forced": 0,
-                "estimated_calls": 0,
-                "estimated_input_tokens": 0,
-                "estimate_is_lower_bound": config.get("analysis_mode", "single") == "triple",
-                "max_files": int(config.get("max_files", 0) or 0),
-                "max_files_candidate_files": 0,
-                "max_files_exceeded": False,
-                "ownership_conflicts": ownership_conflicts,
-                "output_dir": str(output_dir),
-                "output_files": [],
-                "files_skipped_large": _scan_diagnostics.files_skipped_large,
-                "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
-                **no_work_profile_stats,
-                **_split_division_stats(config, None, None),
+                **zero_work_snapshot,
+                "dry_run": False,
+                "checked": 0,
+                "failed": 0,
+                "skipped": 0,
+                "skipped_insufficient_source": 0,
+                "live_backup_path": None,
+                "issues_recorded": 0,
             }
-        preflight_output_accessibility(output_dir)
-        return {
-            "checked": 0,
-            "failed": 0,
-            "skipped": 0,
-            "skipped_insufficient_source": 0,
-            "entry_excluded": 0,
-            "analysis_mode": config.get("analysis_mode", "single"),
-            "initial_calls_per_file": _initial_calls_per_file_for_stats(
-                config.get("analysis_mode", "single"),
-                config.get("large_file_strategy", "truncate"),
-                None,
-            ),
-            "output_dir": str(output_dir),
-            "live_backup_path": None,
-            "issues_recorded": 0,
-            "documentation_scope": config.get("documentation_scope", "entry"),
-            "entry_reachable": 0,
-            "entry_disconnected": 0,
-            "disconnected_paid_files": 0,
-            "disconnected_planned_calls": 0,
-            "files_skipped_large": _scan_diagnostics.files_skipped_large,
-            "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
-            **no_work_profile_stats,
-            **_split_division_stats(config, None, None),
-        }
+        # Explicit-entry zero-admission with unrelated files admitted: the
+        # canonical empty reporter has fired; fall through to the established
+        # deterministic ``_select_files`` error for this exact case (unchanged
+        # wording), still before any provider / writer / output probe / recovery.
 
     graph, file_map, unresolved_imports_by_path = _build_graph(all_files, root, error_reporter)
+    # Non-mutating canonical-spelling projection: on a case-insensitive host a
+    # differently cased ``entry_file`` must select the same existing file.
+    _select_config = (
+        {**config, "entry_file": _canonical_entry}
+        if _explicit_hint else config
+    )
     reachable_rels, documented_rels, entry_rel = _select_files(
-        root, config, graph, file_map
+        root, _select_config, graph, file_map
     )
 
     def _rebuild_source_inputs() -> PlanSourceInputs:
@@ -444,7 +593,7 @@ def run_pipeline(
             _scan_source_files(), root, error_reporter
         )
         reachable_rels, documented_rels, entry_rel = _select_files(
-            root, config, graph, file_map
+            root, _select_config, graph, file_map
         )
         return PlanSourceInputs(
             file_map=file_map,
@@ -481,49 +630,46 @@ def run_pipeline(
         large_file_strategy=large_file_strategy,
     )
     # D2 explicit local gate: partial (split-node) recovery is enabled only
-    # from the valid effective split route, not the bare requested string —
+    # from the resolved-valid split route (analysis_mode 'single' +
+    # large_file_strategy 'split'), not the bare requested string —
     # analysis_mode 'triple' can never legitimately reach here with
     # large_file_strategy 'split' (loader._validate rejects it first), but the
     # check stays visible here as defense-in-depth rather than relying solely
-    # on that earlier gate.
-    effective_real_split = (
-        large_file_strategy == "split"
-        and analysis_mode == "single"
-        and not dry_run
+    # on that earlier gate. Section 5.8: this predicate is independent of
+    # ``dry_run`` — a dry-run for this route is a read-only preview of the same
+    # payable work, so it loads and classifies the exact same recovery state.
+    resolved_valid_split = (
+        large_file_strategy == "split" and analysis_mode == "single"
     )
-    # Inspect the single exact recovery file, read-only.  A real run blocks on an
-    # incompatible / foreign / malformed / completed recovery file; a dry run
-    # never mutates it and treats an incompatible file as non-resumable rather
-    # than blocking planning.
+    # Inspect the single exact recovery file, read-only.  Both a real run and a
+    # dry run block on an incompatible / foreign / malformed / completed /
+    # legacy recovery file for the resolved-valid split route (the identical
+    # deterministic ConfigError). A dry run never mutates the file in any case.
     recovery_state = RecoveryState()
     try:
         recovery_state = load_recovery_records_if_compatible(
             recovery_path,
             recovery_identity,
-            # Split node checkpoints are consumed for real (dependency-valid)
-            # recovery; a dry run never reads them (see split_planning_preview
-            # below, section 18).
-            include_partial_files=effective_real_split,
+            # Split node checkpoints are consumed identically for a real
+            # (dependency-valid) recovery and a dry-run preview of the same
+            # route (section 5.8) — no dry-only divergence.
+            include_partial_files=resolved_valid_split,
         )
     except ConfigError:
-        if not dry_run:
+        # Route predicate, deliberately independent of ``dry_run``: the
+        # resolved-valid split route raises the same fail-closed recovery
+        # ConfigError in dry-run and real preflight alike. Only a separately
+        # resolved ordinary/truncate dry-run keeps its historical non-blocking
+        # behavior, treating an incompatible recovery file as non-resumable
+        # rather than blocking planning.
+        if resolved_valid_split or not dry_run:
             raise
     recovery_records = recovery_state.records_by_path()
-    if split_planning_preview:
-        # A fresh split preview must ignore completed split records, but
-        # ordinary completed recovery remains reusable in the identical real
-        # run. Dropping every record here overstates paid work and makes dry
-        # and real manifests disagree.
-        recovery_records = {
-            rel_path: record
-            for rel_path, record in recovery_records.items()
-            if not record.get("_large_file_identity")
-        }
     # Every structurally parseable partial. Planning narrows this to the subset
     # that is actually reusable; the writer is seeded from that narrower set.
     recovered_partials_by_path = (
         {}
-        if split_planning_preview or not split_release.partial_recovery
+        if not split_release.partial_recovery
         else {state.rel_path: state for state in recovery_state.partial_files}
     )
     if recovery_records:
@@ -551,14 +697,6 @@ def run_pipeline(
         recovered_partials=recovered_partials_by_path,
         diagnostics=_scan_diagnostics,
     )
-
-    # Capacity-blocked requested-split files have no authorized provider
-    # action (D8): a real run raises one deterministic ConfigError listing
-    # every blocked (rel_path, reason) pair before any writer/provider
-    # creation; a dry run reports the same pairs without mutation (see
-    # _build_dry_run_stats / _split_division_stats) and exits 0.
-    if materials.division_blocked and not dry_run:
-        raise ConfigError(_blocked_split_files_message(materials.division_blocked))
 
     # Derived from the file set/graph/selection the plan was actually built
     # from, so a stale-revision rebuild above is reflected here rather than
@@ -622,23 +760,78 @@ def run_pipeline(
             plan.synthesis_calls_planned,
         )
 
-    if dry_run:
-        return _build_dry_run_stats(
-            plan,
-            file_map,
-            config,
-            output_dir,
-            ownership_conflicts,
-            reachable_rels,
-            resolved_profile,
-            profile_resolution,
-            review_batches,
-            call_manifest=call_manifest,
-            recovery_resumed_paths=frozenset(recovery_records),
-            materials=materials,
-            feasibility_notes=feasibility_notes,
-            scan_diagnostics=_scan_diagnostics,
+    # Section 5.8: one immutable provider-free preflight snapshot, built from
+    # the shared plan + canonical call manifest and NEVER re-planned -- the
+    # dry-run return below is the identical builder. Invoke the optional
+    # reporter exactly once here: after the plan and manifest exist, and
+    # before division-blocked / cap enforcement, recovery-writer mutation,
+    # provider construction, prompt-profile review, or any documentation call,
+    # so a division-blocked or cap-exceeded real plan is still explained
+    # before its deterministic error. A reporter exception propagates and
+    # aborts before any mutation or provider use. Without a reporter the
+    # pipeline still logs the complete aggregate totals at INFO (bounded --
+    # counts and the manifest digest only, never a path or source).
+    preflight_snapshot = _build_dry_run_stats(
+        plan,
+        file_map,
+        config,
+        output_dir,
+        ownership_conflicts,
+        reachable_rels,
+        resolved_profile,
+        profile_resolution,
+        review_batches,
+        call_manifest=call_manifest,
+        recovery_resumed_paths=frozenset(recovery_records),
+        materials=materials,
+        feasibility_notes=feasibility_notes,
+        scan_diagnostics=_scan_diagnostics,
+    )
+    # One shared builder; stamp this run's actual mode onto the reported copy
+    # (the dry-run return keeps ``dry_run: True`` unchanged).
+    if not dry_run:
+        preflight_snapshot = {**preflight_snapshot, "dry_run": False}
+    # Section 5.8: deliver ONE deeply-immutable projection to the reporter
+    # (and the INFO fallback) -- a read-only Mapping whose nested detail
+    # collections also reject mutation and which shares no mutable container
+    # with the dry-run return below. Same builder, same shape, both modes.
+    _preflight_view = _freeze_preflight(preflight_snapshot)
+    if plan_reporter is not None:
+        plan_reporter(_preflight_view)
+    else:
+        logger.info(
+            "Planned provider work (before calls): %s",
+            "; ".join(
+                [
+                    f"{_k}={_v}"
+                    for _k, _v in sorted(_preflight_view.items())
+                    if _k != "output_dir"
+                    and (isinstance(_v, (int, float, str)) or _v is None)
+                ]
+                + [
+                    # closed, path-free aggregate mappings rendered as canonical
+                    # (sorted, compact) JSON -- never interpolated raw.
+                    f"{_mk}="
+                    + json.dumps(
+                        {str(_x): _y for _x, _y in dict(_preflight_view[_mk]).items()},
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    for _mk in ("prompt_profile_scope_counts", "split_blocked_by_reason")
+                    if _mk in _preflight_view
+                ]
+            ),
         )
+
+    # D8: capacity-blocked requested-split files have no authorized provider
+    # action. The snapshot/reporter above already surfaced every blocked
+    # (rel_path, reason) pair through the bounded ``split_blocked`` category,
+    # so the failure is explainable; now raise the one deterministic error.
+    if materials.division_blocked and not dry_run:
+        raise ConfigError(_blocked_split_files_message(materials.route_plan))
+
+    if dry_run:
+        return preflight_snapshot
 
     scope_stats = _build_scope_stats(
         config,
@@ -686,7 +879,7 @@ def run_pipeline(
         )
 
     usage = UsageAccumulator()
-    # One run-level correction ledger, initialized with the resolved opt-in flag,
+    # One run-level correction ledger, initialized with the resolved setting,
     # constructed beside the usage accumulator and threaded through the
     # orchestrator to the single shared correction component.
     correction_enabled = bool(config.get("response_correction_enabled", False))
@@ -916,7 +1109,9 @@ def run_pipeline(
             "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
             **no_work_profile_stats,
             **review_stats,
-            **_split_division_stats(config, materials, plan),
+            **_split_division_stats(
+                config, materials, plan, scan_diagnostics=_scan_diagnostics
+            ),
         }
         _set_plan_counters(
             stats,
@@ -956,11 +1151,41 @@ def run_pipeline(
         )
         return stats
 
-    # Build the agent-file queue in topological order.
+    # Section 6.3 mixed-file transaction boundary: an unresolved cross-plan
+    # carried replacement is a PREREQUISITE. When such a carried split file
+    # shares the run with unrelated agent work, the carried replacement(s) run
+    # first (phase 1); the rest of the queue is attempted only if every one of
+    # them produced a completed replacement. If a carried replacement fails,
+    # the unrelated files are left entirely unattempted -- never paid for, so
+    # their work cannot be lost -- and the publish guard below withholds the
+    # stable output, leaving it byte-for-byte identical while any carried
+    # replacement is still incomplete. The carried predecessor container of an
+    # incomplete path is likewise left unchanged and un-checkpointed. Per-path,
+    # though: a separately completed carried path still transactionally
+    # supersedes its own predecessor (section 7.1), so the recovery file is not
+    # guaranteed byte-identical once any sibling carried path has completed and
+    # flushed. No SafeWriter method changes; a run with no cross-plan carry, or
+    # one whose only agent work is the carried file(s), takes the single-phase
+    # path unchanged.
+    cross_plan_carry_rels = (
+        set(materials.carry_states) - set(plan.forced_rels)
+    ) & agent_rels
+    deferred_agent_rels = agent_rels - cross_plan_carry_rels
+    two_phase_carry = bool(cross_plan_carry_rels) and bool(deferred_agent_rels)
+
+    # Build the agent-file queue in topological order. In the two-phase case
+    # phase 1 holds only the carried replacements.
     queue = ProcessingQueue()
+    phase_one_rels = cross_plan_carry_rels if two_phase_carry else agent_rels
     for rel_path in graph.topological_order():
-        if rel_path in agent_rels:
+        if rel_path in phase_one_rels:
             queue.add(file_map[rel_path])
+    # Every ProcessingQueue this run actually executes, phase 1 first. An
+    # execution-time skip (insufficient source) is recorded on whichever queue
+    # processed that file, so final assembly must union the terminal skip
+    # states of all of them -- reading only the last queue would drop phase 1's
+    # states in the two-phase case. At most two queues ever exist here.
+    executed_queues: list[ProcessingQueue] = [queue]
 
     # Create the LLM provider after crash recovery is initialized.
     # initialize_empty() must be called before provider creation so recovery
@@ -1011,7 +1236,9 @@ def run_pipeline(
         "files_skipped_large": _scan_diagnostics.files_skipped_large,
         "files_skipped_unreadable": _scan_diagnostics.files_skipped_unreadable,
         **review_stats,
-        **_split_division_stats(config, materials, plan),
+        **_split_division_stats(
+            config, materials, plan, scan_diagnostics=_scan_diagnostics
+        ),
     }
 
     max_workers = min(config.get("max_parallel_files", 5), len(agent_rels)) or 1
@@ -1084,6 +1311,21 @@ def run_pipeline(
     )
     try:
         execute_agent_files(context)
+        # Phase 2 (section 6.3 mixed-file boundary): attempt the deferred
+        # unrelated agent work ONLY when every carried cross-plan replacement
+        # produced a completed result this run. Otherwise the deferred files
+        # stay unattempted -- reported as planned-but-not-attempted, never
+        # failed, never charged -- and the publish guard below withholds the
+        # stable output, leaving the prior stable bytes untouched while any
+        # carried replacement is incomplete.
+        if two_phase_carry and cross_plan_carry_rels <= set(new_results):
+            deferred_queue = ProcessingQueue()
+            for rel_path in graph.topological_order():
+                if rel_path in deferred_agent_rels:
+                    deferred_queue.add(file_map[rel_path])
+            context.queue = deferred_queue
+            executed_queues.append(deferred_queue)
+            execute_agent_files(context)
     except UnrecoverableProviderError as exc:
         # A confirmed unrecoverable provider abort (terminal
         # billing/credentials/model/access, or a bounded zero-progress rate
@@ -1140,36 +1382,83 @@ def run_pipeline(
         plan,
         provider_free_skips=len(insufficient_source_rels),
     )
+    # Union the terminal insufficient-source skip states of every queue this
+    # run executed (phase 1, plus the phase-2 deferred queue when the two-phase
+    # boundary ran). Reading only ``queue`` here would miss a phase-2 deferred
+    # file skipped at execution time and republish its stale predecessor record.
     skipped_rels = set(insufficient_source_rels) | {
         rel
-        for rel, status in queue.snapshot().items()
+        for one_queue in executed_queues
+        for rel, status in one_queue.snapshot().items()
         if status == STATUS_SKIPPED_INSUFFICIENT_SOURCE
     }
-    output_files = write_project_outputs(
-        _build_documentation_records(
-            documented_rels - skipped_rels,
-            dict(materials.content_hashes),
-            graph.topological_order(),
-            existing_docs,
-            new_results,
-        ),
-        stats,
-        output_dir,
-        error_reporter.summary(),
-        output_format,
-        entry_rel,
-        _graph_edges(graph, documented_rels),
-        json_filename=json_filename,
-        md_filename=md_filename,
-        reachable_rels=reachable_rels,
-        unresolved_imports_by_path=unresolved_imports_by_path,
+    # Section 6.3: a cross-plan carried predecessor is superseded ONLY by a
+    # successful replacement. While any carried replacement is still incomplete
+    # this run -- whether nothing completed at all, or unrelated work was
+    # deliberately deferred at the mixed-file boundary above -- withhold the
+    # stable output: it stays byte-for-byte identical, and recovery stays
+    # present so the predecessor remains resumable. The incomplete path's
+    # predecessor container is left unchanged and un-checkpointed. Per-path,
+    # though: a sibling carried path that DID complete this run has already
+    # transactionally superseded its own predecessor and flushed a completed
+    # recovery record (section 7.1), so the recovery file itself is not
+    # guaranteed byte-identical once that has happened. Ordinary, truncate,
+    # forced-carry, normal non-carry recovery, and fully-successful carry runs
+    # are unaffected.
+    #
+    # A carried predecessor withholds stable output only while a replacement
+    # for it is genuinely pending. Intersect with the paths this run resolves
+    # into `new_results` -- `plan.agent_rels` (provider or locally restored)
+    # and `plan.identical_reuse_rels`. The genuine oversized cross-plan carry
+    # is always in `plan.agent_rels`, so it stays in the guard; but a carried
+    # path this run cannot complete -- notably one in
+    # `insufficient_source_reasons`, which is skipped and never enters
+    # `new_results` -- is dropped, so it no longer withholds stable output
+    # permanently on every future run. It is still preserved: it remains in
+    # `materials.carry_states`, so `recorder` still has carry state loaded,
+    # `SafeWriter.has_partial_state()` stays true, `initialize_empty()` still
+    # skips its flush, and the recovery file is neither rewritten nor deleted.
+    # This guards the deadlock the Section 6.3 recovery-preservation sweep in
+    # `codedoc.core.planning` would otherwise introduce.
+    carried_predecessor_rels = (
+        (set(materials.carry_states) - set(plan.forced_rels))
+        & (set(plan.agent_rels) | set(plan.identical_reuse_rels))
     )
-    stats["output_files"] = [str(path) for path in output_files if path]
-    # Clean completion: the stable output is written above; only now delete the
-    # dedicated recovery file (all formats).  A deletion OSError raises
-    # OutputError and leaves both the stable output and the recovery file intact.
-    if not recorder.has_partial_state():
-        recorder.delete()
+    cross_plan_replacements_incomplete = bool(carried_predecessor_rels) and not (
+        carried_predecessor_rels <= set(new_results)
+    )
+    withhold_stable_output_for_incomplete_carry = (
+        cross_plan_replacements_incomplete and recorder.has_partial_state()
+    )
+    if withhold_stable_output_for_incomplete_carry:
+        stats["output_files"] = []
+    else:
+        output_files = write_project_outputs(
+            _build_documentation_records(
+                documented_rels - skipped_rels,
+                dict(materials.content_hashes),
+                graph.topological_order(),
+                existing_docs,
+                new_results,
+            ),
+            stats,
+            output_dir,
+            error_reporter.summary(),
+            output_format,
+            entry_rel,
+            _graph_edges(graph, documented_rels),
+            json_filename=json_filename,
+            md_filename=md_filename,
+            reachable_rels=reachable_rels,
+            unresolved_imports_by_path=unresolved_imports_by_path,
+        )
+        stats["output_files"] = [str(path) for path in output_files if path]
+        # Clean completion: the stable output is written above; only now delete
+        # the dedicated recovery file (all formats).  A deletion OSError raises
+        # OutputError and leaves both the stable output and the recovery file
+        # intact.
+        if not recorder.has_partial_state():
+            recorder.delete()
     _set_issue_stats(stats, error_reporter, recovery_path)
     _set_usage_stats(
         stats, usage, plan, config, correction_ledger,
@@ -1291,6 +1580,27 @@ def _set_usage_stats(
     stats["max_planned_calls_exceeded"] = plan.max_planned_calls_exceeded
     stats["call_manifest_digest"] = plan.call_manifest_digest
 
+    # Section 5.9 unambiguous all-provider accounting. The legacy
+    # documentation-only keys (estimated_calls / estimated_calls_max_with_
+    # correction) are retained on the dry-run surface for compatibility and
+    # must not be labelled total/worst-case. Corrections are possible only for
+    # documentation responses; reviews are never doubled; transport/file
+    # retries remain additional and excluded from this ceiling.
+    _billing_correction_on = bool(config.get("response_correction_enabled", False))
+    _billing_correction_max = (
+        plan.documentation_calls_planned if _billing_correction_on else 0
+    )
+    stats["initial_provider_calls_planned"] = plan.total_calls_planned
+    stats["prompt_review_calls_planned"] = plan.review_calls_planned
+    stats["initial_documentation_calls_planned"] = plan.documentation_calls_planned
+    stats["correction_calls_possible_max"] = _billing_correction_max
+    stats["provider_calls_max_before_retries"] = (
+        plan.total_calls_planned + _billing_correction_max
+    )
+    stats["file_retry_attempts"] = int(config.get("file_retry_attempts", 1) or 0)
+    stats["retries_included_in_ceiling"] = False
+    stats["max_planned_calls_applies_to"] = "initial_provider_calls_planned"
+
     # Planned-vs-attempted-logical reconciliation. Valid for a clean completion,
     # an allow_partial completion, or (independently, via direct queue snapshot
     # inspection) a terminal abort — never requires execution to continue.
@@ -1375,7 +1685,11 @@ def _build_dry_run_stats(
     feasibility_notes: tuple[str, ...],
     scan_diagnostics: "ScanDiagnostics | None" = None,
 ) -> dict:
-    """Build the read-only dry-run stats dict from the shared plan."""
+    """Build the one immutable provider-free preflight snapshot from the shared
+    plan + canonical call manifest -- the identical projection returned by a
+    dry run and reported before a real run. Never re-planned; every count comes
+    from the same immutable plan. The caller stamps the run-mode marker.
+    """
     scope_stats = _build_scope_stats(
         config,
         file_map,
@@ -1393,9 +1707,10 @@ def _build_dry_run_stats(
     # single mode embeds only known inputs, so its input estimate is exact;
     # triple mode's documentation prompt estimate is a lower bound.
     estimate_is_lower_bound = analysis_mode == "triple"
-    # Correction is opt-in.  The worst case is one extra call per planned per-agent
-    # documentation call; it is 0 when correction is disabled.  The baseline
-    # estimate stays the expected charge; the ceiling below is a worst case.
+    # Correction is enabled by default and supports an explicit opt-out.  The
+    # worst case is one extra call per planned per-agent documentation call; it
+    # is 0 when correction is disabled.  The baseline estimate stays the expected
+    # charge; the ceiling below is a worst case.
     correction_enabled = bool(config.get("response_correction_enabled", False))
     skip_rels: set[str] = set(
         materials.insufficient_source_reasons if materials is not None else ()
@@ -1484,7 +1799,22 @@ def _build_dry_run_stats(
         "max_planned_calls_exceeded": plan.max_planned_calls_exceeded,
         "call_manifest_digest": plan.call_manifest_digest,
         "documentation_calls_planned": plan.documentation_calls_planned,
-        **_split_division_stats(config, materials, plan),
+        # Section 5.9 unambiguous all-provider accounting. estimated_calls /
+        # estimated_calls_max_with_correction above stay as documentation-only
+        # compatibility values and are not total/worst-case LLM calls.
+        "initial_provider_calls_planned": plan.total_calls_planned,
+        "prompt_review_calls_planned": plan.review_calls_planned,
+        "initial_documentation_calls_planned": plan.documentation_calls_planned,
+        "correction_calls_possible_max": correction_possible_max,
+        "provider_calls_max_before_retries": (
+            plan.total_calls_planned + correction_possible_max
+        ),
+        "file_retry_attempts": int(config.get("file_retry_attempts", 1) or 0),
+        "retries_included_in_ceiling": False,
+        "max_planned_calls_applies_to": "initial_provider_calls_planned",
+        **_split_division_stats(
+            config, materials, plan, scan_diagnostics=scan_diagnostics
+        ),
         "ownership_conflicts": ownership_conflicts,
         "output_dir": str(output_dir),
         "output_files": [],
@@ -1606,27 +1936,111 @@ def _build_scope_stats(
     }
 
 
-def _blocked_split_files_message(division_blocked: Mapping[str, str]) -> str:
-    """The deterministic ConfigError message for every capacity-blocked file.
+_BLOCKED_REASON_RANK = {reason: index for index, reason in enumerate(BLOCKED_REASON_ORDER)}
 
-    Lists every ``(rel_path, reason)`` pair in sorted order (D3/D8): a real
-    run must name each one before any writer/provider creation.
+# Remediation prose keyed ONLY by the closed guidance-code vocabulary
+# (section 5.8 / defect E). No generic "raise max_content_chars" advice that
+# could contradict a reduction planning-capacity code, and no free-form
+# provider text.
+_GUIDANCE_REMEDIATION: dict[str, str] = {
+    "simplify-or-exclude": (
+        "simplify-or-exclude: a structural atom/symbol/unit cap was reached; "
+        "simplify or refactor the affected declaration(s), or exclude the "
+        "source."
+    ),
+    "raise-source-ceiling-or-split-source": (
+        "raise-source-ceiling-or-split-source: a source chunk cap was reached; "
+        "raise the source ceiling if the provider supports a larger input, or "
+        "split/refactor the source."
+    ),
+    "report-planning-capacity-defect": (
+        "report-planning-capacity-defect: a reduction envelope/fan-in/depth cap "
+        "was reached; report this as an internal planning-capacity defect. Do "
+        "not raise max_content_chars for this."
+    ),
+    "inspect-authoritative-metadata-or-exclude": (
+        "inspect-authoritative-metadata-or-exclude: final synthesis could not "
+        "fit its authoritative metadata; inspect that metadata, or exclude the "
+        "source."
+    ),
+}
+# De-duplicated canonical guidance-code order, derived from the frozen
+# reason->guidance map so it never drifts from the closed vocabulary.
+_GUIDANCE_ORDER: tuple[str, ...] = tuple(
+    dict.fromkeys(
+        BLOCKED_REASON_GUIDANCE[reason] for reason in BLOCKED_REASON_ORDER
+    )
+)
+
+
+def _blocked_split_category(route_plan: "tuple[RoutePlanEntry, ...]") -> dict:
+    """The bounded ``split_blocked`` category for the human ``ConfigError``
+    (section 5.8). The already-canonical (normalized-path-ascending) immutable
+    route plan is streamed once -- no sorted copy, no second full-population
+    list/tuple/set. Exact total, at most ``PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS``
+    retained by ``BLOCKED_REASON_ORDER`` then path (the frozen display
+    ranking), omitted count, and a ``details_digest`` over the COMPLETE
+    canonical descriptor stream. The 20-record presentation cap here is
+    deliberately distinct from the 4,096 ephemeral-snapshot cap the preflight
+    ``split_blocked`` stats category uses."""
+    return build_flat_plan_diagnostics(
+        (entry.blocked_detail for entry in route_plan if entry.route == "blocked"),
+        rank_key=lambda record: (
+            _BLOCKED_REASON_RANK.get(record["reason"], len(BLOCKED_REASON_ORDER)),
+            record["path"],
+        ),
+        item_budget=PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS,
+    )
+
+
+def _blocked_split_files_message(route_plan: "tuple[RoutePlanEntry, ...]") -> str:
+    """The deterministic, bounded ``ConfigError`` for every capacity-blocked
+    file.
+
+    Section 5.8: exact total / retained / omitted counts and a full-stream
+    ``details_digest`` covering every descriptor, at most
+    ``PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS`` rendered detail lines, and a size
+    that cannot grow with the omitted count. Every rendered path goes through
+    one ``json.dumps(path, ensure_ascii=True)`` field so a hostile normalized
+    relative path (newline, tab, escape, bidi/control, backslash, quote)
+    cannot inject a terminal line. Remediation is derived ONLY from the closed
+    ``guidance_code`` vocabulary, for exactly the codes present across every
+    blocked file -- one bounded streaming pass over the immutable route plan
+    whose accumulator is capped by that 4-value closed vocabulary. Split never
+    falls back to truncation.
     """
-    pairs = ", ".join(
-        f"{rel_path} ({reason})" for rel_path, reason in sorted(division_blocked.items())
+    category = _blocked_split_category(route_plan)
+    total = category["details_total"]
+    retained = category["details_retained"]
+    omitted = category["details_omitted"]
+    lines = "".join(
+        "\n  "
+        + json.dumps(record["path"], ensure_ascii=True)
+        + f": {record['reason']} (phase {record['phase']}, "
+        + f"observed {record['observed']}, limit {record['limit']}, "
+        + f"guidance {record['guidance_code']})"
+        for record in category["details"]
+    )
+    present: dict[str, None] = {}
+    for entry in route_plan:
+        if entry.route == "blocked":
+            present.setdefault(entry.blocked_detail["guidance_code"], None)
+    remediation = "".join(
+        "\n  " + _GUIDANCE_REMEDIATION[code]
+        for code in _GUIDANCE_ORDER
+        if code in present
     )
     return (
-        f"{len(division_blocked)} file(s) cannot be completely split-planned "
-        f"provider-free: {pairs}. Split never falls back to truncation. "
-        "Inspect each reason: raising max_content_chars can help chunk or "
-        "reduction capacity when the provider supports a larger input, but "
-        "does not change atom or symbol counts. Reduce/refactor the affected "
-        "source for structural caps. If a supported language is using lexical "
-        "fallback, the optional structure extra may produce coarser "
-        "syntax-aware atoms. Otherwise choose "
+        f"{total} file(s) cannot be completely split-planned provider-free "
+        f"(showing {retained} of {total}, {omitted} omitted; "
+        f"details_digest {category['details_digest']}). "
+        "Split never falls back to truncation."
+        f"{lines}\n"
+        "Remediation by guidance code:"
+        f"{remediation}\n"
+        "Inspect the exact reasons first with --dry-run. Choose "
         "large_file_strategy 'truncate' only when incomplete-source analysis "
-        "is acceptable for these files. Inspect the exact reasons first with "
-        "--dry-run."
+        "is acceptable for these files."
     )
 
 
@@ -1659,31 +2073,332 @@ def _initial_calls_per_file_for_stats(
     return plan.file_documentation_calls_planned // ordinary_count
 
 
+_CLOSE_REASON_STAT_KEYS: dict[str, str] = {
+    "source-ceiling": "split_closures_source_ceiling",
+    "metadata-ceiling": "split_closures_metadata_ceiling",
+    "source-and-metadata-ceiling": "split_closures_source_and_metadata_ceiling",
+    "oversized-unit-isolation": "split_closures_oversized_unit_isolation",
+    "continuation": "split_closures_continuation",
+    "end-of-file": "split_closures_end_of_file",
+}
+_METADATA_LIMITED_CLOSE_REASONS = frozenset(
+    {"metadata-ceiling", "source-and-metadata-ceiling"}
+)
+_INTERNAL_CUT_KINDS = ("syntax", "physical-line", "balanced-codepoint")
+
+
+def _iter_truncate_descriptors(
+    route_plan: "tuple[RoutePlanEntry, ...]",
+    *,
+    strategy: str,
+    analysis_mode: str,
+    max_content_chars: int,
+    head_ratio: float,
+) -> "Iterator[dict]":
+    """Stream one value-safe truncate descriptor per truncate-routed oversized
+    file, in the route-plan's canonical order. ``initial_calls`` is the exact
+    recovery-aware count: ``initial_calls_per_file(analysis_mode)`` for a
+    payable file, ``0`` for one accepted through same-path / identical-content
+    reuse."""
+    for entry in route_plan:
+        if entry.route != "truncate":
+            continue
+        yield truncate_plan_descriptor(
+            path=entry.rel_path,
+            source_chars=entry.source_chars,
+            resolved_strategy=strategy,
+            max_content_chars=max_content_chars,
+            head_ratio=head_ratio,
+            marker_chars=len(TRUNCATION_MARKER),
+            initial_calls=(
+                initial_calls_per_file(analysis_mode) if entry.payable else 0
+            ),
+        )
+
+
+def _route_diagnostic_stats(
+    config: dict,
+    *,
+    strategy: str,
+    analysis_mode: str,
+    route_plan: "tuple[RoutePlanEntry, ...]",
+    scan_diagnostics: "ScanDiagnostics | None" = None,
+) -> dict:
+    """The shared provider-free route diagnostics (section 5.8 / 5.9): the
+    frozen aggregate statistics plus the five bounded detail categories --
+    ``split_plan`` / ``truncate_plan`` / ``split_blocked`` from the immutable
+    route plan, and ``scanner_size_skip`` / ``scanner_admission_skip`` from the
+    final authoritative scan generation -- each with its exact total,
+    retained/omitted counts, and one full-stream ``details_digest``.
+
+    Emitted for every resolved-valid route -- split, truncate, or a run with no
+    oversized file. The caller has already suppressed the invalid triple+split
+    combination entirely. Every input is a single streaming traversal of the
+    immutable ``route_plan`` view (already canonically ordered by the plan
+    producer); no descriptor list, sorted copy, or per-chunk payload list is
+    materialized.
+    """
+    max_content_chars = int(config.get("max_content_chars", 12000) or 12000)
+    head_ratio = float(config.get("truncation_head_ratio", 0.70) or 0.70)
+
+    split_count = sum(1 for e in route_plan if e.route == "split")
+    truncate_count = sum(1 for e in route_plan if e.route == "truncate")
+
+    manifest_budget = next(
+        (
+            e.reduction_tree.synthesis_manifest_chars
+            for e in route_plan
+            if e.route == "split"
+        ),
+        max(max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
+    )
+
+    # One streaming pass over the split files' descriptor streams: scalar
+    # accumulators only (no per-chunk payload list, no per-file summary list,
+    # no materialized filter of the route-plan view).
+    close_counts = {reason: 0 for reason in _CLOSE_REASON_STAT_KEYS}
+    boundary_cuts_by_kind = {kind: 0 for kind in _INTERNAL_CUT_KINDS}
+    crlf_atomicity_extra = 0
+    oversized_units = 0
+    constrained_small = 0
+    metadata_limited_files = 0
+    metadata_limited_closures = 0
+    payload_min: int | None = None
+    payload_max: int | None = None
+    for entry in route_plan:
+        if entry.route != "split":
+            continue
+        dplan = entry.division_plan
+        current_unit_piece_count = 0
+        file_is_metadata_limited = False
+        for item in _iter_split_file_stream(
+            entry.rel_path,
+            dplan,
+            entry.reduction_tree,
+            source_ceiling_chars=dplan.source_budget_chars,
+            synthesis_manifest_ceiling_chars=(
+                entry.reduction_tree.synthesis_manifest_chars
+            ),
+            initial_calls=entry.split_payable_calls,
+        ):
+            kind = item["t"]
+            if kind == "split-unit":
+                current_unit_piece_count = item["piece_count"]
+                crlf_atomicity_extra += item["atomicity_extra_piece_count"]
+                if item["piece_count"] > 1:
+                    oversized_units += 1
+            elif kind == "split-piece":
+                if item["boundary_constrained_small"]:
+                    constrained_small += 1
+                if item["piece_ordinal"] < current_unit_piece_count - 1:
+                    cut = item["end_boundary"]
+                    if cut in boundary_cuts_by_kind:
+                        boundary_cuts_by_kind[cut] += 1
+            elif kind == "split-leaf":
+                payload = item["payload_chars"]
+                payload_min = payload if payload_min is None else min(payload_min, payload)
+                payload_max = payload if payload_max is None else max(payload_max, payload)
+                reason = item["close_reason"]
+                if reason in close_counts:
+                    close_counts[reason] += 1
+                if reason in _METADATA_LIMITED_CLOSE_REASONS:
+                    metadata_limited_closures += 1
+                    file_is_metadata_limited = True
+        if file_is_metadata_limited:
+            metadata_limited_files += 1
+
+    split_plan_category = build_split_plan_diagnostics(
+        (e for e in route_plan if e.route == "split")
+    )
+    truncate_category = build_flat_plan_diagnostics(
+        _iter_truncate_descriptors(
+            route_plan,
+            strategy=strategy,
+            analysis_mode=analysis_mode,
+            max_content_chars=max_content_chars,
+            head_ratio=head_ratio,
+        ),
+        rank_key=lambda record: (-record["omitted_chars"], record["path"]),
+    )
+    # Reconcile the retained/omitted source-char aggregates from the same
+    # arithmetic, in a second streaming pass (no descriptor list retained).
+    truncate_retained = 0
+    truncate_omitted = 0
+    for record in _iter_truncate_descriptors(
+        route_plan,
+        strategy=strategy,
+        analysis_mode=analysis_mode,
+        max_content_chars=max_content_chars,
+        head_ratio=head_ratio,
+    ):
+        truncate_retained += (
+            record["retained_head_chars"] + record["retained_tail_chars"]
+        )
+        truncate_omitted += record["omitted_chars"]
+
+    blocked_category = build_flat_plan_diagnostics(
+        (e.blocked_detail for e in route_plan if e.route == "blocked"),
+        rank_key=lambda record: (
+            _BLOCKED_REASON_RANK.get(record["reason"], len(BLOCKED_REASON_ORDER)),
+            record["path"],
+        ),
+    )
+
+    # The final authoritative scan generation already exposes each scanner
+    # category as {details, details_total, details_retained, details_omitted,
+    # details_digest} (bounded top-K details, exact totals, one streaming
+    # digest over the COMPLETE canonical descriptor stream). Surface both here
+    # under the frozen prefixes so all five section 5.8 categories publish the
+    # identical four suffixes. A direct-helper call with no generation uses the
+    # canonical empty category.
+    _empty_scan_cat = {
+        "details": [],
+        "details_total": 0,
+        "details_retained": 0,
+        "details_omitted": 0,
+        "details_digest": EMPTY_PLAN_DETAILS_DIGEST,
+    }
+    _size_cat = (
+        scan_diagnostics.scanner_size_skip
+        if scan_diagnostics is not None
+        else _empty_scan_cat
+    )
+    _admission_cat = (
+        scan_diagnostics.scanner_admission_skip
+        if scan_diagnostics is not None
+        else _empty_scan_cat
+    )
+
+    return {
+        "large_file_strategy_resolved": strategy,
+        "large_file_source_ceiling_chars": max_content_chars,
+        "large_files_over_source_ceiling": len(route_plan),
+        "large_files_routed_split": split_count,
+        "large_files_routed_truncate": truncate_count,
+        "truncate_retained_source_chars": truncate_retained,
+        "truncate_omitted_source_chars": truncate_omitted,
+        "split_internal_manifest_budget_chars": manifest_budget,
+        "split_oversized_units": oversized_units,
+        # A continuation piece always closes with reason "continuation" and is
+        # the only chunk kind with unit_chunk_count > 1, so the two counts are
+        # identical by construction.
+        "split_continuation_chunks": close_counts["continuation"],
+        "split_crlf_atomicity_extra_chunks": crlf_atomicity_extra,
+        "split_boundary_cuts_syntax": boundary_cuts_by_kind["syntax"],
+        "split_boundary_cuts_physical_line": boundary_cuts_by_kind["physical-line"],
+        "split_boundary_cuts_balanced_codepoint": boundary_cuts_by_kind[
+            "balanced-codepoint"
+        ],
+        "split_boundary_constrained_small_chunks": constrained_small,
+        "split_closures_source_ceiling": close_counts["source-ceiling"],
+        "split_closures_metadata_ceiling": close_counts["metadata-ceiling"],
+        "split_closures_source_and_metadata_ceiling": close_counts[
+            "source-and-metadata-ceiling"
+        ],
+        "split_closures_oversized_unit_isolation": close_counts[
+            "oversized-unit-isolation"
+        ],
+        "split_closures_continuation": close_counts["continuation"],
+        "split_closures_end_of_file": close_counts["end-of-file"],
+        "split_metadata_limited_files": metadata_limited_files,
+        "split_metadata_limited_closures": metadata_limited_closures,
+        "split_chunk_payload_chars_min": payload_min if payload_min is not None else 0,
+        "split_chunk_payload_chars_max": payload_max if payload_max is not None else 0,
+        "split_plan_details": split_plan_category["details"],
+        "split_plan_details_total": split_plan_category["details_total"],
+        "split_plan_details_retained": split_plan_category["details_retained"],
+        "split_plan_details_omitted": split_plan_category["details_omitted"],
+        "split_plan_details_digest": split_plan_category["details_digest"],
+        "truncate_plan_details": truncate_category["details"],
+        "truncate_plan_details_total": truncate_category["details_total"],
+        "truncate_plan_details_retained": truncate_category["details_retained"],
+        "truncate_plan_details_omitted": truncate_category["details_omitted"],
+        "truncate_plan_details_digest": truncate_category["details_digest"],
+        "split_blocked_details": blocked_category["details"],
+        "split_blocked_details_total": blocked_category["details_total"],
+        "split_blocked_details_retained": blocked_category["details_retained"],
+        "split_blocked_details_omitted": blocked_category["details_omitted"],
+        "split_blocked_details_digest": blocked_category["details_digest"],
+        "scanner_size_skip_details": _size_cat["details"],
+        "scanner_size_skip_details_total": _size_cat["details_total"],
+        "scanner_size_skip_details_retained": _size_cat["details_retained"],
+        "scanner_size_skip_details_omitted": _size_cat["details_omitted"],
+        "scanner_size_skip_details_digest": _size_cat["details_digest"],
+        "scanner_admission_skip_details": _admission_cat["details"],
+        "scanner_admission_skip_details_total": _admission_cat["details_total"],
+        "scanner_admission_skip_details_retained": _admission_cat[
+            "details_retained"
+        ],
+        "scanner_admission_skip_details_omitted": _admission_cat[
+            "details_omitted"
+        ],
+        "scanner_admission_skip_details_digest": _admission_cat["details_digest"],
+    }
+
+
 def _split_division_stats(
     config: dict,
     materials: PlanMaterials | None,
     plan: PipelinePlan | None,
+    scan_diagnostics: "ScanDiagnostics | None" = None,
 ) -> dict:
-    """Return split-only observability; default truncate runs remain unchanged.
+    """Return the run's large-file observability.
 
-    Every field/definition here matches the frozen run-statistics contract:
-    `split_ordinary_files` is the current exact-provider-plan count (`O` in
-    the call formula), every `split_restored_*` count is <= its matching
-    total, and no split statistic ever applies a triple-mode multiplier
-    (split is valid only in single mode — D2).
+    Since section 5.8/5.9 this helper is **not** split-only: for every
+    resolved-valid route (split, truncate, or a run with no oversized file) it
+    emits the shared provider-free route diagnostics -- the frozen aggregate
+    statistics and the bounded ``split_plan`` / ``truncate_plan`` /
+    ``split_blocked`` categories (all zeroed / empty on a truncate or
+    no-oversize run). A split route additionally emits the split-execution
+    counters and the ``large_file_strategy: "split"`` marker. The invalid
+    ``analysis_mode: 'triple'`` + ``large_file_strategy: 'split'`` direct-helper
+    combination still publishes nothing at all. Every split counter here
+    matches the frozen run-statistics contract (``split_ordinary_files`` is the
+    exact-provider-plan count; each ``split_restored_*`` is <= its total; no
+    triple-mode multiplier -- split is single-mode only, D2).
     """
-    # D2 explicit local gate: split statistics are emitted only for the valid
-    # effective split route (large_file_strategy 'split' AND analysis_mode
-    # 'single' — D2), never from the bare requested strategy string alone.
-    if (
-        config.get("large_file_strategy", "truncate") != "split"
-        or config.get("analysis_mode", "single") != "single"
-    ):
+    strategy = config.get("large_file_strategy", "truncate")
+    analysis_mode = config.get("analysis_mode", "single")
+    # D2 explicit local gate: the invalid `analysis_mode: 'triple'` +
+    # `large_file_strategy: 'split'` combination publishes no route or split
+    # statistics at all -- not even a bare strategy marker -- even though the
+    # requested string is exactly "split".
+    if strategy == "split" and analysis_mode != "single":
         return {}
+
     plans = materials.division_plans if materials is not None else {}
     trees = materials.reduction_trees if materials is not None else {}
     tree_states = materials.tree_states if materials is not None else {}
     blocked = materials.division_blocked if materials is not None else {}
+    route_plan = materials.route_plan if materials is not None else ()
+
+    route_stats = _route_diagnostic_stats(
+        config,
+        strategy=strategy,
+        analysis_mode=analysis_mode,
+        route_plan=route_plan,
+        scan_diagnostics=scan_diagnostics,
+    )
+    # Section 6.3: the two EPHEMERAL recovery-transition counts are route-wide
+    # preflight/CLI observability -- present (0) on every resolved-valid route,
+    # not only split -- and never added to persisted ``last_run``. Discarded
+    # counts every unique predecessor paid/quarantined node ID invalidated by a
+    # cross-plan transition; replacement counts every current fresh node
+    # scheduled for the conflicting file (discarded may exceed replacement
+    # during a topology contraction). The persisted ``split_reexecuted_nodes``
+    # in the split block below instead counts only predecessor node IDs that are
+    # also current unpaid IDs (<= split_unpaid_nodes).
+    route_stats["split_recovery_discarded_predecessor_nodes"] = (
+        materials.recovery_discarded_predecessor_nodes if materials is not None else 0
+    )
+    route_stats["split_recovery_replacement_nodes_planned"] = (
+        materials.recovery_replacement_nodes_planned if materials is not None else 0
+    )
+    # A resolved-valid truncate / no-oversize route: the shared route
+    # aggregates and the truncate/split_blocked categories only -- no
+    # split-specific counters and no `large_file_strategy: "split"` marker.
+    if strategy != "split":
+        return route_stats
 
     syntax = lexical = chunks = units = divided = continuation_groups = 0
     unit_consolidation_levels = general_reduction_levels = 0
@@ -1742,13 +2457,9 @@ def _split_division_stats(
     )
 
     blocked_by_reason: dict[str, int] = {}
-    for reason in blocked.values():
+    for detail in blocked.values():
+        reason = detail["reason"]
         blocked_by_reason[reason] = blocked_by_reason.get(reason, 0) + 1
-    # Dry-run must expose the complete deterministic diagnostic, not only
-    # aggregate counts (D8).  Real runs abort above before these pairs could
-    # become completed-output metadata; project_view intentionally persists only
-    # the aggregate split counters.
-    blocked_pairs = tuple(sorted(blocked.items()))
 
     split_unpaid_nodes = (
         plan.unit_documentation_calls_planned
@@ -1766,13 +2477,13 @@ def _split_division_stats(
     quarantined_nodes = sum(len(state.quarantine) for state in tree_states.values())
 
     return {
+        **route_stats,
         "large_file_strategy": "split",
         "split_ordinary_files": ordinary,
         "split_syntax_files": syntax,
         "split_lexical_files": lexical,
         "split_blocked_files": len(blocked),
         "split_blocked_by_reason": blocked_by_reason,
-        "split_blocked_pairs": blocked_pairs,
         "split_divided_files": divided,
         "split_units": units,
         "split_chunks": chunks,
@@ -1796,6 +2507,11 @@ def _split_division_stats(
         "split_recovery_conflict_files": (
             materials.recovery_conflict_files if materials is not None else 0
         ),
+        # ``split_recovery_discarded_predecessor_nodes`` /
+        # ``split_recovery_replacement_nodes_planned`` (the two EPHEMERAL §6.3
+        # transition counts) are already carried in from ``route_stats`` above so
+        # they publish route-wide; they are re-stated by the ``**route_stats``
+        # spread here and never persisted to ``last_run``.
         "file_documentation_calls_planned": (
             plan.file_documentation_calls_planned if plan is not None else 0
         ),
@@ -2007,7 +2723,7 @@ def _estimate_planned_input_tokens(
                     imports=imports,
                     root_count=len(reduction_tree.final_node.child_ids),
                     leaf_count=len(reduction_tree.final_node.leaf_ids),
-                    max_chars=request.context.max_content_chars,
+                    max_chars=request.context.synthesis_manifest_chars,
                 )
                 shape = resolved_synthesis_shape(bundle)
                 system, empty_prompt = file_synthesis_agent.build_prompt(

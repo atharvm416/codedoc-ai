@@ -49,21 +49,40 @@ _HEX_64_RE = re.compile(r"^[0-9a-f]{64}$")
 class AgentCallContext:
     """Immutable per-call context.
 
-    ``analysis_mode``, ``max_content_chars``, and ``truncation_head_ratio`` are
-    identical across every context built within one run; only
-    ``resolved_shape_bundle`` varies per file (extension scope).
+    ``analysis_mode``, ``max_content_chars``, ``synthesis_manifest_chars``, and
+    ``truncation_head_ratio`` are identical across every context built within
+    one run; only ``resolved_shape_bundle`` varies per file (extension scope).
+
+    ``max_content_chars`` and ``synthesis_manifest_chars`` are two distinct
+    ceilings, not interchangeable copies of one value (section 5.7):
+    ``max_content_chars`` is the public ordinary/leaf *source* threshold and
+    ceiling, while ``synthesis_manifest_chars`` is the automatic internal
+    split reducer/final *manifest* ceiling
+    (``max(max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)``, never
+    below the released default). Leaf/ordinary validation uses
+    ``max_content_chars``; split reducer and final-manifest construction and
+    validation use ``synthesis_manifest_chars``.
     """
 
     analysis_mode: str
     max_content_chars: int
+    synthesis_manifest_chars: int
     truncation_head_ratio: float
     resolved_shape_bundle: ResolvedFileShapeBundle
 
     def __post_init__(self) -> None:
         if self.analysis_mode not in DOC_AGENTS_BY_MODE:
             raise ValueError(f"unsupported analysis mode: {self.analysis_mode!r}")
-        if self.max_content_chars <= 0:
-            raise ValueError("max_content_chars must be greater than zero.")
+        # Section 5.7: both ceilings are strict positive integers. A deliberate
+        # ValueError naming the field -- matching the sibling constructor
+        # contracts in this module (e.g. UnitChunkExecutionRequest's count
+        # fields) -- rejects bool, float, str, None, and every other
+        # non-integer, so no caller relies on an accidental comparison
+        # TypeError and nothing is silently coerced with int(...).
+        for name in ("max_content_chars", "synthesis_manifest_chars"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer.")
         if not 0 < self.truncation_head_ratio < 1:
             raise ValueError("truncation_head_ratio must be between zero and one.")
         bundle = self.resolved_shape_bundle

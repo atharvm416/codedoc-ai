@@ -98,6 +98,10 @@ def test_partial_failure_preserves_successful_output_in_both_modes(
             "file_retry_attempts": 0,
             "allow_partial": True,
             "propagate_changes": False,
+            # This test measures a fixed terminal call set for the failed file;
+            # it does not exercise correction. Pin the default so the flip does
+            # not add an incidental repair call (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
         },
     )
     assert stats["checked"] == 1

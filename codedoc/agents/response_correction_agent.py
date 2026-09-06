@@ -9,9 +9,11 @@ canonical :func:`~codedoc.agents.response_diagnostics.process_response` path.
 It is intentionally not a :class:`~codedoc.agents.base_agent.BaseAgent` subclass:
 it holds only the shared ``llm``, ``usage``, ``ledger`` and the ``enabled`` flag,
 and never duplicates provider/usage accounting or the response-validation path.
-Because ``repair`` is invoked at most once per agent per file, the one-call
-guarantee is structural and needs no shared mutable per-file state, so triple-mode
-parallel structure/dependency correction through the one shared instance is safe.
+Because ``repair`` is invoked at most once per rejected response/agent invocation,
+the one-call guarantee is structural and needs no shared mutable per-file state, so
+triple-mode parallel structure/dependency correction through the one shared
+instance is safe. A split file can therefore make more than one correction call
+when more than one node (leaf/reducer/final) is rejected.
 """
 
 from __future__ import annotations

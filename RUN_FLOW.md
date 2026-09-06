@@ -13,11 +13,17 @@ provider-free dry-run planning, paid execution, same-path completed reuse, and
 dependency-valid node recovery. `single + split` execution, completed-record
 reuse, and node-level recovery are fully supported; `triple + split` remains
 unavailable. Split leaf signatures stay
-private, internal matching metadata bounded to the parser-aligned
-600-character ceiling; split never silently truncates an over-bound response.
+private, internal split matching metadata bounded to a 2,000-character ceiling
+and never present in `codedoc.json` or the Markdown; split never silently
+truncates an over-bound response. When a fully visible declaration is longer
+than that ceiling, the model reports only its leading source-backed portion —
+roughly 600 to 1,000 characters, never above the ceiling — so the declaration
+is recorded shortened rather than dropped; a declaration that already fits is
+recorded in full. This is a truthful, expected answer, never an omission.
 A leaf accepts up to 32 functions and up to 32 classes (matching the known-symbol
 count the leaf prompt may list); a combined reduction narrative is capped at
-300 characters, and the reducer prompt states that bound explicitly.
+300 characters, and the reducer prompt states that bound explicitly, alongside
+a recommended 260-character target to write toward.
 
 `triple + split` fails during configuration validation before scanning,
 recovery inspection, output-directory creation, prompt-customization review,
@@ -90,8 +96,9 @@ large enough to take the split path:
   still in progress, because fragments produced under the previous contract
   are not reused. Run with `--dry-run` first to see the exact call count;
   later runs reuse normally again; and
-- set `"response_correction_enabled": true` to allow one repair call per
-  rejected response.
+- one repair call per rejected response is allowed by default; set
+  `"response_correction_enabled": false` to disable it and fail a rejected
+  response immediately.
 
 ## Persistent-file allowlist
 
@@ -115,14 +122,31 @@ When `large_file_strategy` resolves to `split`, CodeDoc reads one canonical
 decoded snapshot per selected source file. A file at or below
 `max_content_chars` remains one planned whole-file call. An oversized file is
 divided at deterministic syntax boundaries when available, otherwise at
-complete lexical line boundaries. An individually oversized semantic unit or
-physical line receives deterministic continuation chunks.
+complete lexical line boundaries. A semantic unit that fits `max_content_chars`
+keeps its exact canonical bytes, source range, and identity. Only a semantic
+unit whose own source exceeds `max_content_chars` is subdivided, and it is
+subdivided toward a balanced piece length rather than filled greedily to the
+ceiling: each cut lands on a nested syntax boundary or a physical-line boundary
+within about ten percent of the balanced target, and on the nearest safe
+character boundary otherwise, with every piece at or below `max_content_chars`.
+So one indivisible 2,010-character unit at a 1,000-character ceiling becomes
+three pieces of about 670 characters, not 1,000 + 1,000 + 10; an 8,292-character
+span at a 2,000-character ceiling becomes five pieces, not a power-of-two
+halving into eight. Given natural units of 1,243, 482, and 285 characters, only
+the 1,243-character unit is subdivided (about 622 + 621) while the 482 and 285
+units keep their exact bytes, ranges, and identities. A `\r\n` pair is
+indivisible for cut placement, so a defensive subdivision may use one extra
+piece and one extra call rather than split it; the normal filesystem pipeline
+normalizes `\r\n` and lone `\r` to `\n` first, so that count is always zero
+there.
 
 Every source character belongs to exactly one planned leaf. Adjacent fitting
 semantic units may share a planned leaf call while retaining their own
-identities. Continuations for one semantic unit consolidate before general
-reduction. General reduction continues only until the complete final manifest
-fits; several ordered roots may feed the planned final synthesis.
+identities; a co-packed group is not byte-identical to a global concatenation
+and no global equality is promised. Continuations for one semantic unit
+consolidate before general reduction. General reduction continues only until the
+complete final manifest fits; several ordered roots may feed the planned final
+synthesis.
 
 Structure extraction is runtime-offline: it never downloads a grammar or
 writes a grammar cache. Without the optional structure package, a matching
@@ -159,15 +183,39 @@ and reason and exits without mutation; a real run stops before provider creation
 or persistent mutation. A genuine planning invariant failure is not converted
 into a capacity result; it aborts planning while prior output remains untouched.
 
+`max_content_chars` is the source ceiling for ordinary whole-file requests and
+split leaf inputs. Reducer and final-synthesis manifests use a separate
+automatic synthesis ceiling — the larger of `max_content_chars` and a fixed
+12,000-character floor — so a source ceiling set below 12,000 does not shrink
+internal synthesis below its released safe size. Both are content ceilings; the
+complete provider prompt is larger than either, and neither is a provider
+context-window guarantee.
+
 The split dry-run manifest reports ordinary-file, leaf,
 unit-consolidation/general-reduction, and final-synthesis call categories. It
 also reports a deterministic worst-case final-input estimate that reserves the
 complete 3,000-character canonical ledger-synopsis allowance rather than using
 one concrete trimmed ledger as a proxy. It is a character-based estimate rather
-than a tokenizer-exact prediction. Dry-run stops after this provider-free plan
-and does not consume checkpoints; a real run executes the same authorized
-topology after completed reuse and dependency-valid recovery remove already-paid
-work.
+than a tokenizer-exact prediction. For a resolved-valid `single + split` route
+the dry run reads completed records and `crash_recovery.json` and classifies
+them through the same reuse and node-recovery rules a real run uses, so both
+report the same remaining payable work at the same repository state; the dry run
+still writes nothing, constructs no provider, and never creates, rewrites,
+quarantines, replaces, or removes recovery. A real run builds that same
+preflight snapshot and reports it as `Planned provider work (before calls)`
+before any provider is constructed or any documentation call is made, so a run
+about to be capped or blocked is explained before it fails.
+
+Scanner diagnostics describe only the final authoritative scan generation for a
+run: when a detected concurrent source change triggers one complete rebuild,
+that rebuild's scan atomically replaces the earlier scan's totals and details
+rather than merging the two, so no file is double-counted across generations.
+An explicit entry that exists but admits no source — an empty explicit
+directory, or explicit targets that are all size-skipped, unreadable, ignored,
+unsupported, or missing — still publishes that final generation's bounded
+scanner evidence and an empty payable-work report before the established
+no-files error is raised, in both dry-run and a real run, so a dead entry is
+explained rather than only rejected.
 
 ## Ordered phases for a real run
 
@@ -263,7 +311,7 @@ per-file predicate.
 
 An oversized split result additionally carries a private topology/imports
 identity. The retired `_split_reuse_contract` key is no longer stamped, but
-remains registered so a record from an older release that still carries it
+remains registered so a legacy record that still carries it
 round-trips unchanged and compares stale. Completed cache
 reuse is provider-agnostic. Partial node identity additionally binds provider,
 model, and effective endpoint; imports-only changes preserve leaves/reducers and

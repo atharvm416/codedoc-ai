@@ -297,8 +297,25 @@ class SafeWriter:
         before the first file finishes.  When records were pre-loaded from a
         previous run the flush includes those records (not truly empty), which
         is the correct behaviour — the banner is the important part.
+
+        Cross-plan / forced carry exception (section 6.3 / section 9): when a
+        recovery file already exists on disk and this run is only carrying
+        predecessor container(s) forward — nothing recorded yet — a flush here
+        would rewrite that file solely to bump ``updated_at`` and would risk
+        re-serializing a predecessor container this run is required to preserve
+        byte-for-byte across a failed or interrupted replacement.  Everything a
+        flush would write was just loaded from that same file, so skip it: the
+        banner and the carried container are already present, replacement node
+        checkpoints stay suppressed while carry state exists, and a completed
+        record still flushes transactionally when one lands.
         """
         with self._lock:
+            if (
+                self._carry_states
+                and not self._recorded_this_run
+                and self._path.exists()
+            ):
+                return
             self._flush_locked()
 
     def record(self, rel_path: str, result: dict, file_hash: str = "") -> None:
