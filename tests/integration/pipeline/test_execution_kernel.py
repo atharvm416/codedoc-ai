@@ -39,7 +39,11 @@ def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
         content=request.content,
         source_budget_chars=2000,
     )
-    tree = build_reduction_tree(plan, max_content_chars=2000)
+    # Pair the tree with the request's carried synthesis budget (automatic
+    # 12,000 floor), exactly as production planning does.
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=request.context.synthesis_manifest_chars
+    )
     (tmp_path / "large.py").unlink()
     writer = SafeWriter(
         tmp_path / "docs" / "crash_recovery.json",
@@ -55,7 +59,7 @@ def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
         def process_reduction_node(self, _request):
             return {"narrative": "combined"}
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             return {"description": "frozen"}
 
     result = _process_divided_file(
@@ -68,6 +72,84 @@ def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
     assert result["_large_file_identity"].startswith("large-file-v3:")
     tree_state = writer.get_tree_state("large.py")
     assert tree.final_node.node_id in tree_state.by_id()
+
+
+def test_split_execution_rejects_a_context_tree_synthesis_budget_mismatch_before_providers(
+    tmp_path,
+):
+    """Section 5.7/8.0B: the frozen request carries the run's single effective
+    synthesis budget and the planned reduction tree carries its own. A tree
+    built under a *different* budget would silently validate reducer/final
+    manifests against the wrong ceiling, so ``_process_divided_file`` must
+    reject the pair with ``DivisionInternalDefect`` before it constructs a
+    provider prompt, calls any orchestrator method, or mutates a checkpoint.
+    """
+    from codedoc.core.execution import _process_divided_file
+    from codedoc.core.file_division import (
+        DivisionInternalDefect,
+        build_division_plan,
+        build_reduction_tree,
+    )
+    from tests.support.execution_requests import make_execution_request
+
+    source = "\n".join(f"value_{index} = {index}" for index in range(220)) + "\n"
+    request = make_execution_request(
+        tmp_path,
+        "large.py",
+        source,
+        max_content_chars=2000,
+    )
+    # The frozen request carries the automatic 12,000 floor for a 2,000-char
+    # source ceiling.
+    assert request.context.max_content_chars == 2000
+    assert request.context.synthesis_manifest_chars == 12000
+
+    plan = build_division_plan(
+        rel_path=request.rel_path,
+        language=request.language,
+        content=request.content,
+        source_budget_chars=2000,
+    )
+    # Deliberately build the tree under a different budget via the deprecated
+    # direct-caller alias, so it carries the raw 2,000 value rather than 12,000.
+    mismatched_tree = build_reduction_tree(plan, max_content_chars=2000)
+    assert mismatched_tree.synthesis_manifest_chars == 2000
+    assert (
+        mismatched_tree.synthesis_manifest_chars
+        != request.context.synthesis_manifest_chars
+    )
+
+    writer = SafeWriter(
+        tmp_path / "docs" / "crash_recovery.json",
+        "json",
+        None,
+        {"large.py": {}},
+    )
+
+    class _NeverCalledOrchestrator:
+        def process_leaf_chunk(self, _request):
+            pytest.fail("a provider/orchestrator method ran despite the mismatch")
+
+        def process_reduction_node(self, _request):
+            pytest.fail("a provider/orchestrator method ran despite the mismatch")
+
+        def synthesize_divided_file(self, *_args, **_kwargs):
+            pytest.fail("a provider/orchestrator method ran despite the mismatch")
+
+    with pytest.raises(DivisionInternalDefect, match="synthesis budget"):
+        _process_divided_file(
+            request,
+            plan,
+            mismatched_tree,
+            "test-provider",
+            _NeverCalledOrchestrator(),
+            writer,
+        )
+
+    # No checkpoint state was written: the rejection precedes every mutation.
+    assert writer.get_tree_state("large.py") is None
+    if writer.path.exists():
+        assert '"partial_files"' not in writer.path.read_text(encoding="utf-8")
 
 
 class _LLM:
@@ -497,6 +579,9 @@ class TestPlannedIdReconciliation:
                 "file_retry_attempts": 0,
                 "allow_partial": True,
                 "propagate_changes": False,
+                # Fixed terminal call-set reconciliation; not a correction test.
+                # Pin the default so the flip adds no incidental repair call.
+                "response_correction_enabled": False,
             },
         )
 

@@ -13,6 +13,10 @@ module):
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.narrative_terminology import (
+    NARRATIVE_TERMINOLOGY_RULES,
+    TerminologyEvidence,
+)
 from codedoc.agents.response_cleaning import clean_combined_report, clean_reduction_capsule_report
 from codedoc.core.execution_model import (
     AgentCallContext,
@@ -22,6 +26,7 @@ from codedoc.core.execution_model import (
 from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
     MAX_REDUCTION_NARRATIVE_CHARS,
+    MAX_REDUCTION_NARRATIVE_TARGET_CHARS,
     REDUCTION_ENVELOPE_OVERHEAD_CHARS,
     DivisionInternalDefect,
     render_reduction_child_manifest,
@@ -49,7 +54,10 @@ _REDUCTION_SYSTEM = (
 _REDUCTION_SHAPE_BLOCK = (
     "Return exactly this fixed internal JSON shape:\n"
     '{\n  "narrative": "<required, non-empty refined narrative>"\n}\n'
-    f"Hard bounds: narrative <= {MAX_REDUCTION_NARRATIVE_CHARS} characters."
+    "Aim below the bound, not at it: write the narrative to a recommended "
+    f"maximum of {MAX_REDUCTION_NARRATIVE_TARGET_CHARS} characters. "
+    f"Hard bounds: narrative <= {MAX_REDUCTION_NARRATIVE_CHARS} characters; "
+    "a narrative over this hard bound is rejected in full, never trimmed."
 )
 
 _REDUCTION_PROMPT_TEMPLATE = """Refine one combined narrative from {child_count} already-reviewed \
@@ -132,7 +140,7 @@ relationships not present above
 - functions, classes, and exports you return must come only from the \
 supplied fact-ledger synopsis
 - Do not include duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_prompt(
@@ -175,11 +183,11 @@ class FileSynthesisAgent(BaseAgent):
         rendered_children = render_reduction_child_manifest(child_narratives)
         if (
             len(rendered_children) + REDUCTION_ENVELOPE_OVERHEAD_CHARS
-            > request.context.max_content_chars
+            > request.context.synthesis_manifest_chars
         ):
             raise DivisionInternalDefect(
                 "planned reduction child manifest exceeds "
-                "max_content_chars."
+                "synthesis_manifest_chars."
             )
         system, prompt = build_reduction_prompt(request, child_narratives)
         raw = self._call_llm(
@@ -210,9 +218,13 @@ class FileSynthesisAgent(BaseAgent):
         call_context: AgentCallContext | None = None,
         planned_call: PlannedCall | None = None,
         additional_attempt: bool = False,
+        terminology_source: str = "",
     ) -> dict:
-        if call_context is not None and len(manifest) > call_context.max_content_chars:
-            raise ValueError("synthesis manifest exceeds max_content_chars.")
+        if (
+            call_context is not None
+            and len(manifest) > call_context.synthesis_manifest_chars
+        ):
+            raise ValueError("synthesis manifest exceeds synthesis_manifest_chars.")
         if requested_shape is None:
             raise ValueError("split-file synthesis requires a resolved shape.")
         system, prompt = build_prompt(file_path, manifest, requested_shape)
@@ -234,4 +246,11 @@ class FileSynthesisAgent(BaseAgent):
             language="",
             shape_block=requested_shape.text if requested_shape else default_shape_block("single", "combined"),
             planned_call=planned_call,
+            # The manifest is untrusted narrative (section 5.6); only the exact
+            # planned source string the caller reconstructs is trusted evidence.
+            terminology_evidence=(
+                TerminologyEvidence(source_text=terminology_source)
+                if terminology_source
+                else None
+            ),
         )

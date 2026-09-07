@@ -71,6 +71,11 @@ def test_response_contract_failure_does_not_repeat_full_call_set(
             "max_parallel_files": 1,
             "file_retry_attempts": 1,
             "propagate_changes": False,
+            # This test proves a response-contract failure does NOT repeat the
+            # full call set. The malformed-then-valid provider would otherwise
+            # let the new default's one repair call rescue the file; pin it off
+            # so the terminal path is what is measured (Section 10 / 7.2.1).
+            "response_correction_enabled": False,
         },
     )
     assert stats["checked"] == 0

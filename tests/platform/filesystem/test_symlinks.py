@@ -254,3 +254,250 @@ def test_windows_junction_skipped_by_default(tmp_path):
     rels = _rels(files)
     assert "real/mod.py" in rels
     assert "junc/mod.py" not in rels
+
+
+# --- Correction round 5: explicit hint must not change admission -------------
+
+def test_cr5_diagnostic_visit_does_not_suppress_ordinary_alias(tmp_path, monkeypatch):
+    """Deterministic (no OS link needed): a skipped explicit directory and a
+    visible alias share ONE directory identity. Admitted files must be identical
+    with and without ``explicit_entry_hint``; explicit-target diagnostics stay
+    exact."""
+    import codedoc.core.scanner as _sc
+
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "target").mkdir()
+    _write_py(tmp_path / ".hidden" / "target" / "a.py")
+    (tmp_path / "alias").mkdir()
+    _write_py(tmp_path / "alias" / "a.py")
+    _write_py(tmp_path / "other.py")
+
+    real_identity = _sc._Walker._identity
+
+    def _shared(self, path):
+        p = os.path.normcase(os.path.normpath(str(path)))
+        if p.endswith(os.path.normcase(os.path.join(".hidden", "target"))) or \
+           p.endswith(os.path.normcase("alias")):
+            return ("shared-dir-identity",)
+        if p.endswith(os.path.normcase(os.path.join(".hidden", "target", "a.py"))) or \
+           p.endswith(os.path.normcase(os.path.join("alias", "a.py"))):
+            return ("shared-file-identity",)
+        return real_identity(self, path)
+
+    monkeypatch.setattr(_sc._Walker, "_identity", _shared, raising=True)
+
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+    plain = {f["rel_path"] for f in scan_files(
+        tmp_path, extension_language_map={".py": "python"}, follow_symlinks=True)}
+
+    diag = ScanDiagnostics()
+    diag.explicit_entry_hint = ".hidden/target"
+    hinted_files = scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        follow_symlinks=True, diagnostics=diag)
+    hinted = {f["rel_path"] for f in hinted_files}
+
+    assert hinted == plain, (plain, hinted)
+    assert "alias/a.py" in hinted
+    cat = diag.scanner_admission_skip
+    assert [d["path"] for d in cat["details"]] == [".hidden/target/a.py"]
+    assert cat["details_total"] == 1
+
+
+@pytest.mark.parametrize("alias_first", [True, False])
+def test_cr5_shared_identity_both_lexical_orders(tmp_path, monkeypatch, alias_first):
+    import codedoc.core.scanner as _sc
+
+    skipped = "aaa_skip" if alias_first else "zzz_skip"
+    alias = "zzz_alias" if alias_first else "aaa_alias"
+    (tmp_path / skipped).mkdir()
+    (tmp_path / skipped / "target").mkdir()
+    _write_py(tmp_path / skipped / "target" / "a.py")
+    (tmp_path / alias).mkdir()
+    _write_py(tmp_path / alias / "a.py")
+
+    real_identity = _sc._Walker._identity
+
+    def _shared(self, path):
+        s = str(path).replace("\\", "/")
+        if s.endswith(f"{skipped}/target") or s.endswith(f"/{alias}"):
+            return ("shared-dir",)
+        if s.endswith(f"{skipped}/target/a.py") or s.endswith(f"{alias}/a.py"):
+            return ("shared-file",)
+        return real_identity(self, path)
+
+    monkeypatch.setattr(_sc._Walker, "_identity", _shared, raising=True)
+
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+    plain = {f["rel_path"] for f in scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        skip_dirs=[skipped], follow_symlinks=True)}
+    diag = ScanDiagnostics()
+    diag.explicit_entry_hint = f"{skipped}/target"
+    hinted = {f["rel_path"] for f in scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        skip_dirs=[skipped], follow_symlinks=True, diagnostics=diag)}
+    assert hinted == plain
+    assert f"{alias}/a.py" in hinted
+    assert [d["path"] for d in diag.scanner_admission_skip["details"]] == [
+        f"{skipped}/target/a.py"]
+
+
+def test_cr5_real_junction_hint_does_not_change_admission(tmp_path):
+    if os.name != "nt":
+        pytest.skip("junction test is Windows-only")
+    import subprocess
+
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "target").mkdir()
+    _write_py(tmp_path / ".hidden" / "target" / "a.py")
+    _write_py(tmp_path / "other.py")
+    junction = tmp_path / "alias"
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", str(junction),
+                        str(tmp_path / ".hidden" / "target")],
+                       capture_output=True, text=True)
+    if r.returncode != 0 or not junction.exists():
+        pytest.skip("could not create a junction here")
+
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+    plain = {f["rel_path"] for f in scan_files(
+        tmp_path, extension_language_map={".py": "python"}, follow_symlinks=True)}
+    diag = ScanDiagnostics()
+    diag.explicit_entry_hint = ".hidden/target"
+    hinted = {f["rel_path"] for f in scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        follow_symlinks=True, diagnostics=diag)}
+    assert hinted == plain
+    assert "alias/a.py" in hinted
+    assert [d["path"] for d in diag.scanner_admission_skip["details"]] == [
+        ".hidden/target/a.py"]
+
+
+def _cr5_dir_link(src, dst) -> bool:
+    """Create a real directory link src<-dst by symlink, else a Windows junction."""
+    try:
+        os.symlink(src, dst, target_is_directory=True)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    if os.name == "nt":
+        import subprocess
+        r = subprocess.run(["cmd", "/c", "mklink", "/J", str(dst), str(src)],
+                           capture_output=True, text=True)
+        return r.returncode == 0 and dst.exists()
+    return False
+
+
+def _cr5_file_alias(src, dst) -> bool:
+    """Create a real second alias to one physical file (hard link, else symlink)."""
+    try:
+        os.link(src, dst)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        pass
+    try:
+        os.symlink(src, dst)
+        return True
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+
+
+def test_cr5_diagnostic_target_link_back_to_root_terminates(tmp_path):
+    (tmp_path / ".hidden").mkdir()
+    (tmp_path / ".hidden" / "target").mkdir()
+    _write_py(tmp_path / ".hidden" / "target" / "a.py")
+    _write_py(tmp_path / "other.py")
+    if not _cr5_dir_link(tmp_path, tmp_path / ".hidden" / "target" / "loop"):
+        pytest.skip("cannot create a directory link on this host")
+
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+    diag = ScanDiagnostics()
+    diag.explicit_entry_hint = ".hidden/target"
+    files = scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        follow_symlinks=True, diagnostics=diag)
+    # scan terminates; boundary evidence only; no duplicated / off-boundary paths.
+    assert {f["rel_path"] for f in files} == {"other.py"}
+    paths = [d["path"] for d in diag.scanner_admission_skip["details"]]
+    assert paths == [".hidden/target/a.py"]
+    assert all(p.startswith(".hidden/target/") for p in paths)
+
+
+def test_cr5_real_alias_file_pair_in_ignored_dir_dedup(tmp_path):
+    (tmp_path / "target").mkdir()
+    _write_py(tmp_path / "target" / "a.py")
+    if not _cr5_file_alias(tmp_path / "target" / "a.py", tmp_path / "target" / "b.py"):
+        pytest.skip("cannot create a second alias to one file on this host")
+    _write_py(tmp_path / "other.py")
+
+    from codedoc.core.scanner import ScanDiagnostics, scan_files
+    diag = ScanDiagnostics()
+    diag.explicit_entry_hint = "target"
+    files = scan_files(
+        tmp_path, extension_language_map={".py": "python"},
+        ignore_paths=["target"], follow_symlinks=True, diagnostics=diag)
+    assert {f["rel_path"] for f in files} == {"other.py"}
+    cat = diag.scanner_admission_skip
+    assert [d["path"] for d in cat["details"]] == ["target/a.py"]
+    assert cat["details_total"] == 1 and cat["details_omitted"] == 0
+
+
+def test_cr6_pipeline_does_not_replace_skipped_explicit_directory_alias(tmp_path):
+    """Case matching must not resolve a skipped junction/symlink to another
+    admitted project path when following links is disabled."""
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    _write_py(tmp_path / "real" / "main.py")
+    if not _cr5_dir_link(tmp_path / "real", tmp_path / "alias"):
+        pytest.skip("cannot create a directory link on this host")
+
+    reports = []
+    with pytest.raises(ConfigError):
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": "alias/main.py",
+                "dry_run": True,
+                "follow_symlinks": False,
+                "propagate_changes": False,
+            },
+            plan_reporter=reports.append,
+        )
+
+    assert len(reports) == 1
+    assert reports[0]["total_calls_planned"] == 0
+    assert not (tmp_path / "codedoc").exists()
+
+
+def test_cr6_pipeline_ignored_target_is_not_replaced_by_visible_alias(tmp_path):
+    """An admitted alias to the same physical file cannot turn an explicitly
+    ignored target into payable work."""
+    from codedoc.pipeline import run_pipeline
+    from codedoc.utils.errors import ConfigError
+
+    target = tmp_path / ".hidden" / "target"
+    _write_py(target / "a.py")
+    if not _cr5_dir_link(target, tmp_path / "alias"):
+        pytest.skip("cannot create a directory link on this host")
+
+    reports = []
+    with pytest.raises(ConfigError):
+        run_pipeline(
+            tmp_path,
+            {
+                "entry_file": ".hidden/target/a.py",
+                "dry_run": True,
+                "follow_symlinks": True,
+                "propagate_changes": False,
+            },
+            plan_reporter=reports.append,
+        )
+
+    assert len(reports) == 1
+    assert reports[0]["total_calls_planned"] == 0
+    assert reports[0]["scanner_admission_skip_details_total"] == 1
+    assert reports[0]["scanner_admission_skip_details"][0]["path"] == (
+        ".hidden/target/a.py"
+    )
+    assert not (tmp_path / "codedoc").exists()

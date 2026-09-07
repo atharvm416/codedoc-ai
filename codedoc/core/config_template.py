@@ -161,7 +161,18 @@ PUBLIC_CONFIG_KEYS: tuple[tuple[str, str], ...] = (
     ),
     (
         "response_correction_enabled",
-        "Opt in to one targeted correction call per failed agent response.",
+        "Enabled by default. One targeted correction call is made per rejected "
+        "response-contract failure, revalidated through the same canonical path. "
+        "The correction-only worst case is one extra provider call for every "
+        "rejected documentation response -- up to a 100% increase over the "
+        "initially planned documentation calls (per rejected agent/leaf/reducer/"
+        "final response in triple and split modes, not per source file). "
+        "Transport and file retries are a separate class and are additional. "
+        "max_planned_calls authorizes only the initial manifest and excludes "
+        "both corrections and retries, so it is not a hard final-billing "
+        "ceiling. Set this to false for a hard opt-out; an existing project "
+        "config with an explicit false is authoritative and keeps the "
+        "historical zero-correction behaviour.",
     ),
     (
         "prompt_profiles",

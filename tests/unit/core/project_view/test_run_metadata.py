@@ -198,3 +198,223 @@ def test_predecessor_split_view_does_not_acquire_optional_counters_on_sanitize()
     sanitized = sanitize_public_view(predecessor)
 
     assert all(key not in sanitized["last_run"] for key in _OPTIONAL_SPLIT_COUNTERS)
+
+
+# ===========================================================================
+# Section 5.8 correction round: the granular provider-free preflight details
+# (per-file split/truncate/blocked descriptor arrays, the two scanner-skip
+# categories, and every new path-bearing granular array) are DELIBERATELY
+# EPHEMERAL -- they belong to the dry-run / real-run stats surface and the
+# ``plan_reporter`` snapshot only, and must never be persisted into the public
+# ``last_run`` block of codedoc.json / codedoc.md. No project_view.py change is
+# authorized; these assertions pin the current (correct) behaviour.
+# ===========================================================================
+
+_S8_EPHEMERAL_GRANULAR_KEYS = (
+    "split_plan_details", "split_plan_details_total", "split_plan_details_retained",
+    "split_plan_details_omitted", "split_plan_details_digest",
+    "truncate_plan_details", "truncate_plan_details_total",
+    "truncate_plan_details_retained", "truncate_plan_details_omitted",
+    "truncate_plan_details_digest",
+    "split_blocked_details", "split_blocked_details_total",
+    "split_blocked_details_retained", "split_blocked_details_omitted",
+    "split_blocked_details_digest",
+    "scanner_size_skip_details", "scanner_size_skip_details_total",
+    "scanner_size_skip_details_retained", "scanner_size_skip_details_omitted",
+    "scanner_size_skip_details_digest",
+    "scanner_admission_skip_details", "scanner_admission_skip_details_total",
+    "scanner_admission_skip_details_retained", "scanner_admission_skip_details_omitted",
+    "scanner_admission_skip_details_digest",
+    # Section 6.3: the two EPHEMERAL recovery-transition counts are preflight /
+    # CLI observability only -- unlike the allowlisted split_reexecuted_nodes /
+    # split_recovery_conflict_files they are never persisted into last_run.
+    "split_recovery_discarded_predecessor_nodes",
+    "split_recovery_replacement_nodes_planned",
+    # billing fields are runtime disclosure, not persisted schema
+    "initial_provider_calls_planned", "prompt_review_calls_planned",
+    "initial_documentation_calls_planned", "correction_calls_possible_max",
+    "provider_calls_max_before_retries", "file_retry_attempts",
+    "retries_included_in_ceiling", "max_planned_calls_applies_to",
+    "call_manifest_digest",
+)
+
+
+def _s8_enriched_split_stats() -> dict:
+    stats = _split_stats()
+    stats.update(
+        {
+            "split_plan_details": [
+                {"path": "src/huge.py", "initial_calls": 5,
+                 "units": [{"ordinal": 0}], "leaves": [{"payload_chars": 600}]}
+            ],
+            "split_plan_details_total": 1,
+            "split_plan_details_retained": 1,
+            "split_plan_details_omitted": 0,
+            "split_plan_details_digest": "sha256:" + "a" * 64,
+            "truncate_plan_details": [
+                {"path": "src/wide.py", "retained_head_chars": 700,
+                 "retained_tail_chars": 300, "omitted_chars": 4000}
+            ],
+            "truncate_plan_details_total": 1,
+            "truncate_plan_details_retained": 1,
+            "truncate_plan_details_omitted": 0,
+            "truncate_plan_details_digest": "sha256:" + "b" * 64,
+            "split_blocked_details": [
+                {"path": "src/blocked.py", "phase": "division-packing",
+                 "reason": "chunk-cap", "observed": 9, "limit": 1,
+                 "guidance_code": "raise-source-ceiling-or-split-source"}
+            ],
+            "split_blocked_details_total": 1,
+            "split_blocked_details_retained": 1,
+            "split_blocked_details_omitted": 0,
+            "split_blocked_details_digest": "sha256:" + "c" * 64,
+            "scanner_size_skip_details": [
+                {"path": "src/big.bin.py", "phase": "scanner-byte",
+                 "observed": 900000, "limit": 512000,
+                 "guidance_code": "raise-scan-byte-limit-or-exclude"}
+            ],
+            "scanner_size_skip_details_total": 1,
+            "scanner_size_skip_details_retained": 1,
+            "scanner_size_skip_details_omitted": 0,
+            "scanner_size_skip_details_digest": "sha256:" + "d" * 64,
+            "scanner_admission_skip_details": [
+                {"path": "src/gone.py", "phase": "scanner-admission",
+                 "reason": "missing", "guidance_code": "fix-entry-path"}
+            ],
+            "scanner_admission_skip_details_total": 1,
+            "scanner_admission_skip_details_retained": 1,
+            "scanner_admission_skip_details_omitted": 0,
+            "scanner_admission_skip_details_digest": "sha256:" + "e" * 64,
+            "split_recovery_discarded_predecessor_nodes": 5,
+            "split_recovery_replacement_nodes_planned": 4,
+            "initial_provider_calls_planned": 4,
+            "prompt_review_calls_planned": 0,
+            "initial_documentation_calls_planned": 4,
+            "correction_calls_possible_max": 4,
+            "provider_calls_max_before_retries": 8,
+            "file_retry_attempts": 1,
+            "retries_included_in_ceiling": False,
+            "max_planned_calls_applies_to": "initial_provider_calls_planned",
+            "call_manifest_digest": "f" * 64,
+        }
+    )
+    return stats
+
+
+def test_s8_granular_preflight_details_never_reach_persisted_last_run():
+    last_run = build_project_view([_split_record()], _s8_enriched_split_stats())["last_run"]
+    for key in _S8_EPHEMERAL_GRANULAR_KEYS:
+        assert key not in last_run, key
+    # a spot-check that legitimate persisted aggregates DO remain
+    assert "split_divided_files" in last_run
+    assert "split_chunks" in last_run
+    # the allowlisted §6.3 counters survive; the two ephemeral ones are gone
+    assert last_run["split_reexecuted_nodes"] == 1
+    assert last_run["split_recovery_conflict_files"] == 1
+    assert "split_recovery_discarded_predecessor_nodes" not in last_run
+    assert "split_recovery_replacement_nodes_planned" not in last_run
+
+
+def _s8_persisted_last_run(tmp_path):
+    written = json.loads(
+        (tmp_path / "codedoc" / "codedoc.json").read_text(encoding="utf-8")
+    )
+    return written["last_run"]
+
+
+def _s8_assert_no_granular_keys(last_run):
+    for key in _S8_EPHEMERAL_GRANULAR_KEYS:
+        assert key not in last_run, key
+    # and no *_details / *_digest / *_details_* granular key under any name
+    for key in last_run:
+        assert not key.endswith("_details"), key
+        assert not key.endswith("_details_digest"), key
+        assert not key.endswith("_details_total"), key
+        assert not key.endswith("_details_retained"), key
+        assert not key.endswith("_details_omitted"), key
+
+
+def test_s8_written_codedoc_json_last_run_has_no_granular_preflight_details(
+    tmp_path, monkeypatch
+):
+    """Real ``large_file_strategy: "split"`` run: both oversized modules take the
+    SPLIT route (no truncate route is exercised here -- that is a separate run
+    below) and one module is byte-size skipped. The run genuinely populates the
+    ``split_plan`` and ``scanner_size_skip`` categories on its stats surface;
+    the persisted ``last_run`` block still contains none of the granular /
+    ephemeral preflight keys, and neither of the two ephemeral §6.3 recovery
+    counters. The remaining granular categories (truncate / blocked / admission)
+    are proven strippable by the synthetic-injection test above and by the
+    truncate-route run below.
+    """
+    from codedoc.pipeline import run_pipeline
+    from tests.support.providers import SmartFake
+
+    (tmp_path / "main.py").write_text(
+        "import wide\nimport huge\nVALUE = 1\n", encoding="utf-8"
+    )
+    (tmp_path / "huge.py").write_text(
+        "\n".join(f"def fn_{i}(): return {i}" for i in range(400)) + "\n",
+        encoding="utf-8", newline="",
+    )
+    (tmp_path / "wide.py").write_text(
+        "\n".join(f"w{i} = {i}" for i in range(400)) + "\n",
+        encoding="utf-8", newline="",
+    )
+    (tmp_path / "skipme.py").write_text(
+        "\n".join(f"s{i} = {i}" for i in range(40000)), encoding="utf-8"
+    )
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py", "documentation_scope": "all",
+            "large_file_strategy": "split", "max_content_chars": 2000,
+            "max_file_size_kb": 500, "parallel_agents": False,
+            "propagate_changes": False,
+        },
+    )
+    # the two categories this run actually exercises are non-empty on the
+    # stats surface (we are not claiming a zero-population category).
+    assert stats["split_plan_details_total"] >= 1
+    assert stats["scanner_size_skip_details_total"] >= 1
+    assert stats["truncate_plan_details_total"] == 0
+
+    last_run = _s8_persisted_last_run(tmp_path)
+    _s8_assert_no_granular_keys(last_run)
+    assert "split_recovery_discarded_predecessor_nodes" not in last_run
+    assert "split_recovery_replacement_nodes_planned" not in last_run
+
+
+def test_s8_written_codedoc_json_last_run_truncate_route_has_no_granular_details(
+    tmp_path, monkeypatch
+):
+    """Companion genuine ``large_file_strategy: "truncate"`` run: an oversized
+    module takes the TRUNCATE route, populating the ``truncate_plan`` category on
+    the stats surface. The persisted ``last_run`` block still carries none of the
+    granular / ephemeral preflight keys.
+    """
+    from codedoc.pipeline import run_pipeline
+    from tests.support.providers import SmartFake
+
+    (tmp_path / "main.py").write_text("import wide\nVALUE = 1\n", encoding="utf-8")
+    (tmp_path / "wide.py").write_text(
+        "\n".join(f"w{i} = {i}" for i in range(4000)) + "\n",
+        encoding="utf-8", newline="",
+    )
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py", "documentation_scope": "all",
+            "large_file_strategy": "truncate", "max_content_chars": 2000,
+            "parallel_agents": False, "propagate_changes": False,
+        },
+    )
+    assert stats["truncate_plan_details_total"] >= 1
+    assert stats["large_files_routed_truncate"] >= 1
+
+    last_run = _s8_persisted_last_run(tmp_path)
+    _s8_assert_no_granular_keys(last_run)
+    assert "split_recovery_discarded_predecessor_nodes" not in last_run
+    assert "split_recovery_replacement_nodes_planned" not in last_run

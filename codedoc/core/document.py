@@ -40,11 +40,14 @@ Document envelope contract:
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 from dataclasses import dataclass
 from pathlib import Path
 
 from codedoc.core.file_division import (
+    EMPTY_PLAN_DETAILS_DIGEST,
+    PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS,
     SPLIT_PARTIAL_SCHEMA_VERSION,
     DuplicateCanonicalKeyError,
     QuarantineEntry,
@@ -134,6 +137,31 @@ _BLOCKED_REASONS = {
 
 
 @dataclass(frozen=True)
+class LegacySplitPartialEvidence:
+    """Bounded, value-safe evidence for predecessor (schema version 1)
+    ordered-prefix split partials in a recovery container (section 5.8).
+
+    Carries the exact ``total`` count, at most
+    ``PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS`` ``retained`` normalized paths -- in
+    the container's own ``sorted(...)`` traversal order, never re-sorted -- the
+    exact ``omitted`` count, and one framed streaming ``details_digest`` over
+    *every* legacy path, not the retained subset. Accumulated inside
+    :func:`_partial_files_from_meta`'s single existing container pass so no
+    complete legacy-path list, set, or joined string survives it.
+
+    This is bounded **error evidence** carried on the caller's ``ConfigError``,
+    not a diagnostic category: it adds no ``*_details_total`` /
+    ``*_details_retained`` / ``*_details_omitted`` / ``*_details_digest`` key to
+    any ephemeral stats surface.
+    """
+
+    total: int = 0
+    retained: tuple[str, ...] = ()
+    omitted: int = 0
+    details_digest: str = EMPTY_PLAN_DETAILS_DIGEST
+
+
+@dataclass(frozen=True)
 class CodedocDocument:
     """Normalized, defensively-copied contents of a CodeDoc document."""
 
@@ -147,11 +175,15 @@ class CodedocDocument:
     in_progress: bool
     view: dict
     partial_files: tuple[SplitTreeState, ...] = ()
-    # rel_paths whose stored split partial structurally matches the
-    # predecessor (schema version 1) ordered-prefix payload.  Migration-
-    # readable only: D11 requires callers to fail closed with the
-    # preserve-or-move-aside remedy rather than resume or execute these.
-    legacy_split_partial_rels: tuple[str, ...] = ()
+    # Bounded, value-safe evidence for any predecessor (schema version 1)
+    # ordered-prefix split partials in this container.  Migration-readable
+    # only: D11 requires callers to fail closed with the preserve-or-move-
+    # aside remedy rather than resume or execute these.  Empty
+    # (``total == 0``) when none are present or ``include_partial_files``
+    # was not requested.
+    legacy_split_partial_evidence: LegacySplitPartialEvidence = (
+        LegacySplitPartialEvidence()
+    )
 
 
 def read_codedoc_document(
@@ -316,9 +348,11 @@ def _read_json(
         metadata.pop("partial_files", None)
 
     partial_files: tuple[SplitTreeState, ...] = ()
-    legacy_split_partial_rels: tuple[str, ...] = ()
+    legacy_split_partial_evidence = LegacySplitPartialEvidence()
     if include_partial_files:
-        partial_files, legacy_split_partial_rels = _partial_files_from_meta(meta)
+        partial_files, legacy_split_partial_evidence = _partial_files_from_meta(
+            meta
+        )
 
     return CodedocDocument(
         path=path,
@@ -331,13 +365,13 @@ def _read_json(
         in_progress=in_progress,
         view=view,
         partial_files=partial_files,
-        legacy_split_partial_rels=legacy_split_partial_rels,
+        legacy_split_partial_evidence=legacy_split_partial_evidence,
     )
 
 
 def _partial_files_from_meta(
     meta: dict,
-) -> tuple[tuple[SplitTreeState, ...], tuple[str, ...]]:
+) -> tuple[tuple[SplitTreeState, ...], "LegacySplitPartialEvidence"]:
     """Parse `partial_files` into `(schema-4 tree states, legacy v1 rel_paths)`.
 
     A predecessor (schema version 1) ordered-prefix payload is
@@ -350,12 +384,22 @@ def _partial_files_from_meta(
     block.
     """
     if "partial_files" not in meta:
-        return (), ()
+        return (), LegacySplitPartialEvidence()
     raw = meta["partial_files"]
     if not isinstance(raw, dict):
         raise ConfigError("CodeDoc recovery partial_files must be an object.")
     partials: list[SplitTreeState] = []
-    legacy_rel_paths: list[str] = []
+    # Bounded legacy (schema version 1) evidence, folded in during the single
+    # sorted-container pass below (section 5.8): an exact count, at most
+    # ``PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS`` retained normalized paths, and one
+    # framed streaming SHA-256 over EVERY legacy path. No complete legacy-path
+    # list, set, or joined string survives this pass -- retaining one would
+    # move the unbounded structure rather than remove it.
+    legacy_total = 0
+    legacy_retained: list[str] = []
+    legacy_hasher = hashlib.sha256()
+    legacy_hasher.update(b"[")
+    legacy_first = True
     normalized_rel_paths: set[str] = set()
     container_required = {
         "schema_version",
@@ -398,7 +442,21 @@ def _partial_files_from_meta(
             )
         normalized_rel_paths.add(normalized_rel_path)
         if is_legacy_split_partial(value):
-            legacy_rel_paths.append(normalized_rel_path)
+            # Fold this legacy path into the running framed digest in the
+            # container's own ``sorted(raw)`` order. This stream defines its
+            # own canonical order and is deliberately NOT re-sorted into
+            # normalized order: a second sort would reintroduce the O(N)
+            # allocation being removed. Retain only the first
+            # ``PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS`` paths.
+            if not legacy_first:
+                legacy_hasher.update(b",")
+            legacy_first = False
+            legacy_hasher.update(
+                canonical_json(normalized_rel_path).encode("utf-8")
+            )
+            legacy_total += 1
+            if len(legacy_retained) < PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS:
+                legacy_retained.append(normalized_rel_path)
             continue
         if value.get("schema_version") != SPLIT_PARTIAL_SCHEMA_VERSION:
             raise ConfigError(
@@ -546,7 +604,14 @@ def _partial_files_from_meta(
                 "CodeDoc recovery contains a malformed split-partial container."
             ) from exc
         partials.append(partial)
-    return tuple(partials), tuple(legacy_rel_paths)
+    legacy_hasher.update(b"]")
+    legacy_evidence = LegacySplitPartialEvidence(
+        total=legacy_total,
+        retained=tuple(legacy_retained),
+        omitted=legacy_total - len(legacy_retained),
+        details_digest=f"sha256:{legacy_hasher.hexdigest()}",
+    )
+    return tuple(partials), legacy_evidence
 
 
 def _validate_json_schema(

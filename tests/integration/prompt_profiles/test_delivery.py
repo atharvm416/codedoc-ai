@@ -91,7 +91,11 @@ def test_single_filters_omitted_top_level_and_nested_fields_and_stamps_digest():
     assert result["_prompt_profile_digest"] == resolved.file_digest("a.py")
 
 def test_no_profile_delivery_is_identity_and_unstamped():
-    result = Orchestrator(CombinedProvider()).process(_request(None, "x = 1"))
+    # ``def f`` is a real declaration, so the model's ``f`` description survives
+    # the source-backed authority; only profile filtering is under test here.
+    result = Orchestrator(CombinedProvider()).process(
+        _request(None, "def f():\n    return 1\n")
+    )
     assert result["role_in_system"] == "drop-role"
     assert result["functions"] == [{"name": "f", "description": "drop"}]
     assert "_prompt_profile_digest" not in result
@@ -132,9 +136,11 @@ def test_triple_filters_each_subagent_before_merge():
     }}, mode="triple")
     result = Orchestrator(
         TripleProvider(), parallel=False, analysis_mode="triple",
-    ).process(_request(resolved, "x = 1", mode="triple"))
+    ).process(_request(resolved, "def f():\n    return 1\n", mode="triple"))
 
-    # structure kept functions, dropped classes/exports/role.
+    # structure kept functions, dropped classes/exports/role. ``def f`` is a
+    # real declaration so the model's ``f`` survives the source-backed
+    # authority; ``C``/``E`` were removed by profile filtering before merge.
     assert result["functions"] == [{"name": "f", "description": "d"}]
     assert result["classes"] == []
     assert result["exports"] == []

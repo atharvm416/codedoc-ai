@@ -29,10 +29,11 @@ from typing import Mapping
 from codedoc.core.db import compute_file_hash, read_source_snapshot
 from codedoc.core.file_division import (
     FINAL_SYNTHESIS_REVISION,
+    MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS,
     REDUCER_PROMPT_REVISION,
-    BlockedReason,
     DivisionPlan,
     ReductionTreePlan,
+    RoutePlanEntry,
     SplitCapacityBlocked,
     SplitRecoveryStateError,
     SplitTreeState,
@@ -118,8 +119,8 @@ def _record_is_reusable(
     security boundary (a stored record must never document a different path
     than the one it would be reused into), so its enforcement does not rely
     solely on set membership that an unrelated future change could alter.  A
-    record whose stored ``_ordinary_path_identity`` is absent (every
-    pre-0.14.4 ordinary/truncate-path record) normalizes to ``None`` and
+    record whose stored ``_ordinary_path_identity`` is absent (every legacy
+    ordinary/truncate-path record without that identity) normalizes to ``None`` and
     compares unequal to the expected non-``None`` value, so it is refused
     until regenerated; a split (non-ordinary) record and expectation both
     normalize to ``None`` here and rely on ``_large_file_identity`` instead.
@@ -168,10 +169,13 @@ class PipelinePlan:
     # predicate. Cross-path split reuse remains unavailable because the
     # completed identity is path-bound.
     completed_split_reuse_rels: frozenset[str] = frozenset()
-    # rel_path -> first-failing capacity-blocked reason under the frozen
-    # evaluation order (D3/D6). A blocked file is never in agent_rels or
+    # rel_path -> the frozen first-failing capacity-block *descriptor* under the
+    # evaluation order (D3/D6, section 5.8): a value-safe mapping of
+    # ``path`` / ``reason`` / ``phase`` / ``observed`` / ``limit`` /
+    # ``guidance_code``. The complete measurement is retained, never collapsed
+    # back to reason text. A blocked file is never in agent_rels or
     # division_plan_rels and never counts toward max_files (D8).
-    division_blocked: Mapping[str, str] = field(default_factory=dict)
+    division_blocked: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
     # Attached by with_call_manifest() once the canonical call manifest exists;
     # zero/empty defaults keep every existing direct PipelinePlan(...) caller
     # (e.g. focused planning tests) source-compatible.
@@ -425,19 +429,54 @@ class PlanMaterials:
     # rel_path -> exact, dependency-validated retained split-tree checkpoint
     # state (only nodes that passed validate_recovered_tree survive here).
     tree_states: Mapping[str, SplitTreeState] = field(default_factory=dict)
-    # rel_path -> a forced split file's structurally valid recovered
-    # container, carried forward untouched (section 9): never validated,
-    # never consulted for scheduling, never counted as restored work.
+    # rel_path -> a structurally valid recovered container carried forward
+    # byte-for-byte: never validated, never consulted for scheduling, never
+    # counted as restored work. Two disjoint cases populate this map:
+    #   * a forced split file (force bypasses reuse/recovery for THIS run's
+    #     scheduling, but the prior checkpoint is preserved for a later
+    #     non-forced resume); and
+    #   * a cross-plan transition (section 6.3): the recovered container's
+    #     content hash, division-plan digest, or reduction-tree digest no
+    #     longer matches the current plan, so it is preserved untouched while
+    #     the whole current split is scheduled fresh.
+    # In both cases SafeWriter re-emits the container unchanged and suppresses
+    # replacement node checkpoints until a completed record transactionally
+    # supersedes it.
     carry_states: Mapping[str, SplitTreeState] = field(default_factory=dict)
-    # rel_path -> first-failing capacity-blocked reason (D3/D6/D8).
-    division_blocked: Mapping[str, str] = field(default_factory=dict)
+    # rel_path -> the frozen first-failing capacity-block descriptor (D3/D6/D8,
+    # section 5.8): value-safe ``path`` / ``reason`` / ``phase`` / ``observed``
+    # / ``limit`` / ``guidance_code``.
+    division_blocked: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
+    # The provider-free route-plan view (section 5.8 / 5.9): one
+    # ``RoutePlanEntry`` per oversized file, in canonical
+    # normalized-path-ascending order, sourced from the same memoized division
+    # outcome, source snapshot, identity checks, and recovery classification
+    # execution uses. It distinguishes every oversized file's resolved route
+    # (split / truncate / blocked), whether it still needs a fresh initial
+    # provider call, and -- for split -- the exact recovery-aware unpaid node
+    # count (``0`` for a completed/reused or fully-recovered file). Diagnostics
+    # traverse this instead of collecting and sorting an unbounded copy;
+    # execution scheduling never consults it. Ephemeral -- never persisted.
+    route_plan: tuple[RoutePlanEntry, ...] = field(default_factory=tuple)
     # The provider-free provider/model/effective-endpoint execution identity
     # for this run (D12), shared by every recoverable split node.
     provider_identity: str = ""
     # Provider-free recovery observability (section 19). These count planned
-    # nodes and conflict files, never provider attempts.
+    # nodes and conflict files, never provider attempts. ``reexecuted_nodes``
+    # counts only predecessor node IDs that are also current unpaid node IDs
+    # and therefore stays at or below split unpaid nodes.
     reexecuted_nodes: int = 0
     recovery_conflict_files: int = 0
+    # Ephemeral cross-plan transition counters (section 6.3). Internal only --
+    # never persisted into last_run; their bounded CLI/preflight presentation
+    # is a later observability prompt. For every file that enters cross-plan
+    # carry: ``recovery_discarded_predecessor_nodes`` counts every unique
+    # predecessor paid-or-quarantined node ID invalidated by the transition,
+    # and ``recovery_replacement_nodes_planned`` counts every current
+    # leaf/reduction/final node scheduled fresh for it. A forced carry is not a
+    # cross-plan transition and never touches these.
+    recovery_discarded_predecessor_nodes: int = 0
+    recovery_replacement_nodes_planned: int = 0
 
     def __post_init__(self) -> None:
         for name in (
@@ -456,7 +495,13 @@ class PlanMaterials:
                 name,
                 MappingProxyType(dict(getattr(self, name))),
             )
-        for name in ("reexecuted_nodes", "recovery_conflict_files"):
+        object.__setattr__(self, "route_plan", tuple(self.route_plan))
+        for name in (
+            "reexecuted_nodes",
+            "recovery_conflict_files",
+            "recovery_discarded_predecessor_nodes",
+            "recovery_replacement_nodes_planned",
+        ):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 0:
                 raise ValueError(f"{name} must be a non-negative integer.")
@@ -498,11 +543,19 @@ def _build_execution_request(
     resolved_profile: ResolvedProfile,
     analysis_mode: str,
     max_content_chars: int,
+    synthesis_manifest_chars: int,
     head_ratio: float,
     snapshot: tuple[str, str] | None = None,
     parsed_imports: tuple[str, ...] | None = None,
 ) -> FileExecutionRequest:
     """Build one frozen :class:`FileExecutionRequest` from a fresh snapshot.
+
+    *synthesis_manifest_chars* is the run's single effective split-synthesis
+    budget (section 5.7), already computed once by the caller as
+    ``max(max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)`` and carried
+    verbatim into :class:`AgentCallContext` here.  This function never
+    recomputes that formula: planning must not size the context from one value
+    while the reduction tree is sized from another (section 4.7/8.0B).
 
     Reads raw bytes once (:func:`read_source_snapshot`) and verifies the
     resulting hash against *expected_hash* (the hash that already decided this
@@ -548,6 +601,7 @@ def _build_execution_request(
         context=AgentCallContext(
             analysis_mode=analysis_mode,
             max_content_chars=max_content_chars,
+            synthesis_manifest_chars=synthesis_manifest_chars,
             truncation_head_ratio=head_ratio,
             resolved_shape_bundle=bundle,
         ),
@@ -776,13 +830,27 @@ def _build_pipeline_plan_once(
     # split planning both consume the exact decoded text. This memoized helper
     # computes the same character count the orchestrator consumes.
     max_content_chars = int(config.get("max_content_chars", 12000) or 12000)
+    # Section 5.7/8.0B: the effective internal reducer/final synthesis budget is
+    # computed exactly once here and carried, unchanged, into both the frozen
+    # AgentCallContext (via _build_execution_request) and build_reduction_tree
+    # (via the preferred synthesis_manifest_chars keyword). No runtime path
+    # recomputes this formula; execution rejects a context/tree mismatch before
+    # any provider call. A legal max_content_chars below the released 12,000
+    # default must not starve the reduction tree (section 4.7); max(...) leaves
+    # a deliberately larger source ceiling carried through unchanged.
+    effective_split_manifest_chars = max(
+        max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS
+    )
     head_ratio = float(config.get("truncation_head_ratio", 0.70) or 0.70)
     _mcr_cache: dict[str, str | None] = {}
     # rel -> (DivisionPlan, ReductionTreePlan) | None. `None` means: not a
     # split-eligible oversized file, OR blocked (see division_blocked below).
     _split_cache: dict[str, tuple[DivisionPlan, ReductionTreePlan] | None] = {}
     _imports_cache: dict[str, tuple[str, ...]] = {}
-    division_blocked: dict[str, BlockedReason] = {}
+    # rel_path -> the value-safe measured capacity-block descriptor (section
+    # 5.8): the complete phase/observed/limit/guidance measurement is retained,
+    # never collapsed to reason text.
+    division_blocked: dict[str, dict] = {}
     provider_identity = provider_execution_identity(config)
     split_release = current_split_release_policy()
 
@@ -832,14 +900,19 @@ def _build_pipeline_plan_once(
                 content=source_snapshots[rel][1],
                 source_budget_chars=max_content_chars,
             )
+            # Section 5.7: the internal reducer/final manifest budget is never
+            # below the released default, even when the user's source ceiling
+            # is smaller -- a legal `max_content_chars` must not starve the
+            # reduction tree (section 4.7). This is the same single value the
+            # frozen AgentCallContext carries; it is computed once above.
             tree = build_reduction_tree(
                 plan,
-                max_content_chars=max_content_chars,
+                synthesis_manifest_chars=effective_split_manifest_chars,
                 language=file_map[rel].get("language", "generic"),
                 imports=_imports_for(rel),
             )
         except SplitCapacityBlocked as exc:
-            division_blocked[rel] = exc.reason
+            division_blocked[rel] = exc.detail
             _split_cache[rel] = None
             return None
         _split_cache[rel] = (plan, tree)
@@ -958,14 +1031,21 @@ def _build_pipeline_plan_once(
     division_plans: dict[str, DivisionPlan] = {}
     reduction_trees: dict[str, ReductionTreePlan] = {}
     tree_states: dict[str, SplitTreeState] = {}
-    # A forced split file's structurally valid recovered container, carried
-    # forward untouched (section 9): force bypasses reuse and recovery for
-    # THIS run's scheduling, but the prior checkpoint is preserved so a later
-    # non-forced run may still resume it if forced execution fails or is
-    # interrupted. Never validated, never consulted for scheduling, never
-    # counted as restored work.
+    # A structurally valid recovered container carried forward untouched. Two
+    # disjoint cases populate this (see PlanMaterials.carry_states):
+    #   * a forced split file -- force bypasses reuse and recovery for THIS
+    #     run's scheduling, but the prior checkpoint is preserved so a later
+    #     non-forced run may still resume it; and
+    #   * a cross-plan transition (section 6.3) -- the recovered container's
+    #     content hash, division-plan digest, or reduction-tree digest no
+    #     longer matches the current plan.
+    # In both cases: never validated, never scheduled from, never counted as
+    # restored work; SafeWriter suppresses replacement checkpoints until a
+    # completed record supersedes it.
     carry_states: dict[str, SplitTreeState] = {}
     reexecuted_nodes = 0
+    recovery_discarded_predecessor_nodes = 0
+    recovery_replacement_nodes_planned = 0
     recovery_conflict_paths: set[str] = set()
     recovered_by_path = dict(recovered_partials or {})
     identical_reuse: set[str] = set()
@@ -978,6 +1058,8 @@ def _build_pipeline_plan_once(
         content_hash: str,
     ) -> None:
         nonlocal reexecuted_nodes
+        nonlocal recovery_discarded_predecessor_nodes
+        nonlocal recovery_replacement_nodes_planned
         if rel_path in insufficient_source_reasons:
             return
         request = _build_execution_request(
@@ -987,6 +1069,7 @@ def _build_pipeline_plan_once(
             effective_resolved_profile,
             analysis_mode,
             max_content_chars,
+            effective_split_manifest_chars,
             head_ratio,
             source_snapshots[rel_path],
             _imports_for(rel_path),
@@ -1028,21 +1111,48 @@ def _build_pipeline_plan_once(
                 if recovered is not None:
                     carry_states[rel_path] = recovered
             elif recovered is not None:
-                if recovered.content_hash != split_content_hash:
-                    # A source revision invalidates every old node. Preserve
-                    # the old container until a completed replacement succeeds;
-                    # SafeWriter suppresses new checkpoints while carry state
-                    # for this path exists, so a failed run cannot overwrite it.
+                # Section 6.3: a schema-4 predecessor whose content hash,
+                # division-plan digest, OR reduction-tree digest no longer
+                # matches the current plan is a cross-plan transition. It is
+                # handled HERE, before validate_recovered_tree(), so no
+                # old-plan node ID is ever fed to current-plan validation
+                # (which would hard-block it as an unplanned ID). All tree
+                # identities bind REDUCTION_PACKING_REVISION plus the carried
+                # synthesis-manifest budget, so a topology-only or budget-only
+                # change is a genuine transition too.
+                cross_plan_conflict = (
+                    recovered.content_hash != split_content_hash
+                    or recovered.division_plan_digest != division_plan.plan_digest
+                    or recovered.reduction_tree_digest != reduction_tree.tree_digest
+                )
+                if cross_plan_conflict:
+                    # Preserve the predecessor container byte-for-byte until a
+                    # completed replacement succeeds; SafeWriter suppresses new
+                    # checkpoints while carry state for this path exists, so a
+                    # failed run cannot overwrite it. Reuse zero predecessor
+                    # nodes and let normal planning schedule the whole current
+                    # split fresh.
                     carry_states[rel_path] = recovered
                     recovery_conflict_paths.add(rel_path)
                     current_node_ids = {
                         *(chunk.chunk_id for chunk in division_plan.chunks),
                         *(node.node_id for node in reduction_tree.all_nodes),
                     }
-                    recovered_paid_ids = {
+                    predecessor_node_ids = {
                         node.node_id for node in recovered.nodes
                     } | {entry.node_id for entry in recovered.quarantine}
-                    reexecuted_nodes += len(recovered_paid_ids & current_node_ids)
+                    # Three distinct counts (section 6.3):
+                    #  - persisted reexecuted: only predecessor IDs that are
+                    #    also current unpaid IDs (stays <= split unpaid nodes);
+                    #  - ephemeral discarded: every unique predecessor paid or
+                    #    quarantined node ID invalidated by the transition;
+                    #  - ephemeral replacement: every current fresh node the
+                    #    conflicting file schedules.
+                    reexecuted_nodes += len(
+                        predecessor_node_ids & current_node_ids
+                    )
+                    recovery_discarded_predecessor_nodes += len(predecessor_node_ids)
+                    recovery_replacement_nodes_planned += len(current_node_ids)
                 else:
                     try:
                         retained_nodes, quarantine_entries = validate_recovered_tree(
@@ -1062,7 +1172,6 @@ def _build_pipeline_plan_once(
                             resolved_shape=resolved_synthesis_shape(
                                 request.context.resolved_shape_bundle
                             ),
-                            max_content_chars=request.context.max_content_chars,
                             existing_quarantine=recovered.quarantine,
                         )
                     except SplitRecoveryStateError as exc:
@@ -1155,8 +1264,134 @@ def _build_pipeline_plan_once(
 
         _route_execution_request(rel_path, descriptor, content_hash)
 
+    # Section 6.3 / Section 12 STOP CONDITION ("deleting predecessor recovery
+    # on conflict, or checkpointing over carried predecessor state before clean
+    # replacement"): every recovered schema-4 container this run did not
+    # otherwise account for -- in `tree_states` (a validated resume) or
+    # `carry_states` (a forced or cross-plan-conflict carry) -- must still be
+    # preserved byte-for-byte.  `_route_execution_request` consults
+    # `recovered_by_path` only inside its `split_requested_and_oversized`
+    # branch, so a path carrying paid schema-4 checkpoints that now routes as
+    # an ordinary whole-file call -- because its source fell under
+    # `max_content_chars`, or because it hit an earlier return (insufficient
+    # source, division blocked), or because it was never in `process_rels` --
+    # lands in neither map.  Downstream, `recorder.load()` does not re-read
+    # on-disk partials and `SafeWriter.initialize_empty()` flushes the banner
+    # over the container (before a provider even exists) unless carry state is
+    # loaded for it.  Carrying it here keeps `SafeWriter.has_partial_state()`
+    # true -- recovery is neither rewritten nor deleted -- until a completed
+    # record transactionally supersedes it.
+    #
+    # Section 5.6 lines 827-831: this parity is confined to a resolved-valid
+    # `analysis_mode: single` + `large_file_strategy: split` run; ordinary
+    # files inside that split run share its recovery classification.  A
+    # separately resolved ordinary/truncate run already fails closed on
+    # recovery identity and is left exactly as it is.
+    #
+    # Preservation only: this sweep deliberately does not touch
+    # `reexecuted_nodes`, `recovery_discarded_predecessor_nodes`,
+    # `recovery_replacement_nodes_planned`, or `recovery_conflict_paths`.
+    # Section 6.3's three transition counters describe a split -> split
+    # cross-plan transition that schedules a fresh whole-file split; an
+    # ordinary-routed carried path schedules no split node at all, so
+    # re-reporting it as a split transition would be wrong.
+    #
+    # A recovered container is dropped by this sweep only when a completed
+    # record already supersedes that path this run: same-path completed reuse
+    # (`unchanged_rels`, which contains `completed_split_reuse_rels` by
+    # construction) or cross-path identical-content reuse (`identical_reuse`).
+    # In either case `crash_recovery.json` for that path is legitimately
+    # cleaned up because a finished record replaces it. Otherwise the container
+    # is carried -- **including when its content hash no longer matches the
+    # current source**. Section 6.3 lines 1611-1613 name the content hash as
+    # one of the three carry triggers, and lines 1641-1645 make preservation
+    # unconditional on resumability ("recovery that this build cannot resume,
+    # or that it detects as stale, is never deleted merely because it was
+    # detected"). The oversized `_route_execution_request` branch already
+    # carries on a content-hash mismatch (`cross_plan_conflict`); an
+    # ordinary-routed path with the same edit and the same paid nodes must
+    # reach the same outcome, not be destroyed because routing differs.
+    if (
+        split_release.partial_recovery
+        and config.get("large_file_strategy", "truncate") == "split"
+        and analysis_mode == "single"
+    ):
+        for _carry_rel, _carry_state in recovered_by_path.items():
+            if (
+                _carry_rel not in tree_states
+                and _carry_rel not in carry_states
+                and _carry_rel not in unchanged_rels
+                and _carry_rel not in identical_reuse
+            ):
+                carry_states[_carry_rel] = _carry_state
+
     max_files = int(config.get("max_files", 0) or 0)
     max_files_exceeded = max_files > 0 and len(agent_candidate_rels) > max_files
+
+    # Provider-free route-plan view (section 5.8 / 5.9). One entry per oversized
+    # file -- including one accepted through same-path or identical-content
+    # reuse, so the observability universe never loses a reused truncate or
+    # split file -- in canonical normalized-path-ascending order. Sourced from
+    # the same memoized `_split_outcome_for()` outcome, the same source
+    # snapshots, and the same reuse/recovery classification already computed
+    # above; execution scheduling and billing are untouched.
+    def _split_payable_calls(
+        rel: str, division_plan: DivisionPlan, reduction_tree: ReductionTreePlan
+    ) -> int:
+        planned_ids = {chunk.chunk_id for chunk in division_plan.chunks} | {
+            node.node_id for node in reduction_tree.all_nodes
+        }
+        if rel in completed_split_reuse_rels or rel in identical_reuse:
+            return 0
+        if rel in carry_states:
+            # Cross-plan carry: the predecessor nodes are never counted as
+            # current paid work; the whole current split is scheduled fresh.
+            return len(planned_ids)
+        state = tree_states.get(rel)
+        retained = frozenset(state.by_id()) if state is not None else frozenset()
+        return len(planned_ids - retained)
+
+    route_plan_entries: list[RoutePlanEntry] = []
+    for rel in sorted(source_snapshots):
+        source_chars = len(source_snapshots[rel][1])
+        if source_chars <= max_content_chars:
+            continue
+        if rel in division_blocked:
+            route_plan_entries.append(
+                RoutePlanEntry(
+                    rel_path=rel,
+                    source_chars=source_chars,
+                    route="blocked",
+                    payable=False,
+                    blocked_detail=division_blocked[rel],
+                )
+            )
+            continue
+        outcome = _split_outcome_for(rel)
+        if outcome is not None:
+            division_plan, reduction_tree = outcome
+            payable_calls = _split_payable_calls(rel, division_plan, reduction_tree)
+            route_plan_entries.append(
+                RoutePlanEntry(
+                    rel_path=rel,
+                    source_chars=source_chars,
+                    route="split",
+                    payable=payable_calls > 0,
+                    split_payable_calls=payable_calls,
+                    division_plan=division_plan,
+                    reduction_tree=reduction_tree,
+                )
+            )
+        else:
+            route_plan_entries.append(
+                RoutePlanEntry(
+                    rel_path=rel,
+                    source_chars=source_chars,
+                    route="truncate",
+                    payable=rel in agent_rels,
+                )
+            )
+    route_plan = tuple(route_plan_entries)
 
     plan = PipelinePlan(
         scanned_rels=scanned_rels,
@@ -1186,8 +1421,11 @@ def _build_pipeline_plan_once(
         tree_states=tree_states,
         carry_states=carry_states,
         division_blocked=dict(division_blocked),
+        route_plan=route_plan,
         provider_identity=provider_identity,
         reexecuted_nodes=reexecuted_nodes,
         recovery_conflict_files=len(recovery_conflict_paths),
+        recovery_discarded_predecessor_nodes=recovery_discarded_predecessor_nodes,
+        recovery_replacement_nodes_planned=recovery_replacement_nodes_planned,
     )
     return plan, materials

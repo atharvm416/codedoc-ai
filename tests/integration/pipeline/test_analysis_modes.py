@@ -48,16 +48,23 @@ def test_both_modes_produce_identical_top_level_keys(tmp_path):
     assert set(triple) - _identity_keys == _FLAT_KEYS
 
 def test_single_mode_compatibility_views(tmp_path):
+    # ``x = 1`` has no ``def``, no ``class``, and no ``__all__``; the mock model
+    # reports a ``main`` function, a ``C`` class, and a ``main`` export anyway.
+    # The shared source-backed authority (section 5.4) omits every one of them:
+    # a structural claim never survives without source proof.
     result = Orchestrator(_CountingProvider(), analysis_mode="single").process(
         make_execution_request(tmp_path, "pkg/mod.py", "x = 1\n", imports=("os",))
     )
     assert result["structure"] == {
         "description": "A documented module.",
         "role_in_system": "entry point",
-        "functions": [{"name": "main", "description": "runs"}],
-        "classes": [{"name": "C", "description": "a class"}],
-        "exports": ["main"],
+        "functions": [],
+        "classes": [],
+        "exports": [],
     }
+    assert result["functions"] == []
+    assert result["classes"] == []
+    assert result["exports"] == []
     assert result["documentation"] == {
         "description": "A documented module.",
         "role_in_system": "entry point",
@@ -98,6 +105,10 @@ def test_partial_failure_preserves_successful_output_in_both_modes(
             "file_retry_attempts": 0,
             "allow_partial": True,
             "propagate_changes": False,
+            # This test measures a fixed terminal call set for the failed file;
+            # it does not exercise correction. Pin the default so the flip does
+            # not add an incidental repair call (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
         },
     )
     assert stats["checked"] == 1

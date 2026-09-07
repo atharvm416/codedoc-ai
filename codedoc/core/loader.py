@@ -288,14 +288,22 @@ DEFAULTS: dict[str, Any] = {
     # Must be a number in the inclusive range 1-600.
     "provider_request_timeout_s": 120,
     # -----------------------------------------------------------------------
-    # Targeted response correction (opt-in, disabled by default)
+    # Targeted response correction (enabled by default; explicit opt-out)
     # -----------------------------------------------------------------------
     # When true, a single targeted corrective provider call is made for an
     # eligible response-contract failure (malformed shape, missing/empty required
-    # field, or a response that retains none of its requested fields).  Disabled
-    # by default so the standard path never adds a paid repair call.  A
-    # response-contract rejection is never converted into a whole-file retry.
-    "response_correction_enabled": False,
+    # field, or a response that retains none of its requested fields).  Enabled
+    # by default: one automatic bounded repair gives a user a better chance of a
+    # complete record than a silent terminal rejection.  The correction-only
+    # worst case is one extra provider call per rejected response -- up to a 100%
+    # increase
+    # over initially planned documentation calls; transport/file retries are a
+    # separate class and are also excluded from ``max_planned_calls``.  Set this
+    # to ``false`` for a hard opt-out; an existing project config with an
+    # explicit ``false`` is authoritative and is never rewritten.  A
+    # response-contract rejection is never converted into a whole-file retry,
+    # and a malformed replacement fails the file with no second repair.
+    "response_correction_enabled": True,
     # -----------------------------------------------------------------------
     # Mode-based JSON prompt profiles
     # -----------------------------------------------------------------------

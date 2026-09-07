@@ -468,3 +468,236 @@ def test_many_sibling_declarations_have_stable_ownership_and_order() -> None:
         atom.symbol_ids == (symbol.symbol_id,)
         for atom, symbol in zip(result.atoms, result.symbols)
     )
+
+
+# ---------------------------------------------------------------------------
+# 0.14.7 section 8.F / 9.1 item 17 / section 3.2: the raised 2,000-character
+# parser signature ceiling -- Unicode-safe truncation and the permanent
+# live-repository declaration census.
+# ---------------------------------------------------------------------------
+
+import ast  # noqa: E402
+import io  # noqa: E402
+import time  # noqa: E402
+import tokenize  # noqa: E402
+
+from codedoc.parser.source_structure import MAX_STRUCTURE_SIGNATURE_CHARS  # noqa: E402
+
+_CODEDOC_PACKAGE = Path(__file__).resolve().parents[3] / "codedoc"
+
+
+def _unicode_param(kind: str, repeats: int) -> str:
+    """One valid Python identifier ~*repeats* code points long, built from
+    *kind* of XID_Continue character so the header parses under the real
+    grammar. All non-ASCII characters are given as escapes so this test file
+    stays pure ASCII."""
+    table = {
+        "ascii": "A",              # 1 byte / code point
+        "latin1": "\u00e9",        # 2 bytes / code point  (e-acute)
+        "cjk": "\u96ea",           # 3 bytes / code point  (snow)
+        "astral": "\U0001d400",    # 4 bytes / code point  (math bold A)
+    }
+    if kind == "combining":
+        return "a" + "\u0301" * (repeats - 1)   # base + N combining acutes
+    return table[kind] * repeats
+
+
+@requires_structure_pack
+@pytest.mark.parametrize(
+    ("kind", "async_kw"),
+    [
+        ("ascii", ""),
+        ("latin1", ""),
+        ("cjk", "async "),
+        ("astral", ""),
+        ("combining", "async "),
+    ],
+)
+def test_real_extraction_truncates_signature_at_2000_codepoints_not_bytes(
+    kind, async_kw
+) -> None:
+    """Real `extract_structure` truncates a captured signature at exactly
+    2,000 Python Unicode code points -- never bytes -- and never cuts inside a
+    UTF-8 code point, for BMP, astral, combining, ordinary and `async def`
+    declarations. The defensive `MAX_STRUCTURE_SIGNATURE_CHARS * 4` byte
+    look-ahead window stays UTF-8 safe."""
+    param = _unicode_param(kind, 3000)  # far past 2,000 code points
+    declaration_line = f"{async_kw}def target({param}) -> int:"
+    source = f"{declaration_line}\n    return 1\n"
+
+    result = extract_structure("src/unicode_sig.py", "python", source)
+    assert result.structural_mode == "syntax", result.diagnostics
+    (symbol,) = [s for s in result.symbols if s.qualified_name == "target"]
+
+    signature = symbol.signature
+    assert len(signature) == MAX_STRUCTURE_SIGNATURE_CHARS == 2000
+    # exactly the leading 2,000 code points of the real declaration line.
+    assert signature == declaration_line[:2000]
+    assert declaration_line.startswith(signature)
+    # code-point safe: round-trips through UTF-8 with no replacement or split.
+    assert signature.encode("utf-8").decode("utf-8") == signature
+    assert "\ufffd" not in signature
+    if kind != "ascii":
+        assert len(signature.encode("utf-8")) > 2000  # bytes > chars
+
+
+@requires_structure_pack
+def test_signature_scan_window_is_utf8_safe_for_a_maximal_multibyte_header() -> None:
+    """The `_signature_for` look-ahead clamps `end` off a UTF-8 continuation
+    byte before slicing; a header made entirely of 4-byte astral characters,
+    longer than the byte window, still yields a clean 2,000-code-point
+    signature with every atom byte covered exactly once."""
+    source = f"def wide({_unicode_param('astral', 4000)}) -> int:\n    return 0\n"
+
+    result = extract_structure("src/wide.py", "python", source)
+    assert result.structural_mode == "syntax", result.diagnostics
+    (symbol,) = [s for s in result.symbols if s.qualified_name == "wide"]
+    assert len(symbol.signature) == 2000
+    assert symbol.signature.encode("utf-8").decode("utf-8") == symbol.signature
+    _assert_complete(source, result)
+    assert all(len(s.signature) <= 2000 for s in result.symbols)
+
+
+# --- the permanent live-repository declaration census (section 3.2) ---------
+
+_CENSUS_HISTORICAL_TOTAL = 794          # section 3.2, at plan-creation time
+_CENSUS_HISTORICAL_TOP_LEVEL = 546
+_CENSUS_HISTORICAL_NESTED = 248
+_CENSUS_OVER_600 = {
+    ("codedoc/core/scanner.py", "scan_files"),
+    ("codedoc/core/execution.py", "_process_files_sequentially"),
+    ("codedoc/core/execution.py", "_process_descriptor_batch"),
+}
+_CENSUS_NORMALIZED_MAX = 1295
+_CENSUS_RAW_MAX = 1395
+
+
+def _header_colon_ends(tokens) -> dict:
+    """Map ``(def-token start)`` -> ``(row, col)`` end of the first ``:`` at
+    bracket depth zero after it, from one pass over a file's token stream.
+    Decorators and bodies are excluded because scanning starts at ``def`` /
+    ``async`` (section 3.2's exact token-span algorithm)."""
+    ends: dict = {}
+    open_headers: list = []  # (start_pos, depth_at_open)
+    depth = 0
+    for tok in tokens:
+        if tok.type == tokenize.NAME and tok.string in ("def", "async"):
+            # a fresh `async` immediately precedes its `def`; treat the first
+            # of the pair as the header start.
+            if not (tok.string == "def" and open_headers and open_headers[-1][2]):
+                open_headers.append([tok.start, depth, tok.string == "async"])
+        elif tok.type == tokenize.OP:
+            if tok.string in "([{":
+                depth += 1
+            elif tok.string in ")]}":
+                depth -= 1
+            elif tok.string == ":" and open_headers and depth == open_headers[-1][1]:
+                start_pos, _d, _a = open_headers.pop()
+                ends[start_pos] = tok.end
+    return ends
+
+
+def _walk_python_declarations():
+    """Yield ``(rel_posix, name, raw_len, normalized_len, is_top_level)`` for
+    every `def` / `async def` in the live `codedoc/` package via an AST walk
+    (methods and nested functions included), tokenizing each file exactly
+    once."""
+    for path in sorted(_CODEDOC_PACKAGE.rglob("*.py")):
+        rel = path.relative_to(_CODEDOC_PACKAGE.parent).as_posix()
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=rel)
+        top_level_nodes = {id(n) for n in ast.iter_child_nodes(tree)}
+        line_starts = [0]
+        for line in source.splitlines(keepends=True):
+            line_starts.append(line_starts[-1] + len(line))
+
+        def _offset(row: int, col: int) -> int:
+            return line_starts[row - 1] + col
+
+        colon_ends = _header_colon_ends(
+            tokenize.generate_tokens(io.StringIO(source).readline)
+        )
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            start_pos = (node.lineno, node.col_offset)
+            end_pos = colon_ends[start_pos]
+            raw = source[_offset(*start_pos):_offset(*end_pos)]
+            normalized = " ".join(raw.split())
+            yield rel, node.name, len(raw), len(normalized), id(node) in top_level_nodes
+
+
+def test_live_repository_declaration_census_matches_the_measured_basis() -> None:
+    """Section 3.2 / 8.F: the permanent census. Walks every Python declaration
+    under `codedoc/` with the exact token-span algorithm (not
+    `ast.get_source_segment`, which would measure whole bodies), and pins the
+    over-600 set, the normalized/raw maxima, and the over-600 count so the
+    measured basis for the 2,000 bound cannot go stale unnoticed."""
+    started = time.perf_counter()
+    rows = list(_walk_python_declarations())
+    elapsed = time.perf_counter() - started
+
+    total = len(rows)
+    top_level = sum(1 for *_r, is_top in rows if is_top)
+    nested = total - top_level
+    raw_lengths = [raw for _f, _n, raw, _norm, _t in rows]
+    normalized_lengths = [norm for _f, _n, _raw, norm, _t in rows]
+
+    # No declaration exceeds the new 2,000-character bound, in either measure.
+    assert max(raw_lengths) <= 2000
+    assert max(normalized_lengths) <= 2000
+
+    over_600_raw = {
+        (f, n) for f, n, raw, _norm, _t in rows if raw > 600
+    }
+    over_600_normalized = {
+        (f, n) for f, n, _raw, norm, _t in rows if norm > 600
+    }
+    assert over_600_raw == _CENSUS_OVER_600, sorted(over_600_raw)
+    assert over_600_normalized == _CENSUS_OVER_600, sorted(over_600_normalized)
+    assert len(over_600_raw) == len(over_600_normalized) == 3
+
+    assert max(normalized_lengths) == _CENSUS_NORMALIZED_MAX
+    assert max(raw_lengths) == _CENSUS_RAW_MAX
+
+    # The historical measured basis: report the current live count and, if the
+    # authorized new helpers moved it off 794, explain the exact delta rather
+    # than falsifying either figure. The plan's historical comment stays as
+    # written in section 3.2.
+    delta = total - _CENSUS_HISTORICAL_TOTAL
+    census_report = (
+        f"live codedoc/ declaration census: total={total} "
+        f"(top_level={top_level}, nested={nested}); "
+        f"historical basis total={_CENSUS_HISTORICAL_TOTAL} "
+        f"(top_level={_CENSUS_HISTORICAL_TOP_LEVEL}, "
+        f"nested={_CENSUS_HISTORICAL_NESTED}); delta={delta:+d}; "
+        f"full-corpus parse+span time={elapsed * 1000:.1f} ms"
+    )
+    print(census_report)
+    assert total == top_level + nested
+    # The delta, whatever it is, must be attributable to added top-level or
+    # nested helpers only -- never to the over-600 set or the maxima, which
+    # are pinned above. A wild swing (a body accidentally measured as a
+    # header) would blow past this and fail loudly.
+    #
+    # Bound history: 60 -> 63 -> 86 -> 92 -> 105. Section 9 Part 2 added three
+    # authorized top-level CLI preflight-reporter presenter helpers under
+    # section 7.1 (``cli._print_preflight_summary``,
+    # ``cli._print_split_plan_detail_records``,
+    # ``cli._print_preflight_flat_category``), each a short-header pure read of
+    # the immutable preflight snapshot. The shared structural-reconciliation
+    # authority (section 5.4 / section 7.1, one new narrowly named module
+    # ``codedoc.core.structural_reconciliation`` every publication route
+    # delegates to) then added short-header helpers -- the closed kind-mapping,
+    # the conservative lexical recognizer (now including the closed export
+    # proof: CommonJS, namespace re-export, and a statically-literal Python
+    # ``__all__`` reader), the immutable ``StructureTruth`` value, and the
+    # reconciliation entry points with their same-name overload disambiguation
+    # helpers. The conservative narrative-terminology authority (section 5.6,
+    # ``codedoc.agents.narrative_terminology``) then added the immutable
+    # ``TerminologyEvidence`` value and the closed initialism grammar helpers.
+    # The over-600 set and the raw/normalized maxima are unchanged; this bound
+    # catches measurement error, not growth.
+    assert abs(delta) <= 105, census_report
+    assert top_level >= _CENSUS_HISTORICAL_TOP_LEVEL - 10
+    assert nested >= _CENSUS_HISTORICAL_NESTED - 10

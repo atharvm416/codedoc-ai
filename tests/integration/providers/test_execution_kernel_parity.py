@@ -87,7 +87,16 @@ def test_malformed_response_failure_reconciles_identically_across_providers(
     installer(monkeypatch, rec, **{kw: "this is not json"})
     stats = run_pipeline(
         project,
-        _base_config(provider_name, model, entry_file="main.py", file_retry_attempts=0),
+        _base_config(
+            provider_name,
+            model,
+            entry_file="main.py",
+            file_retry_attempts=0,
+            # One attempted logical call, no repair: this reconciliation test
+            # measures the terminal path, so pin the correction default
+            # (Section 10 / section 7.2.1).
+            response_correction_enabled=False,
+        ),
     )
 
     assert stats["checked"] == 0

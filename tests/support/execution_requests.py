@@ -6,6 +6,7 @@ import hashlib
 from pathlib import Path
 
 from codedoc.core.execution_model import AgentCallContext, FileExecutionRequest
+from codedoc.core.file_division import MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS
 from codedoc.core.prompt_profiles import FileScope, ResolvedProfile
 
 
@@ -18,6 +19,7 @@ def make_execution_request(
     imports: tuple[str, ...] = (),
     analysis_mode: str = "single",
     max_content_chars: int = 12000,
+    synthesis_manifest_chars: int | None = None,
     truncation_head_ratio: float = 0.70,
     resolved_profile: ResolvedProfile | None = None,
     write: bool = True,
@@ -47,6 +49,11 @@ def make_execution_request(
         context=AgentCallContext(
             analysis_mode=analysis_mode,
             max_content_chars=max_content_chars,
+            synthesis_manifest_chars=(
+                synthesis_manifest_chars
+                if synthesis_manifest_chars is not None
+                else max(max_content_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)
+            ),
             truncation_head_ratio=truncation_head_ratio,
             resolved_shape_bundle=bundle,
         ),

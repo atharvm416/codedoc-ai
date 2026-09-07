@@ -318,6 +318,7 @@ class BaseAgent(ABC):
         language: str,
         shape_block: str,
         planned_call: PlannedCall | None = None,
+        terminology_evidence: object | None = None,
     ) -> dict:
         """Validate *raw* through the canonical path, correcting once if eligible.
 
@@ -333,6 +334,7 @@ class BaseAgent(ABC):
             return process_response(
                 text, mode=mode, agent=agent, file_path=file_path,
                 clean_reporter=clean_reporter, resolved_shape=resolved_shape,
+                terminology_evidence=terminology_evidence,
             )
 
         contract_error: ResponseContractError | None = None
@@ -380,6 +382,7 @@ class BaseAgent(ABC):
         content: str,
         shape_block: str,
         planned_call: PlannedCall | None = None,
+        terminology_evidence: object | None = None,
     ) -> dict:
         """Validate *raw* against a fixed (non-profile) capsule contract.
 
@@ -399,6 +402,7 @@ class BaseAgent(ABC):
                 clean_reporter=clean_reporter,
                 requested_paths=requested_paths,
                 required_paths=required_paths,
+                terminology_evidence=terminology_evidence,
             )
 
         contract_error: ResponseContractError | None = None

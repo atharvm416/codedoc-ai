@@ -95,6 +95,9 @@ REMOVAL_DUPLICATE = "duplicate"
 REMOVAL_ITEM_LIMIT = "item_limit"
 REMOVAL_RESPONSE_CAP = "response_cap"
 REMOVAL_NOT_REQUESTED = "not_requested"
+# A bounded narrative value carried an acronym expansion the closed
+# section-5.6 initialism rule proved unsupported by trusted evidence.
+REMOVAL_UNSUPPORTED_TERMINOLOGY = "unsupported_terminology"
 
 PER_FIELD_REASONS = (
     REMOVAL_UNKNOWN_FIELD,
@@ -105,6 +108,7 @@ PER_FIELD_REASONS = (
     REMOVAL_ITEM_LIMIT,
     REMOVAL_RESPONSE_CAP,
     REMOVAL_NOT_REQUESTED,
+    REMOVAL_UNSUPPORTED_TERMINOLOGY,
 )
 
 # Extraction stages that begin the fixed diagnostic stage vocabulary.
@@ -474,6 +478,7 @@ def process_response(
     file_path: str,
     clean_reporter,
     resolved_shape: ResolvedShapeBlock | None,
+    terminology_evidence: object | None = None,
 ) -> dict:
     """Turn a raw provider response into a validated dict, or raise.
 
@@ -512,6 +517,14 @@ def process_response(
 
     filtered, not_requested = _filter_with_report(cleaned, resolved_shape, mode, agent)
     removed.extend(not_requested)
+
+    if terminology_evidence is not None:
+        from codedoc.agents.narrative_terminology import validate_narrative_terminology
+
+        filtered, terminology_removed = validate_narrative_terminology(
+            filtered, terminology_evidence, mode=mode, agent=agent
+        )
+        removed.extend(terminology_removed)
 
     retained_set = {p for p in _leaf_paths(filtered) if p in requested_set}
     retained_set.update(
@@ -556,6 +569,7 @@ def process_fixed_capsule_response(
     clean_reporter,
     requested_paths: tuple[str, ...],
     required_paths: tuple[str, ...],
+    terminology_evidence: object | None = None,
 ) -> dict:
     """Turn a raw provider response into a validated fixed-schema capsule.
 
@@ -596,6 +610,14 @@ def process_fixed_capsule_response(
     clean_result: CleanResult = clean_reporter(parsed, file_path)
     cleaned = clean_result.value
     removed = list(clean_result.removed)
+
+    if terminology_evidence is not None:
+        from codedoc.agents.narrative_terminology import validate_narrative_terminology
+
+        cleaned, terminology_removed = validate_narrative_terminology(
+            cleaned, terminology_evidence, mode=label, agent=agent
+        )
+        removed.extend(terminology_removed)
 
     retained_set = {p for p in _leaf_paths(cleaned) if p in requested_set}
     retained_set.update(p for p in clean_result.valid_empty_paths if p in requested_set)

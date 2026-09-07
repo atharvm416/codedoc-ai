@@ -10,7 +10,13 @@ Analyses a file's internal structure:
 
 from __future__ import annotations
 
+from functools import partial
+
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.narrative_terminology import (
+    NARRATIVE_TERMINOLOGY_RULES,
+    TerminologyEvidence,
+)
 from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.agents.response_cleaning import clean_structure_report
 from codedoc.core.prompt_profiles import (
@@ -20,6 +26,14 @@ from codedoc.core.prompt_profiles import (
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+# The triple-mode structure response feeds the shared structural authority, so
+# it is cleaned in the reconciliation-bound mode that keeps a bounded per-symbol
+# ``signature`` for same-name overload disambiguation. The orchestrator strips
+# that transient field once reconciliation has consumed it; it is never public.
+_clean_structure_report_reconciling = partial(
+    clean_structure_report, retain_signature=True
+)
 
 _SYSTEM = (
     "You are a senior software engineer analysing source code. "
@@ -51,7 +65,7 @@ Rules:
   supplied head and tail slices — never infer the omitted middle
 - If functions, classes, or exports are not present, omit that key instead of returning an empty list
 - Do not include empty arrays, empty objects, null values, or duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_prompt(
@@ -123,13 +137,14 @@ class StructureAgent(BaseAgent):
             mode="triple",
             agent="structure",
             file_path=file_path,
-            clean_reporter=clean_structure_report,
+            clean_reporter=_clean_structure_report_reconciling,
             resolved_shape=requested_shape,
             content=truncated,
             imports=imports,
             language=language,
             shape_block=shape_block,
             planned_call=planned_call,
+            terminology_evidence=TerminologyEvidence(source_text=truncated),
         )
 
         logger.debug(

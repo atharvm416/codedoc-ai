@@ -73,6 +73,9 @@ MAX_USAGE_EXAMPLE_CHARS = 2000
 MAX_SYMBOL_ITEMS_PER_KIND = MAX_PUBLIC_SYMBOL_ITEMS_PER_KIND
 MAX_SYMBOL_NAME_CHARS = MAX_PUBLIC_SYMBOL_NAME_CHARS
 MAX_SYMBOL_DESCRIPTION_CHARS = MAX_PUBLIC_SYMBOL_DESCRIPTION_CHARS
+# Bound for a provider ``signature`` retained only on the internal
+# reconciliation path (never public); shares the split-leaf/parser bound.
+MAX_SYMBOL_SIGNATURE_CHARS = MAX_LEAF_SYMBOL_SIGNATURE_CHARS
 MAX_EXPORT_ITEMS = MAX_PUBLIC_EXPORT_ITEMS
 MAX_EXPORT_ITEM_CHARS = MAX_PUBLIC_EXPORT_ITEM_CHARS
 MAX_DEPENDENCY_ITEMS_PER_LIST = 32
@@ -178,12 +181,30 @@ def _clean_str_list(
     return out
 
 
-def _clean_symbols(value: object, collector=None, path: str = "") -> list[dict]:
+def _clean_symbols(
+    value: object,
+    collector=None,
+    path: str = "",
+    *,
+    retain_signature: bool = False,
+) -> list[dict]:
     """Clean a function/class symbol list. ``name`` is required and non-empty;
     ``description`` is optional.  Unknown keys are dropped; objects are de-duped
-    by canonical compact JSON; counts are capped."""
+    by canonical compact JSON; counts are capped.
+
+    ``retain_signature`` is the internal reconciliation-path mode: a bounded
+    ``signature`` string is then a known field, kept on the cleaned item so the
+    structural authority can line a model description up with the right
+    same-name overload. The default (public) mode drops it and reports it as an
+    unknown field, exactly as before. It is never part of the public schema and
+    the orchestrator strips it after reconciliation.
+    """
     if not isinstance(value, list):
         return []
+    known = ("name", "description", "signature") if retain_signature else (
+        "name",
+        "description",
+    )
     out: list[dict] = []
     seen: set[str] = set()
     for index, item in enumerate(value):
@@ -192,7 +213,7 @@ def _clean_symbols(value: object, collector=None, path: str = "") -> list[dict]:
             _report(collector, item_path, REMOVAL_WRONG_TYPE, type_detail(item))
             continue
         for field, field_value in item.items():
-            if field not in ("name", "description"):
+            if field not in known:
                 _report(
                     collector,
                     f"{item_path}.{field}",
@@ -215,6 +236,12 @@ def _clean_symbols(value: object, collector=None, path: str = "") -> list[dict]:
                 scalar_removal_reason(item["description"]),
                 type_detail(item["description"]),
             )
+        if retain_signature:
+            signature = _clean_scalar(
+                item.get("signature"), MAX_SYMBOL_SIGNATURE_CHARS
+            )
+            if signature is not None:
+                cleaned["signature"] = signature
         key = _canonical(cleaned)
         if key in seen:
             _report(collector, item_path, REMOVAL_DUPLICATE, type_detail(item))
@@ -383,7 +410,12 @@ def _scalar_candidate(value: str, keep: int, cap: int) -> str:
     return prefix
 
 
-def _enforce_global_cap(cleaned: dict, collector=None) -> dict:
+def _enforce_global_cap(
+    cleaned: dict,
+    collector=None,
+    *,
+    transient_symbol_signatures: bool = False,
+) -> dict:
     """Enforce ``MAX_COMBINED_RESPONSE_CHARS`` against the canonical compact-JSON
     serialization.  Retains complete values only, trimming list items from the
     end in lower-priority-first order, then truncating scalar prose.  Mutates and
@@ -392,8 +424,46 @@ def _enforce_global_cap(cleaned: dict, collector=None) -> dict:
     When a *collector* is given, complete values removed by the cap (dropped list
     items and fields removed entirely) are reported as ``response_cap``; a
     truncated scalar retains a value and is not reported as a removal.
+
+    ``transient_symbol_signatures`` marks signatures retained only for internal
+    source reconciliation.  Those signatures are detached before public fields
+    are budgeted, then restored in deterministic priority/order while space
+    remains.  A transient value can therefore never evict a public symbol or
+    other public documentation field because of the response-character cap.
     """
     if _serialized_len(cleaned) <= MAX_COMBINED_RESPONSE_CHARS:
+        return cleaned
+
+    if transient_symbol_signatures:
+        detached: list[tuple[str, int, dict, str]] = []
+        # Functions are the higher-priority symbol collection in the existing
+        # global-cap order, so their reconciliation hints receive spare budget
+        # before class hints.  Source/model order is retained within each list.
+        for field in ("functions", "classes"):
+            symbols = cleaned.get(field)
+            if not isinstance(symbols, list):
+                continue
+            for index, item in enumerate(symbols):
+                if isinstance(item, dict) and isinstance(item.get("signature"), str):
+                    detached.append((field, index, item, item.pop("signature")))
+
+        _enforce_global_cap(cleaned, collector)
+
+        for field, index, item, signature in detached:
+            symbols = cleaned.get(field)
+            if not isinstance(symbols, list) or not any(
+                candidate is item for candidate in symbols
+            ):
+                continue
+            item["signature"] = signature
+            if _serialized_len(cleaned) > MAX_COMBINED_RESPONSE_CHARS:
+                item.pop("signature", None)
+                _report(
+                    collector,
+                    f"{field}[{index}].signature",
+                    REMOVAL_RESPONSE_CAP,
+                    "transient reconciliation metadata omitted by response cap",
+                )
         return cleaned
 
     for parent, field in _LIST_TRIM_ORDER:
@@ -468,11 +538,15 @@ def _put_str_list(
         cleaned[key] = items
 
 
-def _put_symbols(cleaned: dict, key: str, raw_obj: dict, collector) -> None:
+def _put_symbols(
+    cleaned: dict, key: str, raw_obj: dict, collector, *, retain_signature: bool = False
+) -> None:
     raw_value = raw_obj.get(key)
     if collector is not None and key in raw_obj and not isinstance(raw_value, list):
         _report(collector, key, REMOVAL_WRONG_TYPE, type_detail(raw_value))
-    symbols = _clean_symbols(raw_value, collector=collector, path=key)
+    symbols = _clean_symbols(
+        raw_value, collector=collector, path=key, retain_signature=retain_signature
+    )
     if symbols:
         cleaned[key] = symbols
 
@@ -516,29 +590,37 @@ def _dependency_empty_paths(raw_obj: dict) -> tuple[str, ...]:
     )
 
 
-def _clean_combined_fields(raw_obj: dict, collector=None) -> dict:
+def _clean_combined_fields(
+    raw_obj: dict, collector=None, *, retain_signature: bool = False
+) -> dict:
     """Shared combined-agent field cleaning used by cleaner and reporter."""
     _report_unknown_keys(collector, raw_obj, _COMBINED_KEYS)
     cleaned: dict = {}
     _put_scalar(cleaned, "description", raw_obj, MAX_DESCRIPTION_CHARS, collector)
     _put_scalar(cleaned, "role_in_system", raw_obj, MAX_ROLE_CHARS, collector)
-    _put_symbols(cleaned, "functions", raw_obj, collector)
-    _put_symbols(cleaned, "classes", raw_obj, collector)
+    _put_symbols(cleaned, "functions", raw_obj, collector, retain_signature=retain_signature)
+    _put_symbols(cleaned, "classes", raw_obj, collector, retain_signature=retain_signature)
     _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_EXPORT_ITEM_CHARS, collector)
     _put_dependencies(cleaned, raw_obj, collector)
     _put_str_list(cleaned, "key_concepts", raw_obj, MAX_KEY_CONCEPT_ITEMS, MAX_KEY_CONCEPT_CHARS, collector)
     _put_scalar(cleaned, "usage_example", raw_obj, MAX_USAGE_EXAMPLE_CHARS, collector)
-    cleaned = _enforce_global_cap(cleaned, collector)
+    cleaned = _enforce_global_cap(
+        cleaned,
+        collector,
+        transient_symbol_signatures=retain_signature,
+    )
     return cleaned
 
 
-def _clean_structure_fields(raw_obj: dict, collector=None) -> dict:
+def _clean_structure_fields(
+    raw_obj: dict, collector=None, *, retain_signature: bool = False
+) -> dict:
     _report_unknown_keys(collector, raw_obj, _STRUCTURE_KEYS)
     cleaned: dict = {}
     _put_scalar(cleaned, "description", raw_obj, MAX_DESCRIPTION_CHARS, collector)
     _put_scalar(cleaned, "role_in_system", raw_obj, MAX_ROLE_CHARS, collector)
-    _put_symbols(cleaned, "functions", raw_obj, collector)
-    _put_symbols(cleaned, "classes", raw_obj, collector)
+    _put_symbols(cleaned, "functions", raw_obj, collector, retain_signature=retain_signature)
+    _put_symbols(cleaned, "classes", raw_obj, collector, retain_signature=retain_signature)
     _put_str_list(cleaned, "exports", raw_obj, MAX_EXPORT_ITEMS, MAX_EXPORT_ITEM_CHARS, collector)
     return cleaned
 
@@ -579,15 +661,23 @@ def clean_combined_response(raw_obj: object, file_path: str) -> dict:
     return cleaned
 
 
-def clean_combined_report(raw_obj: object, file_path: str) -> CleanResult:
+def clean_combined_report(
+    raw_obj: object, file_path: str, *, retain_signature: bool = False
+) -> CleanResult:
     """Clean a combined response, returning the value and bounded removals.
 
     Never raises for an empty or non-object input: :func:`process_response` owns
     the top-level object check and the ``no_usable_fields`` decision.
+
+    ``retain_signature`` (used only by the reconciliation-bound single/combined
+    route) keeps a bounded per-symbol ``signature`` on the cleaned items; every
+    other caller gets the unchanged public-safe behavior.
     """
     collector = RemovalCollector()
     source = raw_obj if isinstance(raw_obj, dict) else {}
-    cleaned = _clean_combined_fields(source, collector)
+    cleaned = _clean_combined_fields(
+        source, collector, retain_signature=retain_signature
+    )
     valid_empty_paths = list(
         _explicit_empty_list_paths(
             source, ("functions", "classes", "exports", "key_concepts")
@@ -613,10 +703,14 @@ def clean_structure_response(raw_obj: object, file_path: str) -> dict:
     return _clean_structure_fields(raw_obj)
 
 
-def clean_structure_report(raw_obj: object, file_path: str) -> CleanResult:
+def clean_structure_report(
+    raw_obj: object, file_path: str, *, retain_signature: bool = False
+) -> CleanResult:
     collector = RemovalCollector()
     source = raw_obj if isinstance(raw_obj, dict) else {}
-    cleaned = _clean_structure_fields(source, collector)
+    cleaned = _clean_structure_fields(
+        source, collector, retain_signature=retain_signature
+    )
     return CleanResult(
         value=cleaned,
         removed=collector.finalize(),

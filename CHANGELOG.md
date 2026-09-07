@@ -1,6 +1,310 @@
 # Changelog
 
-## 0.14.5 2026-08-22
+## 0.14.8 - 2026-09-07
+
+### Source-backed structural facts
+
+- The published `functions`, `classes`, and `exports` arrays are now the
+  arrays of one shared source-backed authority. A model response may only
+  *describe* a declaration the source proves, through parser symbol facts or a
+  deliberately incomplete language-specific lexical recognizer; it can no
+  longer add, duplicate, or reclassify one. An invented function such as
+  `updateEnvVersion`, a declaration listed twice from a single source
+  definition, and a `const X: React.FC` binding labelled a class are all
+  corrected: the invented and duplicate items are omitted, the binding is
+  reported as a function/component. Declaration identity is occurrence-based,
+  so two genuine same-name overloads are preserved as two entries; when a
+  parser signature isolates one overload the model's description attaches
+  there, and otherwise no description is guessed onto either. Kind comes from
+  the source through a closed parser-kind mapping: a type alias, a namespace,
+  an HTML element, an `impl` block, and an unrecognised kind resolve to no
+  publishable bucket rather than defaulting to a function. Exports are
+  admitted only by a closed proof set — ESM export declarations, named and
+  namespace re-exports, CommonJS `module.exports` / `exports.NAME`, and a
+  statically literal Python `__all__` — and every proven export keeps its
+  canonical source order, never an alphabetical one.
+- Optional structural arrays may therefore be smaller than before where an
+  earlier item cannot be proved. Field names and types are unchanged, and a
+  wrong, duplicate, or unsupported structural fact was never a compatibility
+  commitment.
+
+### Conservative narrative terminology
+
+- Every applicable initial prompt — the single combined prompt, the triple
+  structure and documentation prompts, the split-leaf fragment prompt, and the
+  final synthesis prompt — and their shared correction prompt now carry one
+  fixed set of terminology rules: do not expand an acronym unless its
+  expansion appears verbatim in supplied source, parser metadata, or trusted
+  project metadata; keep an undefined acronym as written; reserve "entry
+  point" for visible startup or bootstrap behaviour rather than a root
+  component; and do not turn a filename into a declaration name. A custom
+  prompt profile cannot remove them.
+- A closed deterministic check runs inside the canonical response contract on
+  already-cleaned bounded narrative values only (`description`,
+  `role_in_system`, `usage_example`, `key_concepts` items, and per-symbol
+  descriptions). It removes a narrative value when an uppercase acronym is a
+  source token, a Title-Case candidate phrase's initials equal it, and that
+  exact phrase — character for character, no case-folding or whitespace
+  normalisation — is absent from all trusted evidence; the surrounding
+  response contract then corrects or rejects the response through the existing
+  one-repair path. Ambiguous prose the closed grammar cannot classify is
+  retained unchanged; the check never rewrites prose, and its diagnostics
+  carry only bounded paths, reason codes, and fixed detail text.
+
+### Recovery and cache identity
+
+- Four identities advance because their governed output changed:
+  `ANALYSIS_REVISION` from `file-doc-v3` to `file-doc-v4`,
+  `LEAF_CAPSULE_SCHEMA_REVISION` from `leaf-capsule-v9` to `leaf-capsule-v10`,
+  `LEDGER_SCHEMA_REVISION` from `fact-ledger-v6` to `fact-ledger-v7`, and
+  `FINAL_SYNTHESIS_REVISION` from `file-synthesis-v3` to `file-synthesis-v4`.
+- A completed `file-doc-v3` ordinary, truncate, or split record no longer
+  matches the current analysis identity and is reprocessed exactly once under
+  the new contract before reuse; a current `file-doc-v4` record stays
+  zero-call reusable, and JSON/Markdown cross-format reuse is unaffected when
+  the identities match. A stored `leaf-capsule-v9` leaf checkpoint is
+  quarantined under `stale-identity` and re-executed, and every reducer and
+  final node depending on it is pruned with it; a sibling leaf, reducer, or
+  final node stamped with the current identity is retained. A stored
+  `fact-ledger-v6` or `file-synthesis-v3` final node is rejected and rerun
+  while independently compatible leaf and reducer work is kept where the
+  dependency graph allows it. Quarantine stays inside
+  `MAX_QUARANTINE_ENTRIES_PER_FILE` (512), so an advance never aborts a run.
+- Nothing else moves. `LEAF_CAPSULE_SCHEMA_REVISION` participates in
+  `leaf_execution_identity` / `leaf_input_digest`; `LEDGER_SCHEMA_REVISION`
+  and `FINAL_SYNTHESIS_REVISION` participate in the final-node execution
+  identity, the final-node exact input digest, and the completed split
+  identity; `FINAL_SYNTHESIS_REVISION` additionally binds the run
+  call-manifest digest through `file_synthesis_call_id`, so the provider-free
+  live-fixture plan digests are re-measured while the per-profile split
+  topology and call counts are unchanged. The active split identities are
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v6`,
+  `leaf-capsule-v10`, `fact-ledger-v7`, `reduction-capsule-v1`,
+  `reduction-packing-v5`, `file-reduction-v3`, `file-synthesis-v4`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v4`. The
+  structure/unit schemas, the reduction-capsule schema, the reducer prompt,
+  the execution-identity schema wrapper, the split-partial schema version
+  (4), the `large-file-v3` prefix, the ordinary-path identity, the truncate
+  and deterministic-import revisions, and every fixed leaf/reduction bound
+  are unchanged, and advancing any of them would needlessly invalidate
+  otherwise compatible state.
+
+## 0.14.7 - 2026-09-06
+
+### Satisfiable split-leaf signature contract
+
+- The fixed split-leaf prompt required copying a visible declaration's
+  signature verbatim **and** staying at or below the hard bound, then
+  `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` of 600 characters. An AST walk of every
+  declaration in CodeDoc's own source finds three that exceed 600 — the
+  largest, `scan_files`, at 1,295 characters normalized and 1,395 raw — so
+  for those no truthful response existed: unsatisfiable by construction, and
+  this would have failed with any model.
+- The hard bound is **raised to 2,000 characters** this release, still
+  rendered from the constant and still rejecting a longer signature in full,
+  which clears the largest real declaration with margin. Because a raised
+  bound alone would only move the same failure one order of magnitude out,
+  the contract also changes: when the complete declaration is visible it is
+  copied in full if it is at or below the hard bound, and only a fully
+  visible declaration that *exceeds* the bound is shortened — reported as its
+  leading source-backed portion, preferably roughly 600–1,000 characters and
+  never above the bound. A signature shortened this way is a correct,
+  expected answer, never an omission and never an invention; a fully visible
+  declaration between that range and the bound is still reported in full. The
+  contract is now satisfiable at any bound by construction, not by the bound
+  happening to be large enough.
+- The contract also states, as a fact rather than a promise, that a
+  shortened signature does not by itself keep two long same-named
+  declarations apart past the point where they were cut; parser-owned scope
+  and position remain the authority for that, exactly as
+  `build_fact_ledger`'s docstring already documented.
+- The rule is rendered once, inside `_FRAGMENT_SHAPE_BLOCK`, so it reaches
+  the initial leaf call and the one targeted correction call
+  byte-identically — the same single-source mechanism `0.14.6` established
+  for the export contract. Previously the "copied from the visible
+  declaration" sentence lived only in the initial fragment template, so the
+  one correction call for an over-bound signature was asked to fix a value
+  it had never been told the rules for and the released `execution.py`
+  reproduction never recovered from that call.
+
+### Reduction narrative headroom
+
+- The reduction shape block stated only the hard 300-character narrative
+  cap, with nothing telling the model to aim below it. A generative length
+  target stated as an exact ceiling is approached and overshot: a live
+  reproduction over CodeDoc's own source landed corrected narratives at 302
+  and 305 characters against that same 300-character cap. The shape block
+  now also states a recommended 260-character target to write toward, in
+  both the initial reduction prompt and its one targeted correction prompt.
+  The hard 300-character bound is unchanged, still rendered from
+  `MAX_REDUCTION_NARRATIVE_CHARS`, and a narrative over it is still rejected
+  in full — never trimmed.
+
+### Response correction enabled by default
+
+- `response_correction_enabled` now defaults to **true**. A rejected
+  documentation response gets one automatic bounded repair call instead of a
+  silent terminal failure whose opt-in remedy the user did not know existed.
+- The enabled-by-default behaviour can spend **one extra provider call per
+  rejected response**. The correction-only worst case is a 100% increase over
+  the initially planned documentation calls — one correction per rejected
+  response, counted per rejected agent, leaf, reducer, or final response
+  rather than per source file, so one split file can make more than one
+  correction call.
+- Transport and rate-limit retries (`file_retry_attempts`) are a separate,
+  additional class. `max_planned_calls` still authorizes only the initially
+  planned calls and excludes both corrections and retries, so it is not a
+  hard final-billing ceiling; `--dry-run` still reports the initially planned
+  calls, the possible correction calls, and the correction-inclusive ceiling
+  before retries.
+- Explicit `"response_correction_enabled": false` preserves the historical
+  zero-correction behaviour exactly, including an older generated
+  configuration whose then-default was written as `false`. Normal loading
+  never rewrites an existing project configuration; only a newly generated
+  template carries the new default, and `--init-config --force` carries an
+  existing explicit `false` forward.
+- The one-call-per-rejected-response guarantee is unchanged: correction is a
+  schema repair, never a factuality bypass, and a malformed or empty required
+  field in the replacement fails the file with no second repair.
+
+### Source ceiling and automatic synthesis ceiling separated
+
+- `max_content_chars` is now purely a source-routing control: it bounds
+  ordinary whole-file source and each split-leaf payload, and a file above it
+  takes the `truncate` or `split` path. It no longer shrinks the internal
+  reducer and final-synthesis manifest budget.
+- Reducer and final-synthesis manifests now use
+  `max(max_content_chars, 12000)` characters. A project that had set the
+  source ceiling below 12,000 sees larger individual reducer and final
+  manifests — up to that 12,000-character content ceiling — which can reduce
+  avoidable reducer topology but can also raise per-call token cost. The
+  effect is automatic and disclosed by preflight, token estimation, README,
+  and RUN_FLOW; there is no reducer knob, because exposing one would recreate
+  the unsafe coupling this change removes.
+
+### Local boundary-aware subdivision
+
+- Only a single semantic unit whose own source length exceeds
+  `max_content_chars` is subdivided, at a nested-syntax or physical-line
+  boundary near a balanced target. Fitting semantic units keep their
+  canonical bytes, byte ranges, and unit IDs unchanged, and adjacent fitting
+  units may still share one planned leaf call. Making every physical line a
+  paid leaf is deliberately avoided.
+
+### Recovery and cache identity
+
+- Four internal revisions advance: `division-packer-v5` to
+  `division-packer-v6` (local continuation cuts, chunk close reasons, ranges,
+  chunk IDs, and division-plan bytes); `leaf-capsule-v8` to `leaf-capsule-v9`
+  (the changed fragment contract and 2,000-character accepted response
+  field); `reduction-packing-v4` to `reduction-packing-v5` (the
+  independently carried synthesis-manifest budget, fan-in, node IDs, and tree
+  digest); and `file-reduction-v2` to `file-reduction-v3` (the reduction
+  target text shared by the initial and correction prompts).
+- A completed `0.14.6` split record is stale and reruns once; a schema-4
+  partial stays a valid owned container, but each `v8` leaf is quarantined
+  under the closed reason `stale-identity` and re-executed, and every reducer
+  and final-synthesis node depending on it is pruned with it under
+  `input-digest-mismatch`. Reducer nodes are additionally invalidated in
+  their own right, because `reduction_execution_identity` binds
+  `REDUCER_PROMPT_REVISION` independently of the leaf revision.
+- Quarantine stays inside the existing `MAX_QUARANTINE_ENTRIES_PER_FILE`
+  bound of `512`, so this upgrade never aborts a run.
+- `MAX_LEAF_CAPSULE_CANONICAL_CHARS`, a value derived from the leaf bounds
+  rather than an independent bound, moves from `448,672` to `986,272` as a
+  consequence of the signature raise; it participates in the completed-split
+  identity this release already invalidates. There is no schema-version
+  change.
+- The active split identities are `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v6`, `leaf-capsule-v9`, `fact-ledger-v6`,
+  `reduction-capsule-v1`, `reduction-packing-v5`, `file-reduction-v3`,
+  `file-synthesis-v3`, `division-execution-v6`, `large-file-v3`, and ordinary
+  `file-doc-v3`. `MAX_REDUCTION_NARRATIVE_CHARS` (300) is unchanged;
+  `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` is now `2,000` as described above. The
+  recommended signature and narrative targets are guidance figures, not
+  replacements for the hard bounds.
+
+## 0.14.6 - 2026-08-22
+
+### Split-leaf module-export contract
+
+- The fixed split-leaf prompt now states what an export is. Previously the
+  fragment shape block described `exports` only as an optional string list with
+  count and length bounds, and the fragment rules defined `functions` and
+  `classes` but never `exports` — so a fragment showing only the interior of a
+  large exported array or object was free to report its members as module
+  exports, and a valid data-only source could fail its own leaf response.
+- The contract is one string rendered inside the fixed fragment shape block, so
+  it reaches the initial leaf call and the one targeted correction call
+  byte-identically. The correction route previously received the shape block
+  and none of the fragment-specific rules, so a rule added only to the initial
+  template would have left that route defective.
+- The exclusion is scoped to containment, never to the shape of a literal.
+  Where a language declares its exports *as* a list or an object — an
+  exported-names manifest, a brace-enclosed export list, or an assignment to
+  the module's export table — those entries are the exported names and are
+  reported as such. Only ordinary data nested inside an exported value is
+  excluded, so the fix cannot trade the over-reporting bug for silent
+  under-reporting in any supported language.
+- The contract is language-neutral and judged by declaration visibility alone,
+  never by fragment position or continuation flags. Under the lexical fallback
+  a formatted multi-line exported value is packed into ordinary independent
+  chunks, not a marked continuation group, so every chunk after the first
+  reports `fragment 1 of 1` with both continuation flags false while still
+  showing nothing but exported-value interior. Such a fragment omits `exports`.
+- Metadata rendered alongside the source — a symbol-name list, a position
+  marker, or an identifier — is never on its own evidence that a name is
+  exported, and a fragment with no qualifying export omits the optional
+  `exports` key rather than inventing a placeholder.
+
+- The contract lengthens the fixed split-leaf shape/contract block from 741 to
+  2,233 characters, an increase of 1,492 characters — roughly 370 additional
+  input tokens by the usual four-characters-per-token heuristic, not a measured
+  provider count. That cost is standing, not one-time: it applies to every
+  split-leaf call and every leaf correction call. Nothing else changes — there
+  is no total leaf-prompt bound to breach, the fragment payload is still
+  governed by `max_content_chars`, the leaf prompt metadata bound is unchanged,
+  and no chunking or capacity decision moves.
+
+### Recovery and cache identity
+
+- `LEAF_CAPSULE_SCHEMA_REVISION` advances from `leaf-capsule-v7` to
+  `leaf-capsule-v8`. A completed `0.14.5` split record is stale and reruns
+  once; a schema-4 partial stays a valid owned container, but each `v7` leaf is
+  quarantined under the closed reason `stale-identity` and re-executed, and
+  every reducer and final-synthesis node depending on it is pruned with it
+  under `input-digest-mismatch`. This is not a formality: a `v7` leaf that
+  reported exported-value interior as `exports` within the fixed caps was
+  accepted, and those names flow into the published record.
+- Quarantine stays inside the existing `MAX_QUARANTINE_ENTRIES_PER_FILE` bound
+  of `512`, which is already sized for one revision advance invalidating every
+  node of the largest valid plan at once, so this upgrade never aborts a run.
+- No schema-version change and no bound change. The active split identities are
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v5`,
+  `leaf-capsule-v8`, `fact-ledger-v6`, `reduction-capsule-v1`,
+  `reduction-packing-v4`, `file-reduction-v2`, `file-synthesis-v3`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v3`.
+- The fixed export caps are unchanged at 32 items and 256 characters per item.
+  An over-cap or over-length response is still rejected losslessly through the
+  correction contract, never truncated, filtered by guessed string patterns, or
+  converted into a successful empty export list.
+
+### Documentation
+
+- README and RUN_FLOW now carry one shared `Module exports in a split file`
+  section, structured as what CodeDoc reports and then how you use it, and the
+  troubleshooting guidance states the normal behaviour plainly: rerun the
+  identical command and compatible recovery resumes automatically.
+- Both documents were also de-versioned. Release numbers, internal identity
+  revisions, recovery schema generations, and internal constant names are gone
+  from them entirely; a reader cannot act on that vocabulary and it dates the
+  documents on every release. The behaviour those passages carried is
+  preserved in user terms: what happens to recovery this build cannot resume
+  and the two supported remedies, the one-extra-pass cost when an upgrade
+  invalidates earlier split work, and the complete fail-closed rejection list.
+  Version identity lives here in the changelog instead.
+
+## 0.14.5 - 2026-08-22
 
 ### Structured provider-failure classification
 
@@ -160,7 +464,7 @@
 - Every HTTP `404` aborts as model-unavailable even when the actual cause is
   a wrong base path.
 
-## 0.14.4 2026-08-16
+## 0.14.4 - 2026-08-16
 
 ### Endpoint-trust authorization for a custom `api_base_url`
 
@@ -318,7 +622,7 @@
   (`codedoc/core/config_template.py`) and the generated configuration template
   state the runtime authorization requirement.
 
-## 0.14.3 (Unreleased)
+## 0.14.3 - 2026-08-09
 
 ### Split-leaf signature-bound correction
 
@@ -376,7 +680,7 @@
   matrix. `triple + split` remains unavailable, and split never silently
   falls back to truncate.
 
-## 0.14.2 2026-08-04
+## 0.14.2 - 2026-08-04
 
 ### Logging privacy and redirected Windows safety
 

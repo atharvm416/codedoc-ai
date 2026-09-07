@@ -258,26 +258,30 @@ def test_completed_large_file_identity_binds_leaf_capsule_revision_and_bound(
 ):
     """Section 5: the completed large-file identity changes whenever the
     bound leaf-capsule revision or its derived canonical-character maximum
-    changes -- exactly the two inputs `0.14.4`'s leaf per-kind cap correction
-    advances (`leaf-capsule-v6` -> `leaf-capsule-v7`, 200,192 -> 448,672) --
-    while the `large-file-v3:` prefix itself never changes, since split
-    completed identity is not versioned by the package release."""
-    kwargs = _large_file_identity_kwargs()
-    current_v7 = record_meta.expected_large_file_identity(**kwargs)
-    assert current_v7 is not None
-    assert current_v7.startswith("large-file-v3:")
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v7"
-    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 448672
+    changes, while the `large-file-v3:` prefix itself never changes, since
+    split completed identity is not versioned by the package release.
 
-    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v6")
+    Both inputs are proven independently: the revision is reverted to a prior
+    value first, then the canonical-character maximum is reverted to its own
+    prior value, so neither can silently stop participating in the identity."""
+    kwargs = _large_file_identity_kwargs()
+    current_identity = record_meta.expected_large_file_identity(**kwargs)
+    assert current_identity is not None
+    assert current_identity.startswith("large-file-v3:")
+    # The revision's value is owned by the roster test below; asserting it here
+    # would let this proof short-circuit on a literal instead of on the
+    # identity actually changing when the revision is reverted.
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 986272
+
+    monkeypatch.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v8")
     revision_reverted = record_meta.expected_large_file_identity(**kwargs)
-    assert revision_reverted != current_v7
+    assert revision_reverted != current_identity
     assert revision_reverted.startswith("large-file-v3:")
 
-    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 200192)
+    monkeypatch.setattr(record_meta, "MAX_LEAF_CAPSULE_CANONICAL_CHARS", 448672)
     bound_also_reverted = record_meta.expected_large_file_identity(**kwargs)
     assert bound_also_reverted != revision_reverted
-    assert bound_also_reverted != current_v7
+    assert bound_also_reverted != current_identity
     assert bound_also_reverted.startswith("large-file-v3:")
 
 
@@ -296,3 +300,59 @@ def test_patched_registry_excludes_unregistered_production_keys(private_key):
         target,
     )
     assert target == {"_secret": "keep"}
+
+
+def test_active_split_and_analysis_identity_roster_is_frozen_by_value() -> None:
+    """The complete active identity roster, pinned by value.
+
+    Four identities carry the conservative narrative-terminology and
+    source-backed structural contract: ordinary analysis `file-doc-v4`, the
+    split leaf capsule `leaf-capsule-v10`, the split fact ledger
+    `fact-ledger-v7`, and the final synthesis `file-synthesis-v4`. Every other
+    active split identity is frozen at its established value, and so is every
+    fixed leaf/reduction bound. This freeze exists so a change to one revision
+    cannot silently move another, and so that advancing one of the four cannot
+    drag an unrelated identity along."""
+    from codedoc.core import file_division
+
+    # Identities carrying the current truth/terminology contract.
+    assert record_meta.ANALYSIS_REVISION == "file-doc-v4"
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
+    assert file_division.LEDGER_SCHEMA_REVISION == "fact-ledger-v7"
+    assert file_division.FINAL_SYNTHESIS_REVISION == "file-synthesis-v4"
+
+    # Deliberately not advanced: their governed bytes/topology did not change.
+    assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
+    assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v5"
+    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v3"
+    assert file_division.STRUCTURE_SCHEMA_REVISION == "source-structure-v2"
+    assert file_division.UNIT_SCHEMA_REVISION == "semantic-unit-v3"
+    assert file_division.REDUCTION_CAPSULE_SCHEMA_REVISION == "reduction-capsule-v1"
+    assert file_division.EXECUTION_IDENTITY_SCHEMA_REVISION == "division-execution-v6"
+    assert file_division.SPLIT_PARTIAL_SCHEMA_VERSION == 4
+
+    # Fixed leaf/reduction bounds, frozen by value; the response-handling
+    # contract is unchanged -- an over-cap response is rejected losslessly,
+    # never truncated.
+    assert file_division.MAX_LEAF_EXPORT_ITEMS == 32
+    assert file_division.MAX_LEAF_EXPORT_ITEM_CHARS == 256
+    assert file_division.MAX_LEAF_DESCRIPTION_CHARS == 300
+    assert file_division.MAX_LEAF_SYMBOL_ITEMS_PER_KIND == 32
+    assert file_division.MAX_QUARANTINE_ENTRIES_PER_FILE == 512
+    assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 986272
+    assert file_division.MAX_LEAF_SYMBOL_SIGNATURE_CHARS == 2000
+    assert file_division.MAX_REDUCTION_NARRATIVE_CHARS == 300
+    # The recommended targets sit strictly below their hard bounds -- the
+    # headroom itself, not merely their existence. There is no
+    # `MAX_LEAF_SYMBOL_SIGNATURE_TARGET_CHARS` constant; the analogous
+    # leaf-signature headroom is the internal developer-policy hint bound
+    # (section 5.4) that a rendered duplicate signature hint is bounded to
+    # well below the hard ceiling.
+    assert (
+        file_division.MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS
+        < file_division.MAX_LEAF_SYMBOL_SIGNATURE_CHARS
+    )
+    assert (
+        file_division.MAX_REDUCTION_NARRATIVE_TARGET_CHARS
+        < file_division.MAX_REDUCTION_NARRATIVE_CHARS
+    )

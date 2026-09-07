@@ -7,6 +7,7 @@ import logging
 import pytest
 from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import (
+    MAX_COMBINED_RESPONSE_CHARS,
     clean_combined_report,
     clean_dependency_report,
     clean_leaf_capsule_report,
@@ -224,35 +225,36 @@ def test_fixed_leaf_losslessness_survives_bounded_diagnostic_overflow():
 
 
 def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
-    """Section 2A: the private response-field bound now equals the parser's
-    600-character `SemanticUnitIdentity.signature` ceiling, not the prior
-    256-character short-item bound.  A 552-character model-returned signature
-    (the installed 0.14.2 TestPyPI observation) and the exact 600-character
-    boundary are both accepted; 601 is rejected as `fixed_cap_exceeded` and
-    the response is not silently truncated into a shortened accepted fact."""
-    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 600
+    """Section 2A / 0.14.7 section 5.4: the private response-field bound now
+    equals the parser's `SemanticUnitIdentity.signature` ceiling, raised from
+    600 to 2,000 characters (section 3.2's AST-walk census of real
+    declarations). A 1,952-character model-returned signature and the exact
+    2,000-character boundary are both accepted; 2,001 is rejected as
+    `fixed_cap_exceeded` and the response is not silently truncated into a
+    shortened accepted fact."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == MAX_STRUCTURE_SIGNATURE_CHARS == 2000
 
-    accepted_552 = _run_leaf_capsule(
+    accepted_near_bound = _run_leaf_capsule(
         {
             "description": "visible facts",
-            "functions": [{"name": "f", "signature": "s" * 552}],
+            "functions": [{"name": "f", "signature": "s" * 1952}],
         }
     )
-    assert accepted_552["functions"][0]["signature"] == "s" * 552
+    assert accepted_near_bound["functions"][0]["signature"] == "s" * 1952
 
-    accepted_600 = _run_leaf_capsule(
+    accepted_2000 = _run_leaf_capsule(
         {
             "description": "visible facts",
-            "functions": [{"name": "f", "signature": "s" * 600}],
+            "functions": [{"name": "f", "signature": "s" * 2000}],
         }
     )
-    assert accepted_600["functions"][0]["signature"] == "s" * 600
+    assert accepted_2000["functions"][0]["signature"] == "s" * 2000
 
     with pytest.raises(ResponseContractError) as caught:
         _run_leaf_capsule(
             {
                 "description": "visible facts",
-                "functions": [{"name": "f", "signature": "s" * 601}],
+                "functions": [{"name": "f", "signature": "s" * 2001}],
             }
         )
     diagnostic = caught.value.diagnostic
@@ -268,7 +270,7 @@ def test_fixed_leaf_signature_bound_matches_the_parser_ceiling():
     # (a leak through `detail` would not have been caught by field names
     # alone).
     full_diagnostic_json = json.dumps(diagnostic.as_summary())
-    assert "s" * 601 not in full_diagnostic_json
+    assert "s" * 2001 not in full_diagnostic_json
     assert "s" * 100 not in full_diagnostic_json
 
 
@@ -397,3 +399,92 @@ def test_declared_key_cap_is_the_single_source():
         _run_combined(json.dumps(raw))
     assert len(caught.value.diagnostic.returned_keys) <= MAX_DIAGNOSTIC_KEYS
     assert caught.value.diagnostic.returned_keys[-1] == "...(truncated)"
+
+
+# ---------------------------------------------------------------------------
+# P2: a bounded provider `signature` survives the internal reconciliation-mode
+# cleaner and is absent from the default public-safe cleaner.
+# ---------------------------------------------------------------------------
+
+_SIGNED = {
+    "description": "d",
+    "functions": [
+        {"name": "f", "description": "one", "signature": "f(a: int) -> int"},
+        {"name": "f", "description": "two", "signature": "f(a, b)"},
+    ],
+}
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_default_cleaner_drops_signature_and_reports_it_unknown(reporter):
+    result = reporter(dict(_SIGNED), "m.py")
+    for item in result.value["functions"]:
+        assert set(item) <= {"name", "description"}
+    assert any(
+        r.field.endswith(".signature") and r.reason_code == "unknown_field"
+        for r in result.removed
+    )
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_reconciliation_mode_cleaner_retains_a_bounded_signature(reporter):
+    result = reporter(dict(_SIGNED), "m.py", retain_signature=True)
+    sigs = [item.get("signature") for item in result.value["functions"]]
+    assert sigs == ["f(a: int) -> int", "f(a, b)"]
+    # signature is a known field in this mode -- not reported as unknown.
+    assert not any(r.field.endswith(".signature") for r in result.removed)
+    # two same-name items with distinct signatures are not collapsed.
+    assert len(result.value["functions"]) == 2
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_retained_signature_is_length_bounded(reporter):
+    raw = {
+        "description": "d",
+        "functions": [{"name": "f", "signature": "s" * (MAX_STRUCTURE_SIGNATURE_CHARS + 500)}],
+    }
+    result = reporter(raw, "m.py", retain_signature=True)
+    sig = result.value["functions"][0]["signature"]
+    assert 0 < len(sig) <= MAX_STRUCTURE_SIGNATURE_CHARS
+
+
+def test_reconciliation_mode_still_omits_signature_when_absent():
+    result = clean_combined_report(
+        {"description": "d", "functions": [{"name": "f", "description": "x"}]},
+        "m.py",
+        retain_signature=True,
+    )
+    assert result.value["functions"] == [{"name": "f", "description": "x"}]
+
+
+@pytest.mark.parametrize("field", ["functions", "classes"])
+def test_reconciliation_signatures_do_not_evict_public_symbols_at_global_cap(field):
+    raw = {
+        "description": "d",
+        field: [
+            {
+                "name": f"f{index}",
+                "description": "documented",
+                "signature": "s" * MAX_STRUCTURE_SIGNATURE_CHARS,
+            }
+            for index in range(12)
+        ],
+    }
+
+    result = clean_combined_report(raw, "m.py", retain_signature=True)
+
+    assert [item["name"] for item in result.value[field]] == [
+        f"f{index}" for index in range(12)
+    ]
+    assert len(json.dumps(result.value, ensure_ascii=False, separators=(",", ":"))) <= (
+        MAX_COMBINED_RESPONSE_CHARS
+    )
+    assert any(
+        removal.field.endswith(".signature")
+        and removal.reason_code == "response_cap"
+        for removal in result.removed
+    )
+    assert not any(
+        removal.field == field and removal.reason_code == "response_cap"
+        for removal in result.removed
+    )

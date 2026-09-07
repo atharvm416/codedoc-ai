@@ -20,6 +20,8 @@ from codedoc.agents.file_documentation_agent import (
 )
 from codedoc.core.execution_model import UnitChunkExecutionRequest
 from codedoc.core.file_division import (
+    MAX_LEAF_EXPORT_ITEM_CHARS,
+    MAX_LEAF_EXPORT_ITEMS,
     MAX_LEAF_PROMPT_METADATA_CHARS,
     MAX_LEAF_SYMBOL_ITEMS_PER_KIND,
     MAX_LEAF_SYMBOL_SIGNATURE_CHARS,
@@ -82,6 +84,23 @@ class _CorrectingProvider:
 
     def complete(self, prompt, system="", temperature=0.1):
         return self.complete_json(prompt, system)
+
+
+class _RecordingCorrectingProvider(_CorrectingProvider):
+    """`_CorrectingProvider` that also keeps every prompt it was sent.
+
+    The 0.14.6 correction-route assertions must inspect the prompt actually
+    built and sent by the real `ResponseCorrectionAgent`, not a prompt the
+    test reconstructs itself.
+    """
+
+    def __init__(self, **kwargs) -> None:
+        super().__init__(**kwargs)
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt, system=""):
+        self.prompts.append(prompt)
+        return super().complete_json(prompt, system)
 
 _LANG_FIXTURES = {
     "python": {
@@ -557,19 +576,21 @@ def test_fragment_prompt_contains_exact_position_metadata_and_fixed_shape(tmp_pa
     assert "Synthesize one final file-level" not in prompt
 
 
-def test_fragment_prompt_advertises_the_shared_600_character_signature_bound(tmp_path):
-    """Section 2A: the fixed fragment prompt's hard-bounds sentence must
-    match `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (now 600, aliased from the
-    parser's own ceiling) rather than the retired 256-character literal, so
-    a model can never accurately echo a signature CodeDoc itself supplied
-    and still fail the whole leaf response."""
-    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == 600
+def test_fragment_prompt_advertises_the_shared_2000_character_signature_bound(tmp_path):
+    """Section 2A / 0.14.7 section 5.4: the fixed fragment prompt's
+    hard-bounds sentence must match `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (raised
+    to 2,000, aliased from the parser's own ceiling) rather than the retired
+    256-character literal or the pre-0.14.7 600-character bound, so a model
+    can never accurately echo a signature CodeDoc itself supplied and still
+    fail the whole leaf response."""
+    assert MAX_LEAF_SYMBOL_SIGNATURE_CHARS == 2000
     request = _leaf_request(tmp_path)
 
     _system, prompt = build_fragment_prompt(request)
 
-    assert "each symbol signature <= 600 characters" in prompt
+    assert "each symbol signature <= 2000 characters" in prompt
     assert "signature <= 256" not in prompt
+    assert "signature <= 600 characters" not in prompt
 
 
 def test_fragment_prompt_reports_true_continuation_flags(tmp_path):
@@ -811,3 +832,796 @@ def test_run_fragment_correction_terminal_fault_preserves_whole_run_abort(
     assert failure.status == 429
     assert isinstance(caught.value.__cause__, LLMError)
     assert provider.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: the shared split-leaf module-export contract
+# ---------------------------------------------------------------------------
+# The 0.14.5 failure was a split leaf that reported exported-value *interior*
+# (array members, object keys, IDs) as module `exports`, blowing the fixed cap
+# on both the initial leaf response and its one targeted correction. The repair
+# is a semantic contract, and it must reach the correction route too -- that
+# route receives only the shape block, never `_FRAGMENT_PROMPT_TEMPLATE`'s
+# fragment-specific rules.
+
+#: Every clause the shared contract must state, asserted as exact substrings so
+#: a reworded-but-weakened contract fails instead of silently passing. Spelled
+#: out here rather than imported from production, so these assertions cannot be
+#: satisfied by the very string they exist to police.
+_EXPORT_CONTRACT_CLAUSES = (
+    "is a name this module or package exposes as part of its own "
+    "language-level API",
+    "Containment is not export",
+    "not module exports merely because the value containing them is exported",
+    "IS the module's own export declaration",
+    "its entries are the exported names themselves and must be reported",
+    "Judge an export by declaration visibility alone",
+    "never by any continuation flag",
+    "is never on its own evidence that a name is exported",
+    'omit the optional "exports" key entirely',
+)
+
+
+def _at_cap_exports() -> list[str]:
+    """Exactly MAX_LEAF_EXPORT_ITEMS distinct export names."""
+    return [f"exportName{index}" for index in range(MAX_LEAF_EXPORT_ITEMS)]
+
+
+def _over_cap_exports() -> list[str]:
+    """One more export name than MAX_LEAF_EXPORT_ITEMS allows."""
+    return [f"exportName{index}" for index in range(MAX_LEAF_EXPORT_ITEMS + 1)]
+
+
+def _assert_states_the_export_contract_once(prompt: str) -> None:
+    for clause in _EXPORT_CONTRACT_CLAUSES:
+        assert prompt.count(clause) == 1, clause
+    # The pre-existing hard bounds must survive the contract edit verbatim.
+    assert f"exports <= {MAX_LEAF_EXPORT_ITEMS} items" in prompt
+    assert f"each export <= {MAX_LEAF_EXPORT_ITEM_CHARS} characters" in prompt
+
+
+def _interior_only_data_source(entries: int = 120) -> str:
+    """A data-only module whose later lexical chunks show array interior only.
+
+    Used where a fixture response claims "no exports": the claim has to be
+    true of the fragment the model was actually shown. A fragment whose
+    visible source declares a symbol, answered with "data-only fragment, no
+    exports", satisfies the schema while contradicting the factuality contract
+    this release exists to defend.
+    """
+    lines = ["ROWS = ["]
+    lines.extend(f'    {{"id": "row_{index:03d}"}},' for index in range(entries))
+    lines.append("]")
+    return "\n".join(lines) + "\n"
+
+
+def _corrected_leaf_agent(tmp_path):
+    """One real leaf agent over an interior-only data fragment: the first
+    response is an over-cap `exports` list, and the correction returns a
+    truthful description-only capsule -- truthful because the fragment really
+    does show nothing but array interior."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(
+        tmp_path,
+        content=_interior_only_data_source(),
+        max_content_chars=600,
+        chunk_index=1,
+    )
+    assert "ROWS = [" not in request.payload, (
+        "chunk 1 must show array interior only, with no visible declaration"
+    )
+    provider = _RecordingCorrectingProvider(
+        first_response={"description": "ok", "exports": _over_cap_exports()},
+        corrected_response={
+            "description": "Entries of a larger data table; no declaration visible."
+        },
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=600)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+    return request, provider, agent
+
+
+def test_fragment_prompt_states_the_module_export_contract_exactly_once(tmp_path):
+    """0.14.6: the initial split-leaf prompt must define what an export is.
+
+    Before this release `_FRAGMENT_SHAPE_BLOCK` described `exports` only as
+    `"exports": ["...", ...] (optional)` plus its bounds, and
+    `_FRAGMENT_PROMPT_TEMPLATE` defined `functions`/`classes` but never
+    `exports` -- so a fragment showing only the interior of a large exported
+    array was free to report its members as module exports."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    _assert_states_the_export_contract_once(prompt)
+
+
+def test_fragment_export_contract_is_language_neutral(tmp_path):
+    """The reproduction was TypeScript, but the contract governs every
+    supported language: it may name generic data shapes, never one language's
+    keywords as the only reading."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    assert fda._FRAGMENT_EXPORT_CONTRACT in prompt
+    for language_specific in (
+        "TypeScript", "JavaScript", "TSX", "Python", "__init__.py",
+        "export const", "module.exports", "__all__",
+    ):
+        assert language_specific not in fda._FRAGMENT_EXPORT_CONTRACT
+
+
+def test_initial_and_correction_leaf_prompts_carry_the_identical_shape_block(
+    tmp_path,
+):
+    """No-drift guard: both routes must carry `_FRAGMENT_SHAPE_BLOCK` byte for
+    byte. Two texts that each merely satisfy a substring check could still
+    drift apart; the same string object in both prompts cannot."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    initial_prompt, correction_prompt = provider.prompts
+    assert fda._FRAGMENT_SHAPE_BLOCK in initial_prompt
+    assert fda._FRAGMENT_SHAPE_BLOCK in correction_prompt
+
+
+def test_correction_prompt_states_the_same_module_export_contract_once(tmp_path):
+    """0.14.6: the one targeted correction call must carry the same export
+    contract as the initial call.
+
+    `run_fragment()` hands `_FRAGMENT_SHAPE_BLOCK` -- and nothing else from
+    `_FRAGMENT_PROMPT_TEMPLATE` -- to `_finalize_fixed_response()`, so a rule
+    added only to the initial template would leave the correction route
+    defective. This drives a real over-cap `exports` rejection through the
+    real correction component and inspects the prompt actually sent."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    # A corrected capsule carrying only a truthful non-empty description is
+    # valid: `exports` stays optional and is never forced to an empty list.
+    result = agent.run_fragment(request)
+
+    assert result == {
+        "description": "Entries of a larger data table; no declaration visible."
+    }
+    assert provider.calls == 2
+    correction_prompt = provider.prompts[1]
+    assert "Previous response (verbatim" in correction_prompt
+    _assert_states_the_export_contract_once(correction_prompt)
+
+
+def test_export_contract_is_self_contained_for_the_correction_route(tmp_path):
+    """The correction prompt renders no fragment position, no continuation
+    flags, and no known-symbol line -- for a fixed capsule it also passes an
+    empty language and an empty import list. A contract clause whose condition
+    named one of those lines would be unanchored on exactly the defective
+    route, so every clause must resolve against the visible source alone."""
+    request, provider, agent = _corrected_leaf_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    correction_prompt = provider.prompts[1]
+    assert "Continues an earlier fragment" not in correction_prompt
+    assert "Known symbol name(s)" not in correction_prompt
+    assert "Fragment position:" not in correction_prompt
+    assert fda._FRAGMENT_EXPORT_CONTRACT in correction_prompt
+    # No clause may point at one of the initial prompt's own metadata lines.
+    # "continuation flag" appears only as something the model must *ignore*,
+    # which is exactly the 0.14.5 repair and stays correct with the flags
+    # absent -- so the labels themselves are what must not be referenced.
+    for initial_only_line in (
+        "Fragment position:",
+        "Fragment metadata",
+        "Continues an earlier fragment",
+        "Continues into a later fragment",
+        "Known symbol name",
+        "known_symbols",
+    ):
+        assert initial_only_line not in fda._FRAGMENT_EXPORT_CONTRACT
+
+
+def test_module_export_contract_does_not_reach_unrelated_prompts():
+    """Scope guard: the contract governs the fixed split-leaf capsule only. It
+    must not leak into the reduction/final-synthesis capsule (which never
+    carries exports at all) or into the whole-file `single` prompt, whose own
+    export wording this release deliberately leaves unchanged."""
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    _system, whole_file_prompt = build_prompt(
+        "src/example.py", "x = 1\n", ["os"], "python"
+    )
+
+    for clause in _EXPORT_CONTRACT_CLAUSES:
+        assert clause not in _REDUCTION_SHAPE_BLOCK
+        assert clause not in whole_file_prompt
+    # The whole-file prompt keeps its own, separate export sentence.
+    assert "exports are names this module deliberately exposes" in whole_file_prompt
+
+
+# ---------------------------------------------------------------------------
+# 0.14.6: `exports`-specific fixed-capsule cap evidence
+# ---------------------------------------------------------------------------
+# The at-cap/over-cap regressions above exercise `functions` only. The released
+# failure was an over-cap `exports` list, so the rejection path that actually
+# fired had no direct coverage.
+
+
+def test_run_fragment_at_cap_exports_is_accepted(tmp_path) -> None:
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    exports = _at_cap_exports()
+    provider = _Provider(json.dumps({"description": "ok", "exports": exports}))
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    result = agent.run_fragment(request)
+
+    assert result["exports"] == exports
+    assert provider.calls == 1
+
+
+def test_run_fragment_over_cap_exports_is_rejected_without_correction(
+    tmp_path,
+) -> None:
+    """The exact 0.14.5 rejection: an over-cap `exports` list is rejected in
+    full with `fixed_cap_exceeded` and an `item_limit` removal reported on an
+    `exports[...]` path -- never truncated to the first 32 names."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _Provider(
+        json.dumps({"description": "ok", "exports": _over_cap_exports()})
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    assert agent._correction is None
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.field.startswith("exports[")
+        and removal.reason_code == "item_limit"
+        for removal in diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+def test_run_fragment_over_long_export_item_is_rejected_without_correction(
+    tmp_path,
+) -> None:
+    """The collection-size cap is not the only export bound: one item over
+    `MAX_LEAF_EXPORT_ITEM_CHARS` is also a lossy removal, reported as
+    `response_cap` on that item's own path."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _Provider(
+        json.dumps(
+            {
+                "description": "ok",
+                "exports": ["e" * (MAX_LEAF_EXPORT_ITEM_CHARS + 1)],
+            }
+        )
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.field == "exports[0]" and removal.reason_code == "response_cap"
+        for removal in diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+def test_export_contract_never_suppresses_a_manifest_style_export(tmp_path):
+    """The exclusion is scoped to containment, not to the shape of a literal.
+
+    Several supported languages declare their exports *as* a list or an object
+    -- an exported-names manifest, a brace-enclosed export list, an assignment
+    to the module's export table -- and CodeDoc's own public surface is one of
+    them (`codedoc/__init__.py` uses `__all__`). An unqualified "array
+    elements and object properties are not exports" would tell a model to drop
+    every real export in those languages, trading the 0.14.5 over-reporting
+    bug for a silent under-reporting one.
+
+    Only the prompt wording can be guarded here: the fixed cleaner accepts
+    whatever names a response carries, so no end-to-end run can demonstrate
+    that the *prompt* stopped suppressing a manifest-style export."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+    contract = fda._FRAGMENT_EXPORT_CONTRACT
+
+    # The exclusion must be conditional, never absolute.
+    assert "merely because the value containing them is exported" in contract
+    exclusion = contract[contract.index("Containment is not export"):]
+    assert "are data, not module exports." not in exclusion
+
+    # ...and the carve-out must be present, in the same block, exactly once.
+    assert contract.count("IS the module's own export declaration") == 1
+    assert "must be reported" in contract
+    assert prompt.count("IS the module's own export declaration") == 1
+
+    # Stated neutrally: the carve-out survives the language-neutrality rule
+    # rather than being dropped by it.
+    for language_specific in ("__all__", "module.exports", "export {", "export const"):
+        assert language_specific not in contract
+
+
+# ---------------------------------------------------------------------------
+# 0.14.7: the shared split-leaf signature contract
+# ---------------------------------------------------------------------------
+# Section 3/4.1: the fixed fragment prompt required an exact copy of the
+# visible declaration AND a signature at or below 600 characters. CodeDoc's
+# own source contains declarations of 631 and 634 characters, so for those
+# no truthful response existed -- unsatisfiable by construction, and (section
+# 4.2) the rule never reached the correction route at all, since
+# `run_fragment()` passes only `_FRAGMENT_SHAPE_BLOCK` to
+# `_finalize_fixed_response()` and the "copied from the visible declaration"
+# sentence lived only in `_FRAGMENT_PROMPT_TEMPLATE`. The repair states a
+# recommended target below the hard bound and makes a shortened signature a
+# correct, expected response, carried through both routes byte-identically --
+# exactly the single-source mechanism 0.14.6 established for `exports`.
+
+#: Every clause the shared signature contract must state, spelled out here
+#: rather than imported from production, so these assertions cannot be
+#: satisfied by the very string they exist to police.
+_SIGNATURE_CONTRACT_CLAUSES = (
+    "A signature is source-backed declaration text visible in THIS fragment",
+    "Never infer a missing prefix, suffix, name, parameter, type, "
+    "delimiter, or arity from another continuation, parser metadata, "
+    "language convention, or general knowledge",
+    "Shorten only a fully visible declaration that exceeds the hard bound",
+    "preferably roughly 600-1,000 characters and never more than the "
+    "hard bound",
+    "a fully visible declaration between that range and the hard bound is "
+    "reported in full",
+    "report only the contiguous signature text actually visible here, in "
+    "source order and at or below the hard bound",
+    "Partial visibility, not the declaration's whole-file length, "
+    "controls this rule",
+    "a shortened or partial signature cannot by itself distinguish them",
+    "the parser-owned source range, scope, and semantic-unit identity "
+    "remain authoritative",
+    "a partial or shortened signature is only a matching hint, never "
+    "the declaration's identity",
+    'Omit "signature" only when the language expresses none, or this '
+    "fragment exposes no usable declaration text",
+    "Length alone is never a reason to omit a fully visible declaration",
+)
+
+
+def _assert_states_the_signature_contract_once(prompt: str) -> None:
+    for clause in _SIGNATURE_CONTRACT_CLAUSES:
+        assert prompt.count(clause) == 1, clause
+    assert (
+        f"The hard bound is {MAX_LEAF_SYMBOL_SIGNATURE_CHARS} characters"
+        in prompt
+    )
+    assert (
+        f"each symbol signature <= {MAX_LEAF_SYMBOL_SIGNATURE_CHARS} characters"
+        in prompt
+    )
+    # The retired `_FRAGMENT_PROMPT_TEMPLATE` sentence must not survive
+    # alongside the shared contract -- two statements of the same rule that
+    # can drift apart is exactly the failure mode this release removes, and
+    # it is also the false claim section 5.1 clause 1 forbids: the reported
+    # signature is not what keeps overloads distinct.
+    assert "so that overloads sharing a name stay distinguishable" not in prompt
+
+
+def _corrected_leaf_signature_agent(tmp_path):
+    """One real leaf agent over a small fragment: the first response's
+    signature exceeds the hard bound and is rejected; the correction
+    response shortens it to a truthful leading portion within the
+    600-1,000 preferred range, which is accepted."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _RecordingCorrectingProvider(
+        first_response={
+            "description": "ok",
+            "functions": [
+                {
+                    "name": "alpha",
+                    "signature": "s" * (MAX_LEAF_SYMBOL_SIGNATURE_CHARS + 1),
+                }
+            ],
+        },
+        corrected_response={
+            "description": "Corrected leaf.",
+            "functions": [
+                {
+                    "name": "alpha",
+                    "signature": "s" * 800,
+                }
+            ],
+        },
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+    return request, provider, agent
+
+
+def test_fragment_prompt_states_the_signature_contract_exactly_once(tmp_path):
+    """0.14.7: the initial split-leaf prompt must make the fixed signature
+    contract satisfiable. Before this release the shape block bounded
+    `signature` to 600 characters while the fragment rules separately
+    demanded an exact copy of the visible declaration -- a declaration
+    longer than the hard bound (as CodeDoc's own source contains) had no
+    truthful accepted response."""
+    request = _leaf_request(tmp_path)
+
+    _system, prompt = build_fragment_prompt(request)
+
+    _assert_states_the_signature_contract_once(prompt)
+
+
+def test_initial_and_correction_leaf_prompts_carry_the_identical_signature_contract(
+    tmp_path,
+):
+    """No-drift guard, signature-specific: this drives a real over-bound
+    signature rejection through the real correction component and inspects
+    both prompts actually sent, proving the contract reaches the correction
+    route the 0.14.6-era rule never did (section 4.2)."""
+    request, provider, agent = _corrected_leaf_signature_agent(tmp_path)
+
+    result = agent.run_fragment(request)
+
+    assert result == {
+        "description": "Corrected leaf.",
+        "functions": [
+            {
+                "name": "alpha",
+                "signature": "s" * 800,
+            }
+        ],
+    }
+    assert provider.calls == 2
+    initial_prompt, correction_prompt = provider.prompts
+    assert fda._FRAGMENT_SHAPE_BLOCK in initial_prompt
+    assert fda._FRAGMENT_SHAPE_BLOCK in correction_prompt
+    _assert_states_the_signature_contract_once(initial_prompt)
+    _assert_states_the_signature_contract_once(correction_prompt)
+
+
+def test_correction_prompt_states_the_same_signature_contract_once(tmp_path):
+    """0.14.7: the one targeted correction call must carry the same
+    signature contract as the initial call -- the exact defect section 4.2
+    identifies: the correction route received only the bare 600-character
+    bound, with no statement of what a signature is or whether it may be
+    shortened."""
+    request, provider, agent = _corrected_leaf_signature_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    assert provider.calls == 2
+    correction_prompt = provider.prompts[1]
+    assert "Previous response (verbatim" in correction_prompt
+    _assert_states_the_signature_contract_once(correction_prompt)
+
+
+def test_signature_contract_is_self_contained_for_the_correction_route(tmp_path):
+    """The correction prompt renders no fragment position, no continuation
+    flags, and no known-symbol line, so every signature clause must resolve
+    against the visible source alone -- the same self-containment guarantee
+    0.14.6 proved for the export contract."""
+    request, provider, agent = _corrected_leaf_signature_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    correction_prompt = provider.prompts[1]
+    assert "Continues an earlier fragment" not in correction_prompt
+    assert "Known symbol name(s)" not in correction_prompt
+    assert "Fragment position:" not in correction_prompt
+    for initial_only_line in (
+        "Fragment position:",
+        "Fragment metadata",
+        "Continues an earlier fragment",
+        "Continues into a later fragment",
+        "Known symbol name",
+        "known_symbols",
+    ):
+        assert initial_only_line not in fda._FRAGMENT_SIGNATURE_CONTRACT
+
+
+def test_signature_contract_does_not_reach_reduction_or_final_or_whole_file_prompts():
+    """Scope guard: the contract governs the fixed split-leaf capsule only.
+    It must not leak into the reduction/final-synthesis capsule (which never
+    carries a signature at all) or into the whole-file `single` prompt."""
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    _system, whole_file_prompt = build_prompt(
+        "src/example.py", "x = 1\n", ["os"], "python"
+    )
+
+    for clause in _SIGNATURE_CONTRACT_CLAUSES:
+        assert clause not in _REDUCTION_SHAPE_BLOCK
+        assert clause not in whole_file_prompt
+
+
+def test_run_fragment_signature_above_preferred_range_but_below_bound_is_accepted_in_full(
+    tmp_path,
+) -> None:
+    """0.14.7 section 5.1 clause 2: the 600-1,000 preferred shortening range
+    only applies to a declaration that exceeds the hard bound; it is not a
+    second enforced limit or permission to shorten a fully visible
+    declaration that already fits. A signature strictly between that range
+    and the hard bound (2,000) must be reported in full, unchanged, with no
+    correction call. A test suite that rejected this gap would have quietly
+    converted guidance into a second hard bound."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    signature = "s" * 1500
+    assert 1000 < len(signature) <= MAX_LEAF_SYMBOL_SIGNATURE_CHARS
+    provider = _Provider(
+        json.dumps(
+            {
+                "description": "ok",
+                "functions": [{"name": "alpha", "signature": signature}],
+            }
+        )
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+
+    result = agent.run_fragment(request)
+
+    assert result["functions"][0]["signature"] == signature
+    assert provider.calls == 1
+
+
+def test_run_fragment_signature_over_hard_bound_is_rejected_without_correction(
+    tmp_path,
+) -> None:
+    """The repair makes a truthful response possible; it must not make an
+    over-bound response acceptable. An over-bound signature is still
+    rejected losslessly with `fixed_cap_exceeded` and a `response_cap`
+    removal on the `functions[0].signature` path -- never silently
+    shortened to fit."""
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _Provider(
+        json.dumps(
+            {
+                "description": "ok",
+                "functions": [
+                    {
+                        "name": "alpha",
+                        "signature": "s" * (MAX_LEAF_SYMBOL_SIGNATURE_CHARS + 1),
+                    }
+                ],
+            }
+        )
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    assert agent._correction is None
+
+    with pytest.raises(ResponseContractError) as caught:
+        agent.run_fragment(request)
+
+    diagnostic = caught.value.diagnostic
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert any(
+        removal.field == "functions[0].signature"
+        and removal.reason_code == "response_cap"
+        for removal in diagnostic.removed
+    )
+    assert provider.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# 0.14.7 section 7 / 8.D / 9.1 items 14 & 16: the exact direct-agent
+# fully-visible boundary + correction matrix at 1,001 / 1,500 / 2,000 / 2,001
+# ---------------------------------------------------------------------------
+# Every declaration below is REAL single-line Python source of an exact length,
+# embedded verbatim in the request fragment -- never a bare ``"s" * n`` value
+# disconnected from the request source (section 7).
+
+
+class _RecordingProvider(_Provider):
+    """`_Provider` that also keeps every prompt it was sent."""
+
+    def __init__(self, raw: str) -> None:
+        super().__init__(raw)
+        self.prompts: list[str] = []
+
+    def complete_json(self, prompt, system=""):
+        self.prompts.append(prompt)
+        return super().complete_json(prompt, system)
+
+
+def _exact_len_def(total: int, name: str = "alpha") -> str:
+    """`def <name>(<one long parameter identifier>) -> int:` of exactly
+    *total* code points -- one physical line, real parseable Python."""
+    head, tail = f"def {name}(", ") -> int:"
+    pad = total - len(head) - len(tail)
+    assert pad >= 1, total
+    declaration = head + ("p" * pad) + tail
+    assert len(declaration) == total and "\n" not in declaration
+    return declaration
+
+
+def _exact_len_class(total: int, name: str = "Big") -> str:
+    """`class <name>(<one long base identifier>):` of exactly *total* code
+    points -- one physical line, real parseable Python."""
+    head, tail = f"class {name}(", "):"
+    pad = total - len(head) - len(tail)
+    assert pad >= 1, total
+    declaration = head + ("B" * pad) + tail
+    assert len(declaration) == total and "\n" not in declaration
+    return declaration
+
+
+def _fully_visible_leaf_request(tmp_path, declaration: str):
+    """A real leaf request whose single fragment shows *declaration* in full."""
+    source = declaration + "\n    x = 1\n"
+    request = _leaf_request(tmp_path, content=source, max_content_chars=5000)
+    assert request.unit_chunk_count == 1
+    assert request.continuation_before is False
+    assert request.continuation_after is False
+    assert declaration in request.payload
+    return request, source
+
+
+def _leaf_agent_with_real_correction(provider):
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    agent = FileDocumentationAgent(provider, max_content_chars=5000)
+    agent._correction = ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+    return agent
+
+
+_ACCEPTED_IN_FULL_LENGTHS = (1001, 1500, 2000)
+
+
+@pytest.mark.parametrize("length", _ACCEPTED_IN_FULL_LENGTHS)
+@pytest.mark.parametrize("kind", ("function", "class"))
+def test_run_fragment_fully_visible_signature_at_or_below_bound_is_copied_in_full(
+    tmp_path, length, kind
+) -> None:
+    """Section 9.1 item 14: a fully visible declaration of exactly 1,001 /
+    1,500 / 2,000 source characters is copied and accepted unchanged, with no
+    correction call, on both the function and class signature paths."""
+    declaration = (
+        _exact_len_def(length) if kind == "function" else _exact_len_class(length)
+    )
+    request, _source = _fully_visible_leaf_request(tmp_path, declaration)
+    field = "functions" if kind == "function" else "classes"
+    name = "alpha" if kind == "function" else "Big"
+    provider = _RecordingProvider(
+        json.dumps({
+            "description": "Fully visible declaration.",
+            field: [{"name": name, "description": "does x", "signature": declaration}],
+        })
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=5000)
+
+    result = agent.run_fragment(request)
+
+    assert result[field][0]["signature"] == declaration
+    assert len(result[field][0]["signature"]) == length
+    assert provider.calls == 1
+    _assert_states_the_signature_contract_once(provider.prompts[0])
+
+
+@pytest.mark.parametrize("length", _ACCEPTED_IN_FULL_LENGTHS)
+def test_run_fragment_fully_visible_signature_accepted_through_real_correction(
+    tmp_path, length
+) -> None:
+    """Section 9.1 item 14: the same full value is accepted through the real
+    correction component after a deliberately invalid initial response, and
+    both prompts carry the signature contract exactly once."""
+    declaration = _exact_len_def(length)
+    request, _source = _fully_visible_leaf_request(tmp_path, declaration)
+    provider = _RecordingCorrectingProvider(
+        first_response={
+            "description": "ok",
+            "functions": [{"name": "alpha", "signature": _exact_len_def(2001)}],
+        },
+        corrected_response={
+            "description": "Corrected.",
+            "functions": [{"name": "alpha", "signature": declaration}],
+        },
+    )
+    agent = _leaf_agent_with_real_correction(provider)
+
+    result = agent.run_fragment(request)
+
+    assert result["functions"][0]["signature"] == declaration
+    assert provider.calls == 2
+    for prompt in provider.prompts:
+        _assert_states_the_signature_contract_once(prompt)
+        assert fda._FRAGMENT_SHAPE_BLOCK in prompt
+
+
+@pytest.mark.parametrize("kind", ("function", "class"))
+def test_run_fragment_fully_visible_over_bound_declaration_shortening_matrix(
+    tmp_path, kind
+) -> None:
+    """Section 9.1 item 14: a fully visible 2,001-character declaration.
+
+    * returning all 2,001 characters is rejected in full (`fixed_cap_exceeded`,
+      a `response_cap` removal on the exact ``<kind>[0].signature`` path,
+      value-free diagnostics);
+    * an 800-character leading source-backed portion -- proved byte-for-byte
+      contiguous from the fragment -- is accepted;
+    * both outcomes agree between the initial and real correction paths;
+    * a correction that still returns all 2,001 characters fails the file
+      without a second correction.
+    """
+    declaration = (
+        _exact_len_def(2001) if kind == "function" else _exact_len_class(2001)
+    )
+    request, source = _fully_visible_leaf_request(tmp_path, declaration)
+    field = "functions" if kind == "function" else "classes"
+    name = "alpha" if kind == "function" else "Big"
+    shortened = declaration[:800]  # a real leading slice of the visible source
+    assert declaration.startswith(shortened) and shortened in source
+    over = {"description": "ok", field: [{"name": name, "signature": declaration}]}
+    accepted = {
+        "description": "Shortened but truthful.",
+        field: [{"name": name, "description": "does x", "signature": shortened}],
+    }
+
+    # 1) initial path rejects the full 2,001-character value, value-free.
+    reject_provider = _Provider(json.dumps(over))
+    reject_agent = FileDocumentationAgent(reject_provider, max_content_chars=5000)
+    assert reject_agent._correction is None
+    with pytest.raises(ResponseContractError) as caught:
+        reject_agent.run_fragment(request)
+    diag = caught.value.diagnostic
+    assert diag.reason_code == "fixed_cap_exceeded"
+    assert any(
+        r.field == f"{field}[0].signature" and r.reason_code == "response_cap"
+        for r in diag.removed
+    )
+    assert declaration not in json.dumps(diag.as_summary())
+    assert reject_provider.calls == 1
+
+    # 2) initial path accepts the 800-character leading portion unchanged.
+    accept_provider = _Provider(json.dumps(accepted))
+    accept_result = FileDocumentationAgent(
+        accept_provider, max_content_chars=5000
+    ).run_fragment(request)
+    assert accept_result[field][0]["signature"] == shortened
+    assert accept_provider.calls == 1
+
+    # 3) real correction accepts the same 800-character shortening.
+    fix_provider = _CorrectingProvider(
+        first_response=over, corrected_response=accepted
+    )
+    fix_result = _leaf_agent_with_real_correction(fix_provider).run_fragment(request)
+    assert fix_result[field][0]["signature"] == shortened
+    assert fix_provider.calls == 2
+
+    # 4) a correction that still returns all 2,001 characters fails the file
+    #    without a second correction.
+    still_bad = _CorrectingProvider(first_response=over, corrected_response=over)
+    with pytest.raises(ResponseContractError) as caught2:
+        _leaf_agent_with_real_correction(still_bad).run_fragment(request)
+    assert caught2.value.correction_attempted is True
+    assert still_bad.calls == 2

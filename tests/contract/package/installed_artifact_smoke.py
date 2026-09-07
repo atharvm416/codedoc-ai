@@ -14,6 +14,7 @@ from importlib import metadata as importlib_metadata
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import site
 import subprocess
@@ -49,30 +50,97 @@ def _repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def _canonical_distribution_name(name: object) -> str:
+    """PEP 503 name normalization: case-fold and collapse every run of ``-``,
+    ``_`` or ``.`` to a single hyphen, so ``codedoc_ai``, ``Codedoc-AI`` and
+    ``codedoc..ai`` all compare equal to ``codedoc-ai``."""
+    text = name if isinstance(name, str) else ""
+    return re.sub(r"[-_.]+", "-", text.strip()).lower()
+
+
+def _distribution_owns_imported_package(dist: object, package_path: Path) -> bool:
+    """True when *dist*'s own metadata says it installed the exact
+    ``codedoc/__init__.py`` file that was imported -- the origin binding a bare
+    ``importlib.metadata.version("codedoc-ai")`` lookup does not provide."""
+    try:
+        located = Path(dist.locate_file("codedoc/__init__.py")).resolve()
+    except Exception:
+        return False
+    return located == package_path
+
+
+def _origin_bound_distribution(
+    package_path: Path, package_site_root: Path
+) -> object:
+    """Return the single installed ``codedoc-ai`` distribution that both owns
+    the imported package file and lives under the same site-packages root.
+
+    Distinct, stable failures for the three ways this can go wrong:
+
+    * ``codedoc-ai-distribution-not-found`` -- no ``codedoc-ai`` distribution
+      is installed at all;
+    * ``codedoc-ai-distribution-origin-mismatch`` -- one or more are installed
+      but none is co-located with the imported package (e.g. only a
+      repository-local ``codedoc_ai.egg-info`` shadow, or an install under a
+      different site root);
+    * ``codedoc-ai-distribution-ambiguous`` -- more than one qualifies.
+    """
+    named = [
+        dist
+        for dist in importlib_metadata.distributions()
+        if _canonical_distribution_name(_distribution_name(dist)) == "codedoc-ai"
+    ]
+    if not named:
+        raise SmokeFailure("codedoc-ai-distribution-not-found")
+    origin_bound = [
+        dist
+        for dist in named
+        if _distribution_owns_imported_package(dist, package_path)
+        and _distribution_is_under(dist, package_site_root)
+    ]
+    if not origin_bound:
+        raise SmokeFailure("codedoc-ai-distribution-origin-mismatch")
+    if len(origin_bound) > 1:
+        raise SmokeFailure("codedoc-ai-distribution-ambiguous")
+    return origin_bound[0]
+
+
+def _distribution_name(dist: object) -> object:
+    try:
+        return dist.metadata["Name"]
+    except Exception:
+        return getattr(dist, "name", None)
+
+
+def _distribution_is_under(dist: object, root: Path) -> bool:
+    """Whether *dist*'s on-disk metadata directory sits under *root*.  A
+    non-path distribution (no ``_path``) is not rejected on this basis alone --
+    :func:`_distribution_owns_imported_package` is the authoritative bind."""
+    origin = getattr(dist, "_path", None)
+    if origin is None:
+        return True
+    try:
+        return _is_within(Path(origin).resolve(), root)
+    except Exception:
+        return False
+
+
 def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, Path]:
     """Prove product imports and the console script come from this environment.
 
     This deliberately runs before changing directory or importing project
     content.  The harness itself may live in the checkout; the product under
-    test may not.
+    test may not.  Distribution metadata is bound to the imported package's
+    own origin, so a repository-local ``codedoc_ai.egg-info`` (or any other
+    unrelated ``codedoc-ai`` install) cannot stand in for the real one.
     """
     import codedoc
 
     package_path = Path(codedoc.__file__).resolve()
     module_version = codedoc.__version__
-    metadata_version = importlib_metadata.version("codedoc-ai")
     if not isinstance(module_version, str) or not module_version:
         raise SmokeFailure("candidate-module-version-missing")
-    if metadata_version != module_version:
-        raise SmokeFailure(
-            "candidate-module-metadata-version-mismatch: "
-            f"{module_version!r} != {metadata_version!r}"
-        )
-    if expected_version is not None and module_version != expected_version:
-        raise SmokeFailure(
-            f"candidate-version-mismatch: installed {module_version!r} "
-            f"!= expected --candidate-version {expected_version!r}"
-        )
+
     repository = _repository_root()
     site_roots = {
         Path(value).resolve()
@@ -81,8 +149,27 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
     }
     if _is_within(package_path, repository):
         raise SmokeFailure("installed-origin-check-failed")
-    if not any(_is_within(package_path, root) for root in site_roots):
+    package_site_root = next(
+        (root for root in site_roots if _is_within(package_path, root)),
+        None,
+    )
+    if package_site_root is None:
         raise SmokeFailure("site-packages-origin-check-failed")
+
+    distribution = _origin_bound_distribution(package_path, package_site_root)
+    distribution_version = distribution.version
+    if not isinstance(distribution_version, str) or not distribution_version:
+        raise SmokeFailure("candidate-distribution-version-missing")
+    if distribution_version != module_version:
+        raise SmokeFailure(
+            "candidate-module-metadata-version-mismatch: "
+            f"{module_version!r} != {distribution_version!r}"
+        )
+    if expected_version is not None and module_version != expected_version:
+        raise SmokeFailure(
+            f"candidate-version-mismatch: installed {module_version!r} "
+            f"!= expected --candidate-version {expected_version!r}"
+        )
 
     script_name = "codedoc.exe" if os.name == "nt" else "codedoc"
     located = shutil.which(script_name) or shutil.which("codedoc")
@@ -102,7 +189,10 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
         errors="backslashreplace",
         check=False,
     )
-    expected_output = f"codedoc {module_version}"
+    # Compared against the origin-bound distribution version, which the checks
+    # above have already tied to codedoc.__version__ and, when supplied, to
+    # --candidate-version.
+    expected_output = f"codedoc {distribution_version}"
     if version_result.returncode != 0 or version_result.stdout.strip() != expected_output:
         raise SmokeFailure(
             "candidate-console-version-mismatch: "
@@ -361,13 +451,43 @@ def _scenario_fresh_split(root: Path) -> None:
     _assert_private(project, captured)
 
 
+#: The installed signature-acceptance boundary. Lengths track the frozen
+#: live-validation fixture's real 1,520-character declaration and the exact
+#: serialized-response hard bound; one code point past it fails closed. The
+#: separate 600-character leaf-prompt hint clamp is asserted on its own, never
+#: folded into this matrix.
+_SIGNATURE_BOUND_MATRIX: tuple[tuple[int, bool], ...] = (
+    (1520, False),
+    (2000, False),
+    (2001, True),
+)
+
+
+def _assert_prompt_signature_hint_is_600() -> None:
+    """The internal leaf-prompt signature hint stays clamped at 600 characters
+    no matter how large the serialized-response bound becomes. Its own
+    diagnostic reason, distinct from the response-acceptance boundary."""
+    from codedoc.core.file_division import MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS
+
+    if MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS != 600:
+        raise SmokeFailure(
+            "prompt-signature-hint-chars-not-600: "
+            f"{MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS!r}"
+        )
+
+
 def _scenario_signature_bound(root: Path) -> None:
-    """Section 18: a bounded 552-character model leaf signature is accepted
-    with response correction disabled, a synthetic parser-aligned
-    600-character boundary succeeds, and 601 characters fails closed with no
-    truncated public fact -- exercised through the installed artifact, not
-    only at the source level."""
-    for signature_chars, expect_failure in ((552, False), (600, False), (601, True)):
+    """The installed artifact accepts a serialized leaf ``signature`` up to the
+    hard bound and rejects one past it, fail-closed, with no truncated public
+    fact -- exercised end to end, not only at the source level.
+
+    Response correction stays disabled here so the boundary observed is the
+    cleaner's, not a repair's. The separate leaf-prompt signature-hint clamp
+    is verified independently (:func:`_assert_prompt_signature_hint_is_600`)
+    with its own diagnostic.
+    """
+    _assert_prompt_signature_hint_is_600()
+    for signature_chars, expect_failure in _SIGNATURE_BOUND_MATRIX:
         project = root / f"signature-{signature_chars}"
         project.mkdir()
         project.joinpath("main.py").write_text(_large_source(), encoding="utf-8")
@@ -393,6 +513,350 @@ def _scenario_signature_bound(root: Path) -> None:
             if "signature" in output_text:
                 raise SmokeFailure(f"signature-{signature_chars}-private-field-published")
         _assert_private(project, captured)
+
+
+#: Frozen facts of the single tracked live-validation source fixture
+#: (plan section 9.3). Verified before every installed use so a drifted or
+#: substituted fixture fails loudly rather than silently changing the topology.
+_LIVE_FIXTURE_REL_PARTS = (
+    "tests",
+    "fixtures",
+    "live_validation",
+    "oversized_signature.py",
+)
+_LIVE_FIXTURE_BYTES = 2317
+_LIVE_FIXTURE_SHA256 = (
+    "cfbf8716bcab26e996d6d467997eeb57fe53b172d21a9831d8fd42f623b24da1"
+)
+
+#: A base install has no ``tree-sitter-language-pack``; the optional
+#: ``structure`` extra pins exactly this version.  The installed-artifact
+#: harness certifies the two installations as two explicit profiles instead of
+#: silently inheriting whichever topology the developer environment produces
+#: (plan sections 5.1 / 5.2).  This is a release-harness selector only -- it is
+#: never a public CodeDoc CLI option or configuration key.
+_PARSER_DISTRIBUTION_NAME = "tree-sitter-language-pack"
+_STRUCTURE_PROFILE_PARSER_VERSION = "0.13.0"
+_STRUCTURE_PROFILES: tuple[str, ...] = ("base", "structure")
+
+#: Fixture-topology facts identical in both profiles: the same byte-frozen
+#: fixture and the same public product configuration are used for each, and the
+#: only configuration difference is the positive call cap below (plan section
+#: 5.2).  Every key names a stat the installed product itself publishes.
+_LIVE_FIXTURE_SHARED_TOPOLOGY: dict[str, object] = {
+    "dry_run": True,
+    "large_file_strategy_resolved": "split",
+    "large_file_source_ceiling_chars": 1000,
+    "split_internal_manifest_budget_chars": 12000,
+    "file_retry_attempts": 0,
+    "split_divided_files": 1,
+    "split_oversized_units": 1,
+    "split_unit_consolidation_calls_planned": 1,
+    "split_general_reduction_calls_planned": 0,
+    "split_final_synthesis_calls_planned": 1,
+    "prompt_review_calls_planned": 0,
+    "split_boundary_cuts_balanced_codepoint": 1,
+    "split_boundary_cuts_syntax": 0,
+    "split_boundary_cuts_physical_line": 0,
+    "split_crlf_atomicity_extra_chunks": 0,
+    "max_planned_calls_exceeded": False,
+    "retries_included_in_ceiling": False,
+}
+
+#: Per-profile topology deltas, independently frozen from the real production
+#: planning path (plan section 5.2) -- never derived from the product under
+#: test.  ``structural_mode`` is a per-file plan/identity field, not a run
+#: stat, so the discriminating counters asserted here are the published
+#: ``split_lexical_files`` / ``split_syntax_files``.  ``max_planned_calls`` is
+#: both a frozen expectation and the sole configuration delta between the two
+#: profile invocations.  If a fresh measurement contradicts either number,
+#: stop and revise the plan -- do not loosen these to "greater than zero" or
+#: recompute them from the product.
+_LIVE_FIXTURE_PROFILE_TOPOLOGY: dict[str, dict[str, object]] = {
+    "base": {
+        "split_lexical_files": 1,
+        "split_syntax_files": 0,
+        "split_chunks": 4,
+        "unit_documentation_calls_planned": 4,
+        "initial_provider_calls_planned": 6,
+        "initial_documentation_calls_planned": 6,
+        "documentation_calls_planned": 6,
+        "total_calls_planned": 6,
+        "max_planned_calls": 6,
+        "correction_calls_possible_max": 6,
+        "provider_calls_max_before_retries": 12,
+    },
+    "structure": {
+        "split_lexical_files": 0,
+        "split_syntax_files": 1,
+        "split_chunks": 3,
+        "unit_documentation_calls_planned": 3,
+        "initial_provider_calls_planned": 5,
+        "initial_documentation_calls_planned": 5,
+        "documentation_calls_planned": 5,
+        "total_calls_planned": 5,
+        "max_planned_calls": 5,
+        "correction_calls_possible_max": 5,
+        "provider_calls_max_before_retries": 10,
+    },
+}
+
+#: Provider-free call-manifest digest per profile, independently frozen.  They
+#: must stay stable and unequal because the two topologies genuinely differ
+#: (plan section 5.3): a profile mismatch has to fail before any digest or
+#: call count is accepted.  Each value is the ``call_manifest_digest`` the
+#: real provider-free planning path produces for the frozen live fixture under
+#: that profile; the per-profile split topology and call counts are unchanged,
+#: but the final synthesis call id -- and therefore the manifest digest -- is
+#: bound to ``FINAL_SYNTHESIS_REVISION`` (``file_synthesis_call_id``), so each
+#: value is re-measured whenever that revision moves.
+_LIVE_FIXTURE_PROFILE_PLAN_DIGEST: dict[str, str] = {
+    "base": "a6ab302f8720aae654dd6c388c835a05cdf903c6085fdfe522f45492ceea4441",
+    "structure": "e6e05794b31b5c5987c284d7e2a26360b523212329e72bb195d1a48365d19c90",
+}
+
+
+def _live_fixture_topology(structure_profile: str) -> dict[str, object]:
+    """Compose the exact frozen expectation for *structure_profile* from the
+    shared invariants plus that profile's closed delta mapping.  The harness
+    only ever selects an expectation from an already-validated profile -- it
+    never derives expected counts from actual stats."""
+    try:
+        deltas = _LIVE_FIXTURE_PROFILE_TOPOLOGY[structure_profile]
+    except KeyError:
+        raise SmokeFailure(
+            f"unknown-structure-profile: {structure_profile!r}"
+        ) from None
+    merged = dict(_LIVE_FIXTURE_SHARED_TOPOLOGY)
+    merged.update(deltas)
+    return merged
+
+
+def _live_fixture_topology_mismatch(
+    stats: dict, expected: dict[str, object]
+) -> dict[str, tuple[object, object]]:
+    """``{key: (actual, expected)}`` for every frozen key whose planned value
+    differs.  Empty means the planned topology matches exactly."""
+    return {
+        key: (stats.get(key, "<missing>"), value)
+        for key, value in expected.items()
+        if stats.get(key, "<missing>") != value
+    }
+
+
+def _installed_parser_identity() -> tuple[str, str | None, bool]:
+    """Bounded probe of the optional syntax parser only (plan section 5.1):
+    the production ``PARSER_PACKAGE_VERSION`` identity, the installed
+    distribution version (or ``None`` when the distribution is absent), and
+    whether the module can be imported.  No unrelated package or environment
+    enumeration."""
+    from importlib import util as importlib_util
+
+    from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
+
+    try:
+        distribution_version: str | None = importlib_metadata.version(
+            _PARSER_DISTRIBUTION_NAME
+        )
+    except importlib_metadata.PackageNotFoundError:
+        distribution_version = None
+    try:
+        module_importable = (
+            importlib_util.find_spec("tree_sitter_language_pack") is not None
+        )
+    except ModuleNotFoundError:
+        # An import blocker (or a missing parent) surfaces here as an
+        # exception rather than a ``None`` spec; either way the module is not
+        # available to this process.
+        module_importable = False
+    return PARSER_PACKAGE_VERSION, distribution_version, module_importable
+
+
+def _verify_structure_profile(structure_profile: str) -> dict[str, object]:
+    """Fail closed with a stable :class:`SmokeFailure` unless the running
+    environment actually matches *structure_profile*, before any fixture
+    planning (plan section 5.1):
+
+    * ``base`` requires ``tree-sitter-language-pack`` absent -- no importable
+      module, no distribution metadata -- and production
+      ``PARSER_PACKAGE_VERSION`` reporting ``not-installed``;
+    * ``structure`` requires the pinned distribution version and the
+      production parser identity both reporting exactly that version.
+
+    Records only the parser distribution name, the requested profile, and the
+    normalized parser identity.
+    """
+    if structure_profile not in _STRUCTURE_PROFILES:
+        raise SmokeFailure(f"unknown-structure-profile: {structure_profile!r}")
+    parser_identity, distribution_version, module_importable = (
+        _installed_parser_identity()
+    )
+    facts: dict[str, object] = {
+        "parser_distribution": _PARSER_DISTRIBUTION_NAME,
+        "structure_profile": structure_profile,
+        "parser_identity": parser_identity,
+    }
+    if structure_profile == "base":
+        if (
+            parser_identity != "not-installed"
+            or distribution_version is not None
+            or module_importable
+        ):
+            raise SmokeFailure(
+                f"structure-profile-base-requires-absent-parser: {facts}"
+            )
+    else:  # "structure"
+        if (
+            parser_identity != _STRUCTURE_PROFILE_PARSER_VERSION
+            or distribution_version != _STRUCTURE_PROFILE_PARSER_VERSION
+            or not module_importable
+        ):
+            raise SmokeFailure(
+                f"structure-profile-requires-pinned-parser: {facts}"
+            )
+    return facts
+
+
+def _load_frozen_live_fixture() -> bytes:
+    """Read the tracked live-validation fixture from the checkout and verify
+    its exact byte length and SHA-256 before any use."""
+    import hashlib
+
+    path = _repository_root().joinpath(*_LIVE_FIXTURE_REL_PARTS)
+    if not path.is_file():
+        raise SmokeFailure("live-fixture-missing")
+    raw = path.read_bytes()
+    if len(raw) != _LIVE_FIXTURE_BYTES:
+        raise SmokeFailure(
+            f"live-fixture-size-mismatch: {len(raw)} != {_LIVE_FIXTURE_BYTES}"
+        )
+    digest = hashlib.sha256(raw).hexdigest()
+    if digest != _LIVE_FIXTURE_SHA256:
+        raise SmokeFailure(f"live-fixture-hash-mismatch: {digest}")
+    return raw
+
+
+def _scenario_live_fixture_dry_run(root: Path, structure_profile: str) -> None:
+    """Plan sections 5.1-5.3: the frozen live-validation fixture, planned
+    through the installed product's normal config-file loading path with the
+    ``response_correction_enabled`` key absent, resolves the exact per-profile
+    split dry-run topology for *structure_profile* ({base,structure}).
+
+    The environment is verified against the requested profile *before* any
+    fixture planning, so a profile/package mismatch fails closed rather than
+    silently certifying the wrong topology.  Beyond the frozen counts the
+    scenario proves, for the selected profile: correction defaults on, no
+    provider or output/recovery is produced, planning is byte/digest
+    deterministic across repeats, the two profiles' plan digests are distinct,
+    and the canonical source reconstructs exactly once from the ordered chunk
+    payloads.
+    """
+    _verify_structure_profile(structure_profile)
+    expected = _live_fixture_topology(structure_profile)
+    call_cap = expected["max_planned_calls"]
+
+    raw = _load_frozen_live_fixture()
+    project = root / f"live-fixture-dry-run-{structure_profile}"
+    project.mkdir()
+    project.joinpath("main.py").write_bytes(raw)
+    config = _write_config(
+        project,
+        large_file_strategy="split",
+        max_content_chars=1000,
+        allow_partial=False,
+        dry_run=True,
+        # The ONLY configuration difference between the two profile
+        # invocations (plan section 5.2): the positive cap the frozen
+        # topology requires.
+        max_planned_calls=call_cap,
+    )
+    config_text = project.joinpath("codedoc.config.json").read_text(encoding="utf-8")
+    if "response_correction_enabled" in config or "response_correction_enabled" in config_text:
+        raise SmokeFailure("live-fixture-config-pins-correction-key")
+
+    before = _snapshot(project)
+    # Empty overrides: the resolved configuration comes only from the file plus
+    # DEFAULTS, so the absent response-correction key genuinely exercises the
+    # default-on resolution.  ``forbid_provider`` turns any provider
+    # construction into an immediate failure.
+    stats, captured = _run_in_process(project, {}, forbid_provider=True)
+    stats_again, _repeat_captured = _run_in_process(
+        project, {}, forbid_provider=True
+    )
+
+    if stats.get("response_correction_enabled") is not True:
+        raise SmokeFailure(
+            "live-fixture-correction-default-not-enabled: "
+            f"{stats.get('response_correction_enabled')!r}"
+        )
+
+    mismatch = _live_fixture_topology_mismatch(stats, expected)
+    if mismatch:
+        raise SmokeFailure(
+            f"live-fixture-dry-run-topology-mismatch[{structure_profile}]: {mismatch}"
+        )
+
+    frozen_digest = _LIVE_FIXTURE_PROFILE_PLAN_DIGEST[structure_profile]
+    if stats.get("call_manifest_digest") != frozen_digest:
+        raise SmokeFailure(
+            f"live-fixture-dry-run-plan-digest-mismatch[{structure_profile}]: "
+            f"{stats.get('call_manifest_digest')!r} != {frozen_digest!r}"
+        )
+    other_profile = "structure" if structure_profile == "base" else "base"
+    if _LIVE_FIXTURE_PROFILE_PLAN_DIGEST[other_profile] == frozen_digest:
+        raise SmokeFailure("live-fixture-profile-plan-digests-not-distinct")
+    if (
+        stats_again.get("call_manifest_digest") != frozen_digest
+        or _live_fixture_topology_mismatch(stats_again, expected)
+    ):
+        raise SmokeFailure(
+            f"live-fixture-dry-run-nondeterministic[{structure_profile}]"
+        )
+
+    # Plan section 5.3: the canonical decoded source reconstructs exactly once
+    # from the ordered chunks.  `build_division_plan` itself enforces the
+    # ordered, gap-free, complete, non-overlapping partition and the per-chunk
+    # source ceiling; the join is the "reconstructs exactly once" check, and
+    # the count is tied back to the profile's frozen chunk total.
+    from codedoc.core.file_division import build_division_plan
+
+    decoded = raw.decode("utf-8")
+    division = build_division_plan(
+        rel_path="main.py",
+        language="python",
+        content=decoded,
+        source_budget_chars=1000,
+    )
+    if "".join(chunk.payload for chunk in division.chunks) != decoded:
+        raise SmokeFailure(
+            f"live-fixture-chunks-do-not-reconstruct-source[{structure_profile}]"
+        )
+    if len(division.chunks) != expected["split_chunks"]:
+        raise SmokeFailure(
+            f"live-fixture-chunk-count-mismatch[{structure_profile}]: "
+            f"{len(division.chunks)} != {expected['split_chunks']}"
+        )
+    if any(not chunk.payload for chunk in division.chunks):
+        raise SmokeFailure(f"live-fixture-empty-chunk[{structure_profile}]")
+    if any(chunk.payload_chars > 1000 for chunk in division.chunks):
+        raise SmokeFailure(
+            f"live-fixture-chunk-over-source-ceiling[{structure_profile}]"
+        )
+
+    if _snapshot(project) != before:
+        raise SmokeFailure("live-fixture-dry-run-mutated-project")
+    if project.joinpath("docs", "codedoc.json").exists():
+        raise SmokeFailure("live-fixture-dry-run-wrote-output")
+    if project.joinpath("docs", "crash_recovery.json").exists():
+        raise SmokeFailure("live-fixture-dry-run-wrote-recovery")
+
+    fixture_markers = (
+        "merge_resolved_configuration",
+        "provider: str | None = None, model: str | None = None",
+    )
+    if any(marker in captured for marker in fixture_markers):
+        raise SmokeFailure("live-fixture-source-leaked-into-diagnostics")
+    _assert_private(project, captured)
 
 
 def _scenario_completed_reuse(root: Path) -> None:
@@ -441,6 +905,17 @@ def _scenario_interrupt_resume(root: Path) -> None:
     _assert_private(project, captured)
 
 
+#: Public source ceiling the imports-only scenario divides its fixture at.
+#: Production split planning then carries the *automatic* internal synthesis
+#: budget ``max(source_ceiling, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS)`` (plan
+#: sections 4.2.1 / 5.3.1); the comparison reduction tree must be built from
+#: that carried budget through the preferred ``synthesis_manifest_chars``
+#: keyword, never the deprecated ``max_content_chars`` alias -- otherwise it
+#: models a reducer level production never checkpointed and the recovered
+#: ``final.child_ids`` lookup raises ``KeyError``.
+_IMPORTS_ONLY_SOURCE_BUDGET_CHARS = 2000
+
+
 def _scenario_imports_only(root: Path) -> None:
     """Prove the installed planner schedules only final synthesis when the
     parser-derived imports tuple changes while frozen source bytes do not.
@@ -451,10 +926,16 @@ def _scenario_imports_only(root: Path) -> None:
     create live leaf/reducer checkpoints for unchanged source, add the
     corresponding old-import final checkpoint, then validate and plan against
     a different same-length imports tuple.
+
+    The comparison reduction tree, its final manifest, and recovery validation
+    all consume the same carried automatic synthesis budget production uses --
+    never the public source ceiling -- so the locally derived node identities
+    match the topology the product actually checkpoints.
     """
     from codedoc.core.document import read_codedoc_document
     from codedoc.core.execution_model import build_call_manifest
     from codedoc.core.file_division import (
+        MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS,
         SPLIT_PARTIAL_SCHEMA_VERSION,
         SplitTreeState,
         build_division_plan,
@@ -474,13 +955,22 @@ def _scenario_imports_only(root: Path) -> None:
     from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST
     from codedoc.core.result_assembly import flat_combined_result
 
+    source_budget_chars = _IMPORTS_ONLY_SOURCE_BUDGET_CHARS
+    # The run's single effective split-synthesis manifest budget, computed
+    # exactly as production planning computes it (plan section 5.7).
+    synthesis_manifest_chars = max(
+        source_budget_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS
+    )
+
     project = root / "imports-only"
     project.mkdir()
     source = project / "main.py"
     source_text = _large_source()
     source.write_text(source_text, encoding="utf-8")
     config = _write_config(
-        project, large_file_strategy="split", max_content_chars=2000
+        project,
+        large_file_strategy="split",
+        max_content_chars=source_budget_chars,
     )
     dry_stats, _captured = _run_in_process(
         project, {**config, "dry_run": True}, forbid_provider=True
@@ -505,13 +995,16 @@ def _scenario_imports_only(root: Path) -> None:
         rel_path="main.py",
         language="python",
         content=source_text,
-        source_budget_chars=2000,
+        # The source ceiling: production divides source at exactly this value.
+        source_budget_chars=source_budget_chars,
     )
     before_imports = ("alpha",)
     after_imports = ("bravo",)
     tree = build_reduction_tree(
         division,
-        max_content_chars=2000,
+        # The carried automatic synthesis budget, exactly as production
+        # planning passes it -- not the deprecated max_content_chars alias.
+        synthesis_manifest_chars=synthesis_manifest_chars,
         language="python",
         imports=before_imports,
     )
@@ -538,7 +1031,10 @@ def _scenario_imports_only(root: Path) -> None:
         root_narratives=refine_narrative_inputs(root_narratives),
         root_coverage_leaf_ids=final.leaf_ids,
         ledger=ledger,
-        max_chars=2000,
+        # Production bounds the final manifest by the reduction tree's own
+        # carried synthesis budget (codedoc.core.execution), never a source
+        # ceiling.
+        max_chars=tree.synthesis_manifest_chars,
     )
     resolved_config = load_config(project, config)
     provider_identity = provider_execution_identity(resolved_config)
@@ -593,7 +1089,9 @@ def _scenario_imports_only(root: Path) -> None:
         imports_digest=deterministic_imports_digest(after_imports),
         imports=after_imports,
         language="python",
-        max_content_chars=2000,
+        # No source/synthesis ceiling argument: validate_recovered_tree
+        # recomputes the final manifest bounded by tree.synthesis_manifest_chars
+        # (plan section 5.7), never a separately supplied ceiling.
     )
     retained_ids = {node.node_id for node in retained}
     expected_retained = {
@@ -1762,8 +2260,35 @@ def _child_run(project: Path, cli_args: list[str]) -> int:
     return _invoke_child_cli(cli_main, cli_args)
 
 
-def _run_all() -> int:
-    _package_path, console_path = _prove_installed_origin()
+#: The canonical scenario sequence ``--scenario all`` runs, in this exact
+#: order (plan sections 5.3.1 / 9.2 / 12). Each scenario call in ``_run_all``
+#: below is followed by a ``[scenario] reached N/10: <name>`` marker so a
+#: completed run is auditable scenario by scenario, and this tuple is the
+#: independent authority a swap / deletion / duplication is checked against.
+_CANONICAL_SCENARIO_ORDER: tuple[str, ...] = (
+    "_scenario_truncate",
+    "_scenario_fresh_split",
+    "_scenario_signature_bound",
+    "_scenario_live_fixture_dry_run",
+    "_scenario_redirected_verbose",
+    "_scenario_completed_reuse",
+    "_scenario_interrupt_resume",
+    "_scenario_imports_only",
+    "_scenario_preserve_first",
+    "_scenario_exit_fidelity",
+)
+
+
+def _run_all(candidate_version: str, structure_profile: str) -> int:
+    _package_path, console_path = _prove_installed_origin(candidate_version)
+    # Fail closed before any scenario if the environment does not actually
+    # match the certified profile (plan section 5.1).
+    _verify_structure_profile(structure_profile)
+    total = len(_CANONICAL_SCENARIO_ORDER)
+
+    def _reached(index: int, name: str) -> None:
+        print(f"[scenario] reached {index}/{total}: {name}")
+
     original_cwd = Path.cwd()
     with tempfile.TemporaryDirectory(prefix="codedoc-installed-smoke-") as temp_name:
         neutral_root = Path(temp_name).resolve()
@@ -1772,17 +2297,28 @@ def _run_all() -> int:
         try:
             os.chdir(neutral_root)
             _scenario_truncate(neutral_root)
+            _reached(1, "truncate")
             _scenario_fresh_split(neutral_root)
+            _reached(2, "fresh_split")
             _scenario_signature_bound(neutral_root)
+            _reached(3, "signature_bound")
+            _scenario_live_fixture_dry_run(neutral_root, structure_profile)
+            _reached(4, "live_fixture_dry_run")
             _scenario_redirected_verbose(neutral_root)
+            _reached(5, "redirected_verbose")
             _scenario_completed_reuse(neutral_root)
+            _reached(6, "completed_reuse")
             _scenario_interrupt_resume(neutral_root)
+            _reached(7, "interrupt_resume")
             _scenario_imports_only(neutral_root)
+            _reached(8, "imports_only")
             _scenario_preserve_first(neutral_root)
+            _reached(9, "preserve_first")
             _scenario_exit_fidelity(neutral_root, console_path)
+            _reached(10, "exit_fidelity")
         finally:
             os.chdir(original_cwd)
-    print("installed artifact smoke: ok")
+    print(f"installed artifact smoke: ok ({structure_profile} profile)")
     return 0
 
 
@@ -1809,7 +2345,17 @@ def main(argv: list[str] | None = None) -> int:
         "--candidate-version",
         help=(
             "Exact candidate version installed under this interpreter. "
-            "Required for --scenario cross-version."
+            "Required for --scenario all and --scenario cross-version."
+        ),
+    )
+    parser.add_argument(
+        "--structure-profile",
+        choices=list(_STRUCTURE_PROFILES),
+        help=(
+            "Which installation profile to certify for --scenario all: "
+            "'base' (no optional syntax parser) or 'structure' (pinned parser "
+            "extra). Required for --scenario all. Release-harness selector "
+            "only -- never a public CodeDoc CLI option or configuration key."
         ),
     )
     parser.add_argument(
@@ -1846,7 +2392,11 @@ def main(argv: list[str] | None = None) -> int:
         _prove_installed_origin(args.candidate_version)
         _scenario_cross_version(work, args.peer_python.resolve(), args.peer_version)
         return 0
-    return _run_all()
+    if args.candidate_version is None:
+        raise SmokeFailure("scenario-all-requires-candidate-version")
+    if args.structure_profile is None:
+        raise SmokeFailure("scenario-all-requires-structure-profile")
+    return _run_all(args.candidate_version, args.structure_profile)
 
 
 if __name__ == "__main__":

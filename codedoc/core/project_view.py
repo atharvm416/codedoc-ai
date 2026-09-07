@@ -480,7 +480,12 @@ def _sanitize_public_file(value: object) -> dict | None:
         elif key in string_list_fields and isinstance(item, list):
             sanitized[key] = _string_list(item)
         elif key in ("functions", "classes"):
-            sanitized[key] = project_public_symbols(item)
+            # These arrays reach here from the one shared source-backed
+            # authority, whose overload multiplicity is authoritative: value
+            # de-duplication would only merge two genuine same-name
+            # declarations, so it is disabled here. The per-kind and character
+            # caps still apply.
+            sanitized[key] = project_public_symbols(item, collapse_identical=False)
         elif key == "exports":
             sanitized[key] = project_public_exports(item)
         elif key == "_deps":
@@ -705,8 +710,12 @@ def _clean_file(record: dict) -> dict:
         "description": result.get("description", ""),
         "role_in_system": result.get("role_in_system", ""),
         "imports": result.get("imports", []),
-        "functions": project_public_symbols(result.get("functions", [])),
-        "classes": project_public_symbols(result.get("classes", [])),
+        "functions": project_public_symbols(
+            result.get("functions", []), collapse_identical=False
+        ),
+        "classes": project_public_symbols(
+            result.get("classes", []), collapse_identical=False
+        ),
         "exports": project_public_exports(result.get("exports", [])),
         "key_concepts": result.get("key_concepts", []),
         "usage_example": _sanitize_usage_example(result.get("usage_example", "")),

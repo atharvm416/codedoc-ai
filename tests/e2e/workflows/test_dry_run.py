@@ -292,6 +292,10 @@ def test_dry_run_excludes_empty_files_from_calls_and_candidate_cap(
             "documentation_scope": "all",
             "analysis_mode": analysis_mode,
             "max_files": 1,
+            # This test is about empty-file exclusion from the call/candidate
+            # counts, not correction; pin the default so the flip does not
+            # change the incidental zero here (Section 10 / section 7.2.1).
+            "response_correction_enabled": False,
         },
     )
 
@@ -338,3 +342,142 @@ def test_dry_run_read_failure_remains_a_documentation_candidate(
     assert stats["would_skip_insufficient_source"] == 0
     assert stats["would_call_llm_for"] == 1
     assert stats["estimated_calls"] == 1
+
+
+# ===========================================================================
+# Section 5.9: the unambiguous all-provider pre-retry billing contract.
+# Legacy documentation-only keys (estimated_calls /
+# estimated_calls_max_with_correction) stay for compatibility but must not be
+# labelled total/worst-case; the headline is provider_calls_max_before_retries,
+# which includes mandatory active prompt-profile reviews. Corrections apply
+# only to documentation responses; reviews are not doubled; transport/file
+# retries are excluded from the ceiling.
+# ===========================================================================
+
+
+@pytest.mark.parametrize(
+    ("with_profile", "review", "initial", "before_retries"),
+    [(False, 0, 1, 2), (True, 1, 2, 3)],
+)
+def test_dry_run_freezes_the_all_provider_pre_retry_billing_contract(
+    tmp_path, monkeypatch, with_profile, review, initial, before_retries
+):
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider",
+        lambda _c: pytest.fail("dry-run must not construct a provider"),
+    )
+    cfg = {
+        "entry_file": "main.py",
+        "dry_run": True,
+        "response_correction_enabled": True,
+        "propagate_changes": False,
+    }
+    if with_profile:
+        cfg["prompt_profiles"] = _cross_file_profile()
+    stats = run_pipeline(tmp_path, cfg)
+
+    assert stats["prompt_review_calls_planned"] == review
+    assert stats["initial_documentation_calls_planned"] == 1
+    assert stats["initial_provider_calls_planned"] == initial
+    assert stats["correction_calls_possible_max"] == 1
+    assert stats["provider_calls_max_before_retries"] == before_retries
+    assert stats["retries_included_in_ceiling"] is False
+    assert stats["max_planned_calls_applies_to"] == "initial_provider_calls_planned"
+    assert stats["file_retry_attempts"] == 1
+    # Legacy documentation-only keys remain, unlabelled as total/worst-case.
+    assert stats["estimated_calls"] == 1
+    assert stats["estimated_calls_max_with_correction"] == 2
+
+
+def test_real_run_reports_the_same_all_provider_pre_retry_billing_fields(
+    tmp_path, monkeypatch
+):
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    fake = _ReviewFake("SAFE")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: fake)
+    real = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "response_correction_enabled": True,
+            "propagate_changes": False,
+        },
+    )
+    assert fake.doc_calls == 1
+    assert real["initial_provider_calls_planned"] == 1
+    assert real["initial_documentation_calls_planned"] == 1
+    assert real["prompt_review_calls_planned"] == 0
+    assert real["correction_calls_possible_max"] == 1
+    assert real["provider_calls_max_before_retries"] == 2
+    assert real["retries_included_in_ceiling"] is False
+    assert real["max_planned_calls_applies_to"] == "initial_provider_calls_planned"
+    assert real["file_retry_attempts"] == 1
+
+
+def test_s8_max_planned_calls_caps_only_initial_provider_calls_not_corrections(
+    tmp_path, monkeypatch
+):
+    """Section 5.9: ``max_planned_calls`` gates the INITIAL provider-call
+    manifest only. A run whose initial provider calls exactly equal the cap is
+    accepted even with response correction enabled -- corrections are neither
+    reserved nor authorized by the cap, and transport/file retries stay a
+    separately disclosed, excluded, additional envelope."""
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    fake = _ReviewFake("SAFE")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: fake)
+
+    real = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "response_correction_enabled": True,
+            "max_planned_calls": 1,
+            "file_retry_attempts": 2,
+            "propagate_changes": False,
+        },
+    )
+
+    assert real["max_planned_calls"] == 1
+    assert real["max_planned_calls_exceeded"] is False
+    assert real["initial_provider_calls_planned"] == 1 == real["max_planned_calls"]
+    assert real["max_planned_calls_applies_to"] == "initial_provider_calls_planned"
+    assert real["correction_calls_possible_max"] == 1
+    assert real["provider_calls_max_before_retries"] == 2
+    assert real["provider_calls_max_before_retries"] > real["max_planned_calls"]
+    assert real["file_retry_attempts"] == 2
+    assert real["retries_included_in_ceiling"] is False
+    assert fake.doc_calls == 1
+    assert real["checked"] == 1 and real["failed"] == 0
+
+
+@pytest.mark.parametrize(
+    ("with_profile", "review", "initial", "before_retries"),
+    [(False, 0, 1, 2), (True, 1, 2, 3)],
+)
+def test_s8_real_run_freezes_the_1_0_1_and_1_1_1_billing_presenter_cases(
+    tmp_path, monkeypatch, with_profile, review, initial, before_retries
+):
+    """Section 5.9 presenter regression on the REAL surface: 1 documentation +
+    0 review + 1 possible correction = 2 before retries; adding one active
+    review makes it 2 + 1 = 3. Reviews are never doubled by correction."""
+    (tmp_path / "main.py").write_text("VALUE = 1\n", encoding="utf-8")
+    fake = _ReviewFake("SAFE")
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: fake)
+    cfg = {
+        "entry_file": "main.py",
+        "response_correction_enabled": True,
+        "propagate_changes": False,
+    }
+    if with_profile:
+        cfg["prompt_profiles"] = _cross_file_profile()
+    real = run_pipeline(tmp_path, cfg)
+
+    assert real["prompt_review_calls_planned"] == review
+    assert real["initial_documentation_calls_planned"] == 1
+    assert real["initial_provider_calls_planned"] == initial
+    assert real["correction_calls_possible_max"] == 1
+    assert real["provider_calls_max_before_retries"] == before_retries
+    assert real["retries_included_in_ceiling"] is False
+    if with_profile:
+        assert fake.review_calls == 1

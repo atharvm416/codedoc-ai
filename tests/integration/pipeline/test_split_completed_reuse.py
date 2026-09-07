@@ -172,7 +172,7 @@ def test_new_capacity_block_is_checked_before_completed_reuse(
     stable_before = stable_path.read_bytes()
 
     def blocked_plan(**_kwargs):
-        raise SplitCapacityBlocked("main.py", "chunk-cap")
+        raise SplitCapacityBlocked("main.py", "chunk-cap", observed=257, limit=256)
 
     monkeypatch.setattr("codedoc.core.planning.build_division_plan", blocked_plan)
     monkeypatch.setattr(

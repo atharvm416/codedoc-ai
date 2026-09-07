@@ -23,11 +23,16 @@ current run.
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from codedoc.core.document import read_codedoc_document, records_by_path
+from codedoc.core.document import (
+    LegacySplitPartialEvidence,
+    read_codedoc_document,
+    records_by_path,
+)
 from codedoc.core.file_division import SplitTreeState, canonical_json
 from codedoc.core.markdown_view import markdown_to_view
 from codedoc.core.project_view import read_codedoc_meta
@@ -346,7 +351,9 @@ def _recovery_remedy(recovery_path: Path) -> str:
     )
 
 
-def _legacy_split_partial_remedy(recovery_path: Path, rel_paths: tuple[str, ...]) -> str:
+def _legacy_split_partial_remedy(
+    recovery_path: Path, evidence: "LegacySplitPartialEvidence"
+) -> str:
     """The D11 preserve-or-move-aside remedy for a version-1 (predecessor
     ordered-prefix) split partial.
 
@@ -354,7 +361,26 @@ def _legacy_split_partial_remedy(recovery_path: Path, rel_paths: tuple[str, ...]
     migration-readable only.  The message never suggests silently discarding
     paid work; deletion is offered only as an explicit, named choice.
     """
-    named = ", ".join(f"'{rel_path}'" for rel_path in rel_paths)
+    # Render only what the bounded evidence carries: at most
+    # PLAN_SUMMARY_DEFAULT_DETAIL_RECORDS retained paths, each as one
+    # ensure_ascii=True JSON string, plus the exact total, the omitted count,
+    # and the full-stream digest over every legacy path. Never re-derive the
+    # count or digest from a path collection.
+    _shown = ", ".join(
+        json.dumps(rel_path, ensure_ascii=True) for rel_path in evidence.retained
+    )
+    _noun = "path" if evidence.total == 1 else "paths"
+    if evidence.omitted:
+        named = (
+            f"{evidence.total} {_noun} (showing {len(evidence.retained)}: "
+            f"{_shown}; {evidence.omitted} more not shown; full-stream digest "
+            f"{evidence.details_digest})"
+        )
+    else:
+        named = (
+            f"{evidence.total} {_noun} ({_shown}; full-stream digest "
+            f"{evidence.details_digest})"
+        )
     return (
         f"'{recovery_path.name}' in the output directory contains predecessor "
         f"(schema version 1) split checkpoint data for {named} that this build "
@@ -427,8 +453,12 @@ def load_recovery_records_if_compatible(
             f"different run: {field} expected {expected!r} but the recovery file "
             f"has {found!r}. {_recovery_remedy(recovery_path)}"
         )
-    if document.legacy_split_partial_rels:
-        raise ConfigError(_legacy_split_partial_remedy(recovery_path, document.legacy_split_partial_rels))
+    if document.legacy_split_partial_evidence.total:
+        raise ConfigError(
+            _legacy_split_partial_remedy(
+                recovery_path, document.legacy_split_partial_evidence
+            )
+        )
     records = records_by_path(document)
     return RecoveryState(
         records=tuple(
