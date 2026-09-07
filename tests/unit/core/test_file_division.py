@@ -5109,22 +5109,26 @@ def test_tracemalloc_probe_maximum_rendered_leaf_metadata_under_3_mib() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 0.14.7 section 6.1 / 6.D / mutation check 5: leaf-capsule-v9 identity
+# mutation check: leaf-capsule identity is bound into leaf_execution_identity
 # ---------------------------------------------------------------------------
 
 
-def test_leaf_capsule_v9_reverting_to_v8_makes_a_current_leaf_checkpoint_stale(
+def test_leaf_capsule_reverting_to_the_prior_value_makes_a_leaf_checkpoint_stale(
     monkeypatch,
 ) -> None:
-    """Section 6.1 / 6.D: `leaf_execution_identity` binds
-    `LEAF_CAPSULE_SCHEMA_REVISION`, so reverting only `leaf-capsule-v9` to
-    `leaf-capsule-v8` changes a leaf's execution identity. A leaf checkpointed
-    under the reconstructed v8 identity (real function, constant monkeypatched
-    back, then undone) is quarantined as `stale-identity` by the current
-    validation while every sibling leaf, the reducer, and the final node --
-    all checkpointed under the real current identity -- are retained."""
+    """`leaf_execution_identity` binds `LEAF_CAPSULE_SCHEMA_REVISION`, so
+    reverting `leaf-capsule-v10` to `leaf-capsule-v9` changes a leaf's
+    execution identity. A single leaf checkpointed under the reconstructed
+    prior identity (real function, constant monkeypatched back, then undone)
+    is quarantined as `stale-identity` by the current validation while every
+    sibling leaf checkpointed under the real current identity is retained.
+
+    Full leaf/reducer/final dependency-closure behaviour for this same advance
+    -- stale leaves rejected, independent leaves kept, only dependent reducers
+    and the final node pruned -- is proven in
+    `tests/integration/persistence/test_split_partial_quarantine.py`."""
     plan = build_division_plan(
-        rel_path="v9.py",
+        rel_path="leaf_capsule_revert.py",
         language="unknown",
         content=_large_source(90),
         source_budget_chars=200,
@@ -5146,13 +5150,13 @@ def test_leaf_capsule_v9_reverting_to_v8_makes_a_current_leaf_checkpoint_stale(
 
     stale_chunk = plan.chunks[0]
     current_id = _leaf_id(stale_chunk)
-    monkeypatch.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v8")
-    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v8"
+    monkeypatch.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v9")
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v9"
     stale_id = _leaf_id(stale_chunk)
     monkeypatch.undo()
     # direct behavioral identity evidence: the revision reversal moves the digest.
     assert stale_id != current_id
-    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v9"
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
 
     nodes = []
     for chunk in plan.chunks:
@@ -5193,8 +5197,9 @@ def test_leaf_capsule_v9_reverting_to_v8_makes_a_current_leaf_checkpoint_stale(
     )
 
     retained_ids = {state.node_id for state in retained}
-    # every sibling leaf checkpointed under the real current v9 identity is
-    # retained; only the v8-stamped leaf is quarantined, under `stale-identity`.
+    # every sibling leaf checkpointed under the real current (leaf-capsule-v10)
+    # identity is retained; only the leaf stamped under the prior
+    # (leaf-capsule-v9) identity is quarantined, under `stale-identity`.
     assert retained_ids == {
         c.chunk_id for c in plan.chunks if c.chunk_id != stale_chunk.chunk_id
     }

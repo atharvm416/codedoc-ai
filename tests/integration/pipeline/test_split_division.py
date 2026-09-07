@@ -1422,7 +1422,7 @@ def test_terminal_split_failure_cancels_pending_file_tasks_and_keeps_checkpoint(
         def process_reduction_node(self, _request):
             pytest.fail("terminal split task reached a reduction node")
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             pytest.fail("terminal split task reached synthesis")
 
         def process(self, request):

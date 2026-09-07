@@ -13,6 +13,10 @@ module):
 from __future__ import annotations
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.narrative_terminology import (
+    NARRATIVE_TERMINOLOGY_RULES,
+    TerminologyEvidence,
+)
 from codedoc.agents.response_cleaning import clean_combined_report, clean_reduction_capsule_report
 from codedoc.core.execution_model import (
     AgentCallContext,
@@ -136,7 +140,7 @@ relationships not present above
 - functions, classes, and exports you return must come only from the \
 supplied fact-ledger synopsis
 - Do not include duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_prompt(
@@ -214,6 +218,7 @@ class FileSynthesisAgent(BaseAgent):
         call_context: AgentCallContext | None = None,
         planned_call: PlannedCall | None = None,
         additional_attempt: bool = False,
+        terminology_source: str = "",
     ) -> dict:
         if (
             call_context is not None
@@ -241,4 +246,11 @@ class FileSynthesisAgent(BaseAgent):
             language="",
             shape_block=requested_shape.text if requested_shape else default_shape_block("single", "combined"),
             planned_call=planned_call,
+            # The manifest is untrusted narrative (section 5.6); only the exact
+            # planned source string the caller reconstructs is trusted evidence.
+            terminology_evidence=(
+                TerminologyEvidence(source_text=terminology_source)
+                if terminology_source
+                else None
+            ),
         )

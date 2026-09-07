@@ -524,14 +524,14 @@ def test_every_reuse_source_requires_complete_matching_identity_and_language(
         # identical-content reuse is same-path only (0.14.4).
         assert plan.agent_rels == frozenset({"main.py"})
 
-def test_cache_identity_is_v2():
-    assert ANALYSIS_REVISION == "file-doc-v3"
+def test_analysis_identity_is_the_current_revision():
+    assert ANALYSIS_REVISION == "file-doc-v4"
     assert expected_analysis_identity("single") == {
-        "_analysis_revision": "file-doc-v3",
+        "_analysis_revision": "file-doc-v4",
         "_analysis_mode": "single",
     }
 
-def test_v1_record_is_invalidated_once_under_v2(tmp_path):
+def test_v1_record_is_invalidated_once_under_the_current_revision(tmp_path):
     from codedoc.core.db import compute_file_hash
     from codedoc.core.graph import DependencyGraph
     from codedoc.core.planning import build_pipeline_plan
@@ -679,7 +679,7 @@ def _oversized_plan(tmp_path, stored_mcr, *, max_chars=1000, head_ratio=0.70):
         "hash": compute_file_hash(src),
         "description": "cached",
         "language": "python",
-        "_analysis_revision": "file-doc-v3",
+        "_analysis_revision": ANALYSIS_REVISION,
         "_analysis_mode": "single",
         "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
     }
@@ -709,7 +709,7 @@ def _small_plan(tmp_path, *, max_chars, head_ratio=0.70):
     record = {
         "path": "main.py", "hash": compute_file_hash(src), "description": "cached",
         "language": "python",
-        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
         "_ordinary_path_identity": expected_ordinary_path_identity("main.py"),
     }
     config = {
@@ -749,11 +749,12 @@ def test_small_file_reusable_across_ceiling_and_ratio_changes(tmp_path):
         tmp_path, max_chars=5000, head_ratio=0.85
     ).unchanged_rels
 
-def test_analysis_revision_is_v3():
-    assert ANALYSIS_REVISION == "file-doc-v3"
+def test_analysis_revision_is_current():
+    assert ANALYSIS_REVISION == "file-doc-v4"
 
-def test_v2_record_is_invalidated():
-    # A stored v2 record no longer matches the current v3 identity.
+def test_a_predecessor_analysis_record_is_invalidated():
+    # A stored predecessor record (here file-doc-v2) no longer matches the
+    # current analysis identity.
     assert normalized_identity_value("_analysis_revision", {"_analysis_revision": "file-doc-v2"}) == (
         "file-doc-v2"
     )
@@ -797,7 +798,7 @@ def _split_plan(tmp_path, *, max_chars=2000, head_ratio=0.70):
         "hash": compute_file_hash(src),
         "description": "cached",
         "language": "python",
-        "_analysis_revision": "file-doc-v3",
+        "_analysis_revision": ANALYSIS_REVISION,
         "_analysis_mode": "single",
         "_large_file_identity": identity,
     }
@@ -858,10 +859,11 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
 
 
 @requires_structure_pack
-def test_actual_predecessor_completed_split_record_is_stale_under_v9(tmp_path):
+def test_actual_predecessor_completed_split_record_is_stale_under_current_identity(
+    tmp_path,
+):
     """The frozen record's ``_large_file_identity`` is a genuine 0.14.2
-    predecessor value, and it is genuinely stale under the current (v9)
-    identity.
+    predecessor value, and it is genuinely stale under the current identity.
 
     Provenance -- why the frozen value is trusted even though current code
     can no longer re-derive it. It was reproduced *exactly* by real 0.14.2
@@ -982,10 +984,11 @@ def test_actual_predecessor_completed_split_record_is_stale_under_v9(tmp_path):
         "max_content_chars": 2500, "truncation_head_ratio": 0.70,
     }
 
-    # Local sanity guard: the current identity really is the v9 era. If any
-    # of these move, the staleness measured below is against the wrong
-    # baseline and this test needs revisiting rather than silently passing.
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v9"
+    # Local sanity guard: the current identity inputs are what this test was
+    # written against. If any of these move, the staleness measured below is
+    # against the wrong baseline and this test needs revisiting rather than
+    # silently passing.
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
     assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 986272
     assert record_meta.REDUCER_PROMPT_REVISION == "file-reduction-v3"
     assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
@@ -994,22 +997,22 @@ def test_actual_predecessor_completed_split_record_is_stale_under_v9(tmp_path):
     # Staleness, direction 1 -- the identity function itself: a current
     # reconstruction's expected_large_file_identity does not match the
     # frozen predecessor value.
-    v9_identity = record_meta.expected_large_file_identity(
+    current_identity = record_meta.expected_large_file_identity(
         source_chars=len(source), max_chars=2500, rel_path=rel_path,
         division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
         structural_mode=plan.structural_mode, imports_digest=imports_digest,
     )
-    assert v9_identity != record["_large_file_identity"]
+    assert current_identity != record["_large_file_identity"]
 
     # Staleness, direction 2 -- planning's own classification agrees: the
     # completed record is scheduled as changed work, never reused unchanged.
-    graph_v9 = DependencyGraph()
-    graph_v9.add_file(rel_path)
-    plan_result_v9, _ = build_pipeline_plan(
-        file_map, graph_v9, {rel_path}, rel_path, {rel_path: record}, [], config,
+    graph = DependencyGraph()
+    graph.add_file(rel_path)
+    plan_result, _ = build_pipeline_plan(
+        file_map, graph, {rel_path}, rel_path, {rel_path: record}, [], config,
     )
-    assert rel_path not in plan_result_v9.unchanged_rels
-    assert rel_path in plan_result_v9.changed_rels
+    assert rel_path not in plan_result.unchanged_rels
+    assert rel_path in plan_result.changed_rels
 
 
 def test_actual_predecessor_completed_split_recovery_has_no_partial_files():
@@ -1095,7 +1098,7 @@ def test_completed_leaf_capsule_v7_record_is_planned_as_unpaid_work(tmp_path, mo
         "hash": compute_file_hash(src),
         "description": "documented by 0.14.5",
         "language": "python",
-        "_analysis_revision": "file-doc-v3",
+        "_analysis_revision": ANALYSIS_REVISION,
         "_analysis_mode": "single",
         "_large_file_identity": v7_identity,
     }
@@ -1123,9 +1126,9 @@ def test_completed_leaf_capsule_v8_record_is_planned_as_unpaid_work(tmp_path, mo
     same reason: neither the frozen-fixture staleness test nor a bare
     constant pin shows the planner acting on the `v8` -> `v9` advance this
     release makes specifically. Unlike
-    `test_actual_predecessor_completed_split_record_is_stale_under_v9`, which
-    measures staleness against a frozen fixture value pinned literally and a
-    `leaf-capsule-v9` baseline guard, this test's own two directions
+    `test_actual_predecessor_completed_split_record_is_stale_under_current_identity`,
+    which measures staleness against a frozen fixture value pinned literally
+    and a current-revision baseline guard, this test's own two directions
     dynamically recompute "current" via `expected_large_file_identity`
     itself, so a source-level revert of `LEAF_CAPSULE_SCHEMA_REVISION` back
     to `v8` collapses "current" onto the "v8" direction and fails these
@@ -1188,7 +1191,7 @@ def test_completed_leaf_capsule_v8_record_is_planned_as_unpaid_work(tmp_path, mo
         "hash": compute_file_hash(src),
         "description": "documented by 0.14.6",
         "language": "python",
-        "_analysis_revision": "file-doc-v3",
+        "_analysis_revision": ANALYSIS_REVISION,
         "_analysis_mode": "single",
         "_large_file_identity": v8_identity,
     }

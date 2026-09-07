@@ -33,6 +33,7 @@ from typing import Any
 
 from codedoc.agents.orchestrator import Orchestrator, assemble_final_result
 from codedoc.core.db import compute_file_hash
+from codedoc.core.structural_reconciliation import StructureTruth
 from codedoc.core.error_classifier import (
     _classify_failure,
     _detect_limit_type,  # noqa: F401  (re-exported: codedoc.pipeline._detect_limit_type)
@@ -625,6 +626,13 @@ def _execute_divided_file(
         results_by_id[node.node_id] = result
 
     final_node = reduction_tree.final_node
+    # One immutable source-truth result for this divided file, reconstructed from
+    # the planned chunk payloads (never a fresh filesystem read). It backs both
+    # the conservative terminology check on the fresh synthesis call and the
+    # shared structural reconciliation in ``assemble_final_result``.
+    structure_truth = StructureTruth.from_split_plan(
+        request.rel_path, request.language, division_plan
+    )
     stored = completed.get(final_node.node_id)
     if stored is not None:
         final_result = (
@@ -649,7 +657,8 @@ def _execute_divided_file(
             max_chars=reduction_tree.synthesis_manifest_chars,
         )
         final_result = orchestrator.synthesize_divided_file(
-            request, division_plan.plan_digest, manifest_json
+            request, division_plan.plan_digest, manifest_json,
+            terminology_source=structure_truth.source,
         )
         if recovery_enabled:
             imports_digest = deterministic_imports_digest(request.imports)
@@ -694,7 +703,9 @@ def _execute_divided_file(
     )
 
     large_identity = _large_identity(request, division_plan, reduction_tree)
-    return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
+    return assemble_final_result(
+        request, final_result, ledger, allowed_paths, large_identity, structure_truth
+    )
 
 
 def _large_identity(
@@ -747,7 +758,12 @@ def restore_completed_tree_result(
     )
     final_result = load_canonical_json_object(completed[final_node.node_id].result_json)
     large_identity = _large_identity(request, division_plan, reduction_tree)
-    return assemble_final_result(request, final_result, ledger, allowed_paths, large_identity)
+    structure_truth = StructureTruth.from_split_plan(
+        request.rel_path, request.language, division_plan
+    )
+    return assemble_final_result(
+        request, final_result, ledger, allowed_paths, large_identity, structure_truth
+    )
 
 
 # ---------------------------------------------------------------------------

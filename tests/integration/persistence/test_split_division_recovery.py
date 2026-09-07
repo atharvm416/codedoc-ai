@@ -392,7 +392,7 @@ def test_resume_runs_only_unpaid_nodes_and_then_synthesis(tmp_path) -> None:
             self.reduction_calls += 1
             return {"narrative": f"resumed reduction {self.reduction_calls}"}
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             self.synthesis_calls += 1
             return {"description": "complete"}
 
@@ -478,7 +478,7 @@ def test_terminal_split_failure_preserves_stable_output_and_resumes_only_unpaid_
             self.reduction_calls += 1
             return {"narrative": "combined"}
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             self.synthesis_calls += 1
             return {"description": "complete"}
 
@@ -519,7 +519,7 @@ def test_terminal_split_failure_preserves_stable_output_and_resumes_only_unpaid_
             self.reduction_calls += 1
             return {"narrative": "combined"}
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             self.synthesis_calls += 1
             return {"description": "complete"}
 

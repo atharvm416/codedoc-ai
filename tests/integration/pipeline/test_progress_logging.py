@@ -223,7 +223,7 @@ class TestBoundedSplitDiagnostics:
             self.reduction_calls += 1
             return {"narrative": f"reduced sentinel={SENTINEL_PROMPT_FRAGMENT}"}
 
-        def synthesize_divided_file(self, request, digest, manifest_json):
+        def synthesize_divided_file(self, request, digest, manifest_json, terminology_source=""):
             self.synthesis_calls += 1
             return {"description": f"final sentinel={SENTINEL_REQUEST_BODY}"}
 

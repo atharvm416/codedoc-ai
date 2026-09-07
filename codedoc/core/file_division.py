@@ -72,73 +72,90 @@ from codedoc.core.result_assembly import flat_combined_result
 STRUCTURE_SCHEMA_REVISION = "source-structure-v2"
 UNIT_SCHEMA_REVISION = "semantic-unit-v3"
 PACKER_SCHEMA_REVISION = "division-packer-v6"
-# Advanced from v5: an oversized semantic unit's continuation pieces are now
-# produced by deterministic local boundary-aware subdivision (section 5.6)
-# instead of fixed-window budget-stride slicing -- a 2,010-character span at
-# B=1,000 now yields 670+670+670, never the old 1,000+1,000+10 tail. Every
-# chunk also now carries a closed `close_reason` and `start_boundary`/
-# `end_boundary` pair bound into this same revision's plan payload, so a v5
-# division plan's bytes, ranges, and chunk boundaries cannot validate as a
-# current v6 plan even where a piece's raw text happens to be unchanged.
-# Advanced from v7: the fixed fragment shape block now carries the shared
-# module-export contract (`_FRAGMENT_EXPORT_CONTRACT`), which reaches the
-# initial leaf prompt and the one targeted correction prompt alike, so the
-# fixed fragment prompt bytes versioned by this revision changed and a v7 leaf
-# checkpoint cannot validate as a current v8 checkpoint. This is not merely a
-# staleness formality: a v7 leaf that reported exported-value interior (array
-# members, object keys, IDs) as `exports` within the fixed caps was accepted
-# and checkpointed, and its exports flow through `build_fact_ledger` into the
-# published record. v7 had advanced from v6: MAX_LEAF_SYMBOL_ITEMS_PER_KIND
-# came to equal MAX_KNOWN_SYMBOLS_PER_CHUNK (32, up from 12). v6 had advanced
-# from v5: the fixed leaf response signature ceiling matched the existing
-# 600-character parser/semantic-unit ceiling.
-# Advanced from v8: the v8 fixed fragment shape block had no satisfiable
-# fully-visible / partial-fragment signature contract -- it demanded an exact
-# copy of the visible declaration while separately capping `signature` at
-# `MAX_LEAF_SYMBOL_SIGNATURE_CHARS`, so a declaration longer than that bound
-# (CodeDoc's own source contains several) had no truthful accepted response.
-# v9 carries the new shared `_FRAGMENT_SIGNATURE_CONTRACT`
-# (`file_documentation_agent.py`), rendered into `_FRAGMENT_SHAPE_BLOCK` so it
-# reaches the initial leaf prompt and the one targeted correction prompt
-# byte-identically: a fully visible over-bound declaration is answerable
-# through a truthful leading source-backed portion, and a partially visible
-# declaration reports only the contiguous text visible in its own fragment.
-# The response/parser hard bound is 2,000
-# (`MAX_STRUCTURE_SIGNATURE_CHARS`), while the duplicate parser-owned prompt
-# hint stays independently capped at 600
-# (`MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS`). The fixed fragment prompt bytes
-# versioned by this revision changed, so a v8 leaf checkpoint -- which may
-# carry an omitted signature the repaired contract would have retained --
-# cannot validate as a current v9 checkpoint.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v9"
-# Advanced from v5. Bound into final-node execution identity, the final-node
-# exact input digest, and the completed split identity; a ledger revision
-# change alone reruns final synthesis but preserves compatible leaves and
-# reducers (they consume narratives, not the final structured ledger).
-LEDGER_SCHEMA_REVISION = "fact-ledger-v6"
+# Owns the canonical division-plan payload: each chunk's raw bytes and source
+# ranges, its closed `close_reason` and `start_boundary`/`end_boundary` pair,
+# and the fixed `leaf_prompt_signature_hint_chars` entry. An oversized
+# semantic unit's continuation pieces come from deterministic local
+# boundary-aware subdivision (section 5.6) -- a 2,010-character span at
+# B=1,000 divides into 670+670+670, not a 1,000+1,000+10 tail. A stored
+# division plan or leaf checkpoint whose payload bytes, ranges, or boundary
+# fields differ from this revision's is not a current checkpoint, even where a
+# piece's raw text is identical, so it is recomputed.
+#
+# Current contract for `leaf-capsule-v10`. Versions the fixed fragment-shape
+# prompt bytes and the cleaned leaf-capsule contract:
+#   * the shared module-export and signature contracts
+#     (`_FRAGMENT_EXPORT_CONTRACT` / `_FRAGMENT_SIGNATURE_CONTRACT` in
+#     `file_documentation_agent.py`), rendered once into `_FRAGMENT_SHAPE_BLOCK`
+#     so the initial leaf prompt and the one targeted correction prompt receive
+#     them byte-identically. Export facts are admitted only from a visible
+#     export or re-export declaration, never from exported-value interior
+#     (array members, object keys, IDs) or supplied metadata; a signature is
+#     source-backed declaration text, copied whole when the declaration is
+#     fully visible and at or below `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (2,000),
+#     and otherwise reported as its leading visible portion, so the contract is
+#     satisfiable for any declaration length. The duplicate parser-owned prompt
+#     hint stays independently capped at `MAX_LEAF_PROMPT_SIGNATURE_HINT_CHARS`
+#     (600) so a larger accepted signature never grows rendered leaf metadata
+#     or paid-call counts.
+#   * the conservative narrative-terminology rules, and the closed initialism
+#     check applied to the leaf `description` and each per-symbol description
+#     through the fixed-capsule response contract.
+# A leaf capsule's accepted facts flow through `build_fact_ledger` into the
+# published record, so this revision is bound into `leaf_execution_identity`,
+# `leaf_input_digest`, and the completed split identity: a stored leaf capsule
+# or checkpoint carrying a different value is recomputed rather than trusted,
+# while a sibling leaf, reducer, or final node stamped with the current value
+# is retained.
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v10"
+# Bound into final-node execution identity, the final-node exact input digest,
+# and the completed split identity. A ledger-revision change alone reruns the
+# final synthesis node but preserves compatible leaves and reducers -- they
+# consume narratives, not the final structured ledger.
+#
+# Current contract for `fact-ledger-v7`: split fact acceptance and
+# deduplication follow the shared structural authority -- occurrence-based
+# declaration identity, same-name overload preservation, source-backed kind,
+# and no invented, duplicated, or passthrough fact -- so a ledger built
+# without that contract is not a current ledger.
+LEDGER_SCHEMA_REVISION = "fact-ledger-v7"
 REDUCTION_CAPSULE_SCHEMA_REVISION = "reduction-capsule-v1"
-# Advanced from v4. Owns the reduction tree's versioned identity: the
-# independently carried synthesis-manifest budget (section 5.7), the reduction
-# fan-in, every reduction/final node ID, and the tree digest -- all of which
-# now bind ``reduction-packing-v5``. A tree built under v4, or under a
-# user-starved synthesis budget, is therefore not a current checkpoint: a
-# schema-4 partial whose reduction-tree digest differs is carried byte-for-byte
-# into cross-plan fresh-preserve (section 6.3) rather than validated, and a
-# completed split identity moves transitively through the supplied tree digest.
+# Owns the reduction tree's versioned identity: the independently carried
+# synthesis-manifest budget (section 5.7), the reduction fan-in, every
+# reduction and final node ID, and the tree digest. A tree built under a
+# different value, or under a user-starved synthesis budget, is not a current
+# checkpoint: a schema-4 partial whose reduction-tree digest differs is
+# carried byte-for-byte into cross-plan fresh-preserve (section 6.3) rather
+# than validated, and the completed split identity moves transitively through
+# the supplied tree digest.
 REDUCTION_PACKING_REVISION = "reduction-packing-v5"
-# Advanced from v1: the rendered reduction shape block now states the
-# MAX_REDUCTION_NARRATIVE_CHARS bound explicitly (initial and correction
-# routes alike), so a v1 reducer checkpoint cannot validate as a current v2
-# checkpoint.
-# Advanced from v2: the rendered reduction shape block now also states a
-# recommended narrative target below MAX_REDUCTION_NARRATIVE_CHARS (initial
-# and correction routes alike), giving the model headroom instead of an exact
-# ceiling to overshoot -- so a v2 reducer checkpoint cannot validate as a
-# current v3 checkpoint.
+# Owns the rendered reduction shape-block bytes for the internal reduction
+# prompt, on the initial and correction routes alike: the explicit
+# MAX_REDUCTION_NARRATIVE_CHARS bound and a recommended narrative target
+# strictly below it, so the model is given headroom rather than an exact
+# ceiling to overshoot. Bound into ``reduction_execution_identity`` and
+# ``reduction_input_digest``; a reducer checkpoint whose value differs is not
+# a current checkpoint. The internal reduction prompt is deliberately outside
+# the narrative-terminology rules.
 REDUCER_PROMPT_REVISION = "file-reduction-v3"
-FINAL_SYNTHESIS_REVISION = "file-synthesis-v3"
-# Advanced from v5 to division-execution-v6 alongside the leaf/ledger bumps
-# above.
+# Bound into final-node execution identity, the final-node exact input digest,
+# the completed split identity, and -- through `file_synthesis_call_id` -- the
+# run call-manifest digest. A change here reruns only the final synthesis node;
+# compatible leaves and reducers are retained where the dependency graph
+# permits.
+#
+# Current contract for `file-synthesis-v4`: the final synthesis prompt renders
+# the conservative narrative-terminology rules, and the accepted final
+# narrative is checked against the closed initialism rule -- using the
+# reconstructed planned source as evidence, never the synthesis manifest --
+# through the response contract, so a final result produced without that
+# contract is not a current result.
+FINAL_SYNTHESIS_REVISION = "file-synthesis-v4"
+# Schema revision for every split node's execution-identity payload
+# (``leaf_execution_identity`` / ``reduction_execution_identity`` /
+# ``final_execution_identity``). A stored node whose execution identity was
+# built under a different schema value is quarantined ``stale-identity`` and
+# re-executed.
 EXECUTION_IDENTITY_SCHEMA_REVISION = "division-execution-v6"
 
 # ---------------------------------------------------------------------------
@@ -3953,22 +3970,40 @@ def _structural_name_parts(name: str, language: str) -> tuple[str, str]:
     return qualified, short
 
 
+# Generic lexical atom kinds carry no class/function signal: a chunk built
+# from raw lines (no parser symbols) tags every semantic unit with one of
+# these. They keep the permissive split-scope pairing they have always had --
+# anything not a parser declaration kind pairs with a ``functions`` fact -- so
+# that same-name packed-unit scope allocation is unaffected by the closed
+# parser-kind mapping.
+_GENERIC_ATOM_KINDS = frozenset(
+    {
+        "",
+        "line",
+        "line-continuation",
+        "syntax-gap",
+        "embedded_javascript_gap",
+    }
+)
+
+
 def _structural_kind_matches(source_kind: str, fact_kind: str) -> bool:
-    kind = source_kind.lower()
-    class_like = any(
-        token in kind
-        for token in (
-            "class",
-            "enum",
-            "interface",
-            "object",
-            "record",
-            "struct",
-            "trait",
-            "type_declaration",
-        )
-    )
-    return class_like if fact_kind == "classes" else not class_like
+    """Whether a ``source_kind`` publishes into ``fact_kind``.
+
+    A real parser declaration kind is classified by the one shared closed
+    mapping in
+    :func:`codedoc.core.structural_reconciliation.parser_kind_bucket`, so the
+    split fact ledger and every other publication route agree on which node
+    types are classes, which are callables, and which (containers, type
+    aliases, namespaces, HTML elements, ``impl`` blocks, unknown parser kinds)
+    are neither. A generic lexical atom kind (``"line"`` and friends) has no
+    such signal and keeps its historical permissive pairing with ``functions``.
+    """
+    from codedoc.core.structural_reconciliation import parser_kind_bucket
+
+    if (source_kind or "").strip().lower() in _GENERIC_ATOM_KINDS:
+        return fact_kind == "functions"
+    return parser_kind_bucket(source_kind) == fact_kind
 
 
 def _matching_structural_candidates(

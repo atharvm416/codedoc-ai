@@ -50,6 +50,12 @@ from codedoc.core.prompt_profiles import (
     resolved_synthesis_shape,
 )
 from codedoc.core.result_assembly import extension_of, flat_combined_result
+from codedoc.core.structural_reconciliation import (
+    StructureTruth,
+    apply_structural_reconciliation,
+    reconcile_structural_arrays,
+    strip_transient_symbol_fields,
+)
 from codedoc.core.usage import UsageAccumulator
 from codedoc.llm.base import LLMProvider
 from codedoc.utils.logger import get_logger
@@ -92,6 +98,7 @@ def assemble_final_result(
     ledger: FactLedger,
     requested_field_paths: tuple[str, ...],
     large_file_identity: str,
+    structure_truth: StructureTruth | None = None,
 ) -> dict:
     """Locally assemble and identity-stamp the final published split record.
 
@@ -100,9 +107,12 @@ def assemble_final_result(
     capsules, or reduction content ever reach the result.
     ``functions``/``classes``/``exports`` are assembled from the locally
     maintained fact ledger — never from the model's own final response —
-    whenever the resolved final shape requests them (D10/section 14); every other
-    field (description, role, dependencies, concepts, usage) comes from the
-    cleaned final synthesis response unchanged.
+    whenever the resolved final shape requests them (D10/section 14), then
+    reconciled against the same shared source-backed authority every other
+    route uses so a ledger entry that no source declaration proves is dropped
+    rather than published with an invented scope; every other field
+    (description, role, dependencies, concepts, usage) comes from the cleaned
+    final synthesis response unchanged.
 
     Effective split records never carry ``_max_context_revision``: their
     `_large_file_identity` already binds `max_content_chars` through the
@@ -122,12 +132,40 @@ def assemble_final_result(
         merged["exports"] = list(ledger.exports)
     else:
         merged.pop("exports", None)
+
+    # Reconcile against the shared authority *before* the model-response
+    # cleaner runs, so the ledger's per-symbol signatures are still available
+    # to line a description up with the right same-name overload; then keep the
+    # structural arrays out of ``clean_combined_report`` (whose symbol cleaner
+    # would re-collapse two genuine identical-looking overloads) and re-insert
+    # the authoritative arrays afterwards.
+    reconciled_arrays = None
+    if structure_truth is not None:
+        reconciled_arrays = reconcile_structural_arrays(
+            merged.get("functions", []) or [],
+            merged.get("classes", []) or [],
+            merged.get("exports", []) or [],
+            truth=structure_truth,
+        )
+        for key in ("functions", "classes", "exports"):
+            merged.pop(key, None)
+
     merged = clean_combined_report(merged, request.rel_path).value
+
+    if reconciled_arrays is not None:
+        if "functions" in requested_field_paths:
+            merged["functions"] = [dict(i) for i in reconciled_arrays.functions]
+        if "classes" in requested_field_paths:
+            merged["classes"] = [dict(i) for i in reconciled_arrays.classes]
+        if "exports" in requested_field_paths:
+            merged["exports"] = list(reconciled_arrays.exports)
+
     result = flat_combined_result(
         request.rel_path,
         request.language,
         list(request.imports),
         merged,
+        reconciled_structure=reconciled_arrays is not None,
     )
     result.update(expected_analysis_identity(request.context.analysis_mode))
     bundle = request.context.resolved_shape_bundle
@@ -283,8 +321,15 @@ class Orchestrator:
         request: FileExecutionRequest,
         division_plan_digest: str,
         manifest_json: str,
+        terminology_source: str = "",
     ) -> dict:
-        """Run the single final synthesis call for a divided file."""
+        """Run the single final synthesis call for a divided file.
+
+        *terminology_source* is the exact planned source string reconstructed by
+        the caller from the immutable division plan (never a fresh filesystem
+        read); it is the only trusted evidence for the conservative
+        initialism check on this route.
+        """
         context = request.context
         call = PlannedCall(
             call_id=file_synthesis_call_id(
@@ -305,6 +350,7 @@ class Orchestrator:
             call_context=context,
             planned_call=call,
             additional_attempt=additional_attempt,
+            terminology_source=terminology_source,
         )
         return self._merge_single(
             request.rel_path, request.language, list(request.imports), cleaned
@@ -328,6 +374,12 @@ class Orchestrator:
         content = request.content
         imports = list(request.imports)
         context = request.context
+
+        # One immutable source-truth result for this file, built from the exact
+        # planned bytes execution already holds (never a fresh filesystem read).
+        # Shared by every publication route so ``functions``/``classes``/
+        # ``exports`` are source-backed, not model-owned (section 5.4).
+        structure_truth = StructureTruth.from_source(file_path, language, content)
 
         # Truncate once here so all three agents receive the exact same
         # string and the marker stays inside the configured ceiling.  One
@@ -366,12 +418,14 @@ class Orchestrator:
                 file_path, content, imports, language, bundle,
                 context=context,
                 additional_attempt=additional_attempt,
+                structure_truth=structure_truth,
             )
         else:
             result = self._process_single(
                 file_path, content, imports, language, bundle,
                 context=context,
                 additional_attempt=additional_attempt,
+                structure_truth=structure_truth,
             )
 
         # Attach cache-identity keys to every successful flat result before it is
@@ -410,6 +464,7 @@ class Orchestrator:
         self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None,
         *, context=None, additional_attempt: bool = False,
+        structure_truth: StructureTruth | None = None,
     ) -> dict:
         """One combined provider call, merged into the flat record."""
         t_start = time.monotonic()
@@ -433,13 +488,30 @@ class Orchestrator:
             return self._merge_single_failure(file_path, language, imports, cleaned)
 
         logger.info("[FILE] %s | combined ok  %.1fs", file_path, elapsed)
-        return self._merge_single(file_path, language, imports, cleaned)
+        return self._merge_single(
+            file_path, language, imports, cleaned, structure_truth
+        )
 
     def _merge_single(
-        self, file_path: str, language: str, imports: list[str], cleaned: dict
+        self, file_path: str, language: str, imports: list[str], cleaned: dict,
+        structure_truth: StructureTruth | None = None,
     ) -> dict:
-        """Merge a cleaned combined response with deterministic identity fields."""
-        return flat_combined_result(file_path, language, imports, cleaned)
+        """Merge a cleaned combined response with deterministic identity fields.
+
+        Structural arrays are reconciled against the shared source-backed
+        authority when a truth is supplied (section 5.4); the transient split
+        final-synthesis merge passes none because ``assemble_final_result``
+        rebuilds and reconciles those arrays from the fact ledger.
+        """
+        if structure_truth is not None:
+            cleaned = apply_structural_reconciliation(cleaned, structure_truth)
+        return flat_combined_result(
+            file_path,
+            language,
+            imports,
+            cleaned,
+            reconciled_structure=structure_truth is not None,
+        )
 
     def _merge_single_failure(
         self, file_path: str, language: str, imports: list[str], failure: dict
@@ -490,6 +562,7 @@ class Orchestrator:
         self, file_path: str, content: str, imports: list[str], language: str,
         bundle=None,
         *, context=None, additional_attempt: bool = False,
+        structure_truth: StructureTruth | None = None,
     ) -> dict:
         t_start = time.monotonic()
 
@@ -505,6 +578,14 @@ class Orchestrator:
                 context=context,
                 additional_attempt=additional_attempt,
             )
+
+        # Reconcile the StructureAgent's functions/classes/exports against the
+        # shared source-backed authority *before* the DocumentationAgent sees
+        # them as context: the doc agent then works from source-backed
+        # structure, and the transient per-symbol signature the structure
+        # cleaner retained for same-name overload disambiguation is consumed
+        # here and never travels into a prompt, a checkpoint, or the record.
+        structure = self._reconcile_structure(structure, structure_truth)
 
         # DocumentationAgent always gets the other agents' context
         t_doc_start = time.monotonic()
@@ -543,7 +624,9 @@ class Orchestrator:
         else:
             logger.info("[FILE] %s | documentation ok  %.1fs", file_path, elapsed_doc)
 
-        return self._merge(file_path, language, imports, structure, dependencies, documentation)
+        return self._merge(
+            file_path, language, imports, structure, dependencies, documentation,
+        )
 
     # ------------------------------------------------------------------
     # Internal runners (triple mode)
@@ -688,6 +771,35 @@ class Orchestrator:
     # Merge
     # ------------------------------------------------------------------
 
+    def _reconcile_structure(
+        self, structure: dict, structure_truth: StructureTruth | None
+    ) -> dict:
+        """Return *structure* with its ``functions``/``classes``/``exports``
+        replaced by the shared source-backed authority's arrays (so triple mode
+        reaches the identical structural truth single mode does -- section 5.4 /
+        section 9.1 item 11) and every transient internal field removed.
+
+        A failed StructureAgent result keeps its error shape; its arrays are
+        still projected to the bare ``{name, description?}`` schema so a
+        retained ``signature`` never travels further.
+        """
+        if not isinstance(structure, dict):
+            return structure
+        if structure_truth is not None and not structure.get("error"):
+            reconciled = apply_structural_reconciliation(structure, structure_truth)
+            return {
+                **structure,
+                "functions": reconciled["functions"],
+                "classes": reconciled["classes"],
+                "exports": reconciled["exports"],
+            }
+        return {
+            **structure,
+            "functions": strip_transient_symbol_fields(structure.get("functions", [])),
+            "classes": strip_transient_symbol_fields(structure.get("classes", [])),
+            "exports": list(structure.get("exports", []) or []),
+        }
+
     def _merge(
         self,
         file_path: str,
@@ -697,7 +809,16 @@ class Orchestrator:
         dependencies: dict,
         documentation: dict,
     ) -> dict:
-        """Combine all agent outputs into one flat result dict."""
+        """Combine all agent outputs into one flat result dict.
+
+        ``structure``'s ``functions``/``classes``/``exports`` have already been
+        reconciled against the shared source-backed authority in
+        :meth:`_process_triple` and carry no transient internal fields, so the
+        flat top level and the nested ``structure`` mirror one truth.
+        """
+        functions = list(structure.get("functions", []) or [])
+        classes = list(structure.get("classes", []) or [])
+        exports = list(structure.get("exports", []) or [])
         return {
             # Identity
             "file_path": file_path,
@@ -716,9 +837,9 @@ class Orchestrator:
                 documentation.get("role_in_system")
                 or structure.get("role_in_system", "")
             ),
-            "functions": structure.get("functions", []),
-            "classes": structure.get("classes", []),
-            "exports": structure.get("exports", []),
+            "functions": functions,
+            "classes": classes,
+            "exports": exports,
             "structure": structure,
 
             # From DependencyAgent

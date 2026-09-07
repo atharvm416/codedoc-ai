@@ -13,6 +13,11 @@ from __future__ import annotations
 from concurrent.futures import CancelledError
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.narrative_terminology import (
+    NARRATIVE_TERMINOLOGY_RULES,
+    TerminologyEvidence,
+    terminology_metadata_text,
+)
 from codedoc.core.execution_model import AgentCallContext, PlannedCall
 from codedoc.agents.response_cleaning import clean_documentation_report
 from codedoc.core.prompt_profiles import (
@@ -59,7 +64,7 @@ Rules:
   of the middle of the file is omitted; report only what is visible in the
   supplied head and tail slices and the analyses — never infer the omitted middle
 - Do not include empty arrays, empty objects, null values, or duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_prompt(
@@ -225,6 +230,12 @@ class DocumentationAgent(BaseAgent):
             language=language,
             shape_block=shape_block,
             planned_call=planned_call,
+            terminology_evidence=TerminologyEvidence(
+                source_text=truncated,
+                metadata_text=terminology_metadata_text(
+                    structure.get("functions"), structure.get("classes")
+                ),
+            ),
         )
 
         logger.debug("DocumentationAgent: completed %s", file_path)

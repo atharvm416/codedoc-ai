@@ -1,5 +1,94 @@
 # Changelog
 
+## 0.14.8 - 2026-09-07
+
+### Source-backed structural facts
+
+- The published `functions`, `classes`, and `exports` arrays are now the
+  arrays of one shared source-backed authority. A model response may only
+  *describe* a declaration the source proves, through parser symbol facts or a
+  deliberately incomplete language-specific lexical recognizer; it can no
+  longer add, duplicate, or reclassify one. An invented function such as
+  `updateEnvVersion`, a declaration listed twice from a single source
+  definition, and a `const X: React.FC` binding labelled a class are all
+  corrected: the invented and duplicate items are omitted, the binding is
+  reported as a function/component. Declaration identity is occurrence-based,
+  so two genuine same-name overloads are preserved as two entries; when a
+  parser signature isolates one overload the model's description attaches
+  there, and otherwise no description is guessed onto either. Kind comes from
+  the source through a closed parser-kind mapping: a type alias, a namespace,
+  an HTML element, an `impl` block, and an unrecognised kind resolve to no
+  publishable bucket rather than defaulting to a function. Exports are
+  admitted only by a closed proof set — ESM export declarations, named and
+  namespace re-exports, CommonJS `module.exports` / `exports.NAME`, and a
+  statically literal Python `__all__` — and every proven export keeps its
+  canonical source order, never an alphabetical one.
+- Optional structural arrays may therefore be smaller than before where an
+  earlier item cannot be proved. Field names and types are unchanged, and a
+  wrong, duplicate, or unsupported structural fact was never a compatibility
+  commitment.
+
+### Conservative narrative terminology
+
+- Every applicable initial prompt — the single combined prompt, the triple
+  structure and documentation prompts, the split-leaf fragment prompt, and the
+  final synthesis prompt — and their shared correction prompt now carry one
+  fixed set of terminology rules: do not expand an acronym unless its
+  expansion appears verbatim in supplied source, parser metadata, or trusted
+  project metadata; keep an undefined acronym as written; reserve "entry
+  point" for visible startup or bootstrap behaviour rather than a root
+  component; and do not turn a filename into a declaration name. A custom
+  prompt profile cannot remove them.
+- A closed deterministic check runs inside the canonical response contract on
+  already-cleaned bounded narrative values only (`description`,
+  `role_in_system`, `usage_example`, `key_concepts` items, and per-symbol
+  descriptions). It removes a narrative value when an uppercase acronym is a
+  source token, a Title-Case candidate phrase's initials equal it, and that
+  exact phrase — character for character, no case-folding or whitespace
+  normalisation — is absent from all trusted evidence; the surrounding
+  response contract then corrects or rejects the response through the existing
+  one-repair path. Ambiguous prose the closed grammar cannot classify is
+  retained unchanged; the check never rewrites prose, and its diagnostics
+  carry only bounded paths, reason codes, and fixed detail text.
+
+### Recovery and cache identity
+
+- Four identities advance because their governed output changed:
+  `ANALYSIS_REVISION` from `file-doc-v3` to `file-doc-v4`,
+  `LEAF_CAPSULE_SCHEMA_REVISION` from `leaf-capsule-v9` to `leaf-capsule-v10`,
+  `LEDGER_SCHEMA_REVISION` from `fact-ledger-v6` to `fact-ledger-v7`, and
+  `FINAL_SYNTHESIS_REVISION` from `file-synthesis-v3` to `file-synthesis-v4`.
+- A completed `file-doc-v3` ordinary, truncate, or split record no longer
+  matches the current analysis identity and is reprocessed exactly once under
+  the new contract before reuse; a current `file-doc-v4` record stays
+  zero-call reusable, and JSON/Markdown cross-format reuse is unaffected when
+  the identities match. A stored `leaf-capsule-v9` leaf checkpoint is
+  quarantined under `stale-identity` and re-executed, and every reducer and
+  final node depending on it is pruned with it; a sibling leaf, reducer, or
+  final node stamped with the current identity is retained. A stored
+  `fact-ledger-v6` or `file-synthesis-v3` final node is rejected and rerun
+  while independently compatible leaf and reducer work is kept where the
+  dependency graph allows it. Quarantine stays inside
+  `MAX_QUARANTINE_ENTRIES_PER_FILE` (512), so an advance never aborts a run.
+- Nothing else moves. `LEAF_CAPSULE_SCHEMA_REVISION` participates in
+  `leaf_execution_identity` / `leaf_input_digest`; `LEDGER_SCHEMA_REVISION`
+  and `FINAL_SYNTHESIS_REVISION` participate in the final-node execution
+  identity, the final-node exact input digest, and the completed split
+  identity; `FINAL_SYNTHESIS_REVISION` additionally binds the run
+  call-manifest digest through `file_synthesis_call_id`, so the provider-free
+  live-fixture plan digests are re-measured while the per-profile split
+  topology and call counts are unchanged. The active split identities are
+  `source-structure-v2`, `semantic-unit-v3`, `division-packer-v6`,
+  `leaf-capsule-v10`, `fact-ledger-v7`, `reduction-capsule-v1`,
+  `reduction-packing-v5`, `file-reduction-v3`, `file-synthesis-v4`,
+  `division-execution-v6`, `large-file-v3`, and ordinary `file-doc-v4`. The
+  structure/unit schemas, the reduction-capsule schema, the reducer prompt,
+  the execution-identity schema wrapper, the split-partial schema version
+  (4), the `large-file-v3` prefix, the ordinary-path identity, the truncate
+  and deterministic-import revisions, and every fixed leaf/reduction bound
+  are unchanged, and advancing any of them would needlessly invalidate
+  otherwise compatible state.
+
 ## 0.14.7 - 2026-09-06
 
 ### Satisfiable split-leaf signature contract

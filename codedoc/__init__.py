@@ -1,6 +1,6 @@
 """codedoc: local-first, LLM-agnostic codebase documentation."""
 
-__version__ = "0.14.7"
+__version__ = "0.14.8"
 __author__ = "Atharv Mannur"
 
 

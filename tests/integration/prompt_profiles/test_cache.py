@@ -21,6 +21,7 @@ from tests.support.profiles import INLINE
 from tests.support.providers import SmartFake
 from tests.support.prompt_profile_runs import _run
 from codedoc.core.record_meta import (
+    ANALYSIS_REVISION,
     CACHE_IDENTITY_KEYS,
     expected_ordinary_path_identity,
     normalized_identity_value,
@@ -57,7 +58,7 @@ def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
         "language": "generic",
-        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
         "_ordinary_path_identity": expected_ordinary_path_identity(rel),
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())

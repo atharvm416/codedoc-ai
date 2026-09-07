@@ -208,7 +208,7 @@ def test_fresh_sequential_retry_observes_stop_before_next_leaf(tmp_path) -> None
         def process_reduction_node(self, _request):
             pytest.fail("reduction began after cancellation")
 
-        def synthesize_divided_file(self, *_args):
+        def synthesize_divided_file(self, *_args, **_kwargs):
             pytest.fail("synthesis began after cancellation")
 
     orchestrator = StoppingOrchestrator()

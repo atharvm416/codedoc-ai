@@ -7,6 +7,7 @@ import logging
 import pytest
 from codedoc.agents.base_agent import BaseAgent
 from codedoc.agents.response_cleaning import (
+    MAX_COMBINED_RESPONSE_CHARS,
     clean_combined_report,
     clean_dependency_report,
     clean_leaf_capsule_report,
@@ -398,3 +399,92 @@ def test_declared_key_cap_is_the_single_source():
         _run_combined(json.dumps(raw))
     assert len(caught.value.diagnostic.returned_keys) <= MAX_DIAGNOSTIC_KEYS
     assert caught.value.diagnostic.returned_keys[-1] == "...(truncated)"
+
+
+# ---------------------------------------------------------------------------
+# P2: a bounded provider `signature` survives the internal reconciliation-mode
+# cleaner and is absent from the default public-safe cleaner.
+# ---------------------------------------------------------------------------
+
+_SIGNED = {
+    "description": "d",
+    "functions": [
+        {"name": "f", "description": "one", "signature": "f(a: int) -> int"},
+        {"name": "f", "description": "two", "signature": "f(a, b)"},
+    ],
+}
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_default_cleaner_drops_signature_and_reports_it_unknown(reporter):
+    result = reporter(dict(_SIGNED), "m.py")
+    for item in result.value["functions"]:
+        assert set(item) <= {"name", "description"}
+    assert any(
+        r.field.endswith(".signature") and r.reason_code == "unknown_field"
+        for r in result.removed
+    )
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_reconciliation_mode_cleaner_retains_a_bounded_signature(reporter):
+    result = reporter(dict(_SIGNED), "m.py", retain_signature=True)
+    sigs = [item.get("signature") for item in result.value["functions"]]
+    assert sigs == ["f(a: int) -> int", "f(a, b)"]
+    # signature is a known field in this mode -- not reported as unknown.
+    assert not any(r.field.endswith(".signature") for r in result.removed)
+    # two same-name items with distinct signatures are not collapsed.
+    assert len(result.value["functions"]) == 2
+
+
+@pytest.mark.parametrize("reporter", [clean_combined_report, clean_structure_report])
+def test_retained_signature_is_length_bounded(reporter):
+    raw = {
+        "description": "d",
+        "functions": [{"name": "f", "signature": "s" * (MAX_STRUCTURE_SIGNATURE_CHARS + 500)}],
+    }
+    result = reporter(raw, "m.py", retain_signature=True)
+    sig = result.value["functions"][0]["signature"]
+    assert 0 < len(sig) <= MAX_STRUCTURE_SIGNATURE_CHARS
+
+
+def test_reconciliation_mode_still_omits_signature_when_absent():
+    result = clean_combined_report(
+        {"description": "d", "functions": [{"name": "f", "description": "x"}]},
+        "m.py",
+        retain_signature=True,
+    )
+    assert result.value["functions"] == [{"name": "f", "description": "x"}]
+
+
+@pytest.mark.parametrize("field", ["functions", "classes"])
+def test_reconciliation_signatures_do_not_evict_public_symbols_at_global_cap(field):
+    raw = {
+        "description": "d",
+        field: [
+            {
+                "name": f"f{index}",
+                "description": "documented",
+                "signature": "s" * MAX_STRUCTURE_SIGNATURE_CHARS,
+            }
+            for index in range(12)
+        ],
+    }
+
+    result = clean_combined_report(raw, "m.py", retain_signature=True)
+
+    assert [item["name"] for item in result.value[field]] == [
+        f"f{index}" for index in range(12)
+    ]
+    assert len(json.dumps(result.value, ensure_ascii=False, separators=(",", ":"))) <= (
+        MAX_COMBINED_RESPONSE_CHARS
+    )
+    assert any(
+        removal.field.endswith(".signature")
+        and removal.reason_code == "response_cap"
+        for removal in result.removed
+    )
+    assert not any(
+        removal.field == field and removal.reason_code == "response_cap"
+        for removal in result.removed
+    )

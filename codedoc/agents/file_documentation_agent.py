@@ -24,7 +24,14 @@ one strict contract.  They are re-exported here for backward compatibility.
 
 from __future__ import annotations
 
+from functools import partial
+
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, BaseAgent
+from codedoc.agents.narrative_terminology import (
+    NARRATIVE_TERMINOLOGY_RULES,
+    TerminologyEvidence,
+    terminology_metadata_text,
+)
 from codedoc.core.execution_model import AgentCallContext, PlannedCall, UnitChunkExecutionRequest
 from codedoc.core.file_division import (
     MAX_LEAF_DESCRIPTION_CHARS,
@@ -76,6 +83,14 @@ from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
 
+# The single-mode combined response feeds the shared structural authority, so it
+# is cleaned in the reconciliation-bound mode that keeps a bounded per-symbol
+# ``signature`` for same-name overload disambiguation. The orchestrator strips
+# that transient field once reconciliation has consumed it; it is never public.
+_clean_combined_report_reconciling = partial(
+    clean_combined_report, retain_signature=True
+)
+
 _SYSTEM = (
     "You are a senior software engineer and technical writer analysing source "
     "code. You respond ONLY with valid JSON — no markdown, no explanation."
@@ -116,7 +131,7 @@ Rules:
   supplied head and tail slices and the parser imports — never infer the omitted middle
 - Omit a key instead of returning an empty list, empty object, or null
 - Do not include duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_prompt(
@@ -217,21 +232,19 @@ _FRAGMENT_EXPORT_CONTRACT = (
 # `_FRAGMENT_SHAPE_BLOCK` for the same reason `_FRAGMENT_EXPORT_CONTRACT` is:
 # so it reaches the initial leaf prompt and the one targeted correction
 # prompt byte-identically -- the correction route receives the shape block
-# and nothing else from `_FRAGMENT_PROMPT_TEMPLATE`. Previously, the
-# fragment rules demanded an exact copy of the visible declaration while the
-# shape block separately capped `signature` at
-# `MAX_LEAF_SYMBOL_SIGNATURE_CHARS` (600); CodeDoc's own source contains real
-# declarations longer than that, so for those no truthful response existed --
-# unsatisfiable by construction. The hard bound is therefore raised
-# (see `MAX_STRUCTURE_SIGNATURE_CHARS` in `codedoc/parser/source_structure.py`)
-# and keeps the contract satisfiable at any bound by making a fully visible
-# over-bound declaration answerable through a leading shortened portion,
-# rather than relying on the bound alone happening to be large enough. The
-# hard bound is rendered from the constant, never a literal, so the stated
-# ceiling can never drift from the enforced one. Every clause below resolves
-# against the visible source alone, for the same reason the export contract
-# does: the correction prompt renders no fragment position, no continuation
-# flag, and no known-symbol line.
+# and nothing else from `_FRAGMENT_PROMPT_TEMPLATE`. The contract stays
+# satisfiable for a declaration of any length: when the complete declaration
+# is visible and at or below the hard bound (`MAX_STRUCTURE_SIGNATURE_CHARS`
+# in `codedoc/parser/source_structure.py`) it is copied whole, and a fully
+# visible declaration that exceeds the bound is answered through its leading
+# source-backed portion rather than relying on the bound being large enough.
+# CodeDoc's own source contains declarations longer than the bound, so an
+# exact-copy-only rule would have no truthful response for those. The hard
+# bound is rendered from the constant, never a literal, so the stated ceiling
+# cannot drift from the enforced one. Every clause below resolves against the
+# visible source alone, for the same reason the export contract does: the
+# correction prompt renders no fragment position, no continuation flag, and no
+# known-symbol line.
 _FRAGMENT_SIGNATURE_CONTRACT = (
     "\nSignature contract for the optional \"signature\" field on a "
     "function, method, or class:\n"
@@ -331,7 +344,7 @@ non-executable text, still provide a truthful minimal description and omit \
 functions/classes/exports
 - Omit a key instead of returning an empty list, empty object, or null
 - Do not include duplicate fields
-"""
+""" + NARRATIVE_TERMINOLOGY_RULES + "\n"
 
 
 def build_fragment_prompt(request: UnitChunkExecutionRequest) -> tuple[str, str]:
@@ -409,13 +422,14 @@ class FileDocumentationAgent(BaseAgent):
             mode="single",
             agent="combined",
             file_path=file_path,
-            clean_reporter=clean_combined_report,
+            clean_reporter=_clean_combined_report_reconciling,
             resolved_shape=requested_shape,
             content=truncated,
             imports=imports,
             language=language,
             shape_block=shape_block,
             planned_call=planned_call,
+            terminology_evidence=TerminologyEvidence(source_text=truncated),
         )
         logger.debug(
             "FileDocumentationAgent: %s → %d functions, %d classes",
@@ -459,6 +473,10 @@ class FileDocumentationAgent(BaseAgent):
             content=request.payload,
             shape_block=_FRAGMENT_SHAPE_BLOCK,
             planned_call=planned_call,
+            terminology_evidence=TerminologyEvidence(
+                source_text=request.payload,
+                metadata_text=terminology_metadata_text(request.known_symbols),
+            ),
         )
         logger.debug(
             "FileDocumentationAgent: %s fragment %d/%d -> %d functions, %d classes",

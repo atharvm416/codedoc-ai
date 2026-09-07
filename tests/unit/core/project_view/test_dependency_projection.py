@@ -316,7 +316,8 @@ _DOWNSTREAM_CASES = [
         "helper_source": "class Helper:\n    pass\n",
         "functions": [{"name": "main", "description": "Builds a Helper."}],
         "classes": [],
-        "exports": ["main"],
+        # no ``__all__`` in the entry source -> nothing proves an export.
+        "exports": [],
         "external": "requests",
         "catalog_name": "requests",
         "usage": "from main import main",
@@ -348,7 +349,8 @@ _DOWNSTREAM_CASES = [
         "helper_source": "void helper() {}\n",
         "functions": [{"name": "main", "description": "Starts the application."}],
         "classes": [],
-        "exports": ["main"],
+        # Dart has no ``export`` statement the recognizer proves.
+        "exports": [],
         "external": "package:http/http.dart",
         "catalog_name": "http",
         "usage": "import 'main.dart';",
@@ -364,7 +366,8 @@ _DOWNSTREAM_CASES = [
         "helper_source": "package src; public class Helper {}\n",
         "functions": [{"name": "main", "description": "Starts the application."}],
         "classes": [{"name": "Main", "description": "Application entry type."}],
-        "exports": ["Main"],
+        # Java has no ``export`` statement the recognizer proves.
+        "exports": [],
         "external": "org.slf4j.Logger",
         "catalog_name": "org.slf4j.Logger",
         "usage": "new Main()",
@@ -444,7 +447,7 @@ def test_combined_response_maps_losslessly_to_public_catalog_and_graph(
     assert documented["description"] == entry_response["description"]
     assert documented.get("functions", []) == case["functions"]
     assert documented.get("classes", []) == case["classes"]
-    assert documented["exports"] == case["exports"]
+    assert documented.get("exports", []) == case["exports"]
     assert documented["key_concepts"] == ["startup"]
     assert documented["usage_example"] == case["usage"]
     assert documented["links"]["internal_dependencies"] == [case["helper"]]

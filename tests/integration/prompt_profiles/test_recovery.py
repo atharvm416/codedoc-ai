@@ -18,7 +18,7 @@ from codedoc.core.resume import (
     build_recovery_identity,
     load_recovery_records_if_compatible,
 )
-from codedoc.core.record_meta import expected_ordinary_path_identity
+from codedoc.core.record_meta import ANALYSIS_REVISION, expected_ordinary_path_identity
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.utils.errors import ConfigError
 
@@ -32,7 +32,7 @@ def _identity(tmp_path, **changes):
         "entry_file": "main.py",
         "documentation_scope": "entry",
         "analysis_mode": "single",
-        "analysis_revision": "file-doc-v3",
+        "analysis_revision": ANALYSIS_REVISION,
     }
     values.update(changes)
     return build_recovery_identity(**values)
@@ -65,7 +65,7 @@ def _record(path, rel, resolved):
     rec = {
         "path": rel, "hash": compute_file_hash(path), "description": "cached",
         "language": "generic",
-        "_analysis_revision": "file-doc-v3", "_analysis_mode": "single",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
         "_ordinary_path_identity": expected_ordinary_path_identity(rel),
     }
     digest = resolved.file_digest(PurePosixPath(rel).name.lower())

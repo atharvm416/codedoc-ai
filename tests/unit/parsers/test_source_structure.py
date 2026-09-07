@@ -680,12 +680,24 @@ def test_live_repository_declaration_census_matches_the_measured_basis() -> None
     # are pinned above. A wild swing (a body accidentally measured as a
     # header) would blow past this and fail loudly.
     #
-    # Bound history: 60 -> 63. Section 9 Part 2 added three authorized top-level
-    # CLI preflight-reporter presenter helpers under section 7.1
-    # (``cli._print_preflight_summary``, ``cli._print_split_plan_detail_records``,
+    # Bound history: 60 -> 63 -> 86 -> 92 -> 105. Section 9 Part 2 added three
+    # authorized top-level CLI preflight-reporter presenter helpers under
+    # section 7.1 (``cli._print_preflight_summary``,
+    # ``cli._print_split_plan_detail_records``,
     # ``cli._print_preflight_flat_category``), each a short-header pure read of
-    # the immutable preflight snapshot. The over-600 set and the raw/normalized
-    # maxima are unchanged; this bound catches measurement error, not growth.
-    assert abs(delta) <= 63, census_report
+    # the immutable preflight snapshot. The shared structural-reconciliation
+    # authority (section 5.4 / section 7.1, one new narrowly named module
+    # ``codedoc.core.structural_reconciliation`` every publication route
+    # delegates to) then added short-header helpers -- the closed kind-mapping,
+    # the conservative lexical recognizer (now including the closed export
+    # proof: CommonJS, namespace re-export, and a statically-literal Python
+    # ``__all__`` reader), the immutable ``StructureTruth`` value, and the
+    # reconciliation entry points with their same-name overload disambiguation
+    # helpers. The conservative narrative-terminology authority (section 5.6,
+    # ``codedoc.agents.narrative_terminology``) then added the immutable
+    # ``TerminologyEvidence`` value and the closed initialism grammar helpers.
+    # The over-600 set and the raw/normalized maxima are unchanged; this bound
+    # catches measurement error, not growth.
+    assert abs(delta) <= 105, census_report
     assert top_level >= _CENSUS_HISTORICAL_TOP_LEVEL - 10
     assert nested >= _CENSUS_HISTORICAL_NESTED - 10

@@ -61,18 +61,23 @@ from codedoc.core.file_division import (
 )
 from codedoc.parser.tree_sitter_structure import PARSER_PACKAGE_VERSION
 
-# Cache identity.  Bump ``ANALYSIS_REVISION`` whenever the generation strategy
-# changes in a way that should invalidate previously cached records.
+# Cache identity for an ordinary/truncate ``single`` or ``triple`` completed
+# record.  A stored record whose ``_analysis_revision`` differs from this value
+# is reprocessed exactly once under the current contract before it can be
+# reused; an older readable record is never silently reused.
 #
-# The current revision is ``file-doc-v3``: the strengthened exact-JSON response
-# rules shared across all four prompts, plus stricter response acceptance
-# (registry-required-field validation and rejection of a response that retains
-# none of its requested fields), change generation semantics for both ``single``
-# and ``triple`` modes even though the rendered requested-shape block — and the
-# ``_prompt_profile_digest`` computed from it — are unchanged.  Older
-# ``file-doc-v2`` (and ``file-doc-v1``) records remain readable but are
-# reprocessed exactly once under the current contract before reuse.
-ANALYSIS_REVISION = "file-doc-v3"
+# The current contract for ``file-doc-v4``: every applicable initial and
+# correction prompt renders the conservative narrative-terminology rules, and a
+# provably unsupported acronym expansion is removed from a bounded narrative
+# field through the response contract; the published
+# ``functions``/``classes``/``exports`` arrays are the source-backed arrays of
+# the shared structural authority, so an invented, duplicated, or misclassified
+# declaration is omitted while a genuine same-name overload is preserved.
+# Ordinary ``single`` and ``triple`` output changes under these, so a record
+# generated without them is not a current record.  The rendered
+# requested-shape block, and the ``_prompt_profile_digest`` computed from it,
+# are unchanged.
+ANALYSIS_REVISION = "file-doc-v4"
 
 # Rejected predecessor value from the former fresh-only split contract. Current
 # production code never stamps it, but the key remains registered so predecessor

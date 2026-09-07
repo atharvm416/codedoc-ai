@@ -21,6 +21,7 @@ from __future__ import annotations
 from concurrent.futures import CancelledError
 
 from codedoc.agents.base_agent import EXACT_JSON_RESPONSE_RULES, _call_llm_counted
+from codedoc.agents.narrative_terminology import NARRATIVE_TERMINOLOGY_RULES
 from codedoc.agents.response_diagnostics import (
     MAX_CORRECTION_RESPONSE_CHARS,
     CorrectionLedger,
@@ -64,7 +65,19 @@ Correction rules:
 - Preserve every valid fact already present in the previous response
 - Use the source and parser imports only to fill required missing information
 - Output one complete replacement JSON response, not a patch or a diff
-"""
+{terminology_rules}"""
+
+# The narrative routes whose correction prompt also carries the conservative
+# terminology rules. The dependency and internal-reduction routes have no
+# bounded narrative fields and are deliberately excluded.
+_TERMINOLOGY_CORRECTION_ROUTES = frozenset(
+    {
+        ("single", "combined"),      # single mode and the split final synthesis
+        ("triple", "structure"),
+        ("triple", "documentation"),
+        ("split-leaf", "leaf"),
+    }
+)
 
 
 class ResponseCorrectionAgent:
@@ -179,9 +192,16 @@ class ResponseCorrectionAgent:
         self, correction_input: dict, diagnostic: ResponseDiagnostic
     ) -> tuple[str, str]:
         original = correction_input.get("original_response", "")
+        mode = correction_input.get("mode", "")
+        agent = correction_input.get("agent", "")
+        terminology_rules = (
+            NARRATIVE_TERMINOLOGY_RULES + "\n"
+            if (mode, agent) in _TERMINOLOGY_CORRECTION_ROUTES
+            else ""
+        )
         prompt = _PROMPT_TEMPLATE.format(
-            mode=correction_input.get("mode", ""),
-            agent=correction_input.get("agent", ""),
+            mode=mode,
+            agent=agent,
             language=correction_input.get("language", ""),
             file_path=correction_input.get("file_path", ""),
             reason=diagnostic.reason_code,
@@ -190,5 +210,6 @@ class ResponseCorrectionAgent:
             content=correction_input.get("content", ""),
             shape_block=correction_input.get("shape_block", ""),
             original_response=original[:MAX_CORRECTION_RESPONSE_CHARS],
+            terminology_rules=terminology_rules,
         )
         return _SYSTEM, prompt

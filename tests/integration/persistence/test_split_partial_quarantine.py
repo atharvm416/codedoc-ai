@@ -19,6 +19,7 @@ import pytest
 
 import codedoc.core.file_division as file_division
 import codedoc.core.planning as planning_mod
+import codedoc.core.record_meta as record_meta
 from codedoc.core.file_division import (
     MAX_QUARANTINE_ENTRIES_PER_FILE,
     MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS,
@@ -49,6 +50,7 @@ from codedoc.core.planning import build_pipeline_plan
 from codedoc.core.safe_writer import SafeWriter
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import ConfigError
+from tests.support.structure_extra import requires_structure_pack
 
 
 def _effective_synthesis(budget: int) -> int:
@@ -1558,3 +1560,440 @@ def test_same_plan_old_leaf_prompt_identity_quarantines_leaves_and_prunes_depend
         call.category == "file-synthesis" and call.owner == "main.py"
         for call in manifest.calls
     )
+
+
+# ===========================================================================
+# 0.14.8 P2-2: full leaf/reducer/final recovery-node evidence for the reached
+# ledger / final-synthesis / leaf-capsule identity advances.
+#
+# Every node in these containers is built by the production identity/input
+# functions. Each scenario patches exactly the constant that owns the node it
+# means to make stale, then validates through the real ``build_pipeline_plan``
+# recovery path and asserts the exact retained / quarantined / re-executed set
+# and the minimum scheduled calls -- not only a digest inequality.
+# ===========================================================================
+
+
+def _current_leaves_and_reducers(
+    plan, tree, *, rel_path, content_hash, provider_identity
+):
+    """The ordered current-valid leaf nodes, the current-valid reducer nodes,
+    and the ``child_results`` map a final node is derived from -- every digest
+    from the production functions under the current revisions."""
+    leaf_results = _leaf_results_for(plan)
+    leaves = tuple(
+        _leaf_node_for(
+            chunk, plan=plan, rel_path=rel_path, content_hash=content_hash,
+            provider_identity=provider_identity, index=index,
+        )
+        for index, chunk in enumerate(plan.chunks)
+    )
+    child_results = dict(leaf_results)
+    reducers = []
+    for node in tree.unit_consolidation_nodes + tree.general_nodes:
+        reducers.append(
+            _reducer_node_for(
+                node, plan=plan, rel_path=rel_path, content_hash=content_hash,
+                provider_identity=provider_identity, tree_digest=tree.tree_digest,
+                child_results=child_results,
+            )
+        )
+        child_results[node.node_id] = _reducer_result(node)
+    return leaf_results, leaves, tuple(reducers), child_results
+
+
+@pytest.mark.parametrize(
+    "constant_name, prior_value",
+    [
+        ("LEDGER_SCHEMA_REVISION", "fact-ledger-v6"),
+        ("FINAL_SYNTHESIS_REVISION", "file-synthesis-v3"),
+    ],
+)
+def test_same_plan_stale_final_bound_revision_quarantines_only_the_final_node(
+    tmp_path, monkeypatch, constant_name, prior_value
+) -> None:
+    """A same-plan schema-4 container whose leaves and reducer are current-valid
+    but whose final checkpoint was genuinely paid under a predecessor ledger /
+    final-synthesis revision: the container never enters carry; every leaf and
+    every reducer is retained; only the final node is quarantined
+    ``stale-identity``; final synthesis is scheduled exactly once; and reverting
+    the production constant to that predecessor value makes the same final node
+    a current, retained checkpoint (mutation sensitivity, finding P2-2 E)."""
+    source = _large_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = _split_config(tmp_path)
+    provider_identity = provider_execution_identity(config)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    plan, tree = _current_split("main.py", source, 2000)
+    assert len(tree.unit_consolidation_nodes) == 1
+
+    leaf_results, leaves, reducers, child_results = _current_leaves_and_reducers(
+        plan, tree, rel_path="main.py", content_hash=content_hash,
+        provider_identity=provider_identity,
+    )
+    leaf_ids = {chunk.chunk_id for chunk in plan.chunks}
+    reducer_ids = {node.node_id for node in tree.all_intermediate_nodes}
+    final_id = tree.final_node.node_id
+
+    # Only the final checkpoint is stamped under the predecessor revision.
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, constant_name, prior_value)
+        stale_final = _final_node_for(
+            tree, plan=plan, rel_path="main.py", content_hash=content_hash,
+            provider_identity=provider_identity, leaf_results=leaf_results,
+            child_results=child_results,
+        )
+    recovered = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+        rel_path="main.py", content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=leaves + reducers + (stale_final,),
+    )
+
+    _plan_result, materials = _plan_with_recovered(tmp_path, config, recovered)
+    state = materials.tree_states["main.py"]
+    assert "main.py" not in materials.carry_states
+    assert materials.recovery_discarded_predecessor_nodes == 0
+    assert materials.recovery_replacement_nodes_planned == 0
+
+    retained_ids = set(state.by_id())
+    assert leaf_ids <= retained_ids            # every compatible leaf retained
+    assert reducer_ids <= retained_ids         # every compatible reducer retained
+    assert final_id not in retained_ids        # only the stale final rejected
+    reasons = {entry.node_id: entry.reason for entry in state.quarantine}
+    assert list(reasons) == [final_id]
+    assert reasons[final_id] == "stale-identity"
+    assert materials.reexecuted_nodes == 1     # exactly one final rerun
+
+    manifest = build_call_manifest(
+        [], _plan_result.agent_rels, "single",
+        materials.division_plans, materials.reduction_trees, materials.tree_states,
+    )
+    synthesis_calls = [
+        call for call in manifest.calls
+        if call.category == "file-synthesis" and call.owner == "main.py"
+    ]
+    assert len(synthesis_calls) == 1
+    assert not any(
+        call.owner in leaf_ids or call.owner in reducer_ids
+        for call in manifest.calls
+    )
+
+    # Mutation sensitivity: with the production constant reverted, the very same
+    # final node matches the current identity and is retained -- so it is the
+    # advance, not the container shape, that quarantined it above.
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, constant_name, prior_value)
+        reverted = SplitTreeState(
+            schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+            rel_path="main.py", content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            nodes=leaves + reducers + (stale_final,),
+        )
+        _pr2, materials2 = _plan_with_recovered(tmp_path, config, reverted)
+    state2 = materials2.tree_states["main.py"]
+    assert final_id in set(state2.by_id())
+    assert state2.quarantine == ()
+    assert materials2.reexecuted_nodes == 0
+
+
+def test_same_plan_stale_leaves_prune_only_their_dependents_no_reducer_topology(
+    tmp_path, monkeypatch
+) -> None:
+    """Leaf-capsule predecessor, complete tree, standalone-leaf topology: two of
+    six current leaves are re-stamped under ``leaf-capsule-v9``. After the patch
+    is undone: exactly those two are quarantined ``stale-identity``; the other
+    four leaves stay retained; the final node -- whose dependency chain now has
+    a hole -- is pruned ``input-digest-mismatch``; and no unrelated compatible
+    node is invalidated."""
+    parts = []
+    for f in range(12):
+        parts.append(f"def fn_{f}():")
+        parts.extend(f"    a_{f}_{k} = {k}" for k in range(30))
+        parts.append("")
+    source = "\n".join(parts) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = _split_config(tmp_path, max_chars=1200)
+    provider_identity = provider_execution_identity(config)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=1200,
+    )
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=_effective_synthesis(1200), language="python",
+    )
+    # A no-reducer topology: every leaf feeds the final node directly.
+    assert tree.all_intermediate_nodes == ()
+    assert len(plan.chunks) >= 4
+
+    leaf_results = _leaf_results_for(plan)
+    stale_chunks = plan.chunks[:2]
+    stale_ids = {chunk.chunk_id for chunk in stale_chunks}
+
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v9")
+        stale_leaves = tuple(
+            _leaf_node_for(
+                chunk, plan=plan, rel_path="main.py", content_hash=content_hash,
+                provider_identity=provider_identity, index=index,
+            )
+            for index, chunk in enumerate(stale_chunks)
+        )
+    current_leaves = tuple(
+        _leaf_node_for(
+            chunk, plan=plan, rel_path="main.py", content_hash=content_hash,
+            provider_identity=provider_identity, index=index,
+        )
+        for index, chunk in enumerate(plan.chunks)
+        if chunk.chunk_id not in stale_ids
+    )
+    child_results = dict(leaf_results)
+    final_node = _final_node_for(
+        tree, plan=plan, rel_path="main.py", content_hash=content_hash,
+        provider_identity=provider_identity, leaf_results=leaf_results,
+        child_results=child_results,
+    )
+    recovered = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+        rel_path="main.py", content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=stale_leaves + current_leaves + (final_node,),
+    )
+
+    _plan_result, materials = _plan_with_recovered(tmp_path, config, recovered)
+    state = materials.tree_states["main.py"]
+    assert "main.py" not in materials.carry_states
+
+    retained_ids = set(state.by_id())
+    good_leaf_ids = {c.chunk_id for c in plan.chunks} - stale_ids
+    assert retained_ids == good_leaf_ids       # only the compatible leaves
+    reasons = {entry.node_id: entry.reason for entry in state.quarantine}
+    assert {reasons[cid] for cid in stale_ids} == {"stale-identity"}
+    assert reasons[tree.final_node.node_id] == "input-digest-mismatch"
+    assert tree.final_node.node_id not in retained_ids
+
+
+@requires_structure_pack
+def test_same_plan_stale_leaves_prune_only_the_dependent_reducer(
+    tmp_path, monkeypatch
+) -> None:
+    """Leaf-capsule predecessor, complete multi-reducer tree: a syntax-mode
+    source of three functions fans out into disjoint unit-consolidation
+    reducers. Only the leaves under the first reducer are re-stamped under
+    ``leaf-capsule-v9``. After the patch is undone: those leaves are quarantined
+    ``stale-identity``; their reducer is pruned ``input-digest-mismatch``; the
+    other reducers and every leaf beneath them stay retained; the final node is
+    pruned; no unrelated compatible node is invalidated."""
+    parts = []
+    for f in range(3):
+        parts.append(f"def func_{f}():")
+        parts.extend(f"    v_{f}_{b} = {b}" for b in range(90))
+        parts.append("")
+    source = "\n".join(parts) + "\n"
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = _split_config(tmp_path, max_chars=1000)
+    provider_identity = provider_execution_identity(config)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=1000,
+    )
+    tree = build_reduction_tree(
+        plan, synthesis_manifest_chars=_effective_synthesis(1000), language="python",
+    )
+    assert plan.structural_mode == "syntax"
+    assert len(tree.unit_consolidation_nodes) >= 2
+    target_reducer = tree.unit_consolidation_nodes[0]
+    other_reducers = tree.unit_consolidation_nodes[1:] + tree.general_nodes
+    stale_ids = set(target_reducer.child_ids)
+    assert stale_ids and stale_ids.issubset({c.chunk_id for c in plan.chunks})
+
+    leaf_results = _leaf_results_for(plan)
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v9")
+        stale_leaves = tuple(
+            _leaf_node_for(
+                chunk, plan=plan, rel_path="main.py", content_hash=content_hash,
+                provider_identity=provider_identity, index=index,
+            )
+            for index, chunk in enumerate(plan.chunks)
+            if chunk.chunk_id in stale_ids
+        )
+    current_leaves = tuple(
+        _leaf_node_for(
+            chunk, plan=plan, rel_path="main.py", content_hash=content_hash,
+            provider_identity=provider_identity, index=index,
+        )
+        for index, chunk in enumerate(plan.chunks)
+        if chunk.chunk_id not in stale_ids
+    )
+    child_results = dict(leaf_results)
+    reducers = []
+    for node in tree.unit_consolidation_nodes + tree.general_nodes:
+        reducers.append(
+            _reducer_node_for(
+                node, plan=plan, rel_path="main.py", content_hash=content_hash,
+                provider_identity=provider_identity, tree_digest=tree.tree_digest,
+                child_results=child_results,
+            )
+        )
+        child_results[node.node_id] = _reducer_result(node)
+    final_node = _final_node_for(
+        tree, plan=plan, rel_path="main.py", content_hash=content_hash,
+        provider_identity=provider_identity, leaf_results=leaf_results,
+        child_results=child_results,
+    )
+    recovered = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+        rel_path="main.py", content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=stale_leaves + current_leaves + tuple(reducers) + (final_node,),
+    )
+
+    _plan_result, materials = _plan_with_recovered(tmp_path, config, recovered)
+    state = materials.tree_states["main.py"]
+    assert "main.py" not in materials.carry_states
+
+    retained_ids = set(state.by_id())
+    reasons = {entry.node_id: entry.reason for entry in state.quarantine}
+    assert {reasons[cid] for cid in stale_ids} == {"stale-identity"}
+    assert reasons[target_reducer.node_id] == "input-digest-mismatch"
+    assert target_reducer.node_id not in retained_ids
+    for node in other_reducers:
+        assert node.node_id in retained_ids
+    assert ({c.chunk_id for c in plan.chunks} - stale_ids) <= retained_ids
+    assert tree.final_node.node_id not in retained_ids
+
+
+def _plan_with_record_and_recovered(
+    tmp_path, config, record, recovered, rel_path="main.py"
+):
+    file_map = _file_map(tmp_path, rel_path)
+    graph = DependencyGraph()
+    graph.add_file(rel_path)
+    return build_pipeline_plan(
+        file_map, graph, {rel_path}, rel_path, {rel_path: record}, [], config,
+        recovered_partials={rel_path: recovered},
+    )
+
+
+def test_combined_predecessor_completed_record_and_stale_tree_reprocess_the_minimum(
+    tmp_path, monkeypatch
+) -> None:
+    """P2-2 D: all four predecessor identities represented across their real
+    ownership boundaries -- a completed ``file-doc-v3`` record, ``leaf-capsule-v9``
+    leaf nodes, and a final node paid under both ``fact-ledger-v6`` and
+    ``file-synthesis-v3``. Planning rejects the completed record; the stored
+    tree is validated through its real nodes; the retained / quarantined set
+    follows the dependency graph; and a current-valid regenerated container is
+    then fully reusable with zero re-executed nodes."""
+    source = _large_source()
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = _split_config(tmp_path)
+    provider_identity = provider_execution_identity(config)
+    content_hash = hashlib.sha256(source.encode("utf-8")).hexdigest()
+    plan, tree = _current_split("main.py", source, 2000)
+    assert len(tree.unit_consolidation_nodes) == 1
+
+    stale_record = {
+        "path": "main.py",
+        "hash": content_hash,
+        "language": "python",
+        "description": "predecessor completed split",
+        "_analysis_revision": "file-doc-v3",
+        "_analysis_mode": "single",
+        "_large_file_identity": record_meta.expected_large_file_identity(
+            source_chars=len(source), max_chars=2000, rel_path="main.py",
+            division_plan_digest=plan.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            structural_mode=plan.structural_mode,
+            imports_digest=deterministic_imports_digest(()),
+        ),
+    }
+
+    leaf_results = _leaf_results_for(plan)
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v9")
+        stale_leaves = tuple(
+            _leaf_node_for(
+                chunk, plan=plan, rel_path="main.py", content_hash=content_hash,
+                provider_identity=provider_identity, index=index,
+            )
+            for index, chunk in enumerate(plan.chunks)
+        )
+    child_results = dict(leaf_results)
+    uc = tree.unit_consolidation_nodes[0]
+    reducer = _reducer_node_for(
+        uc, plan=plan, rel_path="main.py", content_hash=content_hash,
+        provider_identity=provider_identity, tree_digest=tree.tree_digest,
+        child_results=child_results,
+    )
+    child_results[uc.node_id] = _reducer_result(uc)
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, "LEDGER_SCHEMA_REVISION", "fact-ledger-v6")
+        mp.setattr(file_division, "FINAL_SYNTHESIS_REVISION", "file-synthesis-v3")
+        stale_final = _final_node_for(
+            tree, plan=plan, rel_path="main.py", content_hash=content_hash,
+            provider_identity=provider_identity, leaf_results=leaf_results,
+            child_results=child_results,
+        )
+    recovered = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+        rel_path="main.py", content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=stale_leaves + (reducer, stale_final),
+    )
+
+    plan_result, materials = _plan_with_record_and_recovered(
+        tmp_path, config, stale_record, recovered
+    )
+
+    # The completed file-doc-v3 record is rejected by planning.
+    assert "main.py" not in plan_result.unchanged_rels
+    assert "main.py" in plan_result.changed_rels
+
+    # The stored tree was validated through its real nodes (not carried). The
+    # dependency graph dominates: every ``leaf-capsule-v9`` leaf is rejected
+    # ``stale-identity``, and the reducer and final node above them are pruned
+    # ``input-digest-mismatch`` for the lost dependency -- the final node's own
+    # ``fact-ledger-v6`` / ``file-synthesis-v3`` staleness never gets its own
+    # identity check here, and is proven in isolation by
+    # ``test_same_plan_stale_final_bound_revision_quarantines_only_the_final_node``.
+    assert "main.py" not in materials.carry_states
+    state = materials.tree_states["main.py"]
+    leaf_ids = {chunk.chunk_id for chunk in plan.chunks}
+    reasons = {entry.node_id: entry.reason for entry in state.quarantine}
+    assert {reasons[cid] for cid in leaf_ids} == {"stale-identity"}
+    assert reasons[uc.node_id] == "input-digest-mismatch"
+    assert reasons[tree.final_node.node_id] == "input-digest-mismatch"
+    assert set(state.by_id()) == set()          # nothing retained
+    assert len(state.quarantine) <= MAX_QUARANTINE_ENTRIES_PER_FILE
+
+    manifest = build_call_manifest(
+        [], plan_result.agent_rels, "single",
+        materials.division_plans, materials.reduction_trees, materials.tree_states,
+    )
+    scheduled = {call.owner for call in manifest.calls}
+    assert leaf_ids <= scheduled
+    assert uc.node_id in scheduled
+    assert any(
+        call.category == "file-synthesis" and call.owner == "main.py"
+        for call in manifest.calls
+    )
+
+    # After regeneration: a fully current container is reusable, zero re-exec.
+    current = _full_current_valid_container(
+        plan, tree, rel_path="main.py", content_hash=content_hash,
+        provider_identity=provider_identity,
+    )
+    _pr2, materials2 = _plan_with_recovered(tmp_path, config, current)
+    state2 = materials2.tree_states["main.py"]
+    assert set(state2.by_id()) == {node.node_id for node in current.nodes}
+    assert state2.quarantine == ()
+    assert materials2.reexecuted_nodes == 0

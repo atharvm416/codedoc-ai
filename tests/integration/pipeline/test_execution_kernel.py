@@ -59,7 +59,7 @@ def test_split_execution_consumes_only_the_frozen_request_snapshot(tmp_path):
         def process_reduction_node(self, _request):
             return {"narrative": "combined"}
 
-        def synthesize_divided_file(self, _request, _digest, _manifest):
+        def synthesize_divided_file(self, _request, _digest, _manifest, terminology_source=""):
             return {"description": "frozen"}
 
     result = _process_divided_file(
@@ -133,7 +133,7 @@ def test_split_execution_rejects_a_context_tree_synthesis_budget_mismatch_before
         def process_reduction_node(self, _request):
             pytest.fail("a provider/orchestrator method ran despite the mismatch")
 
-        def synthesize_divided_file(self, *_args):
+        def synthesize_divided_file(self, *_args, **_kwargs):
             pytest.fail("a provider/orchestrator method ran despite the mismatch")
 
     with pytest.raises(DivisionInternalDefect, match="synthesis budget"):
