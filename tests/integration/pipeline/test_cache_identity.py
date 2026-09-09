@@ -40,6 +40,7 @@ from codedoc.core.file_division import (
     tree_node_state,
 )
 from codedoc.core.graph import DependencyGraph
+from codedoc.core.execution_model import build_call_manifest
 from codedoc.core.planning import build_pipeline_plan
 from codedoc.core import record_meta
 from codedoc.core.record_meta import (
@@ -49,6 +50,30 @@ from codedoc.core.record_meta import (
 )
 from tests.support.fixture_paths import FIXTURES_ROOT
 from tests.support.structure_extra import requires_structure_pack
+
+
+def _historical_crlf_source_bytes(path: Path) -> bytes:
+    """Reconstruct the exact CRLF byte stream the frozen predecessor records
+    below were hashed from, independent of how Git materialized line endings in
+    the current checkout.
+
+    The completed-predecessor fixtures freeze the raw SHA-256 of
+    ``test_config_precedence.py`` as it existed with CRLF endings
+    (``f4cdd10b...696bb``). ``.gitattributes`` deliberately pins an EOL policy
+    only for ``tests/fixtures/**``, so a normal ``.py`` checkout is LF on Linux
+    and CRLF on Windows and would otherwise hash two different ways. Collapsing
+    every CRLF and every lone CR to LF and then re-emitting CRLF yields the one
+    canonical historical stream on every platform, while any non-EOL content
+    change still moves the hash and keeps the frozen value a real oracle.
+
+    This is a test-local materialization only: it never touches
+    ``compute_file_hash``, ``read_source_text``, source decoding, cache
+    identity, ``.gitattributes``, or the live file on disk.
+    """
+    raw = Path(path).read_bytes()
+    lf_only = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    return lf_only.replace(b"\n", b"\r\n")
+
 
 def test_pipeline_same_path_reuse_free_but_cross_path_content_match_is_not(
     tmp_path, monkeypatch
@@ -834,7 +859,7 @@ def test_actual_predecessor_completed_split_record_is_rejected_as_stale(tmp_path
     assert record["_large_file_identity"].startswith("large-file-v2:")
 
     rel_path = record["path"]
-    source = (Path(__file__).with_name(rel_path)).read_bytes()
+    source = _historical_crlf_source_bytes(Path(__file__).with_name(rel_path))
     src = tmp_path / rel_path
     src.write_bytes(source)
     assert compute_file_hash(src) == record["hash"]
@@ -932,7 +957,7 @@ def test_actual_predecessor_completed_split_record_is_stale_under_current_identi
     assert "_split_reuse_contract" not in record
 
     rel_path = record["path"]
-    source_bytes = (Path(__file__).with_name(rel_path)).read_bytes()
+    source_bytes = _historical_crlf_source_bytes(Path(__file__).with_name(rel_path))
     src = tmp_path / rel_path
     src.write_bytes(source_bytes)
     assert compute_file_hash(src) == record["hash"]
@@ -987,10 +1012,13 @@ def test_actual_predecessor_completed_split_record_is_stale_under_current_identi
     # Local sanity guard: the current identity inputs are what this test was
     # written against. If any of these move, the staleness measured below is
     # against the wrong baseline and this test needs revisiting rather than
-    # silently passing.
-    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
+    # silently passing. Advanced to leaf-capsule-v11 / file-reduction-v4 by the
+    # plan section 5.6.2 revision advance (0.14.9); the frozen 0.14.2
+    # ``large-file-v3:f3819f35...`` predecessor value is even further from the
+    # current identity now, so both staleness directions below still hold.
+    assert record_meta.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
     assert record_meta.MAX_LEAF_CAPSULE_CANONICAL_CHARS == 986272
-    assert record_meta.REDUCER_PROMPT_REVISION == "file-reduction-v3"
+    assert record_meta.REDUCER_PROMPT_REVISION == "file-reduction-v4"
     assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
     assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v5"
 
@@ -1420,3 +1448,391 @@ def test_true_v5_v8_v4_v2_predecessor_is_unpaid_completed_and_cross_plan_carry_p
     assert old_ids & current_ids == set()
     assert "main.py" in carry_result.division_plan_rels
     assert "main.py" not in carry_result.completed_split_reuse_rels
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 section 5.6.2 -- a COMPLETED split-file record stamped under either
+# predecessor revision regenerates (section 9.1 items 31-33); with no partial
+# state it reports zero quarantine; dependency propagation reprocesses selected
+# dependents only when enabled; current-identity records still reuse.
+# ---------------------------------------------------------------------------
+
+_S3_PRED_REVS = {
+    "leaf": ("LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v10"),
+    "reducer": ("REDUCER_PROMPT_REVISION", "file-reduction-v3"),
+}
+
+
+def _s3_split_identity_kwargs(source, max_chars):
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=max_chars,
+    )
+    tree = build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(max_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
+        language="python",
+    )
+    return dict(
+        source_chars=len(source), max_chars=max_chars, rel_path="main.py",
+        division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
+        structural_mode=plan.structural_mode,
+        imports_digest=deterministic_imports_digest(()),
+    )
+
+
+def _s3_predecessor_split_identity(monkeypatch, attr, old, kwargs):
+    with monkeypatch.context() as mp:
+        mp.setattr(record_meta, attr, old)
+        if hasattr(file_division, attr):
+            mp.setattr(file_division, attr, old)
+        return record_meta.expected_large_file_identity(**kwargs)
+
+
+@pytest.mark.parametrize("which", ["leaf", "reducer"])
+def test_s3_completed_split_record_under_a_predecessor_revision_regenerates(
+    tmp_path, monkeypatch, which
+):
+    """Objective 6 / item 31: a completed record stamped by a real predecessor
+    (``leaf-capsule-v10`` OR ``file-reduction-v3``) identity is rejected by the
+    completed identity and scheduled as changed work; with no partial state the
+    quarantine count is zero -- partial-recovery quarantine accounting does not
+    apply to a completed-record rerun.
+
+    P2-3 (completed-record rerun): the reject is proven at the CALL-MANIFEST
+    level, not only via ``changed_rels`` membership. The regenerated record is
+    absent from ``completed_split_reuse_rels`` and the manifest carries the
+    file's FULL current split call set -- one ``unit-documentation`` call per
+    leaf chunk, one ``file-reduction`` call per reducer node, one
+    ``file-synthesis`` call -- with no ``file-documentation`` call, no unrelated
+    owner, and a canonical digest."""
+    attr, old = _S3_PRED_REVS[which]
+    src = tmp_path / "main.py"
+    source = "\n".join(f"value_{i} = {i}" for i in range(1000)) + "\n"
+    src.write_text(source, encoding="utf-8", newline="")
+    max_chars = 2000
+    kwargs = _s3_split_identity_kwargs(source, max_chars)
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=max_chars,
+    )
+    tree = build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(max_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
+        language="python",
+    )
+    reducer_ids = [
+        n.node_id for n in tree.unit_consolidation_nodes + tree.general_nodes
+    ]
+    chunk_ids = [c.chunk_id for c in plan.chunks]
+    assert len(chunk_ids) >= 2 and len(reducer_ids) >= 1
+
+    pred_identity = _s3_predecessor_split_identity(monkeypatch, attr, old, kwargs)
+    current_identity = record_meta.expected_large_file_identity(**kwargs)
+    assert pred_identity.startswith("large-file-v3:")
+    assert pred_identity != current_identity
+
+    record = {
+        "path": "main.py", "hash": compute_file_hash(src),
+        "description": "documented by a predecessor build", "language": "python",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        "_large_file_identity": pred_identity,
+    }
+    file_map = {
+        "main.py": {"path": src, "rel_path": "main.py", "language": "python",
+                    "extension": ".py"},
+    }
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split", "max_content_chars": max_chars,
+        "truncation_head_ratio": 0.70,
+    }
+
+    def plan_for():
+        g = DependencyGraph()
+        g.add_file("main.py")
+        return build_pipeline_plan(
+            file_map, g, {"main.py"}, "main.py", {"main.py": record}, [], config,
+        )
+
+    # Direction 1: while the constant reads the predecessor value, the identical
+    # record is a valid completed record of its own release.
+    with monkeypatch.context() as mp:
+        mp.setattr(record_meta, attr, old)
+        if hasattr(file_division, attr):
+            mp.setattr(file_division, attr, old)
+        under_pred, _ = plan_for()
+    assert "main.py" in under_pred.unchanged_rels
+    assert "main.py" not in under_pred.changed_rels
+
+    # Direction 2: identical record under the real current revision -> scheduled
+    # as changed, with NO partial-recovery quarantine (no partial state exists).
+    under_cur, materials = plan_for()
+    assert "main.py" not in under_cur.unchanged_rels
+    assert "main.py" in under_cur.changed_rels
+    assert "main.py" not in materials.tree_states
+    assert sum(len(s.quarantine) for s in materials.tree_states.values()) == 0
+
+    # P2-3: the completed-record reject is a full split re-plan, proven at the
+    # manifest level. No partial state -> not a completed-split reuse.
+    assert "main.py" not in under_cur.completed_split_reuse_rels
+    assert "main.py" in under_cur.division_plan_rels
+    manifest = build_call_manifest(
+        [], sorted(under_cur.agent_rels), "single",
+        division_plans=materials.division_plans,
+        reduction_trees=materials.reduction_trees,
+        tree_states=materials.tree_states,
+    )
+    by_cat: dict[str, list[str]] = {}
+    for call in manifest.calls:
+        by_cat.setdefault(call.category, []).append(call.owner)
+    assert sorted(under_cur.agent_rels) == ["main.py"]                 # nothing else
+    assert sorted(by_cat["unit-documentation"]) == sorted(chunk_ids)   # every leaf
+    assert sorted(by_cat["file-reduction"]) == sorted(reducer_ids)     # every reducer
+    assert by_cat["file-synthesis"] == ["main.py"]                     # the final
+    assert by_cat.get("file-documentation", []) == []                  # not whole-file
+    assert len(manifest.calls) == len(chunk_ids) + len(reducer_ids) + 1
+    assert manifest.digest == hashlib.sha256(
+        "\n".join(c.call_id for c in manifest.calls).encode("utf-8")
+    ).hexdigest()
+
+
+@pytest.mark.parametrize("propagate", [True, False])
+def test_s3_stale_completed_split_record_propagation_is_mode_dependent(
+    tmp_path, monkeypatch, propagate
+):
+    """Objective 7 / item 32: a stale completed split record enters
+    ``changed_rels`` identically in both modes; a selected dependent is
+    scheduled ONLY when dependency propagation is enabled.
+
+    P2-3 (completed-record rerun): the propagation-mode difference is proven to
+    be a SCHEDULING difference (``process_rels`` vs ``unchanged_rels``
+    membership), NOT a planned-call difference. The split file's full current
+    call set is planned identically in both modes and the current-identity
+    dependent contributes NO manifest call in either mode -- with propagation on
+    it is pulled into ``process_rels`` and then resolved by identical-content
+    reuse, exactly as ``tests/integration/pipeline/test_planning.py``
+    ::``test_I1_propagate_changes_true_reimports_updated`` establishes (a
+    propagated dependent whose own content is unchanged is reused, not re-sent).
+    ``codedoc/core/planning.py`` states the same in situ: "Propagated dependents
+    keep normal reuse behaviour". Forcing a paid dependent call on a
+    dependency-only change would be a production behaviour change and is out of
+    scope here."""
+    src = tmp_path / "main.py"
+    dep = tmp_path / "dependent.py"
+    source = "\n".join(f"value_{i} = {i}" for i in range(1000)) + "\n"
+    src.write_text(source, encoding="utf-8", newline="")
+    dep.write_text("import main\n", encoding="utf-8")
+    max_chars = 2000
+    kwargs = _s3_split_identity_kwargs(source, max_chars)
+    pred_identity = _s3_predecessor_split_identity(
+        monkeypatch, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v10", kwargs
+    )
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=max_chars,
+    )
+    tree = build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(max_chars, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
+        language="python",
+    )
+    split_node_ids = {c.chunk_id for c in plan.chunks} | {
+        n.node_id for n in tree.unit_consolidation_nodes + tree.general_nodes
+    }
+    expected_split_calls = len(plan.chunks) + len(
+        tree.unit_consolidation_nodes + tree.general_nodes
+    ) + 1
+
+    main_rec = {
+        "path": "main.py", "hash": compute_file_hash(src),
+        "description": "predecessor split", "language": "python",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        "_large_file_identity": pred_identity,
+    }
+    dep_rec = {
+        "path": "dependent.py", "hash": compute_file_hash(dep),
+        "description": "dependent", "language": "python",
+        "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+        "_ordinary_path_identity": expected_ordinary_path_identity("dependent.py"),
+    }
+    file_map = {
+        "main.py": {"path": src, "rel_path": "main.py", "language": "python",
+                    "extension": ".py"},
+        "dependent.py": {"path": dep, "rel_path": "dependent.py",
+                         "language": "python", "extension": ".py"},
+    }
+    graph = DependencyGraph()
+    graph.add_file("main.py")
+    graph.add_file("dependent.py")
+    graph.add_dependency("dependent.py", "main.py")   # dependent imports main
+    config = {
+        "propagate_changes": propagate, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split", "max_content_chars": max_chars,
+        "truncation_head_ratio": 0.70,
+    }
+    result, materials = build_pipeline_plan(
+        file_map, graph, {"main.py", "dependent.py"}, "main.py",
+        {"main.py": main_rec, "dependent.py": dep_rec}, [], config,
+    )
+
+    # Direct identity invalidation of main.py is identical either way: it is
+    # changed work and is sent to an agent in both modes.
+    assert "main.py" in result.changed_rels
+    assert "main.py" in result.agent_rels
+    # The selected dependent is pulled into process_rels (not skipped) ONLY with
+    # propagation enabled; with propagation off it stays unchanged/skipped.
+    assert ("dependent.py" in result.process_rels) is propagate
+    assert ("dependent.py" in result.unchanged_rels) is (not propagate)
+    # ...but in NEITHER mode is the current-identity dependent sent to an agent.
+    assert "dependent.py" not in result.agent_rels
+    assert sorted(result.agent_rels) == ["main.py"]
+
+    # The planned call manifest is byte-identical in both modes: the full
+    # current split call set for main.py, nothing owned by dependent.py.
+    manifest = build_call_manifest(
+        [], sorted(result.agent_rels), "single",
+        division_plans=materials.division_plans,
+        reduction_trees=materials.reduction_trees,
+        tree_states=materials.tree_states,
+    )
+    by_cat: dict[str, list[str]] = {}
+    for call in manifest.calls:
+        by_cat.setdefault(call.category, []).append(call.owner)
+    assert len(manifest.calls) == expected_split_calls
+    assert sorted(by_cat["unit-documentation"]) == sorted(
+        c.chunk_id for c in plan.chunks
+    )
+    assert sorted(by_cat["file-reduction"]) == sorted(
+        n.node_id for n in tree.unit_consolidation_nodes + tree.general_nodes
+    )
+    assert by_cat["file-synthesis"] == ["main.py"]
+    assert by_cat.get("file-documentation", []) == []
+    non_synth_owners = {
+        call.owner for call in manifest.calls if call.category != "file-synthesis"
+    }
+    assert non_synth_owners <= split_node_ids           # no dependent.py owner
+    assert "dependent.py" not in {call.owner for call in manifest.calls}
+    assert manifest.digest == hashlib.sha256(
+        "\n".join(c.call_id for c in manifest.calls).encode("utf-8")
+    ).hexdigest()
+
+
+def _s3_completed_split_tree(root, monkeypatch, *, propagate):
+    """A project tree with a COMPLETED split record for ``main.py`` stamped
+    under the ``leaf-capsule-v10`` predecessor identity plus a current-identity
+    ``dependent.py`` importing it, ready for a real ``run_pipeline`` rerun. The
+    predecessor identity is stamped through ``monkeypatch.context()`` so the
+    live constant is restored before ``run_pipeline`` executes."""
+    root.mkdir(parents=True, exist_ok=True)
+    src = root / "main.py"
+    dep = root / "dependent.py"
+    source = "\n".join(f"value_{i} = {i}" for i in range(1000)) + "\n"
+    src.write_text(source, encoding="utf-8", newline="")
+    dep.write_text("import main\nq = main.value_0\n", encoding="utf-8")
+    max_chars = 2000
+    kwargs = _s3_split_identity_kwargs(source, max_chars)
+    pred_identity = _s3_predecessor_split_identity(
+        monkeypatch, "LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v10", kwargs
+    )
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"  # restored
+    out = root / "docs"
+    out.mkdir()
+    out.joinpath("codedoc.json").write_text(json.dumps({
+        "_codedoc": {"entry_file": "main.py", "schema_version": "1.4"},
+        "files": [
+            {"path": "main.py", "hash": compute_file_hash(src),
+             "description": "documented by a predecessor build", "language": "python",
+             "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+             "_large_file_identity": pred_identity},
+            {"path": "dependent.py", "hash": compute_file_hash(dep),
+             "description": "dependent", "language": "python",
+             "_analysis_revision": ANALYSIS_REVISION, "_analysis_mode": "single",
+             "_ordinary_path_identity": expected_ordinary_path_identity("dependent.py")},
+        ],
+    }), encoding="utf-8")
+    return {
+        "entry_file": "main.py", "analysis_mode": "single",
+        "large_file_strategy": "split", "max_content_chars": max_chars,
+        "output_dir": "docs", "documentation_scope": "all",
+        "propagate_changes": propagate, "parallel_agents": False,
+    }, pred_identity
+
+
+class _S3CountingSmartFake(SmartFake):
+    def __init__(self) -> None:
+        super().__init__()
+        self.completions = 0
+
+    def complete_json(self, prompt, system=""):
+        self.completions += 1
+        return super().complete_json(prompt, system)
+
+
+def test_s3_completed_split_record_rerun_paid_work_is_propagation_mode_independent(
+    tmp_path, monkeypatch
+):
+    """P2-3 (completed-record rerun) end to end through a real fake-provider
+    pipeline: a completed split record stamped ``leaf-capsule-v10`` is rejected
+    and fully re-documented; a current-identity ``dependent.py`` importing it is
+    REUSED with propagation on and SKIPPED with propagation off -- never
+    re-sent to the provider. The provider call count for the rerun is IDENTICAL
+    in both propagation modes: propagation changes which files are examined, not
+    how much paid work runs (mirrors
+    ``tests/integration/pipeline/test_planning.py``
+    ::``test_I1_propagate_changes_true_reimports_updated``)."""
+    completions: dict[bool, int] = {}
+    for propagate in (True, False):
+        root = tmp_path / f"prop_{propagate}"
+        config, pred_identity = _s3_completed_split_tree(
+            root, monkeypatch, propagate=propagate
+        )
+        provider = _S3CountingSmartFake()
+        monkeypatch.setattr(
+            "codedoc.pipeline.create_provider", lambda _c, _p=provider: _p
+        )
+        stats = run_pipeline(root, config)
+        completions[propagate] = provider.completions
+
+        assert stats["failed"] == 0
+        # main.py: the predecessor split identity was rejected and regenerated.
+        records = records_by_path(
+            read_codedoc_document(root / "docs" / "codedoc.json")
+        )
+        main_rec = records["main.py"]
+        assert main_rec["_large_file_identity"] != pred_identity
+        assert main_rec["_large_file_identity"].startswith("large-file-v3:")
+        assert main_rec["_analysis_revision"] == ANALYSIS_REVISION
+        # dependent.py: never re-sent. Reused (in process_rels) with propagation
+        # on; skipped (never entered process_rels) with propagation off.
+        assert stats.get("reused", 0) == (1 if propagate else 0)
+        assert stats.get("skipped", 0) == (0 if propagate else 1)
+
+    # The paid work is the same either way -- propagation is a scheduling
+    # concern, not a call-count one.
+    assert completions[True] == completions[False]
+    assert completions[True] > 0
+
+
+def test_s3_current_identity_split_ordinary_and_truncate_records_still_reuse(tmp_path):
+    """Objective 8 / item 33: the two advances do not over-invalidate. A
+    current-identity completed split record, a current ordinary record, and a
+    current truncate record are all still reused unpaid under v11/v4, while the
+    two advanced constants read their new values and a representative slice of
+    section 5.6.3 is unchanged by value (the full slice is asserted in
+    ``tests/unit/agents/test_response_correction.py``)."""
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
+    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v4"
+    assert record_meta.ANALYSIS_REVISION == "file-doc-v4"
+    assert file_division.FINAL_SYNTHESIS_REVISION == "file-synthesis-v4"
+    assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v5"
+    assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
+    assert file_division.LEAF_INPUT_DIGEST_REVISION == "leaf-input-v1"
+    assert file_division.REDUCTION_INPUT_DIGEST_REVISION == "reduction-input-v1"
+    assert file_division.FINAL_INPUT_DIGEST_REVISION == "final-input-v1"
+
+    assert "main.py" in _split_plan(tmp_path).unchanged_rels
+    assert "main.py" in _small_plan(tmp_path, max_chars=1000).unchanged_rels
+    assert "main.py" in _oversized_plan(
+        tmp_path, "truncate-v1:max=1000:head=0.7000"
+    ).unchanged_rels

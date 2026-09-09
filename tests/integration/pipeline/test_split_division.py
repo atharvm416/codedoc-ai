@@ -3381,3 +3381,75 @@ def test_live_validation_fixture_dry_run_topology_matches_frozen_plan(
     assert stats["documentation_calls_planned"] == _FIXTURE_INITIAL_PROVIDER_CALLS
     assert stats["prompt_review_calls_planned"] == 0
     assert stats["unit_documentation_calls_planned"] == _FIXTURE_LEAF_CALLS
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 section 5.6.2 -- FRESH-RUN call accounting across the two revision
+# advances (plan section 9.1 item 35 "FRESH", section 6.2). The reducer-prompt
+# advance (file-reduction-v3 -> v4) is bound into file_reduction_call_id and
+# therefore the run call-manifest digest; the leaf-capsule advance
+# (leaf-capsule-v10 -> v11) is not on the call path at all. A fresh run must
+# plan the identical count and categories of calls -- only opaque
+# file-reduction call IDs (and the digest) may move.
+# ---------------------------------------------------------------------------
+
+
+def _s3fresh_manifest(source: str, budget: int = 2000):
+    plan = build_division_plan(
+        rel_path="main.py", language="python", content=source,
+        source_budget_chars=budget,
+    )
+    tree = build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(budget, MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS),
+        language="python",
+    )
+    return build_call_manifest(
+        [], ["main.py"], "single",
+        division_plans={"main.py": plan}, reduction_trees={"main.py": tree},
+    )
+
+
+@pytest.mark.parametrize(
+    ("attr", "old_value", "on_call_path"),
+    [
+        ("LEAF_CAPSULE_SCHEMA_REVISION", "leaf-capsule-v10", False),
+        ("REDUCER_PROMPT_REVISION", "file-reduction-v3", True),
+    ],
+)
+def test_fresh_run_call_accounting_is_stable_across_the_0_14_9_revision_advance(
+    monkeypatch, attr, old_value, on_call_path
+) -> None:
+    # A source wide enough to plan at least one unit-consolidation reduction
+    # node -- otherwise file_reduction_call_id never appears and the reducer
+    # advance could not be observed.
+    source = "\n".join(f"value_{i} = {i}" for i in range(1000)) + "\n"
+    after = _s3fresh_manifest(source)
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, attr, old_value)
+        before = _s3fresh_manifest(source)
+
+    # Same count and same ordered (category, owner, ordinal) sequence: neither
+    # advance touches split topology or call categories.
+    assert len(before.calls) == len(after.calls)
+    def _shape(m):
+        return [(c.category, c.owner, c.ordinal) for c in m.calls]
+    assert _shape(before) == _shape(after)
+    categories = {c.category for c in after.calls}
+    assert "file-reduction" in categories       # the advance is observable here
+    assert categories <= {"unit-documentation", "file-reduction", "file-synthesis"}
+
+    changed = [
+        (a.category, a.owner)
+        for a, b in zip(after.calls, before.calls)
+        if a.call_id != b.call_id
+    ]
+    if on_call_path:
+        # Only the opaque reducer call IDs move -- and the digest with them.
+        assert changed and {cat for cat, _ in changed} == {"file-reduction"}
+        assert before.digest != after.digest
+    else:
+        # The leaf-capsule advance is not on the call path: no call ID moves,
+        # and the fresh-run digest is unchanged.
+        assert changed == []
+        assert before.digest == after.digest

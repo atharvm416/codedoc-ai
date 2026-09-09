@@ -125,6 +125,27 @@ def _distribution_is_under(dist: object, root: Path) -> bool:
         return False
 
 
+def _environment_bin() -> Path:
+    """The script directory of the interpreter running this harness.
+
+    Resolves the interpreter's *directory*, never the interpreter itself. A
+    POSIX ``venv`` symlinks ``bin/python`` at the interpreter it was created
+    from, so resolving the executable escapes the environment entirely and
+    lands in the base installation's ``bin`` -- while the console script under
+    test is a real file inside the venv. Windows copies ``python.exe`` into
+    ``Scripts\\``, so there the resolved executable stays inside the
+    environment and the difference is invisible; a check written against
+    ``Path(sys.executable).resolve().parent`` therefore passes on Windows and
+    fails on every POSIX runner.
+
+    Resolving the parent keeps symlinked-*directory* normalisation -- macOS
+    resolves ``/tmp`` to ``/private/tmp``, which the console path normalises
+    the same way -- without ever following ``bin/python`` out of the
+    environment being certified.
+    """
+    return Path(sys.executable).parent.resolve()
+
+
 def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, Path]:
     """Prove product imports and the console script come from this environment.
 
@@ -176,7 +197,7 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
     if not located:
         raise SmokeFailure("console-script-not-found")
     console_path = Path(located).resolve()
-    environment_bin = Path(sys.executable).resolve().parent
+    environment_bin = _environment_bin()
     if _is_within(console_path, repository):
         raise SmokeFailure("console-script-repository-origin")
     if not _is_within(console_path, environment_bin):
@@ -607,12 +628,19 @@ _LIVE_FIXTURE_PROFILE_TOPOLOGY: dict[str, dict[str, object]] = {
 #: call count is accepted.  Each value is the ``call_manifest_digest`` the
 #: real provider-free planning path produces for the frozen live fixture under
 #: that profile; the per-profile split topology and call counts are unchanged,
-#: but the final synthesis call id -- and therefore the manifest digest -- is
-#: bound to ``FINAL_SYNTHESIS_REVISION`` (``file_synthesis_call_id``), so each
-#: value is re-measured whenever that revision moves.
+#: but the manifest digest is the SHA-256 of the newline-joined initial
+#: call ids, so it moves whenever any of those ids move.  Two revisions feed
+#: it: ``FINAL_SYNTHESIS_REVISION`` through ``file_synthesis_call_id`` and
+#: ``REDUCER_PROMPT_REVISION`` through ``file_reduction_call_id`` (this fixture
+#: plans one unit-consolidation reduction node).  The 0.14.9 values below were
+#: re-measured after the ``file-reduction-v3`` -> ``file-reduction-v4`` advance
+#: of plan section 5.6.2: topology, call counts, and every category/owner/
+#: ordinal stayed identical, and the single reduction call id was the only id
+#: that changed under the advance (independently reproduced against the
+#: patched-back v3 constant, which reproduces the pre-0.14.9 digests exactly).
 _LIVE_FIXTURE_PROFILE_PLAN_DIGEST: dict[str, str] = {
-    "base": "a6ab302f8720aae654dd6c388c835a05cdf903c6085fdfe522f45492ceea4441",
-    "structure": "e6e05794b31b5c5987c284d7e2a26360b523212329e72bb195d1a48365d19c90",
+    "base": "37dbef2bd3c4ecd88126442bfa3b029d635a8eb62b67ecec1f95024a6a044544",
+    "structure": "a9b788ae61e7a10d4257e4b1180b2032922617866d300c2adadc273c8728f2ae",
 }
 
 

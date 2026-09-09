@@ -102,6 +102,17 @@ class _RecordingCorrectingProvider(_CorrectingProvider):
         self.prompts.append(prompt)
         return super().complete_json(prompt, system)
 
+
+def _real_correction(provider):
+    """A live, enabled ``ResponseCorrectionAgent`` sharing *provider*."""
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    return ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
 _LANG_FIXTURES = {
     "python": {
         "source": "def main():\n    return 0\n",
@@ -1625,3 +1636,120 @@ def test_run_fragment_fully_visible_over_bound_declaration_shortening_matrix(
         _leaf_agent_with_real_correction(still_bad).run_fragment(request)
     assert caught2.value.correction_attempted is True
     assert still_bad.calls == 2
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 F-1: the shared fixed-capsule cap-repair instruction reaches the real
+# split-leaf correction prompt (section 5.2 route coverage / 9.1 items 6, 20,
+# 21, 26). LEAF_CAPSULE_SCHEMA_REVISION advances to v11 (section 5.6.2 / G-4).
+# ---------------------------------------------------------------------------
+
+def test_leaf_capsule_schema_revision_advanced_to_v11():
+    """Mutation 18: reverting this alone must fail here, independently of the
+    reducer revision."""
+    from codedoc.core.file_division import LEAF_CAPSULE_SCHEMA_REVISION
+
+    assert LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
+
+
+def test_leaf_correction_prompt_carries_cap_repair_rule_with_260_target_for_description(
+    tmp_path,
+):
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _RecordingCorrectingProvider(
+        first_response={"description": "d" * 313},
+        corrected_response={"description": "Corrected, concise fragment."},
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = _real_correction(provider)
+
+    result = agent.run_fragment(request)
+
+    assert result == {"description": "Corrected, concise fragment."}
+    assert provider.calls == 2
+    initial_prompt, correction_prompt = provider.prompts
+    assert "Cap repair" not in initial_prompt
+    assert fda._FRAGMENT_SHAPE_BLOCK in correction_prompt
+    cap = correction_prompt.split("Cap repair", 1)
+    assert len(cap) == 2, "the correction prompt must carry the cap-repair rule"
+    rule = cap[1]
+    assert "rejected in full" in rule                       # clause 1
+    assert "must not be copied" in rule                     # clause 2
+    assert "shorter, meaning-preserving value" in rule      # clause 3
+    assert "description: within 260 characters" in rule     # clause 4 target
+    assert "every other valid field and fact" in rule       # clause 5
+    # The general preserve-valid-facts rule still stands (subordinate, not gone).
+    assert (
+        "Preserve every valid fact already present in the previous response"
+        in correction_prompt
+    )
+
+
+def test_leaf_correction_prompt_states_260_target_for_symbol_description(tmp_path):
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+    provider = _RecordingCorrectingProvider(
+        first_response={
+            "description": "ok",
+            "functions": [{"name": "alpha", "description": "x" * 313}],
+        },
+        corrected_response={
+            "description": "ok",
+            "functions": [{"name": "alpha", "description": "short"}],
+        },
+    )
+    agent = FileDocumentationAgent(provider, max_content_chars=1000)
+    agent._correction = _real_correction(provider)
+
+    agent.run_fragment(request)
+
+    rule = provider.prompts[1].split("Cap repair", 1)[1]
+    assert "functions[0].description: within 260 characters" in rule
+
+
+def test_leaf_correction_over_bound_signature_defers_with_no_rewrite_target(tmp_path):
+    """9.1 items 21, 26: a rejected source-backed ``signature`` gets clauses 1,
+    2, 5 and shape-contract deferral -- never a rewrite-shorter numeric
+    target."""
+    request, provider, agent = _corrected_leaf_signature_agent(tmp_path)
+
+    agent.run_fragment(request)
+
+    correction_prompt = provider.prompts[1]
+    cap = correction_prompt.split("Cap repair", 1)[1]
+    assert "functions[0].signature" in cap
+    assert "must not invent a shorter identifier" in cap
+    assert "within" not in cap and "260" not in cap
+    assert "shorter, meaning-preserving value" not in cap
+    # The signature shape contract is still stated exactly once (deferral, not
+    # duplication).
+    _assert_states_the_signature_contract_once(correction_prompt)
+
+
+def test_leaf_cap_repair_strict_acceptance_300_ok_301_fails_with_one_call(tmp_path):
+    request = _leaf_request(
+        tmp_path, content="def alpha():\n    return 1\n", max_content_chars=1000
+    )
+
+    ok = _CorrectingProvider(
+        first_response={"description": "d" * 313},
+        corrected_response={"description": "d" * 300},
+    )
+    ok_agent = FileDocumentationAgent(ok, max_content_chars=1000)
+    ok_agent._correction = _real_correction(ok)
+    assert ok_agent.run_fragment(request)["description"] == "d" * 300
+    assert ok.calls == 2
+
+    bad = _CorrectingProvider(
+        first_response={"description": "d" * 313},
+        corrected_response={"description": "d" * 301},
+    )
+    bad_agent = FileDocumentationAgent(bad, max_content_chars=1000)
+    bad_agent._correction = _real_correction(bad)
+    with pytest.raises(ResponseContractError) as caught:
+        bad_agent.run_fragment(request)
+    assert caught.value.correction_attempted is True
+    assert bad.calls == 2  # exactly one correction call, no third attempt

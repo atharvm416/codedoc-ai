@@ -199,7 +199,7 @@ jobs:
           /tmp/clean-env-wheel/bin/python -c "import os, pathlib, site, codedoc; expected = os.environ['CODEDOC_EXPECTED_VERSION']; origin = pathlib.Path(codedoc.__file__).resolve(); roots = [pathlib.Path(v).resolve() for v in (*site.getsitepackages(), site.getusersitepackages()) if v]; assert any(origin.is_relative_to(r) for r in roots), f'not installed from site-packages: {origin}'; assert codedoc.__version__ == expected, (codedoc.__version__, expected)"
           /tmp/clean-env-wheel/bin/codedoc --version
           /tmp/clean-env-wheel/bin/codedoc --help
-          /tmp/clean-env-wheel/bin/python "$HARNESS" --scenario all
+          /tmp/clean-env-wheel/bin/python "$HARNESS" --scenario all --candidate-version "$CODEDOC_EXPECTED_VERSION" --structure-profile base
       - name: Smoke-test the sdist-installed distribution
         run: |
           CODEDOC_EXPECTED_VERSION="$(python -c "import pathlib, tomllib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text(encoding='utf-8'))['project']['version'])")"
@@ -210,4 +210,4 @@ jobs:
           /tmp/clean-env-sdist/bin/python -c "import os, pathlib, site, codedoc; expected = os.environ['CODEDOC_EXPECTED_VERSION']; origin = pathlib.Path(codedoc.__file__).resolve(); roots = [pathlib.Path(v).resolve() for v in (*site.getsitepackages(), site.getusersitepackages()) if v]; assert any(origin.is_relative_to(r) for r in roots), f'not installed from site-packages: {origin}'; assert codedoc.__version__ == expected, (codedoc.__version__, expected)"
           /tmp/clean-env-sdist/bin/codedoc --version
           /tmp/clean-env-sdist/bin/codedoc --help
-          /tmp/clean-env-sdist/bin/python "$HARNESS" --scenario all
+          /tmp/clean-env-sdist/bin/python "$HARNESS" --scenario all --candidate-version "$CODEDOC_EXPECTED_VERSION" --structure-profile base

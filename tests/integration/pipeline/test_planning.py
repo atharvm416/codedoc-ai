@@ -1224,6 +1224,26 @@ def _s8_norm(value):
     return value
 
 
+def _s8_string_values(value):
+    """Yield every string scalar reachable inside a (possibly frozen) nested
+    snapshot structure -- dicts, MappingProxyType, lists, and tuples.
+
+    Used to inspect diagnostic detail *values* directly, rather than serializing
+    them to JSON first: ``json.dumps`` escapes ``\\`` to ``\\\\``, so a Windows
+    absolute path can sit inside a value yet not match an unescaped needle in
+    the serialized text."""
+    from types import MappingProxyType
+
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (dict, MappingProxyType)):
+        for item in value.values():
+            yield from _s8_string_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _s8_string_values(item)
+
+
 def _s8_event_spy(monkeypatch, events):
     def _spy(_config):
         events.append("provider")
@@ -1763,8 +1783,19 @@ def test_s8_explicit_entry_admission_matrix(tmp_path, monkeypatch, case_name, dr
     assert snap[cat + "_details_digest"] == canonical_stream_digest(details)
     assert snap[other + "_details_total"] == 0
     assert snap[other + "_details"] == ()
-    blob = json.dumps(_s8_norm(snap))
-    assert str(tmp_path) not in blob
+    # Privacy boundary: the absolute temporary project root must not reach
+    # either scanner diagnostic detail collection, in native-backslash or
+    # forward-slash form. Raw string values are inspected recursively -- never
+    # a JSON serialization, whose backslash escaping would let a Windows path
+    # sit in a value undetected. Unrelated snapshot fields are out of scope:
+    # the plan snapshot legitimately publishes an absolute output_dir
+    # (str(root / config["output_dir"])) by an established contract, asserted
+    # positively just below.
+    tmp_root_posix = tmp_path.as_posix()
+    for collection in ("scanner_admission_skip_details", "scanner_size_skip_details"):
+        for value in _s8_string_values(snap[collection]):
+            assert tmp_root_posix not in value.replace("\\", "/")
+    assert snap["output_dir"] == str(tmp_path / "out")
     for bad in ("\n", "\t", "\x1b", "\\"):
         assert bad not in d0["path"]
 

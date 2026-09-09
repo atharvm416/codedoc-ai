@@ -817,11 +817,14 @@ def _clean_fixed_scalar(
         )
         return None
     if len(trimmed) > max_chars:
+        # F-2: state the measured length and the cap plainly. The earlier
+        # "{len} chars over cap {cap}" wording read as if ``len`` itself were
+        # the overshoot; it is the total measured length.
         _report(
             collector,
             path,
             REMOVAL_RESPONSE_CAP,
-            f"{len(trimmed)} chars over cap {max_chars}",
+            f"length {len(trimmed)} exceeds cap {max_chars}",
         )
         return None
     return trimmed

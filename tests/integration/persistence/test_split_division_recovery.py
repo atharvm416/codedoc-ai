@@ -50,6 +50,7 @@ from tests.support.fixture_paths import FIXTURES_ROOT
 from tests.support.provider_failures import provider_failure_error
 from tests.support.providers import SmartFake
 from tests.support.run_metadata_cases import _view as run_metadata_view
+from tests.support.structure_extra import requires_structure_pack
 
 _CONTENT_HASH = "0" * 64
 _PLAN_DIGEST = "division-plan:" + "1" * 64
@@ -2465,3 +2466,1074 @@ def test_d1_edited_source_still_oversized_preserves_recovery(
     assert recovery_path.exists()
     assert recovery_path.read_bytes() == recovery_before
     assert _d1_partial_nodes_on_disk(recovery_path) == predecessor
+
+
+# ===========================================================================
+# 0.14.9 section 5.6 / section 13 step 11 -- the recovery & invalidation
+# regression matrix for the two authorized revision advances:
+#   LEAF_CAPSULE_SCHEMA_REVISION  leaf-capsule-v10  -> leaf-capsule-v11
+#   REDUCER_PROMPT_REVISION       file-reduction-v3 -> file-reduction-v4
+#
+# Every predecessor node here is stamped by the *production* identity function
+# with the constant patched back, never a hand-authored digest, and every
+# quarantine reason / retained set / re-execution is read from the real
+# validate_recovered_tree + build_pipeline_plan resume path.
+# ===========================================================================
+
+_S3_OLD_LEAF_REV = "leaf-capsule-v10"
+_S3_OLD_REDUCER_REV = "file-reduction-v3"
+
+
+def _s3_sha256(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _s3_source(units: int = 260) -> str:
+    return "\n".join(f"value_{i} = {i}" for i in range(units)) + "\n"
+
+
+def _s3_config(budget: int, *, propagate: bool = False) -> dict:
+    return {
+        "entry_file": "main.py",
+        "analysis_mode": "single",
+        "large_file_strategy": "split",
+        "max_content_chars": budget,
+        "max_parallel_files": 1,
+        "parallel_agents": False,
+        "propagate_changes": propagate,
+        "output_dir": "docs",
+        "file_retry_attempts": 0,
+    }
+
+
+def _s3_plan_tree(source: str, budget: int):
+    plan = file_division.build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=budget
+    )
+    tree = file_division.build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(
+            budget, file_division.MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS
+        ),
+        language="python",
+    )
+    return plan, tree
+
+
+def _s3_provider_identity(tmp_path, config: dict) -> str:
+    from codedoc.core.loader import load_config
+
+    return file_division.provider_execution_identity(load_config(tmp_path, config))
+
+
+def _s3_leaf_node(plan, chunk, *, content_hash, provider_identity, index):
+    return tree_node_state(
+        node_id=chunk.chunk_id,
+        node_type="leaf",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        input_digest=file_division.leaf_input_digest(
+            rel_path=plan.rel_path,
+            language="python",
+            chunk=chunk,
+            unit_indexes=plan.unit_positions(chunk),
+            unit_count=len(plan.units),
+        ),
+        execution_identity_digest=file_division.leaf_execution_identity(
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            provider_identity=provider_identity,
+            chunk=chunk,
+        ),
+        unit_id=None,
+        child_ids=(),
+        coverage_leaf_ids=(chunk.chunk_id,),
+        result={"description": f"restored leaf {index}", "chunk_id": chunk.chunk_id,
+                "unit_id": chunk.unit_id},
+    )
+
+
+def _s3_reducer_node(plan, tree, node, *, content_hash, provider_identity, child_results):
+    raw = tuple(
+        child_results[cid].get("narrative", child_results[cid].get("description", ""))
+        for cid in node.child_ids
+    )
+    result = {"narrative": f"restored {node.phase} narrative"}
+    red = tree_node_state(
+        node_id=node.node_id,
+        node_type=node.phase,
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        input_digest=file_division.reduction_input_digest(
+            rel_path=plan.rel_path,
+            phase=node.phase,
+            level=node.level,
+            unit_id=node.unit_id,
+            child_count=len(node.child_ids),
+            ordered_child_narratives=file_division.refine_narrative_inputs(raw),
+        ),
+        execution_identity_digest=file_division.reduction_execution_identity(
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            provider_identity=provider_identity,
+            node=node,
+        ),
+        unit_id=node.unit_id,
+        child_ids=node.child_ids,
+        coverage_leaf_ids=node.leaf_ids,
+        result=result,
+    )
+    return red, result
+
+
+def _s3_final_result(rel_path, *, imports=()):
+    """The exact post-cleaner combined object a live final-synthesis checkpoint
+    stores, so a CURRENT synthetic final node passes
+    ``_node_result_matches_live_schema`` and can be *retained* (not only
+    dependency-pruned). Built through the same ``process_response`` +
+    ``flat_combined_result`` path the recovery validator reapplies."""
+    from codedoc.agents.response_cleaning import clean_combined_report
+    from codedoc.agents.response_diagnostics import process_response
+    from codedoc.core.prompt_profiles import ResolvedProfile
+    from codedoc.core.result_assembly import flat_combined_result
+
+    resolved_shape = ResolvedProfile("single", None).resolve_block(
+        "combined", rel_path
+    )
+    cleaned = process_response(
+        file_division.canonical_json(
+            {"description": "A restored final synthesis narrative for the file."}
+        ),
+        mode="single", agent="combined", file_path=rel_path,
+        clean_reporter=clean_combined_report, resolved_shape=resolved_shape,
+    )
+    return flat_combined_result(rel_path, "python", list(imports), cleaned)
+
+
+def _s3_final_node(plan, tree, *, content_hash, provider_identity, results_by_id,
+                   prompt_profile_digest, imports=()):
+    final = tree.final_node
+    imports_digest = file_division.deterministic_imports_digest(imports)
+    ledger = file_division.build_fact_ledger(
+        [results_by_id[c.chunk_id] for c in plan.chunks],
+        language="python", chunks=plan.chunks, symbols=plan.symbols,
+    )
+    raw = tuple(
+        results_by_id[cid].get("narrative", results_by_id[cid].get("description", ""))
+        for cid in final.child_ids
+    )
+    manifest_json = file_division.final_synthesis_input(
+        rel_path=plan.rel_path, language="python", imports=imports,
+        root_narratives=file_division.refine_narrative_inputs(raw),
+        root_coverage_leaf_ids=final.leaf_ids, ledger=ledger,
+        max_chars=tree.synthesis_manifest_chars,
+    )
+    return tree_node_state(
+        node_id=final.node_id,
+        node_type="final",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        input_digest=file_division.final_input_digest(
+            imports_digest=imports_digest,
+            resolved_shape_digest=prompt_profile_digest,
+            manifest_json=manifest_json,
+        ),
+        execution_identity_digest=file_division.final_execution_identity(
+            rel_path=plan.rel_path,
+            content_hash=content_hash,
+            division_plan_digest=plan.plan_digest,
+            reduction_tree_digest=tree.tree_digest,
+            provider_identity=provider_identity,
+            prompt_profile_digest=prompt_profile_digest,
+            imports_digest=imports_digest,
+            node=final,
+        ),
+        unit_id=None,
+        child_ids=final.child_ids,
+        coverage_leaf_ids=final.leaf_ids,
+        result=_s3_final_result(plan.rel_path, imports=imports),
+    )
+
+
+def _s3_completed_state(plan, tree, *, content_hash, provider_identity,
+                        prompt_profile_digest, monkeypatch,
+                        stale_leaves=frozenset(), stale_reducers=frozenset()):
+    """A dependency-valid predecessor ``SplitTreeState`` over the CURRENT
+    plan/tree, with selected leaf indexes / reducer node-ids stamped under the
+    OLD revision (genuine predecessor identities via the production functions)."""
+    import json as _json
+
+    results_by_id: dict[str, dict] = {}
+    leaf_nodes = []
+    for index, chunk in enumerate(plan.chunks):
+        if index in stale_leaves:
+            with monkeypatch.context() as mp:
+                mp.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", _S3_OLD_LEAF_REV)
+                if hasattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION"):
+                    mp.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION",
+                               _S3_OLD_LEAF_REV)
+                node = _s3_leaf_node(plan, chunk, content_hash=content_hash,
+                                     provider_identity=provider_identity, index=index)
+        else:
+            node = _s3_leaf_node(plan, chunk, content_hash=content_hash,
+                                 provider_identity=provider_identity, index=index)
+        leaf_nodes.append(node)
+        results_by_id[chunk.chunk_id] = _json.loads(node.result_json)
+    reducer_nodes = []
+    for node in tree.unit_consolidation_nodes + tree.general_nodes:
+        child_results = {cid: results_by_id[cid] for cid in node.child_ids}
+        if node.node_id in stale_reducers:
+            with monkeypatch.context() as mp:
+                mp.setattr(file_division, "REDUCER_PROMPT_REVISION", _S3_OLD_REDUCER_REV)
+                if hasattr(record_meta, "REDUCER_PROMPT_REVISION"):
+                    mp.setattr(record_meta, "REDUCER_PROMPT_REVISION",
+                               _S3_OLD_REDUCER_REV)
+                red, result = _s3_reducer_node(
+                    plan, tree, node, content_hash=content_hash,
+                    provider_identity=provider_identity, child_results=child_results)
+        else:
+            red, result = _s3_reducer_node(
+                plan, tree, node, content_hash=content_hash,
+                provider_identity=provider_identity, child_results=child_results)
+        reducer_nodes.append(red)
+        results_by_id[node.node_id] = result
+    final_node = _s3_final_node(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        results_by_id=results_by_id, prompt_profile_digest=prompt_profile_digest,
+    )
+    return SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION,
+        owner="codedoc-ai",
+        rel_path=plan.rel_path,
+        content_hash=content_hash,
+        division_plan_digest=plan.plan_digest,
+        reduction_tree_digest=tree.tree_digest,
+        nodes=tuple(leaf_nodes + reducer_nodes + [final_node]),
+    )
+
+
+def _s3_validate_kwargs(plan, tree, content_hash, provider_identity):
+    from codedoc.core.prompt_profiles import NO_PROMPT_PROFILE_DIGEST, ResolvedProfile
+
+    return dict(
+        plan=plan,
+        tree=tree,
+        content_hash=content_hash,
+        provider_identity=provider_identity,
+        prompt_profile_digest=NO_PROMPT_PROFILE_DIGEST,
+        imports_digest=file_division.deterministic_imports_digest(()),
+        language="python",
+        resolved_shape=ResolvedProfile("single", None).resolve_block("combined", "main.py"),
+    )
+
+
+def _s3_build_plan(tmp_path, source, budget, recovered_state):
+    from codedoc.core.graph import DependencyGraph
+    from codedoc.core.planning import build_pipeline_plan
+
+    src = tmp_path / "main.py"
+    src.write_text(source, encoding="utf-8", newline="")
+    file_map = {
+        "main.py": {"path": src, "rel_path": "main.py", "language": "python",
+                    "extension": ".py"},
+    }
+    graph = DependencyGraph()
+    graph.add_file("main.py")
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split", "max_content_chars": budget,
+        "truncation_head_ratio": 0.70,
+    }
+    return build_pipeline_plan(
+        file_map, graph, {"main.py"}, "main.py", {}, [], config,
+        recovered_partials={"main.py": recovered_state},
+    )
+
+
+def _s3_plan_tree_for(rel_path, source, budget):
+    plan = file_division.build_division_plan(
+        rel_path=rel_path, language="python", content=source,
+        source_budget_chars=budget,
+    )
+    tree = file_division.build_reduction_tree(
+        plan,
+        synthesis_manifest_chars=max(
+            budget, file_division.MIN_SPLIT_SYNTHESIS_MANIFEST_CHARS
+        ),
+        language="python",
+    )
+    return plan, tree
+
+
+def _s3_build_two_file_plan(tmp_path, files, budget):
+    """``build_pipeline_plan`` over two independent split files, each with its
+    own recovered partial. ``files`` maps rel_path -> (source, SplitTreeState)."""
+    from codedoc.core.graph import DependencyGraph
+    from codedoc.core.planning import build_pipeline_plan
+
+    file_map = {}
+    graph = DependencyGraph()
+    recovered = {}
+    for rel, (source, state) in files.items():
+        path = tmp_path / rel
+        path.write_text(source, encoding="utf-8", newline="")
+        file_map[rel] = {"path": path, "rel_path": rel, "language": "python",
+                         "extension": ".py"}
+        graph.add_file(rel)
+        recovered[rel] = state
+    entry = next(iter(files))
+    config = {
+        "propagate_changes": False, "max_files": 0, "analysis_mode": "single",
+        "large_file_strategy": "split", "max_content_chars": budget,
+        "truncation_head_ratio": 0.70,
+    }
+    return build_pipeline_plan(
+        file_map, graph, set(files), entry, {}, [], config,
+        recovered_partials=recovered,
+    )
+
+
+def test_s3_final_synthesis_and_split_checkpoints_outside_the_closure_are_preserved(
+    tmp_path, monkeypatch
+):
+    """P2-4: a stale identity in ONE split file does not reach into an unrelated
+    split file whose recovered partial is fully current and dependency-closed.
+
+    ``affected.py`` carries a ``leaf-capsule-v10`` leaf -> that leaf plus its
+    dependency-pruned reducer and final are invalidated. ``unrelated.py`` carries
+    a wholly current partial -- every leaf, every reducer, AND the final-synthesis
+    node. After the real resume:
+
+    * every ``unrelated.py`` node -- leaves, reducers, and the final-synthesis
+      checkpoint -- is retained, with zero quarantine;
+    * no ``unrelated.py`` node (and not its ``file-synthesis`` call) appears in
+      the unpaid call manifest; only ``affected.py``'s closure does;
+    * ``split_reexecuted_nodes`` counts ``affected.py``'s closure only;
+    * ``recovery_conflict_files`` is 1, not 2.
+
+    Ordinary and truncate current-record preservation under the same two
+    advances is covered by
+    ``tests/integration/pipeline/test_cache_identity.py``
+    ::``test_s3_current_identity_split_ordinary_and_truncate_records_still_reuse``."""
+    budget = 1500
+    aff_source = _s3_source(600)
+    unr_source = _s3_source(620)
+    aff_plan, aff_tree = _s3_plan_tree_for("affected.py", aff_source, budget)
+    unr_plan, unr_tree = _s3_plan_tree_for("unrelated.py", unr_source, budget)
+    assert aff_plan.plan_digest != unr_plan.plan_digest        # genuinely distinct
+    assert len(aff_plan.chunks) >= 3 and len(unr_plan.chunks) >= 3
+
+    provider_identity = _s3_provider_identity(tmp_path, _s3_config(budget))
+    aff_hash = _s3_sha256(aff_source)
+    unr_hash = _s3_sha256(unr_source)
+    ppd = _s3_validate_kwargs(aff_plan, aff_tree, aff_hash, provider_identity)[
+        "prompt_profile_digest"
+    ]
+
+    aff_state = _s3_completed_state(
+        aff_plan, aff_tree, content_hash=aff_hash,
+        provider_identity=provider_identity, prompt_profile_digest=ppd,
+        monkeypatch=monkeypatch, stale_leaves={0},
+    )
+    unr_state = _s3_completed_state(
+        unr_plan, unr_tree, content_hash=unr_hash,
+        provider_identity=provider_identity, prompt_profile_digest=ppd,
+        monkeypatch=monkeypatch,
+    )
+
+    res, materials = _s3_build_two_file_plan(
+        tmp_path,
+        {"affected.py": (aff_source, aff_state),
+         "unrelated.py": (unr_source, unr_state)},
+        budget,
+    )
+
+    unr_final_id = unr_tree.final_node.node_id
+    unr_reducer_ids = {
+        n.node_id for n in unr_tree.unit_consolidation_nodes + unr_tree.general_nodes
+    }
+    unr_leaf_ids = {c.chunk_id for c in unr_plan.chunks}
+    unr_all_ids = unr_leaf_ids | unr_reducer_ids | {unr_final_id}
+
+    # ---- unrelated.py: every node retained, including final-synthesis --------
+    unr_ts = materials.tree_states["unrelated.py"]
+    assert set(unr_ts.by_id()) == unr_all_ids
+    assert unr_final_id in set(unr_ts.by_id())
+    assert unr_reducer_ids <= set(unr_ts.by_id())
+    assert list(unr_ts.quarantine) == []
+
+    # ---- affected.py: only its own closure is invalidated -------------------
+    aff_ts = materials.tree_states["affected.py"]
+    aff_stale_leaf = aff_plan.chunks[0].chunk_id
+    aff_reasons = {e.node_id: e.reason for e in aff_ts.quarantine}
+    assert aff_reasons[aff_stale_leaf] == "stale-identity"
+    assert set(aff_reasons.values()) == {"stale-identity", "input-digest-mismatch"}
+    assert aff_stale_leaf not in set(aff_ts.by_id())
+
+    assert materials.recovery_conflict_files == 1                 # not 2
+    assert materials.reexecuted_nodes == len(aff_state.nodes) - len(list(aff_ts.by_id()))
+
+    # ---- the unpaid manifest touches nothing in unrelated.py ---------------
+    manifest = build_call_manifest(
+        [], sorted(res.agent_rels), "single",
+        division_plans=materials.division_plans,
+        reduction_trees=materials.reduction_trees,
+        tree_states=materials.tree_states,
+    )
+    owners = {call.owner for call in manifest.calls}
+    assert owners.isdisjoint(unr_all_ids)                        # no retained node
+    assert "unrelated.py" not in owners                          # nor its synthesis
+    by_cat: dict[str, list[str]] = {}
+    for call in manifest.calls:
+        by_cat.setdefault(call.category, []).append(call.owner)
+    assert by_cat["file-synthesis"] == ["affected.py"]           # only the affected final
+    assert set(by_cat.get("unit-documentation", [])) == {aff_stale_leaf}
+    assert manifest.digest == _s3_sha256(
+        "\n".join(c.call_id for c in manifest.calls)
+    )
+
+
+def test_s3_isolated_stale_leaf_is_quarantined_stale_identity_and_re_executed(
+    tmp_path, monkeypatch
+):
+    """Objective 2: one leaf stamped ``leaf-capsule-v10`` while every other node
+    is current. The stale leaf is quarantined with the exact closed reason
+    ``stale-identity`` and leaves ``completed_ids``; its dependency-pruned
+    ancestors are ``input-digest-mismatch``; the unrelated current leaves stay
+    retained (reusable)."""
+    source = _s3_source(600)
+    budget = 1500
+    plan, tree = _s3_plan_tree(source, budget)
+    assert len(plan.chunks) >= 3
+    content_hash = _s3_sha256(source)
+    provider_identity = _s3_provider_identity(tmp_path, _s3_config(budget))
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+
+    state = _s3_completed_state(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        prompt_profile_digest=kw["prompt_profile_digest"], stale_leaves={0},
+        monkeypatch=monkeypatch,
+    )
+
+    retained, quarantine = file_division.validate_recovered_tree(state.nodes, **kw)
+    reasons = {e.node_id: e.reason for e in quarantine}
+    stale_leaf_id = plan.chunks[0].chunk_id
+    retained_ids = {n.node_id for n in retained}
+
+    assert reasons[stale_leaf_id] == "stale-identity"
+    assert stale_leaf_id not in retained_ids
+    current_leaf_ids = {c.chunk_id for c in plan.chunks[1:]}
+    assert current_leaf_ids <= retained_ids
+    leaf_ids = {c.chunk_id for c in plan.chunks}
+    for node_id, reason in reasons.items():
+        if node_id not in leaf_ids:
+            assert reason == "input-digest-mismatch", node_id
+    assert set(reasons.values()) == {"stale-identity", "input-digest-mismatch"}
+    assert len(quarantine) <= file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+
+    _plan_res, materials = _s3_build_plan(tmp_path, source, budget, state)
+    resumed = materials.tree_states["main.py"]
+    assert [e.reason for e in resumed.quarantine if e.node_id == stale_leaf_id] == [
+        "stale-identity"
+    ]
+    assert stale_leaf_id not in resumed.by_id()
+    assert current_leaf_ids <= set(resumed.by_id())
+    assert materials.recovery_conflict_files == 1
+
+
+def test_s3_isolated_stale_reducer_reaches_keep_and_is_quarantined_stale_identity(
+    tmp_path, monkeypatch
+):
+    """Objective 3 + 10 (reducer half): every child leaf is current; one reducer
+    is stamped ``file-reduction-v3``. Because its children are retained it
+    reaches ``_keep`` and fails on its own execution identity -> ``stale-identity``
+    (never ``input-digest-mismatch``); the pruned final is ``input-digest-mismatch``.
+
+    Then this exact v3->v4 scenario is driven through real ``build_pipeline_plan``
+    and ``build_call_manifest``: the stale reducer leaves ``completed_ids`` and
+    becomes an unpaid ``file-reduction`` call with its own node ID as owner; the
+    pruned final becomes the required ``file-synthesis`` call; the retained child
+    leaves generate no new ``unit-documentation`` calls; the manifest stays
+    canonical; and no unrelated node is scheduled."""
+    source = _s3_source(600)
+    budget = 1500
+    plan, tree = _s3_plan_tree(source, budget)
+    reducers = tree.unit_consolidation_nodes + tree.general_nodes
+    assert len(reducers) == 1, "this scenario needs exactly one reducer node"
+    target = reducers[0]
+    final_id = tree.final_node.node_id
+    content_hash = _s3_sha256(source)
+    provider_identity = _s3_provider_identity(tmp_path, _s3_config(budget))
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+
+    state = _s3_completed_state(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        prompt_profile_digest=kw["prompt_profile_digest"],
+        stale_reducers={target.node_id}, monkeypatch=monkeypatch,
+    )
+
+    # --- direct validator: exact reasons -------------------------------------
+    retained, quarantine = file_division.validate_recovered_tree(state.nodes, **kw)
+    reasons = {e.node_id: e.reason for e in quarantine}
+    retained_ids = {n.node_id for n in retained}
+    leaf_ids = {c.chunk_id for c in plan.chunks}
+
+    assert reasons[target.node_id] == "stale-identity"
+    assert reasons[final_id] == "input-digest-mismatch"
+    assert set(reasons) == {target.node_id, final_id}
+    assert leaf_ids <= retained_ids and retained_ids == leaf_ids  # only the leaves
+
+    # --- real planning-resume: completed_ids / re-plan / call manifest ------
+    _plan_res, materials = _s3_build_plan(tmp_path, source, budget, state)
+    resumed = materials.tree_states["main.py"]
+    completed_ids = set(resumed.by_id())
+
+    assert target.node_id not in completed_ids          # stale reducer excluded
+    assert final_id not in completed_ids
+    assert leaf_ids <= completed_ids                    # current children present
+    assert completed_ids == leaf_ids
+
+    previously_paid = {n.node_id for n in state.nodes}
+    assert previously_paid - completed_ids == {target.node_id, final_id}
+    assert materials.reexecuted_nodes == 2              # reducer + pruned final
+
+    manifest = build_call_manifest(
+        [], sorted(_plan_res.agent_rels), "single",
+        division_plans=materials.division_plans,
+        reduction_trees=materials.reduction_trees,
+        tree_states=materials.tree_states,
+    )
+    by_cat: dict[str, list[str]] = {}
+    for call in manifest.calls:
+        by_cat.setdefault(call.category, []).append(call.owner)
+
+    assert sorted(_plan_res.agent_rels) == ["main.py"]          # nothing unrelated
+    assert by_cat.get("unit-documentation", []) == []           # leaves reused
+    assert by_cat.get("file-documentation", []) == []
+    assert by_cat["file-reduction"] == [target.node_id]         # the exact reducer
+    assert by_cat["file-synthesis"] == ["main.py"]              # the pruned final
+    assert len(manifest.calls) == 2
+
+
+def test_s3_combined_whole_tree_invalidation_allocates_quarantine_reasons(
+    tmp_path, monkeypatch
+):
+    """Objective 4: a partial whose leaves are ALL ``leaf-capsule-v10`` and
+    reducers ALL ``file-reduction-v3``. Directly-stale leaves -> ``stale-identity``;
+    dependency-pruned reducers/final -> ``input-digest-mismatch``. The reason set
+    is closed, untruncated, and NOT flattened onto a single value."""
+    source = _s3_source(600)
+    budget = 1500
+    plan, tree = _s3_plan_tree(source, budget)
+    content_hash = _s3_sha256(source)
+    provider_identity = _s3_provider_identity(tmp_path, _s3_config(budget))
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+    reducer_ids = {n.node_id for n in tree.unit_consolidation_nodes + tree.general_nodes}
+
+    state = _s3_completed_state(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        prompt_profile_digest=kw["prompt_profile_digest"],
+        stale_leaves=set(range(len(plan.chunks))),
+        stale_reducers=reducer_ids, monkeypatch=monkeypatch,
+    )
+    node_count = len(plan.chunks) + len(reducer_ids) + 1
+    assert len(state.nodes) == node_count
+
+    retained, quarantine = file_division.validate_recovered_tree(state.nodes, **kw)
+    assert retained == ()
+    assert len(quarantine) == node_count
+    reasons = {e.node_id: e.reason for e in quarantine}
+    leaf_ids = {c.chunk_id for c in plan.chunks}
+    for node_id, reason in reasons.items():
+        assert reason in {"stale-identity", "input-digest-mismatch"}
+        assert reason == ("stale-identity" if node_id in leaf_ids
+                          else "input-digest-mismatch"), node_id
+    assert set(reasons.values()) == {"stale-identity", "input-digest-mismatch"}
+    assert len({e.node_id for e in quarantine}) == node_count       # no truncation
+    assert len(quarantine) <= file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+
+
+def _s3_chunks_for(units: int, budget: int) -> int | None:
+    """``len(plan.chunks)`` for *units* ``value_i = i`` lines at *budget*, or
+    ``None`` when the plan is chunk-capped (i.e. would exceed
+    ``MAX_CHUNKS_PER_FILE``)."""
+    try:
+        return len(
+            file_division.build_division_plan(
+                rel_path="main.py", language="python",
+                content=_s3_source(units), source_budget_chars=budget,
+            ).chunks
+        )
+    except file_division.SplitCapacityBlocked:
+        return None
+
+
+def _s3_source_for_exact_chunks(target: int, budget: int = 1000):
+    """Deterministically find a source producing *exactly* ``target`` leaf
+    chunks in the current environment (not a hardcoded length): the chunk count
+    is monotonic non-decreasing in the unit count, so bisect for the largest
+    unit count whose plan is not yet chunk-capped, then confirm it lands on
+    ``target``. Fails loudly if the packer no longer admits an exact-``target``
+    plan for this construction, forcing a deliberate refresh."""
+    lo, hi = 100, 60_000
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        count = _s3_chunks_for(mid, budget)
+        if count is not None and count <= target:
+            lo = mid
+        else:
+            hi = mid - 1
+    count = _s3_chunks_for(lo, budget)
+    assert count == target, (
+        f"no exact {target}-chunk plan for this construction (largest uncapped "
+        f"= {count} chunks at {lo} units); refresh the fixture construction"
+    )
+    return _s3_source(lo), lo
+
+
+@requires_structure_pack
+def test_s3_whole_plan_invalidation_at_the_maximum_plan_size_stays_within_the_bound(
+    tmp_path, monkeypatch
+):
+    """Objective 5 / 9.1 item 30: a MAXIMUM-size predecessor partial -- a
+    deterministic syntax-mode plan with exactly ``MAX_CHUNKS_PER_FILE`` (256)
+    leaf chunks -- whose entire stored node set is invalidated under the
+    revision advance.
+
+    Every directly-stale leaf is quarantined ``stale-identity``; every
+    dependency-pruned reducer/final is ``input-digest-mismatch``; every stored
+    node gets exactly one untruncated quarantine entry; ``node_count <= 2n`` and
+    ``node_count <= MAX_QUARANTINE_ENTRIES_PER_FILE == 512``; and
+    ``validate_recovered_tree`` raises no ``SplitRecoveryStateError``. A
+    tightened bound (below the produced population) DOES raise it -- proving the
+    headroom is real, not a constant compared with itself. Syntax mode is
+    required to hit exactly 256 deterministically, so this skips on a base
+    install like its sibling identity tests."""
+    source, _units = _s3_source_for_exact_chunks(file_division.MAX_CHUNKS_PER_FILE)
+    budget = 1000
+    plan, tree = _s3_plan_tree(source, budget)
+    n = len(plan.chunks)
+    assert n == file_division.MAX_CHUNKS_PER_FILE == 256
+    assert plan.structural_mode == "syntax"
+
+    all_reducer_ids = {
+        node.node_id for node in tree.unit_consolidation_nodes + tree.general_nodes
+    }
+    node_count = n + len(tree.all_nodes)          # leaves + reducers + final
+    assert len(tree.all_nodes) == len(all_reducer_ids) + 1
+    assert node_count <= 2 * n                    # the plan's own "at most 2n" claim
+    assert (
+        file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+        == 2 * file_division.MAX_CHUNKS_PER_FILE
+        == 512
+    )
+    assert node_count <= file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+
+    content_hash = _s3_sha256(source)
+    # Every stored node is expected to be invalidated, but not all by the same
+    # route: the 256 leaves carry leaf-capsule-v10 and the 8 reducers carry
+    # file-reduction-v3 (the relevant predecessor identities), while the single
+    # final node is built under its CURRENT identity and is rejected only by
+    # dependency closure once its children are pruned (input-digest-mismatch,
+    # not stale-identity). The retained/quarantined outcome is therefore
+    # independent of the provider identity; one fixed shaped value is used
+    # consistently for both state construction and validation (kw below).
+    provider_identity = "division-execution:" + "b" * 64
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+    state = _s3_completed_state(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        prompt_profile_digest=kw["prompt_profile_digest"],
+        stale_leaves=set(range(n)),
+        stale_reducers=all_reducer_ids,
+        monkeypatch=monkeypatch,
+    )
+    assert len(state.nodes) == node_count
+
+    retained, quarantine = file_division.validate_recovered_tree(state.nodes, **kw)
+
+    assert retained == ()
+    assert len(quarantine) == node_count
+    assert len(quarantine) <= file_division.MAX_QUARANTINE_ENTRIES_PER_FILE
+    # exactly one entry per stored node, no truncation / duplication
+    assert len({e.node_id for e in quarantine}) == node_count
+    assert {e.node_id for e in quarantine} == {n.node_id for n in state.nodes}
+
+    leaf_ids = {c.chunk_id for c in plan.chunks}
+    reasons = {e.node_id: e.reason for e in quarantine}
+    for node_id, reason in reasons.items():
+        assert reason == (
+            "stale-identity" if node_id in leaf_ids else "input-digest-mismatch"
+        ), node_id
+    assert set(reasons.values()) == {"stale-identity", "input-digest-mismatch"}
+
+    # Mutation resistance: a bound below the produced population raises through
+    # the real validator.
+    monkeypatch.setattr(
+        file_division, "MAX_QUARANTINE_ENTRIES_PER_FILE", node_count - 1
+    )
+    with pytest.raises(file_division.SplitRecoveryStateError):
+        file_division.validate_recovered_tree(state.nodes, **kw)
+
+
+def _s3_multi_reducer_tree(source, budget):
+    """The plan/tree for *source* plus the three reducer nodes this all-category
+    partial-resume scenario depends on, identified structurally (never by a
+    hardcoded node id): the two level-1 unit-consolidation reducers and the
+    single level-2 reducer whose child is the final node. Fails loudly if the
+    packer no longer produces that exact shape, forcing a deliberate refresh."""
+    plan, tree = _s3_plan_tree(source, budget)
+    reducers = tree.unit_consolidation_nodes + tree.general_nodes
+    assert len(plan.chunks) >= 20, "need a wide plan to spread leaves over 2 reducers"
+    assert len(reducers) == 3, f"scenario needs exactly 3 reducers, got {len(reducers)}"
+    level1 = [r for r in reducers if r.level == 1]
+    level2 = [r for r in reducers if r.level == 2]
+    assert len(level1) == 2 and len(level2) == 1, "need 2 level-1 + 1 level-2 reducers"
+    idx = {c.chunk_id: i for i, c in enumerate(plan.chunks)}
+    l1_leaves = [
+        {idx[c] for c in r.child_ids if c in idx} for r in level1
+    ]
+    assert all(l1_leaves), "each level-1 reducer must consolidate leaf chunks"
+    # {0, 1} must land wholly inside ONE level-1 reducer so the OTHER level-1
+    # reducer has only current children and can reach ``_keep``.
+    holder = next(
+        (i for i, leaves in enumerate(l1_leaves) if {0, 1} <= leaves), None
+    )
+    assert holder is not None, "stale leaves 0 and 1 are not under one reducer"
+    pruned_reducer = level1[holder]
+    clean_reducer = level1[1 - holder]
+    clean_leaves = l1_leaves[1 - holder]
+    assert clean_leaves.isdisjoint({0, 1}), "clean reducer unexpectedly holds a stale leaf"
+    l2 = level2[0]
+    assert set(l2.child_ids) == {pruned_reducer.node_id, clean_reducer.node_id}
+    assert tree.final_node.child_ids == (l2.node_id,)
+    return plan, tree, pruned_reducer, clean_reducer, l2
+
+
+@requires_structure_pack
+def test_s3_partial_resume_across_the_boundary_has_an_exact_per_category_call_delta(
+    tmp_path, monkeypatch
+):
+    """P2-3 (partial resume): the same saved partial, resumed once with every
+    stored identity CURRENT and once with a real predecessor slice
+    (``leaf-capsule-v10`` leaves + a ``file-reduction-v3`` reducer), yields an
+    EXACT current-vs-predecessor call-manifest delta -- not merely a nonzero
+    ``split_reexecuted_nodes`` against a zero baseline.
+
+    The partial carries every paid node of a three-reducer tree, so all three
+    invalidation categories are exercised:
+
+    * two directly-stale leaves -> ``stale-identity`` -> two ``unit-documentation``
+      calls, owned by exactly those chunk ids;
+    * their level-1 reducer, dependency-pruned -> ``input-digest-mismatch``;
+    * a sibling level-1 reducer stamped ``file-reduction-v3`` whose children are
+      all retained -> it reaches ``_keep`` and fails on its own identity ->
+      ``stale-identity``;
+    * the level-2 reducer and the final node, dependency-pruned ->
+      ``input-digest-mismatch`` -> three ``file-reduction`` calls (the two
+      level-1 reducers + the level-2 reducer) and one ``file-synthesis`` call.
+
+    The predecessor resume therefore plans STRICTLY more calls; the additional
+    call owners are EXACTLY the invalidated / pruned node ids; the per-category
+    delta is exact (unit-documentation +2, file-reduction +3, file-synthesis
+    +1); every unrelated retained leaf reappears in neither manifest; the
+    manifest stays canonical; and the nonzero quarantine count corresponds
+    one-for-one to the affected recovered nodes."""
+    source = _s3_source(3000)
+    budget = 1000
+    plan, tree, pruned_reducer, clean_reducer, l2 = _s3_multi_reducer_tree(source, budget)
+    assert plan.structural_mode == "syntax"
+    final_id = tree.final_node.node_id
+    leaf0, leaf1 = plan.chunks[0].chunk_id, plan.chunks[1].chunk_id
+    all_leaf_ids = {c.chunk_id for c in plan.chunks}
+    retained_leaf_ids = {c.chunk_id for c in plan.chunks[2:]}
+    all_node_ids = all_leaf_ids | {
+        pruned_reducer.node_id, clean_reducer.node_id, l2.node_id, final_id
+    }
+
+    content_hash = _s3_sha256(source)
+    provider_identity = _s3_provider_identity(tmp_path, _s3_config(budget))
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+
+    def _resume(*, stale_leaves=frozenset(), stale_reducers=frozenset()):
+        state = _s3_completed_state(
+            plan, tree, content_hash=content_hash,
+            provider_identity=provider_identity,
+            prompt_profile_digest=kw["prompt_profile_digest"],
+            monkeypatch=monkeypatch,
+            stale_leaves=stale_leaves, stale_reducers=stale_reducers,
+        )
+        plan_res, materials = _s3_build_plan(tmp_path, source, budget, state)
+        manifest = build_call_manifest(
+            [], sorted(plan_res.agent_rels), "single",
+            division_plans=materials.division_plans,
+            reduction_trees=materials.reduction_trees,
+            tree_states=materials.tree_states,
+        )
+        by_cat: dict[str, list[str]] = {}
+        for call in manifest.calls:
+            by_cat.setdefault(call.category, []).append(call.owner)
+        return state, plan_res, materials, manifest, by_cat
+
+    # ---- current baseline: every stored identity valid -> nothing re-planned --
+    state_cur, res_cur, mat_cur, man_cur, cat_cur = _resume()
+    assert sorted(res_cur.agent_rels) == ["main.py"]
+    assert mat_cur.reexecuted_nodes == 0
+    assert set(mat_cur.tree_states["main.py"].by_id()) == all_node_ids
+    assert not mat_cur.tree_states["main.py"].quarantine
+    assert list(man_cur.calls) == []                 # zero unpaid calls
+
+    # ---- predecessor slice: 2 stale leaves + 1 stale (but keep-reaching) reducer
+    state_pred, res_pred, mat_pred, man_pred, cat_pred = _resume(
+        stale_leaves={0, 1}, stale_reducers={clean_reducer.node_id},
+    )
+
+    # direct validator: the exact closed reasons for every affected node
+    retained, quarantine = file_division.validate_recovered_tree(state_pred.nodes, **kw)
+    reasons = {e.node_id: e.reason for e in quarantine}
+    assert {n.node_id for n in retained} == retained_leaf_ids
+    assert reasons == {
+        leaf0: "stale-identity",
+        leaf1: "stale-identity",
+        pruned_reducer.node_id: "input-digest-mismatch",
+        clean_reducer.node_id: "stale-identity",
+        l2.node_id: "input-digest-mismatch",
+        final_id: "input-digest-mismatch",
+    }
+    assert set(reasons.values()) == {"stale-identity", "input-digest-mismatch"}
+
+    # planning-resume accounting
+    resumed = mat_pred.tree_states["main.py"]
+    completed_ids = set(resumed.by_id())
+    assert completed_ids == retained_leaf_ids
+    previously_paid = {n.node_id for n in state_pred.nodes}
+    invalidated = {
+        leaf0, leaf1, pruned_reducer.node_id, clean_reducer.node_id,
+        l2.node_id, final_id,
+    }
+    assert previously_paid - completed_ids == invalidated
+    assert mat_pred.reexecuted_nodes == len(invalidated) == 6
+    assert {e.node_id for e in resumed.quarantine} == invalidated   # 1:1 with nodes
+    assert mat_pred.recovery_conflict_files == 1
+
+    # ---- the call-manifest delta is exact, per category and per owner --------
+    assert sorted(res_pred.agent_rels) == ["main.py"]               # nothing unrelated
+    assert sorted(cat_pred["unit-documentation"]) == sorted([leaf0, leaf1])
+    assert sorted(cat_pred["file-reduction"]) == sorted(
+        [pruned_reducer.node_id, clean_reducer.node_id, l2.node_id]
+    )
+    assert cat_pred["file-synthesis"] == ["main.py"]
+    assert cat_pred.get("file-documentation", []) == []
+    assert len(man_pred.calls) == 6
+
+    # no retained leaf is scheduled
+    assert retained_leaf_ids.isdisjoint(
+        {owner for owners in cat_pred.values() for owner in owners}
+    )
+
+    # strictly more work than the current resume, and the increase is EXACTLY
+    # the invalidated/pruned closure -- nothing dropped, nothing extra.
+    owners_cur = {(c.category, c.owner) for c in man_cur.calls}
+    owners_pred = {(c.category, c.owner) for c in man_pred.calls}
+    assert owners_cur == set()
+    assert owners_pred - owners_cur == {
+        ("unit-documentation", leaf0),
+        ("unit-documentation", leaf1),
+        ("file-reduction", pruned_reducer.node_id),
+        ("file-reduction", clean_reducer.node_id),
+        ("file-reduction", l2.node_id),
+        ("file-synthesis", "main.py"),
+    }
+    assert owners_cur - owners_pred == set()
+    for cat, added in (
+        ("unit-documentation", 2), ("file-reduction", 3), ("file-synthesis", 1),
+    ):
+        assert len(cat_pred.get(cat, [])) - len(cat_cur.get(cat, [])) == added
+
+    # canonical manifest digest over the planned call ids
+    assert man_pred.digest == _s3_sha256("\n".join(c.call_id for c in man_pred.calls))
+
+
+def test_s3_corrected_leaf_capsule_is_a_resumable_checkpoint_across_the_advance(
+    tmp_path, monkeypatch
+):
+    """Objective 1: a leaf whose first response is an over-cap ``description``
+    (real ``fixed_cap_exceeded`` -> the 0.14.9 F-1 cap-repair route) is
+    corrected, checkpointed, and -- after an interrupt on a later leaf -- is
+    RESTORED unchanged on resume (zero re-execution), its checkpoint carrying
+    the corrected shorter description. The corrected node is a genuine
+    resumable checkpoint (section 5.6.1 premise), current under v11/v4."""
+    over_cap = "d" * 320
+    corrected = "A concise corrected fragment description."
+
+    class _CorrectFirstLeafThenStop(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.first_leaf_failed = False
+            self.leaf_checkpoints = 0
+            self.correction_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "Previous response (verbatim" in prompt:
+                self.correction_calls += 1
+                return json.dumps({"description": corrected})
+            if "This is one bounded fragment of a larger" in prompt:
+                if not self.first_leaf_failed:
+                    self.first_leaf_failed = True
+                    return json.dumps({"description": over_cap})
+                self.leaf_checkpoints += 1
+                if self.leaf_checkpoints >= 2:
+                    raise LLMError("interrupt after the corrected leaf checkpointed")
+            return super().complete_json(prompt, system)
+
+    source = _s3_source(600)
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    config = {**_s3_config(1500), "response_correction_enabled": True}
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+
+    provider = _CorrectFirstLeafThenStop()
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: provider)
+        stats = run_pipeline(tmp_path, config)
+    assert stats["failed"] == 1
+    assert provider.correction_calls == 1
+    assert recovery_path.exists()
+
+    partial = json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+        "partial_files"
+    ]["main.py"]
+    checkpointed = {n["node_id"]: n for n in partial["nodes"]}
+    corrected_nodes = [
+        n for n in checkpointed.values()
+        if json.loads(n["result_json"]).get("description") == corrected
+    ]
+    assert len(corrected_nodes) == 1, "the corrected leaf capsule must be checkpointed"
+    corrected_node = corrected_nodes[0]
+    # The checkpoint carries the corrected shorter text and NOT the rejected
+    # over-cap value -- no metadata was lost persisting the corrected capsule.
+    assert json.loads(corrected_node["result_json"])["description"] == corrected
+    assert over_cap not in corrected_node["result_json"]
+    assert corrected_node["node_type"] == "leaf"
+
+    # Resume under the same current v11/v4 constants: the corrected leaf is
+    # restored, never re-executed or quarantined.
+    resume_provider = SmartFake()
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: resume_provider)
+        resume_stats = run_pipeline(tmp_path, config)
+
+    assert resume_stats["failed"] == 0
+    assert resume_stats["split_restored_complete_chunks"] >= 1
+    assert resume_stats["split_quarantined_nodes"] == 0
+    # The corrected leaf was not re-paid: the resume runs strictly fewer leaf
+    # calls than a fresh run of the same plan would.
+    assert resume_provider.doc_calls < len(_s3_plan_tree(source, 1500)[0].chunks) + 1
+    assert not recovery_path.exists()
+    record = json.loads(
+        (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
+    )["files"][0]
+    assert record.get("description")
+
+
+def test_s3_resume_across_the_revision_boundary_replans_quarantined_leaves(
+    tmp_path, monkeypatch
+):
+    """Objective 10 (leaf half): a genuine interrupted split whose leaf
+    checkpoints were written while ``LEAF_CAPSULE_SCHEMA_REVISION`` is patched
+    back to ``leaf-capsule-v10``, then resumed under the real current
+    ``leaf-capsule-v11``:
+      - the stale leaf checkpoints leave ``completed_ids``;
+      - the resumed run PLANS MORE work than an identical-identity resume;
+      - ``split_quarantined_nodes`` is nonzero and drives ``split_reexecuted_nodes``;
+      - the run still completes and clears recovery.
+
+    Only the leaf revision is patched back here: the interrupt fires after the
+    second leaf chunk and before any reducer or final checkpoint, so the
+    saved partial contains no reducer checkpoint and the reducer revision is
+    irrelevant to what this particular resume validates. Reducer-transition
+    resume evidence (a checkpoint stamped ``file-reduction-v3`` reaching
+    ``_keep`` and re-planned as an unpaid ``file-reduction`` call) is supplied
+    by ``test_s3_isolated_stale_reducer_reaches_keep_and_is_quarantined_stale_identity``
+    and the combined whole-tree scenario, not here."""
+    source = _s3_source(600)
+    budget = 1500
+    config = _s3_config(budget)
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+
+    # A real interrupted run under the OLD leaf revision -> genuine
+    # leaf-capsule-v10 leaf checkpoints on disk.
+    original_leaf = Orchestrator.process_leaf_chunk
+    seen = {"n": 0}
+
+    def _fail_after_two(self, request):
+        if seen["n"] >= 2:
+            raise LLMError("interrupted for the v10/v3 recovery fixture")
+        seen["n"] += 1
+        return original_leaf(self, request)
+
+    # Only LEAF_CAPSULE_SCHEMA_REVISION is patched back: the interrupt fires
+    # before any reducer checkpoint, so only leaf identities matter, and the
+    # reducer revision is not on the call-manifest path this run validates.
+    (tmp_path / "main.py").write_text(source, encoding="utf-8", newline="")
+    with monkeypatch.context() as mp:
+        mp.setattr(file_division, "LEAF_CAPSULE_SCHEMA_REVISION", _S3_OLD_LEAF_REV)
+        mp.setattr(record_meta, "LEAF_CAPSULE_SCHEMA_REVISION", _S3_OLD_LEAF_REV)
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: SmartFake())
+        mp.setattr(Orchestrator, "process_leaf_chunk", _fail_after_two)
+        interrupted = run_pipeline(tmp_path, config)
+    assert interrupted["failed"] == 1
+    assert recovery_path.exists()
+    stale_ids = [
+        n["node_id"]
+        for n in json.loads(recovery_path.read_text(encoding="utf-8"))["_codedoc"][
+            "partial_files"
+        ]["main.py"]["nodes"]
+    ]
+    assert len(stale_ids) == 2
+
+    # Baseline: a resume whose SAME two checkpoints are current re-plans nothing
+    # extra (reexecuted == 0), so any increase below is the invalidation cost.
+    plan, tree = _s3_plan_tree(source, budget)
+    content_hash = _s3_sha256(source)
+    provider_identity = _s3_provider_identity(tmp_path, config)
+    kw = _s3_validate_kwargs(plan, tree, content_hash, provider_identity)
+    current_two = _s3_completed_state(
+        plan, tree, content_hash=content_hash, provider_identity=provider_identity,
+        prompt_profile_digest=kw["prompt_profile_digest"], monkeypatch=monkeypatch,
+    )
+    current_partial = SplitTreeState(
+        schema_version=SPLIT_PARTIAL_SCHEMA_VERSION, owner="codedoc-ai",
+        rel_path="main.py", content_hash=content_hash,
+        division_plan_digest=plan.plan_digest, reduction_tree_digest=tree.tree_digest,
+        nodes=tuple(n for n in current_two.nodes if n.node_id in set(stale_ids)),
+    )
+    _pr_cur, mat_cur = _s3_build_plan(tmp_path, source, budget, current_partial)
+    baseline_reexecuted = mat_cur.reexecuted_nodes
+    assert set(mat_cur.tree_states["main.py"].by_id()) == set(stale_ids)
+    assert not mat_cur.tree_states["main.py"].quarantine
+    assert baseline_reexecuted == 0
+
+    # Resume the REAL interrupted recovery under current v11/v4.
+    resume_provider = SmartFake()
+    with monkeypatch.context() as mp:
+        mp.setattr("codedoc.pipeline.create_provider", lambda _c: resume_provider)
+        resumed = run_pipeline(tmp_path, config)
+
+    assert resumed["failed"] == 0
+    assert resumed["split_quarantined_nodes"] >= 2
+    assert resumed["split_reexecuted_nodes"] >= 2
+    assert resumed["split_restored_complete_chunks"] == 0     # nothing v10 restored
+    # the resumed plan pays for the invalidated leaves that a current-identity
+    # resume would have restored for free.
+    assert resumed["split_reexecuted_nodes"] > baseline_reexecuted
+    assert not recovery_path.exists()
+    assert json.loads(
+        (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
+    )["files"][0].get("description")

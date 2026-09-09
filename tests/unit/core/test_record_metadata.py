@@ -305,26 +305,30 @@ def test_patched_registry_excludes_unregistered_production_keys(private_key):
 def test_active_split_and_analysis_identity_roster_is_frozen_by_value() -> None:
     """The complete active identity roster, pinned by value.
 
-    Four identities carry the conservative narrative-terminology and
-    source-backed structural contract: ordinary analysis `file-doc-v4`, the
-    split leaf capsule `leaf-capsule-v10`, the split fact ledger
-    `fact-ledger-v7`, and the final synthesis `file-synthesis-v4`. Every other
-    active split identity is frozen at its established value, and so is every
-    fixed leaf/reduction bound. This freeze exists so a change to one revision
-    cannot silently move another, and so that advancing one of the four cannot
-    drag an unrelated identity along."""
+    The split leaf capsule `leaf-capsule-v11` and the internal reduction prompt
+    `file-reduction-v4` are the two identities the 0.14.9 F-1 correction-prompt
+    change advances (plan section 5.6.2). Ordinary analysis `file-doc-v4`, the
+    split fact ledger `fact-ledger-v7`, and the final synthesis
+    `file-synthesis-v4` carry the established narrative-terminology / structural
+    contract. Every other active split identity (section 5.6.3) is frozen at its
+    established value, and so is every fixed leaf/reduction bound. This freeze
+    exists so a change to one revision cannot silently move another, and so that
+    advancing one cannot drag an unrelated identity along."""
     from codedoc.core import file_division
 
-    # Identities carrying the current truth/terminology contract.
+    # The two identities advanced by the 0.14.9 output-affecting prompt change.
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
+    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v4"
+
+    # Identities carrying the current truth/terminology contract (not advanced).
     assert record_meta.ANALYSIS_REVISION == "file-doc-v4"
-    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
     assert file_division.LEDGER_SCHEMA_REVISION == "fact-ledger-v7"
     assert file_division.FINAL_SYNTHESIS_REVISION == "file-synthesis-v4"
 
-    # Deliberately not advanced: their governed bytes/topology did not change.
+    # Deliberately not advanced (section 5.6.3): their governed bytes/topology
+    # did not change.
     assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
     assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v5"
-    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v3"
     assert file_division.STRUCTURE_SCHEMA_REVISION == "source-structure-v2"
     assert file_division.UNIT_SCHEMA_REVISION == "semantic-unit-v3"
     assert file_division.REDUCTION_CAPSULE_SCHEMA_REVISION == "reduction-capsule-v1"

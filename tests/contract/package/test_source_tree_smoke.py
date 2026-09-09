@@ -55,14 +55,26 @@ def test_sdist_manifest_includes_public_docs_and_excludes_repository_tests():
 
 
 def test_optional_structure_dependency_is_pinned_and_runtime_optional():
-    import tomllib
+    try:
+        import tomllib
+    except ModuleNotFoundError:  # Python 3.10 has no stdlib tomllib
+        import tomli as tomllib
 
     project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
-    optional = project["project"]["optional-dependencies"]
+    metadata = project["project"]
+    optional = metadata["optional-dependencies"]
 
     assert "tree-sitter-language-pack==0.13.0" in optional["structure"]
     assert "tree-sitter-language-pack==0.13.0" in optional["dev"]
     assert not any(
         dependency.startswith("tree-sitter-language-pack")
-        for dependency in project["project"]["dependencies"]
+        for dependency in metadata["dependencies"]
     )
+    assert not any(
+        dependency.startswith("tomli") for dependency in metadata["dependencies"]
+    )
+    assert not any(
+        dependency.startswith("tomli") for dependency in optional["structure"]
+    )
+    assert "tomli>=2; python_version < '3.11'" in optional["dev"]
+    assert metadata["requires-python"] == ">=3.10,<3.13"
