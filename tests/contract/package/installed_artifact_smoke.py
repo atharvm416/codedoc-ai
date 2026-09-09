@@ -125,6 +125,27 @@ def _distribution_is_under(dist: object, root: Path) -> bool:
         return False
 
 
+def _environment_bin() -> Path:
+    """The script directory of the interpreter running this harness.
+
+    Resolves the interpreter's *directory*, never the interpreter itself. A
+    POSIX ``venv`` symlinks ``bin/python`` at the interpreter it was created
+    from, so resolving the executable escapes the environment entirely and
+    lands in the base installation's ``bin`` -- while the console script under
+    test is a real file inside the venv. Windows copies ``python.exe`` into
+    ``Scripts\\``, so there the resolved executable stays inside the
+    environment and the difference is invisible; a check written against
+    ``Path(sys.executable).resolve().parent`` therefore passes on Windows and
+    fails on every POSIX runner.
+
+    Resolving the parent keeps symlinked-*directory* normalisation -- macOS
+    resolves ``/tmp`` to ``/private/tmp``, which the console path normalises
+    the same way -- without ever following ``bin/python`` out of the
+    environment being certified.
+    """
+    return Path(sys.executable).parent.resolve()
+
+
 def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, Path]:
     """Prove product imports and the console script come from this environment.
 
@@ -176,7 +197,7 @@ def _prove_installed_origin(expected_version: str | None = None) -> tuple[Path, 
     if not located:
         raise SmokeFailure("console-script-not-found")
     console_path = Path(located).resolve()
-    environment_bin = Path(sys.executable).resolve().parent
+    environment_bin = _environment_bin()
     if _is_within(console_path, repository):
         raise SmokeFailure("console-script-repository-origin")
     if not _is_within(console_path, environment_bin):

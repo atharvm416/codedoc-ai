@@ -1913,3 +1913,98 @@ def test_scenario_exit_fidelity_executes(tmp_path, monkeypatch):
     work = tmp_path / "work"
     work.mkdir()
     harness._scenario_exit_fidelity(work, tmp_path / "codedoc-double.exe")
+
+
+# ---------------------------------------------------------------------------
+# Console-script environment binding across POSIX symlinked venvs.
+#
+# `_prove_installed_origin` requires the resolved `codedoc` console script to
+# live inside the running interpreter's script directory. Computing that
+# directory as `Path(sys.executable).resolve().parent` is wrong on every POSIX
+# runner: `venv` symlinks `bin/python` at the interpreter it was created from,
+# so resolving the executable lands in the base installation's `bin` while the
+# console script is a real file in the venv -- the check then fails with
+# `console-script-environment-mismatch`. Windows copies `python.exe` into
+# `Scripts\`, so the resolved executable stays inside the environment and the
+# defect is invisible there. That asymmetry is why it reached CI unnoticed.
+# ---------------------------------------------------------------------------
+
+
+def _can_symlink(tmp_path) -> bool:
+    """Whether this platform/permission set can create a symlink."""
+    target = tmp_path / "_probe_target"
+    target.mkdir(exist_ok=True)
+    link = tmp_path / "_probe_link"
+    try:
+        os.symlink(target, link, target_is_directory=True)
+    except (OSError, NotImplementedError, AttributeError):
+        return False
+    finally:
+        try:
+            link.unlink()
+        except OSError:
+            pass
+    return True
+
+
+def test_environment_bin_never_follows_a_symlinked_interpreter(tmp_path, monkeypatch):
+    """A POSIX-shaped venv whose `bin/python` symlinks out to a base
+    installation still resolves to its OWN script directory, so a console
+    script sitting beside that symlink is correctly recognised as belonging to
+    the environment under test."""
+    if not _can_symlink(tmp_path):
+        pytest.skip("symlink creation unavailable on this platform")
+
+    base_bin = tmp_path / "base" / "bin"
+    base_bin.mkdir(parents=True)
+    base_python = base_bin / "python3"
+    base_python.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    venv_bin = tmp_path / "venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    venv_python = venv_bin / "python"
+    os.symlink(base_python, venv_python)          # exactly what `venv` does
+    console = venv_bin / "codedoc"
+    console.write_text("#!/bin/sh\n", encoding="utf-8")
+
+    monkeypatch.setattr(harness.sys, "executable", str(venv_python))
+
+    resolved = harness._environment_bin()
+    assert resolved == venv_bin.resolve(), resolved
+    assert resolved != base_bin.resolve()
+    # The console script beside the symlinked interpreter belongs to the
+    # environment -- this is the exact containment `_prove_installed_origin`
+    # asserts, and what the pre-fix computation got wrong.
+    assert harness._is_within(console.resolve(), resolved)
+
+    # The superseded computation is proven wrong on this layout, so a
+    # regression back to it fails here rather than only on a POSIX runner.
+    superseded = Path(harness.sys.executable).resolve().parent
+    assert superseded == base_bin.resolve()
+    assert not harness._is_within(console.resolve(), superseded)
+
+
+def test_environment_bin_matches_a_copied_interpreter_layout(tmp_path, monkeypatch):
+    """The Windows layout -- `python.exe` copied into the environment rather
+    than symlinked -- keeps working, so the fix is not platform-specific."""
+    env_bin = tmp_path / "env" / "Scripts"
+    env_bin.mkdir(parents=True)
+    interpreter = env_bin / "python.exe"
+    interpreter.write_text("", encoding="utf-8")
+    console = env_bin / "codedoc.exe"
+    console.write_text("", encoding="utf-8")
+
+    monkeypatch.setattr(harness.sys, "executable", str(interpreter))
+
+    resolved = harness._environment_bin()
+    assert resolved == env_bin.resolve(), resolved
+    assert harness._is_within(console.resolve(), resolved)
+
+
+def test_prove_installed_origin_computes_environment_bin_from_the_helper():
+    """The production check routes through `_environment_bin`, so the two
+    tests above actually guard `_prove_installed_origin` rather than an
+    unused helper."""
+    source = inspect.getsource(harness._prove_installed_origin)
+    assert "environment_bin = _environment_bin()" in source
+    assert "Path(sys.executable).resolve().parent" not in source
