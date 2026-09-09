@@ -426,7 +426,7 @@ def test_stale_leaf_capsule_node_is_quarantined_on_identity_not_schema(monkeypat
         plan, content_hash=content_hash, provider_identity=provider_identity
     )
     monkeypatch.undo()
-    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
 
     retained, quarantine = validate_recovered_tree(
         stale_nodes, plan=plan, tree=tree, content_hash=content_hash,
@@ -675,7 +675,8 @@ def test_non_advanced_revisions_hold_their_established_values():
     assert file_division.UNIT_SCHEMA_REVISION == "semantic-unit-v3"
     assert file_division.PACKER_SCHEMA_REVISION == "division-packer-v6"
     assert file_division.REDUCTION_PACKING_REVISION == "reduction-packing-v5"
-    assert file_division.REDUCER_PROMPT_REVISION == "file-reduction-v3"
+    # REDUCER_PROMPT_REVISION advanced (file-reduction-v3 -> v4) under 0.14.9
+    # plan section 5.6.2, so it is no longer one of the non-advanced revisions.
     assert file_division.REDUCTION_CAPSULE_SCHEMA_REVISION == "reduction-capsule-v1"
     assert file_division.EXECUTION_IDENTITY_SCHEMA_REVISION == "division-execution-v6"
     assert file_division.SPLIT_PARTIAL_SCHEMA_VERSION == 4
@@ -683,33 +684,33 @@ def test_non_advanced_revisions_hold_their_established_values():
     assert SCHEMA_VERSION == "1.4"
 
 
-def test_reducer_prompt_revision_not_advanced_keeps_reducer_nodes_reusable(monkeypatch):
-    # REDUCER_PROMPT_REVISION governs reduction_execution_identity /
-    # reduction_input_digest. It did not move, so a reducer node from before
-    # the terminology work stays a current checkpoint (the internal reduction
-    # prompt is deliberately excluded from the terminology rules).
+def test_reducer_prompt_revision_participates_in_the_reducer_input_digest(monkeypatch):
+    # REDUCER_PROMPT_REVISION governs reduction_input_digest /
+    # reduction_execution_identity. 0.14.9 (plan section 5.6.2) advances it
+    # file-reduction-v3 -> file-reduction-v4 as an output-affecting prompt
+    # change, so a reducer checkpoint stamped under the prior value is not a
+    # current checkpoint. This proves, by mutation, that the constant really is
+    # bound into the digest -- so the advance genuinely moves reducer identity.
     plan, tree = _tree_bits()
     # _SOURCE at a 2000-char source budget deterministically fans out into
     # several leaves under at least one reducer node.
     assert tree.all_intermediate_nodes, "fixture no longer produces a reducer node"
     node = tree.all_intermediate_nodes[0]
-    rid = reduction_input_digest(
-        phase=node.phase, level=node.level, unit_id=node.unit_id,
-        child_count=len(node.child_ids), ordered_child_narratives=("n",),
-        rel_path="main.py",
-    )
-    current = reduction_input_digest(
-        phase=node.phase, level=node.level, unit_id=node.unit_id,
-        child_count=len(node.child_ids), ordered_child_narratives=("n",),
-        rel_path="main.py",
-    )
-    assert rid == current  # deterministic
+
+    def _rid() -> str:
+        return reduction_input_digest(
+            phase=node.phase, level=node.level, unit_id=node.unit_id,
+            child_count=len(node.child_ids), ordered_child_narratives=("n",),
+            rel_path="main.py",
+        )
+
+    current = _rid()
+    assert _rid() == current  # deterministic under a fixed revision
+
+    monkeypatch.setattr(file_division, "REDUCER_PROMPT_REVISION", "file-reduction-v3")
+    assert _rid() != current  # the prior 0.14.8 value produces a different digest
     monkeypatch.setattr(file_division, "REDUCER_PROMPT_REVISION", "file-reduction-v9")
-    assert reduction_input_digest(
-        phase=node.phase, level=node.level, unit_id=node.unit_id,
-        child_count=len(node.child_ids), ordered_child_narratives=("n",),
-        rel_path="main.py",
-    ) != current  # it still participates -> correctly held, not advanced
+    assert _rid() != current  # any other value moves it too -> genuinely bound
 
 
 # ---------------------------------------------------------------------------

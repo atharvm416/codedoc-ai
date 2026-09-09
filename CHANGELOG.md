@@ -1,5 +1,43 @@
 # Changelog
 
+## 0.14.9 - 2026-09-09
+
+### Targeted fixed-cap correction with recovery-safe identity refresh
+
+- **Correction behavior:** Added bounded correction guidance for fixed-cap
+  scalar failures. The derived target is emitted only when
+  `fixed_cap_exceeded` and an untruncated `response_cap` are both present;
+  bounded prose targets 260 characters for a 300-character cap, while
+  identifiers continue to follow their shape contract without a numeric
+  target.
+- **Diagnostics and compatibility:** Kept configurable correction routes
+  byte-identical, made fixed-scalar diagnostics report
+  `length N exceeds cap M`, and kept the diagnostic summary bounded and
+  value-free while preserving the single correction-call contract.
+- **CI portability:** Restored Python 3.10 collection for TOML-reading contract
+  tests through the development-only `tomli` fallback, without adding a
+  runtime dependency. The historical CRLF oracle is platform-neutral, the S8
+  assertion is scoped to scanner detail, and installed-artifact CI scenarios
+  are bound to the candidate version and baseline fixture profile.
+- **Recovery identities:** Advanced the leaf capsule identity from
+  `leaf-capsule-v10` to `leaf-capsule-v11` and the file-reduction identity from
+  `file-reduction-v3` to `file-reduction-v4`.
+- **Reuse and reprocessing:** Existing partial recovery nodes under the retired
+  identities are quarantined and re-executed; affected ancestors are
+  invalidated by input-digest mismatch. Existing completed split records under
+  the retired identities are regenerated regardless of dependency-propagation
+  mode. Selected dependents are scheduled through normal propagation only when
+  propagation is enabled. This one-time reprocessing is the only user-visible
+  cost.
+- **Fresh-run preservation:** Fresh runs retain the same planned call count and
+  call categories; only opaque reducer call IDs and dependent digests change.
+  All other split identities, hard bounds, and topology remain unchanged.
+- **Active identity ledger:** `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v6`, `leaf-capsule-v11`, `fact-ledger-v7`,
+  `reduction-capsule-v1`, `reduction-packing-v5`, `file-reduction-v4`,
+  `file-synthesis-v4`, `division-execution-v6`, `large-file-v3`, and
+  `file-doc-v4`.
+
 ## 0.14.8 - 2026-09-07
 
 ### Source-backed structural facts

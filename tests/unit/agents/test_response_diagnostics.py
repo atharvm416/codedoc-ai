@@ -488,3 +488,141 @@ def test_reconciliation_signatures_do_not_evict_public_symbols_at_global_cap(fie
         removal.field == field and removal.reason_code == "response_cap"
         for removal in result.removed
     )
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 F-2: the fixed-scalar response-cap detail states the measured length
+# and the cap plainly ("length N exceeds cap M"), never "N chars over cap M"
+# (which read as if N were the overshoot).
+# ---------------------------------------------------------------------------
+
+def _leaf_capsule_error(raw):
+    with pytest.raises(ResponseContractError) as caught:
+        _run_leaf_capsule(raw)
+    return caught.value.diagnostic
+
+
+def test_fixed_scalar_response_cap_detail_uses_length_exceeds_cap_wording():
+    diagnostic = _leaf_capsule_error({"description": "d" * 313})
+    detail = next(
+        removal.detail
+        for removal in diagnostic.removed
+        if removal.field == "description" and removal.reason_code == "response_cap"
+    )
+    assert detail == "length 313 exceeds cap 300"
+    assert "chars over cap" not in detail
+
+
+def test_fixed_scalar_cap_wording_is_exact_for_301_over_300():
+    """9.1 items 11-12: ``length 301 exceeds cap 300`` recorded exactly; the
+    old ``301 chars over cap 300`` phrasing never appears."""
+    diagnostic = _leaf_capsule_error({"description": "d" * 301})
+    details = [
+        removal.detail
+        for removal in diagnostic.removed
+        if removal.reason_code == "response_cap"
+    ]
+    assert "length 301 exceeds cap 300" in details
+    blob = json.dumps(diagnostic.as_summary())
+    assert "301 chars over cap 300" not in blob
+
+
+def test_global_cap_eviction_details_keep_their_existing_wording():
+    """F-2 changes only ``_clean_fixed_scalar``. The three ``_enforce_global_cap``
+    details describe eviction, not an over-long value, and must not be
+    reworded."""
+    raw = {
+        "description": "keep",
+        "dependencies_analysis": {
+            "warnings": [f"warn-{i}-" + "w" * 250 for i in range(32)],
+            "internal": [f"int-{i}-" + "i" * 250 for i in range(32)],
+            "external": [f"ext-{i}-" + "e" * 250 for i in range(32)],
+        },
+        "key_concepts": [f"kc-{i}-" + "c" * 250 for i in range(16)],
+        "functions": [{"name": f"f{i}", "description": "d" * 250} for i in range(12)],
+    }
+    result = clean_combined_report(raw, "m.py")
+    cap_details = [
+        removal.detail
+        for removal in result.removed
+        if removal.reason_code == "response_cap"
+    ]
+    assert cap_details
+    for detail in cap_details:
+        assert "item(s) dropped by response cap" in detail or (
+            detail in (
+                "field removed by response cap",
+                "transient reconciliation metadata omitted by response cap",
+            )
+        )
+        assert "exceeds cap" not in detail
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 G-2: the complete, untruncated observed removal-reason set is carried
+# on ResponseDiagnostic for the shared correction gate, and is never
+# serialized by as_summary().
+# ---------------------------------------------------------------------------
+
+def test_fixed_capsule_diagnostic_carries_untruncated_observed_removal_reasons():
+    diagnostic = _leaf_capsule_error({"description": "d" * 313})
+    assert isinstance(diagnostic.observed_removal_reasons, frozenset)
+    assert "response_cap" in diagnostic.observed_removal_reasons
+    assert diagnostic.observed_removal_reasons <= {
+        "unknown_field", "wrong_type", "empty_value", "invalid_value",
+        "duplicate", "item_limit", "response_cap", "not_requested",
+        "unsupported_terminology",
+    }
+
+
+def test_saturated_leaf_capsule_keeps_response_cap_in_observed_reasons_only():
+    """9.1 item 18 / G-2: unknown keys are collected before ``description``, so
+    a capsule with many unknowns plus a 313-char ``description`` yields a
+    genuine ``fixed_cap_exceeded`` whose bounded ``removed`` tuple can hold no
+    ``response_cap`` entry -- but the untruncated ``observed_removal_reasons``
+    still does."""
+    raw = {"description": "d" * 313}
+    raw.update({f"unknown_{index}": "x" for index in range(80)})
+    diagnostic = _leaf_capsule_error(raw)
+
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert len(diagnostic.removed) <= MAX_REMOVAL_ENTRIES
+    assert not any(
+        removal.reason_code == "response_cap" for removal in diagnostic.removed
+    )
+    assert "response_cap" in diagnostic.observed_removal_reasons
+
+
+def test_item_limit_only_elevation_observed_reasons_has_no_response_cap():
+    """9.1 item 19: an ``item_limit``-only elevation carries ``item_limit`` but
+    not ``response_cap`` in the observed set, so the shared gate's second
+    condition fails."""
+    diagnostic = _leaf_capsule_error(
+        {
+            "description": "ok",
+            "functions": [
+                {"name": f"function_{index}"}
+                for index in range(MAX_LEAF_SYMBOL_ITEMS_PER_KIND + 1)
+            ],
+        }
+    )
+    assert diagnostic.reason_code == "fixed_cap_exceeded"
+    assert "item_limit" in diagnostic.observed_removal_reasons
+    assert "response_cap" not in diagnostic.observed_removal_reasons
+
+
+def test_observed_removal_reasons_absent_from_as_summary_and_keys_stable():
+    diagnostic = _leaf_capsule_error({"description": "d" * 313})
+    summary = diagnostic.as_summary()
+    assert set(summary) == {
+        "stage", "reason_code", "agent", "expected_keys", "returned_keys",
+        "returned_types", "retained_keys", "removed", "parse_error",
+        "parse_position", "response_chars",
+    }
+    assert "observed_removal_reasons" not in summary
+    assert "observed_removal_reasons" not in json.dumps(summary)
+
+
+def test_default_diagnostic_observed_removal_reasons_is_empty():
+    empty = ResponseDiagnostic(stage="x", reason_code="y", agent="a", file_path="f")
+    assert empty.observed_removal_reasons == frozenset()

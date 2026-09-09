@@ -607,12 +607,19 @@ _LIVE_FIXTURE_PROFILE_TOPOLOGY: dict[str, dict[str, object]] = {
 #: call count is accepted.  Each value is the ``call_manifest_digest`` the
 #: real provider-free planning path produces for the frozen live fixture under
 #: that profile; the per-profile split topology and call counts are unchanged,
-#: but the final synthesis call id -- and therefore the manifest digest -- is
-#: bound to ``FINAL_SYNTHESIS_REVISION`` (``file_synthesis_call_id``), so each
-#: value is re-measured whenever that revision moves.
+#: but the manifest digest is the SHA-256 of the newline-joined initial
+#: call ids, so it moves whenever any of those ids move.  Two revisions feed
+#: it: ``FINAL_SYNTHESIS_REVISION`` through ``file_synthesis_call_id`` and
+#: ``REDUCER_PROMPT_REVISION`` through ``file_reduction_call_id`` (this fixture
+#: plans one unit-consolidation reduction node).  The 0.14.9 values below were
+#: re-measured after the ``file-reduction-v3`` -> ``file-reduction-v4`` advance
+#: of plan section 5.6.2: topology, call counts, and every category/owner/
+#: ordinal stayed identical, and the single reduction call id was the only id
+#: that changed under the advance (independently reproduced against the
+#: patched-back v3 constant, which reproduces the pre-0.14.9 digests exactly).
 _LIVE_FIXTURE_PROFILE_PLAN_DIGEST: dict[str, str] = {
-    "base": "a6ab302f8720aae654dd6c388c835a05cdf903c6085fdfe522f45492ceea4441",
-    "structure": "e6e05794b31b5c5987c284d7e2a26360b523212329e72bb195d1a48365d19c90",
+    "base": "37dbef2bd3c4ecd88126442bfa3b029d635a8eb62b67ecec1f95024a6a044544",
+    "structure": "a9b788ae61e7a10d4257e4b1180b2032922617866d300c2adadc273c8728f2ae",
 }
 
 

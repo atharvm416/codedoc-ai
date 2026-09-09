@@ -157,6 +157,17 @@ class ResponseDiagnostic:
     parse_error: str | None = None
     parse_position: int | None = None
     response_chars: int = 0
+    #: Complete, untruncated set of per-field removal reasons observed while
+    #: cleaning this response, drawn straight from
+    #: ``CleanResult.removal_reason_codes`` (closed ``PER_FIELD_REASONS``
+    #: vocabulary only -- no field values, paths, or free text). Used solely by
+    #: the shared correction agent's fixed-capsule cap-repair gate, which must
+    #: read the full set rather than the ``MAX_REMOVAL_ENTRIES``-bounded
+    #: ``removed`` tuple. Deliberately absent from :meth:`as_summary` so the
+    #: bounded cross-boundary marker payload, and every cache/recovery/public
+    #: schema, stay byte-identical. Defaults empty; only
+    #: :func:`process_fixed_capsule_response` populates it.
+    observed_removal_reasons: frozenset[str] = frozenset()
 
     def as_summary(self) -> dict:
         """Return a bounded json-safe dict for cross-boundary marker transport."""
@@ -644,6 +655,12 @@ def process_fixed_capsule_response(
                 "fixed split capsules must be corrected rather than "
                 "published after bounded facts were removed"
             ),
+            # The gate in ``ResponseCorrectionAgent`` must discriminate a
+            # per-field response-cap overrun from an item-limit overrun using
+            # the complete observed set, never the ``MAX_REMOVAL_ENTRIES``
+            # -bounded ``removed`` tuple (which a saturated leaf capsule can
+            # push the ``response_cap`` entry out of entirely).
+            observed_removal_reasons=clean_result.removal_reason_codes,
         )
 
     if requested_set and not retained:
@@ -678,6 +695,7 @@ def _raise(
     parse_position: int | None = None,
     response_chars: int = 0,
     reason_detail: str | None = None,
+    observed_removal_reasons: frozenset[str] = frozenset(),
 ) -> "None":
     """Build a bounded diagnostic, log it, and raise ``ResponseContractError``."""
     diagnostic = ResponseDiagnostic(
@@ -693,6 +711,7 @@ def _raise(
         parse_error=parse_error,
         parse_position=parse_position,
         response_chars=response_chars,
+        observed_removal_reasons=observed_removal_reasons,
     )
     _log_rejection(diagnostic)
     message = f"response contract failed ({reason})"

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "codedoc-ai"
-version = "0.14.8"
+version = "0.14.9"
 description = "Generate structured, incremental documentation for any codebase using OpenAI, Anthropic, or Gemini"
 readme = "README.md"
 license = "MIT"
@@ -51,6 +51,10 @@ structure = [
 dev = [
     "pytest>=7.0",
     "pytest-cov>=7.0",
+    # Python 3.10 has no stdlib ``tomllib``; the TOML-reading contract tests
+    # fall back to this backport there. Development-only and version-gated, so
+    # no installed-package (runtime, base, or ``structure``) dependency changes.
+    "tomli>=2; python_version < '3.11'",
     "black>=23.0",
     "ruff>=0.1",
     "build>=1.0",

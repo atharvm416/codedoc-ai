@@ -107,7 +107,7 @@ PACKER_SCHEMA_REVISION = "division-packer-v6"
 # or checkpoint carrying a different value is recomputed rather than trusted,
 # while a sibling leaf, reducer, or final node stamped with the current value
 # is retained.
-LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v10"
+LEAF_CAPSULE_SCHEMA_REVISION = "leaf-capsule-v11"
 # Bound into final-node execution identity, the final-node exact input digest,
 # and the completed split identity. A ledger-revision change alone reruns the
 # final synthesis node but preserves compatible leaves and reducers -- they
@@ -137,7 +137,7 @@ REDUCTION_PACKING_REVISION = "reduction-packing-v5"
 # ``reduction_input_digest``; a reducer checkpoint whose value differs is not
 # a current checkpoint. The internal reduction prompt is deliberately outside
 # the narrative-terminology rules.
-REDUCER_PROMPT_REVISION = "file-reduction-v3"
+REDUCER_PROMPT_REVISION = "file-reduction-v4"
 # Bound into final-node execution identity, the final-node exact input digest,
 # the completed split identity, and -- through `file_synthesis_call_id` -- the
 # run call-manifest digest. A change here reruns only the final synthesis node;

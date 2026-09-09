@@ -5156,7 +5156,7 @@ def test_leaf_capsule_reverting_to_the_prior_value_makes_a_leaf_checkpoint_stale
     monkeypatch.undo()
     # direct behavioral identity evidence: the revision reversal moves the digest.
     assert stale_id != current_id
-    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v10"
+    assert file_division.LEAF_CAPSULE_SCHEMA_REVISION == "leaf-capsule-v11"
 
     nodes = []
     for chunk in plan.chunks:

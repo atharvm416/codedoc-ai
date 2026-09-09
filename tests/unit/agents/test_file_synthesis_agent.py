@@ -719,3 +719,90 @@ def test_reduction_narrative_between_target_and_bound_is_accepted(tmp_path) -> N
 
     assert result == {"narrative": narrative}
     assert provider.calls == 1
+
+
+# ---------------------------------------------------------------------------
+# 0.14.9 F-1: the shared fixed-capsule cap-repair instruction reaches the real
+# internal-reduction correction prompt (section 5.2 route coverage / 9.1 items
+# 7, 20). REDUCER_PROMPT_REVISION advances to v4 (section 5.6.2 / G-4).
+# ---------------------------------------------------------------------------
+
+def _real_reducer_correction(provider):
+    from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+    from codedoc.agents.response_diagnostics import CorrectionLedger
+    from codedoc.core.usage import UsageAccumulator
+
+    return ResponseCorrectionAgent(
+        provider, UsageAccumulator(), CorrectionLedger(True), True,
+    )
+
+
+def test_reducer_prompt_revision_advanced_to_v4():
+    """Mutation 19: reverting this alone must fail here, independently of the
+    leaf-capsule revision."""
+    from codedoc.core.file_division import REDUCER_PROMPT_REVISION
+
+    assert REDUCER_PROMPT_REVISION == "file-reduction-v4"
+
+
+def test_reduction_correction_prompt_carries_cap_repair_rule_with_260_target(
+    tmp_path,
+) -> None:
+    from codedoc.agents.file_synthesis_agent import _REDUCTION_SHAPE_BLOCK
+
+    request = make_execution_request(tmp_path, "src/large.py", max_content_chars=1000)
+    reduction_request = _reduction_request(request.rel_path, request.context)
+    provider = _RecordingCorrectingProvider(
+        first_response={"narrative": "n" * (MAX_REDUCTION_NARRATIVE_CHARS + 13)},
+        corrected_response={"narrative": "A refined, concise combined narrative."},
+    )
+    agent = FileSynthesisAgent(provider, max_content_chars=1000)
+    agent._correction = _real_reducer_correction(provider)
+
+    result = agent.run_reduction(reduction_request, ("First narrative.",))
+
+    assert result == {"narrative": "A refined, concise combined narrative."}
+    assert provider.calls == 2
+    initial_prompt, correction_prompt = provider.prompts
+    assert "Cap repair" not in initial_prompt
+    assert _REDUCTION_SHAPE_BLOCK in correction_prompt
+    cap = correction_prompt.split("Cap repair", 1)
+    assert len(cap) == 2, "the reducer correction prompt must carry the cap-repair rule"
+    rule = cap[1]
+    assert "rejected in full" in rule                    # clause 1
+    assert "must not be copied" in rule                  # clause 2
+    assert "shorter, meaning-preserving value" in rule   # clause 3
+    assert "narrative: within 260 characters" in rule    # clause 4 target
+    assert "every other valid field and fact" in rule    # clause 5
+    assert (
+        "Preserve every valid fact already present in the previous response"
+        in correction_prompt
+    )
+
+
+def test_reduction_cap_repair_strict_acceptance_300_ok_301_fails_with_one_call(
+    tmp_path,
+) -> None:
+    request = make_execution_request(tmp_path, "src/large.py", max_content_chars=1000)
+    reduction_request = _reduction_request(request.rel_path, request.context)
+
+    ok = _CorrectingProvider(
+        first_response={"narrative": "n" * (MAX_REDUCTION_NARRATIVE_CHARS + 5)},
+        corrected_response={"narrative": "n" * MAX_REDUCTION_NARRATIVE_CHARS},
+    )
+    ok_agent = FileSynthesisAgent(ok, max_content_chars=1000)
+    ok_agent._correction = _real_reducer_correction(ok)
+    result = ok_agent.run_reduction(reduction_request, ("First narrative.",))
+    assert result == {"narrative": "n" * MAX_REDUCTION_NARRATIVE_CHARS}
+    assert ok.calls == 2
+
+    bad = _CorrectingProvider(
+        first_response={"narrative": "n" * (MAX_REDUCTION_NARRATIVE_CHARS + 5)},
+        corrected_response={"narrative": "n" * (MAX_REDUCTION_NARRATIVE_CHARS + 1)},
+    )
+    bad_agent = FileSynthesisAgent(bad, max_content_chars=1000)
+    bad_agent._correction = _real_reducer_correction(bad)
+    with pytest.raises(ResponseContractError) as caught:
+        bad_agent.run_reduction(reduction_request, ("First narrative.",))
+    assert caught.value.correction_attempted is True
+    assert bad.calls == 2  # exactly one correction call
