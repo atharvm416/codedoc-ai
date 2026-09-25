@@ -46,6 +46,7 @@ def test_provider_failure_reason_codes_domain():
         "provider-connection-failed",
         "provider-response-malformed",
         "provider-input-rejected",
+        "provider-output-truncated",
     }
 
 
@@ -262,6 +263,18 @@ def test_as_mapping_uses_json_null_shape_for_absent_optional_fields():
     assert mapping["status"] is None
     assert mapping["retry_after_s"] is None
     assert mapping["limit_type"] is None
+
+
+def test_provider_output_truncated_round_trips_as_mapping():
+    """0.15.0 FIX-3: the new reason code is recognized end to end by
+    ``provider_failure_from_mapping``, the same as any other closed code."""
+    original = ProviderFailureEnvelope(
+        provider_kind="anthropic", reason_code="provider-output-truncated"
+    )
+    mapping = provider_failure_as_mapping(original)
+    assert mapping["reason_code"] == "provider-output-truncated"
+    rebuilt = provider_failure_from_mapping(mapping)
+    assert rebuilt == original
 
 
 def test_from_mapping_round_trips_as_mapping():

@@ -34,13 +34,15 @@ class _OpenAIResponse:
 
 
 class _AnthropicBlock:
-    def __init__(self, text):
+    def __init__(self, text, type="text"):
         self.text = text
+        self.type = type
 
 
 class _AnthropicResponse:
-    def __init__(self, text):
+    def __init__(self, text, stop_reason="end_turn"):
         self.content = [_AnthropicBlock(text)]
+        self.stop_reason = stop_reason
 
 
 class _GeminiResponse:
@@ -91,9 +93,10 @@ def _install_anthropic(monkeypatch, rec, *, text='{"ok": true}', error=None):
             return _AnthropicResponse(text)
 
     class Anthropic:
-        def __init__(self, api_key=None, timeout=None, max_retries=None):
+        def __init__(self, api_key=None, base_url=None, timeout=None, max_retries=None):
             rec["init"] = {
-                "api_key": api_key, "timeout": timeout, "max_retries": max_retries,
+                "api_key": api_key, "base_url": base_url,
+                "timeout": timeout, "max_retries": max_retries,
             }
             self.messages = _Messages()
 
@@ -132,8 +135,10 @@ def _install_gemini(monkeypatch, rec, *, text='{"ok": true}', error=None):
             return _GeminiResponse(text)
 
     class Client:
-        def __init__(self, api_key=None, http_options=None):
-            rec["init"] = {"api_key": api_key, "http_options": http_options}
+        def __init__(self, api_key=None, http_options=None, vertexai=None):
+            rec["init"] = {
+                "api_key": api_key, "http_options": http_options, "vertexai": vertexai,
+            }
             self.models = _Models()
 
     genai.Client = Client

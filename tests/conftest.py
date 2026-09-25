@@ -63,3 +63,18 @@ def _attest_injected_pipeline_providers(monkeypatch):
         "verify_provider_execution_identity",
         _verify,
     )
+
+
+@pytest.fixture(autouse=True)
+def _clear_sdk_endpoint_overrides(monkeypatch):
+    """FIX-4 (section 5.5): remove every pinned-SDK endpoint-override
+    environment variable before each test, so the suite's behavior never
+    depends on whatever a developer's or CI machine's environment happens to
+    set. ``codedoc.llm.factory._SDK_ENDPOINT_OVERRIDE_VARS`` is the single
+    list this fixture and the FIX-4 gate both read from.
+    """
+    from codedoc.llm.factory import _SDK_ENDPOINT_OVERRIDE_VARS
+
+    for variables in _SDK_ENDPOINT_OVERRIDE_VARS.values():
+        for name in variables:
+            monkeypatch.delenv(name, raising=False)

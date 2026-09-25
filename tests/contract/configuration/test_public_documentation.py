@@ -544,6 +544,38 @@ def test_public_docs_explain_split_reuse_recovery_and_optional_structure_extra()
     assert "reducer prompt states that bound explicitly" in normalized_run_flow
 
 
+def test_public_docs_state_the_parser_version_and_thinking_timeout_guidance():
+    """DOC-1: both public docs explain that a direct ``tree-sitter-language-
+    pack`` install should match the version the ``structure`` extra pins (the
+    parser version contributes to split identity), that ``[structure]``
+    remains optional either way, and that a thinking-capable model may need a
+    larger ``provider_request_timeout_s`` than the 120-second default."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    run_flow = (ROOT / "RUN_FLOW.md").read_text(encoding="utf-8")
+
+    for doc in (readme, run_flow):
+        normalized = " ".join(doc.split())
+        assert "tree-sitter-language-pack" in normalized
+        assert "match the version" in normalized
+        assert "structure` extra pins" in normalized
+        assert "parser package's version contributes to split identity" in normalized
+        assert "Lexical split remains fully supported" in normalized
+        assert "provider_request_timeout_s" in normalized
+        assert "thinking-capable model" in normalized
+        assert "120-second default" in normalized
+        assert "billed and counted as output tokens" in normalized
+
+
+def test_readme_explains_gemini_default_access_limit():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    defaults = readme.split("Provider defaults are", 1)[1].split("## Inline instructions", 1)[0]
+    normalized = " ".join(defaults.split())
+    assert "gemini-2.5-flash" in normalized
+    assert "Google limits Gemini 2.5 models" in normalized
+    assert "accounts that used them previously" in normalized
+    assert "New Gemini users should set `model_name`" in normalized
+
+
 def test_model_help_scopes_provider_auto_detection_to_auto():
     """`--model` must not claim auto-detection when --provider is explicit."""
     model_help = next(
@@ -677,6 +709,34 @@ def test_readme_and_run_flow_state_reason_codes_and_endpoint_authorization():
     assert "runtime endpoint-trust approval bound to" in normalized_run_flow
     assert "can never satisfy this gate" in normalized_run_flow
     assert "resolved before any credential is read" in normalized_run_flow
+
+
+def test_readme_states_the_fix4_sdk_endpoint_pinning_refusal_and_remedy():
+    """FIX-4 (section 5.5): the README's endpoint-trust section must name all
+    five SDK environment-override variables, state that a conflict refuses
+    the run before any credential is read, and give the remedy (unset it, or
+    approved api_base_url)."""
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    endpoint_trust = readme.split(
+        "### Custom endpoints and endpoint-trust approval", 1
+    )[1].split("### Large files", 1)[0]
+    normalized = " ".join(endpoint_trust.split())
+
+    for variable in (
+        "OPENAI_BASE_URL",
+        "ANTHROPIC_BASE_URL",
+        "GOOGLE_GEMINI_BASE_URL",
+        "GOOGLE_GENAI_USE_VERTEXAI",
+        "GOOGLE_GENAI_USE_ENTERPRISE",
+    ):
+        assert variable in normalized
+
+    assert "pins each provider's SDK to its own default endpoint" in normalized
+    assert "before any credential is read" in normalized
+    assert "unset it" in normalized
+    assert "runtime endpoint-trust approval for an OpenAI-compatible endpoint" in normalized
+    assert "dry run constructs no provider" in normalized
+    assert "never its value" in normalized
 
 
 def test_security_md_recovery_sensitivity_wording_is_present_and_unchanged():

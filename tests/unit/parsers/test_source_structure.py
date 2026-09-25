@@ -680,7 +680,26 @@ def test_live_repository_declaration_census_matches_the_measured_basis() -> None
     # are pinned above. A wild swing (a body accidentally measured as a
     # header) would blow past this and fail loudly.
     #
-    # Bound history: 60 -> 63 -> 86 -> 92 -> 105 -> 110. The 0.14.9 F-1/G-5
+    # Bound history: 60 -> 63 -> 86 -> 92 -> 105 -> 110 -> 118.
+    # ``_walk_python_declarations`` counts only functions and methods
+    # (``def`` and ``async def``); it never counts a class. The 0.15.0
+    # FIX-1/FIX-2/FIX-3/FIX-4/FIX-5/HARD-1 provider-and-invariant bug-fix
+    # release adds exactly eight counted functions and methods: the
+    # exact-model capability lookup (``codedoc.llm.model_capabilities``:
+    # ``anthropic_capability``, ``openai_omits_temperature``), the shared
+    # post-response signal/extraction helpers in
+    # ``codedoc.llm.api_provider`` (``_raise_signal_failure``,
+    # ``_extract_anthropic_text``, ``_extract_openai_text``,
+    # ``_extract_gemini_text``, and ``AnthropicProvider.complete_json``), and
+    # one endpoint-override helper, ``codedoc.llm.factory.
+    # _sdk_endpoint_override`` -- none over 600 chars and none touching the
+    # maxima, so this bound moves by exactly that authorized growth:
+    # 110 + 8 = 118. The release's three new classes --
+    # ``codedoc.llm.model_capabilities.AnthropicModelCapability``,
+    # ``codedoc.utils.errors.CorrectionPromptInvariantError``, and
+    # ``codedoc.llm.api_provider._CodeDocDefaultTemperature`` -- define no
+    # counted declaration of their own and are excluded from that eight.
+    # The 0.14.9 F-1/G-5
     # repair (plan sections 5.1.1 / 5.1.4) added five short-header pure helpers
     # in ``codedoc.agents.response_correction_agent`` -- the closed field-path
     # resolver (``_normalized_field_path``, ``_prose_correction_target``,
@@ -705,6 +724,6 @@ def test_live_repository_declaration_census_matches_the_measured_basis() -> None
     # ``TerminologyEvidence`` value and the closed initialism grammar helpers.
     # The over-600 set and the raw/normalized maxima are unchanged; this bound
     # catches measurement error, not growth.
-    assert abs(delta) <= 110, census_report
+    assert abs(delta) <= 118, census_report
     assert top_level >= _CENSUS_HISTORICAL_TOP_LEVEL - 10
     assert nested >= _CENSUS_HISTORICAL_NESTED - 10

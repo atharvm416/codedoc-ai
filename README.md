@@ -418,6 +418,14 @@ map. New configurations should use `extension_language_map`. For list and map
 families, the base key replaces the default while matching `_add` and `_remove`
 keys adjust the resolved value.
 
+A thinking-capable model may need a larger `provider_request_timeout_s` than
+the 120-second default. Thinking tokens are billed and counted as output
+tokens before the final response text, and CodeDoc issues a non-streaming
+request with an explicit timeout, so the provider SDK's own default
+non-streaming timeout guard does not apply here — raise
+`provider_request_timeout_s` for a thinking-capable model if you see
+`provider-timeout` failures.
+
 ### Custom endpoints and endpoint-trust approval
 
 Setting `api_base_url` (in `codedoc.config.json`, `API_BASE_URL`, or an
@@ -451,6 +459,18 @@ credential; it identifies the endpoint only by its canonical digest.
 ```bash
 codedoc --entry src/main.py --trust-api-base-url http://localhost:11434/v1
 ```
+
+CodeDoc pins each provider's SDK to its own default endpoint (or your approved
+`api_base_url` for an OpenAI-compatible endpoint), passed explicitly on every
+construction. This means a provider SDK's own environment-variable endpoint
+override — `OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`, `GOOGLE_GEMINI_BASE_URL`,
+or the Vertex switches `GOOGLE_GENAI_USE_VERTEXAI`/`GOOGLE_GENAI_USE_ENTERPRISE`
+— has no effect on where a real run sends traffic. If one of these variables
+is set to a value that conflicts with CodeDoc's configured endpoint, a real
+run stops with an error naming the variable (never its value) before any
+credential is read; the remedy is to unset it, or to use `api_base_url` with
+runtime endpoint-trust approval for an OpenAI-compatible endpoint. A dry run
+constructs no provider, so this check never applies to `--dry-run`.
 
 ### Large files
 
@@ -546,6 +566,14 @@ before any provider call. The optional package can reduce atom count only when
 it supplies a usable parser for the language. It cannot repair malformed or
 error-dominated source, and raising `max_content_chars` cannot clear the
 line-counted atom cap.
+
+If you install `tree-sitter-language-pack` directly rather than through the
+`structure` extra, match the version the `structure` extra pins for your
+installed CodeDoc release: the parser package's version contributes to split
+identity, and a mismatched direct install can plan and split differently than
+the extra's pinned version would. Lexical split remains fully supported
+without the extra either way, so this only matters if you install the parser
+package directly.
 
 Planning and execution use the exact canonical JSON representation for each bounded
 manifest, including quotes, backslashes, controls, newlines, and Unicode. It
@@ -977,6 +1005,9 @@ Provider defaults are OpenAI `gpt-4o-mini`, Anthropic
 `--provider` and `--model`. With `auto`, configured Anthropic prefixes are
 checked first, then Gemini prefixes; every other model uses the OpenAI adapter.
 The default prefixes are editable through the `provider_prefixes` settings.
+Google limits Gemini 2.5 models, including the `gemini-2.5-flash` default, to
+accounts that used them previously. New Gemini users should set `model_name`
+to a current Gemini model in `codedoc.config.json`.
 
 ## Inline instructions
 

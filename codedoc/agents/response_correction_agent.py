@@ -34,7 +34,7 @@ from codedoc.agents.response_diagnostics import (
 from codedoc.core.error_classifier import _classify_failure
 from codedoc.core.execution_model import CallManifestTracker, PlannedCall
 from codedoc.llm.base import LLMProvider
-from codedoc.utils.errors import ResponseContractError
+from codedoc.utils.errors import CorrectionPromptInvariantError, ResponseContractError
 from codedoc.utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -338,8 +338,12 @@ class ResponseCorrectionAgent:
                 diagnostic=diagnostic, correction_attempted=False,
             )
 
-        self._ledger.record_attempt()
+        # Build the prompt before recording the attempt (section 5.3 HARD-1):
+        # a ``CorrectionPromptInvariantError`` raised here (the field-summary
+        # ceiling guard inside ``_field_summary``) means no attempt was made
+        # and no provider call happens -- the ledger must show zero attempts.
         system, prompt = self._build_prompt(correction_input, diagnostic)
+        self._ledger.record_attempt()
         try:
             corrected_raw = _call_llm_counted(
                 self._llm, self._usage,
@@ -402,10 +406,17 @@ class ResponseCorrectionAgent:
         for removed in diagnostic.removed:
             parts.append(f"{removed.field} ({removed.reason_code})")
         rendered = "; ".join(parts) if parts else "(none)"
-        assert len(rendered) <= _FIELD_SUMMARY_CEILING_CHARS, (
-            "rendered correction field summary exceeded its 10,000-char ceiling "
-            "(section 12 stop condition)"
-        )
+        if len(rendered) > _FIELD_SUMMARY_CEILING_CHARS:
+            # An explicit, always-active guard (section 5.3 HARD-1): a bare
+            # ``assert`` is stripped by ``python -O`` and would silently let a
+            # malformed correction prompt through in that interpreter mode.
+            # The message names the ceiling only -- never a field value.
+            raise CorrectionPromptInvariantError(
+                diagnostic.agent, diagnostic.file_path,
+                "rendered correction field summary exceeded its "
+                f"{_FIELD_SUMMARY_CEILING_CHARS}-character ceiling",
+                diagnostic=diagnostic, correction_attempted=False,
+            )
         return rendered
 
     def _build_prompt(
