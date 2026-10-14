@@ -22,6 +22,7 @@ import httpx
 import requests
 
 from codedoc.llm.base import LLMProvider
+from codedoc.llm.model_capabilities import anthropic_capability, openai_omits_temperature
 from codedoc.utils.errors import LLMError, ProviderFailureEnvelope, detect_limit_type
 from codedoc.utils.logger import get_logger
 
@@ -37,6 +38,25 @@ _JSON_INSTRUCTION = (
 # provider_request_timeout_s. A real run always passes the resolved config
 # value explicitly through the factory (section 5.5).
 _DEFAULT_PROVIDER_REQUEST_TIMEOUT_S = 120.0
+
+# FIX-4 (section 5.5): CodeDoc's own default endpoint for each provider,
+# always passed explicitly to its SDK client so transport can never silently
+# fall back to that SDK's own environment-variable override (OPENAI_BASE_URL,
+# ANTHROPIC_BASE_URL, GOOGLE_GEMINI_BASE_URL, or a Vertex switch). These are
+# the exact strings each installed pinned SDK already falls back to
+# internally when nothing else is configured, so passing them explicitly in
+# a clean environment produces byte-identical transport to today's implicit
+# default.
+_OPENAI_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+_ANTHROPIC_DEFAULT_BASE_URL = "https://api.anthropic.com"
+_GEMINI_DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/"
+
+
+class _CodeDocDefaultTemperature(float):
+    """Distinguish an omitted public argument from an explicit ``0.1``."""
+
+
+_UNSUPPLIED_TEMPERATURE = _CodeDocDefaultTemperature(0.1)
 
 
 # ---------------------------------------------------------------------------
@@ -394,6 +414,126 @@ def _gemini_failure_envelope(exc: BaseException, errors_module: object) -> Provi
 
 
 # ---------------------------------------------------------------------------
+# Post-response signal detection and safe text extraction (section 5.2 / 5.3)
+#
+# Every function below runs *after* the adapter's own SDK call already
+# succeeded -- called from outside the ``try``/``except`` blocks above, so a
+# raised ``LLMError`` here is never re-caught and remapped by this module's
+# own exception classifiers (never relabeled ``provider-request-failed``).
+# A missing or ``None`` finish/stop/feedback field is "no signal", never an
+# error -- this also keeps every pre-existing SDK-shaped test double that
+# does not set these newer fields working unchanged, since a field this code
+# never finds is indistinguishable from one explicitly absent on a real
+# response.
+# ---------------------------------------------------------------------------
+
+# The nine Gemini policy-refusal finish reasons (the installed google-genai
+# SDK's ``FinishReason``); each maps to the existing ``provider-input-rejected``.
+_GEMINI_POLICY_FINISH_REASONS: frozenset[str] = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "LANGUAGE",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    }
+)
+
+
+# Bounded, human-readable message for each *post-response signal* failure
+# (truncation, refusal, or an unexplained empty response) -- never the closed
+# reason-code string itself. ``LLMError``'s own message (a CodeDocError) is
+# rendered unchanged by ``str(exc)`` at every reporting boundary, including
+# ``ErrorReporter.summary()``, which is written into ``codedoc.json`` and
+# Markdown; the new ``provider-output-truncated`` code must never appear
+# verbatim in that generated JSON, Markdown, or recovery output, so it
+# classifies through ``ProviderFailureEnvelope.reason_code`` only. This
+# scoping applies only to the three signal failures raised here -- the
+# existing SDK-exception path (the ``except Exception`` blocks above) still
+# renders its other reason codes through ``_canonical_reason`` unchanged. No
+# message here may contain a response body, refusal text, ``stop_details``,
+# a prompt, source, or a credential.
+_SIGNAL_FAILURE_MESSAGES: dict[str, str] = {
+    "provider-output-truncated": "response was truncated before completion",
+    "provider-input-rejected": "provider declined or blocked the request",
+    "provider-response-malformed": "response contained no usable text",
+}
+
+
+def _raise_signal_failure(provider_display: str, provider_kind: str, reason_code: str) -> None:
+    """Raise a typed, envelope-carrying ``LLMError`` for a post-response
+    signal (truncation, refusal, or an unexplained empty response). Never
+    invoked from inside this module's SDK-exception ``except`` blocks."""
+    envelope = ProviderFailureEnvelope(provider_kind=provider_kind, reason_code=reason_code)
+    message = _SIGNAL_FAILURE_MESSAGES[reason_code]
+    raise LLMError(provider_display, message, provider_failure=envelope)
+
+
+def _extract_anthropic_text(response: object, *, provider_display: str = "Anthropic") -> str:
+    """Select and concatenate ``type == "text"`` content blocks, in response
+    order, using the empty string as separator -- never a block whose type is
+    anything else (including ``thinking``, whose content is never exposed).
+    A single text block returns bytes identical to the historical adapter.
+    """
+    stop_reason = getattr(response, "stop_reason", None)
+    if stop_reason in ("max_tokens", "model_context_window_exceeded"):
+        _raise_signal_failure(provider_display, "anthropic", "provider-output-truncated")
+    if stop_reason == "refusal":
+        _raise_signal_failure(provider_display, "anthropic", "provider-input-rejected")
+    blocks = getattr(response, "content", None) or []
+    text = "".join(
+        block.text for block in blocks if getattr(block, "type", None) == "text"
+    )
+    if text:
+        return text
+    _raise_signal_failure(provider_display, "anthropic", "provider-response-malformed")
+
+
+def _extract_openai_text(response: object, *, provider_display: str = "OpenAI") -> str:
+    choices = getattr(response, "choices", None) or []
+    choice = choices[0] if choices else None
+    finish_reason = getattr(choice, "finish_reason", None) if choice is not None else None
+    message = getattr(choice, "message", None) if choice is not None else None
+    refusal = getattr(message, "refusal", None) if message is not None else None
+    if finish_reason == "length":
+        _raise_signal_failure(provider_display, "openai", "provider-output-truncated")
+    if finish_reason == "content_filter" or (isinstance(refusal, str) and refusal):
+        _raise_signal_failure(provider_display, "openai", "provider-input-rejected")
+    content = getattr(message, "content", None) if message is not None else None
+    if content:
+        return content
+    _raise_signal_failure(provider_display, "openai", "provider-response-malformed")
+
+
+def _extract_gemini_text(response: object, *, provider_display: str = "Gemini") -> str:
+    """Gemini's own ``.text`` property already skips ``thought`` parts (the
+    installed google-genai SDK), so no Anthropic-style type-based reselection
+    is needed here -- only the finish/prompt-feedback signal check is new."""
+    prompt_feedback = getattr(response, "prompt_feedback", None)
+    block_reason = (
+        getattr(prompt_feedback, "block_reason", None) if prompt_feedback is not None else None
+    )
+    if block_reason is not None and block_reason != "BLOCKED_REASON_UNSPECIFIED":
+        # A blocked prompt has no candidate and therefore no finish reason.
+        _raise_signal_failure(provider_display, "gemini", "provider-input-rejected")
+    candidates = getattr(response, "candidates", None) or []
+    candidate = candidates[0] if candidates else None
+    finish_reason = getattr(candidate, "finish_reason", None) if candidate is not None else None
+    if finish_reason == "MAX_TOKENS":
+        _raise_signal_failure(provider_display, "gemini", "provider-output-truncated")
+    if finish_reason in _GEMINI_POLICY_FINISH_REASONS:
+        _raise_signal_failure(provider_display, "gemini", "provider-input-rejected")
+    text = getattr(response, "text", None)
+    if text:
+        return text
+    _raise_signal_failure(provider_display, "gemini", "provider-response-malformed")
+
+
+# ---------------------------------------------------------------------------
 # OpenAI / OpenAI-compatible
 # ---------------------------------------------------------------------------
 
@@ -424,25 +564,44 @@ class OpenAIProvider(LLMProvider):
 
         self._model = model
         self._sdk = _openai
+        # Keeps the configured value (None for the default endpoint) so
+        # FIX-1's exact-model rule and provider_name stay unchanged; the SDK
+        # itself always receives an explicit, non-None base_url below.
+        self._base_url = base_url
         self._rate_limit_signals = rate_limit_signals
         self._client = _openai.OpenAI(
-            api_key=api_key, base_url=base_url, timeout=timeout, max_retries=max_retries
+            api_key=api_key,
+            base_url=base_url or _OPENAI_DEFAULT_BASE_URL,
+            timeout=timeout,
+            max_retries=max_retries,
         )
         logger.info("OpenAI provider ready — model: %s", model)
 
-    def complete(self, prompt: str, system: str = "", temperature: float = 0.1) -> str:
+    def complete(
+        self,
+        prompt: str,
+        system: str = "",
+        temperature: float = _UNSUPPLIED_TEMPERATURE,
+    ) -> str:
+        """Use the exact-model policy for an unsupplied temperature.
+
+        An explicitly supplied value is forwarded unchanged. A subclass or
+        wrapper that declares its own ``temperature=0.1`` and forwards it
+        supplies that value, so it cannot inherit this method's omission.
+        """
         messages: list[dict] = []
         if system:
             messages.append({"role": "system", "content": system})
         messages.append({"role": "user", "content": prompt})
 
+        kwargs: dict = dict(model=self._model, messages=messages)
+        if temperature is _UNSUPPLIED_TEMPERATURE:
+            if self._base_url or not openai_omits_temperature(self._model):
+                kwargs["temperature"] = 0.1
+        else:
+            kwargs["temperature"] = temperature
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=temperature,
-            )
-            return response.choices[0].message.content or ""
+            response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             envelope = _openai_failure_envelope(exc, self._sdk)
             envelope = _promote_via_configured_signals(
@@ -451,11 +610,16 @@ class OpenAIProvider(LLMProvider):
             raise LLMError(
                 "OpenAI", _canonical_reason(envelope), provider_failure=envelope
             ) from exc
+        return _extract_openai_text(response)
 
     def complete_json(self, prompt: str, system: str = "") -> str:
         """
         Uses OpenAI's native ``response_format={"type": "json_object"}`` mode
         for guaranteed JSON output rather than relying on text instructions alone.
+
+        Exact IDs in :mod:`codedoc.llm.model_capabilities` omit the CodeDoc
+        default ``temperature`` only on the default OpenAI endpoint. Unlisted
+        IDs and any custom ``base_url`` keep the legacy request.
         """
         json_system = (
             (system + "\n\n" if system else "") + _JSON_INSTRUCTION
@@ -464,14 +628,16 @@ class OpenAIProvider(LLMProvider):
             {"role": "system", "content": json_system},
             {"role": "user", "content": prompt},
         ]
+        kwargs: dict = dict(
+            model=self._model,
+            messages=messages,
+            response_format={"type": "json_object"},
+        )
+        on_default_endpoint = not self._base_url
+        if not (on_default_endpoint and openai_omits_temperature(self._model)):
+            kwargs["temperature"] = 0.0
         try:
-            response = self._client.chat.completions.create(
-                model=self._model,
-                messages=messages,
-                temperature=0.0,
-                response_format={"type": "json_object"},
-            )
-            return response.choices[0].message.content or ""
+            response = self._client.chat.completions.create(**kwargs)
         except Exception as exc:
             envelope = _openai_failure_envelope(exc, self._sdk)
             envelope = _promote_via_configured_signals(
@@ -480,6 +646,7 @@ class OpenAIProvider(LLMProvider):
             raise LLMError(
                 "OpenAI", _canonical_reason(envelope), provider_failure=envelope
             ) from exc
+        return _extract_openai_text(response)
 
     @property
     def provider_name(self) -> str:
@@ -520,22 +687,41 @@ class AnthropicProvider(LLMProvider):
         self._sdk = _anthropic
         self._rate_limit_signals = rate_limit_signals
         self._client = _anthropic.Anthropic(
-            api_key=api_key, timeout=timeout, max_retries=max_retries
+            api_key=api_key,
+            base_url=_ANTHROPIC_DEFAULT_BASE_URL,
+            timeout=timeout,
+            max_retries=max_retries,
         )
         logger.info("Anthropic provider ready — model: %s", model)
 
-    def complete(self, prompt: str, system: str = "", temperature: float = 0.1) -> str:
+    def complete(
+        self,
+        prompt: str,
+        system: str = "",
+        temperature: float = _UNSUPPLIED_TEMPERATURE,
+    ) -> str:
+        """Use the exact-model policy for an unsupplied temperature.
+
+        Explicit values are forwarded unchanged, even for an omitting model.
+        A subclass or wrapper that declares its own ``temperature=0.1`` and
+        forwards it supplies that value, so it cannot inherit this method's
+        omission. The public path retains ``max_tokens=4096``.
+        """
+        kwargs: dict = dict(
+            model=self._model,
+            max_tokens=4096,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        if temperature is _UNSUPPLIED_TEMPERATURE:
+            capability = anthropic_capability(self._model)
+            if capability is None or capability.supports_temperature:
+                kwargs["temperature"] = 0.1
+        else:
+            kwargs["temperature"] = temperature
+        if system:
+            kwargs["system"] = system
         try:
-            kwargs: dict = dict(
-                model=self._model,
-                max_tokens=4096,
-                temperature=temperature,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            if system:
-                kwargs["system"] = system
             response = self._client.messages.create(**kwargs)
-            return response.content[0].text or ""
         except Exception as exc:
             envelope = _anthropic_failure_envelope(exc, self._sdk)
             envelope = _promote_via_configured_signals(
@@ -544,11 +730,43 @@ class AnthropicProvider(LLMProvider):
             raise LLMError(
                 "Anthropic", _canonical_reason(envelope), provider_failure=envelope
             ) from exc
+        return _extract_anthropic_text(response)
 
-    # Anthropic does not expose a dedicated JSON-mode parameter in the
-    # standard Messages API, so we rely on the base class text-instruction
-    # approach (complete_json from LLMProvider) combined with the JSON
-    # extraction logic in BaseAgent._parse_json.
+    def complete_json(self, prompt: str, system: str = "") -> str:
+        """Explicit Anthropic JSON path (section 5.1): keeps the same JSON
+        system instruction ``LLMProvider.complete_json`` built, but selects
+        only the request parameters this exact model supports and its own
+        conservative output cap, instead of delegating to :meth:`complete`
+        with a fixed ``temperature=0.0``/``max_tokens=4096``.
+
+        ``claude-haiku-4-5-20251001`` (the default) keeps the byte-identical
+        historical request. An unknown model keeps the same legacy request and
+        surfaces a real incompatibility as an ordinary provider error.
+        """
+        json_system = (
+            (system + "\n\n" if system else "") + _JSON_INSTRUCTION
+        )
+        capability = anthropic_capability(self._model)
+        max_tokens = capability.max_tokens if capability is not None else 4096
+        kwargs: dict = dict(
+            model=self._model,
+            max_tokens=max_tokens,
+            messages=[{"role": "user", "content": prompt}],
+            system=json_system,
+        )
+        if capability is None or capability.supports_temperature:
+            kwargs["temperature"] = 0.0
+        try:
+            response = self._client.messages.create(**kwargs)
+        except Exception as exc:
+            envelope = _anthropic_failure_envelope(exc, self._sdk)
+            envelope = _promote_via_configured_signals(
+                exc, envelope, getattr(self, "_rate_limit_signals", ())
+            )
+            raise LLMError(
+                "Anthropic", _canonical_reason(envelope), provider_failure=envelope
+            ) from exc
+        return _extract_anthropic_text(response)
 
     @property
     def provider_name(self) -> str:
@@ -589,10 +807,13 @@ class GeminiProvider(LLMProvider):
         self._model = model
         self._rate_limit_signals = rate_limit_signals
         http_options = types.HttpOptions(
+            base_url=_GEMINI_DEFAULT_BASE_URL,
             timeout=int(timeout * 1000),
             retry_options=types.HttpRetryOptions(attempts=max_retries),
         )
-        self._client = genai.Client(api_key=api_key, http_options=http_options)
+        self._client = genai.Client(
+            api_key=api_key, http_options=http_options, vertexai=False
+        )
         self._types = types
         self._sdk = genai
         self._errors = getattr(genai, "errors", None)
@@ -609,7 +830,6 @@ class GeminiProvider(LLMProvider):
                 contents=prompt,
                 config=config,
             )
-            return response.text or ""
         except Exception as exc:
             envelope = _gemini_failure_envelope(exc, self._errors)
             envelope = _promote_via_configured_signals(
@@ -618,6 +838,7 @@ class GeminiProvider(LLMProvider):
             raise LLMError(
                 "Gemini", _canonical_reason(envelope), provider_failure=envelope
             ) from exc
+        return _extract_gemini_text(response)
 
     def complete_json(self, prompt: str, system: str = "") -> str:
         """
@@ -639,7 +860,6 @@ class GeminiProvider(LLMProvider):
                 contents=prompt,
                 config=config,
             )
-            return response.text or ""
         except Exception as exc:
             envelope = _gemini_failure_envelope(exc, self._errors)
             envelope = _promote_via_configured_signals(
@@ -648,6 +868,7 @@ class GeminiProvider(LLMProvider):
             raise LLMError(
                 "Gemini", _canonical_reason(envelope), provider_failure=envelope
             ) from exc
+        return _extract_gemini_text(response)
 
     @property
     def provider_name(self) -> str:

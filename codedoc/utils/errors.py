@@ -34,7 +34,7 @@ from dataclasses import dataclass
 
 PROVIDER_KINDS: frozenset[str] = frozenset({"openai", "anthropic", "gemini"})
 
-# The nine closed provider failure reason codes. Every adapter-boundary
+# The ten closed provider failure reason codes. Every adapter-boundary
 # classification (codedoc/llm/*_provider.py) resolves to exactly one of
 # these; there is no default/fallback code outside this set.
 PROVIDER_FAILURE_REASON_CODES: frozenset[str] = frozenset(
@@ -48,6 +48,7 @@ PROVIDER_FAILURE_REASON_CODES: frozenset[str] = frozenset(
         "provider-connection-failed",
         "provider-response-malformed",
         "provider-input-rejected",
+        "provider-output-truncated",
     }
 )
 
@@ -349,6 +350,27 @@ class ResponseContractError(AgentError):
         self.diagnostic = diagnostic
         self.correction_attempted = correction_attempted
         super().__init__(agent_name, file_path, reason)
+
+
+class CorrectionPromptInvariantError(ResponseContractError):
+    """Raised when a correction prompt cannot be safely built because a local,
+    developer-owned invariant would be violated.
+
+    Currently the only such invariant is the correction agent's field-summary
+    character ceiling (section 5.3): the rendered summary is structurally
+    bounded well below the ceiling under normal operation, so exceeding it
+    signals a defect rather than an ordinary rejected response, and the
+    correction is refused rather than sent with a malformed prompt. The
+    message names the ceiling but never a field value, and
+    ``correction_attempted`` is always ``False`` -- no provider call is made.
+
+    A plain ``assert`` cannot enforce this: ``python -O`` strips assertions,
+    so this explicit, always-active check replaces one that previously
+    existed only in normal interpreter mode. Because this subclasses
+    :class:`ResponseContractError`, it is non-retryable through the existing
+    marker path (``_classify_failure`` -> ``response_contract_final``)
+    without any change to the classifier or ``execution.py``.
+    """
 
 
 class OutputError(CodeDocError):

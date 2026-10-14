@@ -105,8 +105,8 @@ def test_insufficient_source_precedes_rate_limit_path_signals():
 # ---------------------------------------------------------------------------
 
 
-def test_reason_code_verdict_table_key_set_equals_the_nine_closed_codes():
-    """Section 5.3: the table is closed -- its key set must equal the nine
+def test_reason_code_verdict_table_key_set_equals_the_ten_closed_codes():
+    """Section 5.3: the table is closed -- its key set must equal the ten
     reason codes exactly, with no default and no lookup fallback. Compared
     here as an ordinary test, so the contract survives an optimized import
     that strips the module-level assertion guarding the same invariant."""
@@ -121,6 +121,7 @@ def test_reason_code_verdict_table_key_set_equals_the_nine_closed_codes():
         ("provider-model-unavailable", "global"),
         ("provider-rate-limited", "rate_limit"),
         ("provider-input-rejected", "input"),
+        ("provider-output-truncated", "input"),
         ("provider-timeout", "transient"),
         ("provider-connection-failed", "transient"),
         ("provider-response-malformed", "transient"),
@@ -130,7 +131,7 @@ def test_reason_code_verdict_table_key_set_equals_the_nine_closed_codes():
 def test_every_reason_code_resolves_to_its_closed_table_verdict(
     reason_code, expected_verdict
 ):
-    """Section 5.3: exercise all nine mappings through ``_classify_failure``.
+    """Section 5.3: exercise all ten mappings through ``_classify_failure``.
 
     The expected verdicts are written out independently of
     ``_REASON_CODE_VERDICTS`` rather than read back from it, so this proves

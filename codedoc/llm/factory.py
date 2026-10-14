@@ -53,6 +53,23 @@ _DEFAULT_MODELS = {
     "gemini": "gemini-2.5-flash",
 }
 
+# FIX-4 (section 5.5): the pinned SDKs consult these environment variables
+# only when CodeDoc passes no explicit endpoint argument. Since api_provider.py
+# now always passes one, these are inert for real transport -- this table
+# exists solely so create_provider can refuse a conflicting override before
+# any credential is read, rather than silently letting a stale/synthetic
+# variable point at a different endpoint than the identity CodeDoc records.
+_SDK_ENDPOINT_OVERRIDE_VARS: dict[str, tuple[str, ...]] = {
+    "openai": ("OPENAI_BASE_URL",),
+    "anthropic": ("ANTHROPIC_BASE_URL",),
+    "gemini": ("GOOGLE_GEMINI_BASE_URL", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"),
+}
+
+# The installed google-genai SDK reads a Vertex-switch variable as true only
+# for these two case-insensitive string values (google/genai/_api_client.py:
+# ``env_vertexai_str.lower() in ['true', '1']``).
+_GEMINI_VERTEX_TRUE_VALUES = frozenset({"true", "1"})
+
 _ENDPOINT_DEFAULT_SENTINEL = "provider-default"
 _EXECUTION_DESCRIPTOR_ATTRIBUTE = "_codedoc_provider_execution_descriptor"
 _RATE_LIMIT_PROFILE_ATTRIBUTE = "_codedoc_rate_limit_profile"
@@ -266,6 +283,21 @@ def create_provider(config: dict) -> LLMProvider:
                 "load_config() so the authorization can be verified."
             )
 
+    # FIX-4 fail-closed gate (section 5.5): resolved and checked before any
+    # credential is read. A conflicting SDK environment override would let
+    # credentials, source, and prompts reach an endpoint CodeDoc's recorded
+    # identity does not describe.
+    selected_provider_kind = _resolve_api_provider(provider, model.lower(), provider_prefixes)
+    conflicting_var = _sdk_endpoint_override(selected_provider_kind, base_url)
+    if conflicting_var is not None:
+        raise ProviderInitError(
+            f"Environment variable {conflicting_var} would route "
+            f"{selected_provider_kind} provider requests to a different "
+            "endpoint than CodeDoc's configured one. Unset it, or configure "
+            "api_base_url with runtime endpoint-trust approval for an "
+            "OpenAI-compatible endpoint."
+        )
+
     api_key = config.get("api_key") or _provider_api_key(provider, model, provider_prefixes)
 
     if mode == "api":
@@ -412,6 +444,59 @@ def _resolve_api_provider(
         if any(model_lower.startswith(p) for p in prefixes.get(provider_name, [])):
             return provider_name
     return "openai"
+
+
+def _sdk_endpoint_override(provider_kind: str, api_base_url: str | None) -> str | None:
+    """Return the first environment variable that would route *provider_kind*'s
+    SDK to a different endpoint than CodeDoc's own default or approved one, or
+    ``None`` when none conflicts (section 5.5 FIX-4).
+
+    A URL-type variable conflicts when it is non-blank and either not a valid
+    endpoint or, per :func:`effective_endpoint_identity`, identifies a
+    different endpoint than this provider's default. ``OPENAI_BASE_URL`` is
+    ignored when *api_base_url* is configured: the explicit endpoint CodeDoc
+    passes to the SDK already wins there, so an unrelated override cannot
+    change the transport. A Vertex-switch variable conflicts only when the
+    installed SDK would read it as true (``"true"`` or ``"1"``,
+    case-insensitive) -- never on a blank, false, or unrelated value.
+
+    Imports the default URL constants locally to avoid a module import cycle
+    between ``codedoc.llm.factory`` and ``codedoc.llm.api_provider`` (the
+    latter already imports this module's helpers only inside functions).
+    """
+    from codedoc.llm.api_provider import (
+        _ANTHROPIC_DEFAULT_BASE_URL,
+        _GEMINI_DEFAULT_BASE_URL,
+        _OPENAI_DEFAULT_BASE_URL,
+    )
+
+    default_urls = {
+        "openai": _OPENAI_DEFAULT_BASE_URL,
+        "anthropic": _ANTHROPIC_DEFAULT_BASE_URL,
+        "gemini": _GEMINI_DEFAULT_BASE_URL,
+    }
+    for var in _SDK_ENDPOINT_OVERRIDE_VARS.get(provider_kind, ()):
+        value = os.environ.get(var)
+        if not value or not value.strip():
+            continue
+        if var in ("GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_GENAI_USE_ENTERPRISE"):
+            # Mirror the installed SDK exactly (google/genai/_api_client.py:
+            # ``env_vertexai_str.lower() in ['true', '1']``) -- no stripping,
+            # so a value with leading/trailing whitespace (e.g. " true ")
+            # is correctly treated as not-true here, exactly as the SDK
+            # itself would resolve it.
+            if value.lower() in _GEMINI_VERTEX_TRUE_VALUES:
+                return var
+            continue
+        if var == "OPENAI_BASE_URL" and api_base_url:
+            continue
+        try:
+            override_identity = effective_endpoint_identity(value)
+        except ConfigError:
+            return var
+        if override_identity != effective_endpoint_identity(default_urls[provider_kind]):
+            return var
+    return None
 
 
 def _provider_api_key(

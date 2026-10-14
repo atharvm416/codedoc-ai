@@ -85,13 +85,14 @@ _REASON_CODE_VERDICTS: dict[str, str] = {
     "provider-model-unavailable": "global",
     "provider-rate-limited": "rate_limit",
     "provider-input-rejected": "input",
+    "provider-output-truncated": "input",
     "provider-timeout": "transient",
     "provider-connection-failed": "transient",
     "provider-response-malformed": "transient",
     "provider-request-failed": "transient",
 }
 assert set(_REASON_CODE_VERDICTS) == PROVIDER_FAILURE_REASON_CODES, (
-    "_REASON_CODE_VERDICTS must cover exactly the nine closed reason codes"
+    "_REASON_CODE_VERDICTS must cover exactly the ten closed reason codes"
 )
 
 

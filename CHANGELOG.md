@@ -1,5 +1,81 @@
 # Changelog
 
+## 0.15.0 2026-09-25
+
+### Provider and invariant bug fixes
+
+- **Exact-model request compatibility:** Added a small, exact-model capability
+  table (`codedoc.llm.model_capabilities`) that chooses CodeDoc's own default
+  request parameters and, for Anthropic, a conservative output-token cap.
+  Exact `gpt-5`, `gpt-5-mini`, `gpt-5-nano`, their documented
+  `2025-08-07` snapshots, and `gpt-6-astra`, `gpt-6-sol`, and `gpt-6-luna`
+  omit CodeDoc's default `temperature` on the default OpenAI endpoint.
+  `gpt-5.1`, `gpt-5.2`, every unlisted ID, and OpenAI-compatible custom
+  endpoints retain their legacy requests. Anthropic gained an explicit
+  `complete_json` path. Exact `claude-opus-4-7`, `claude-opus-4-8`,
+  `claude-sonnet-5`, `claude-opus-5`, `claude-opus-5-5`, `claude-fable-5`,
+  `claude-fable-5-1`, `claude-mythos-5`, and `claude-mythos-5-1` omit
+  CodeDoc's unsupported default temperature. The public `complete()`
+  signature still displays `temperature: float = 0.1`; an unsupplied value
+  follows the exact-model policy, while every explicitly supplied value is
+  forwarded. A wrapper that declares and forwards its own `0.1` counts as
+  supplying that value. `claude-haiku-4-5-20251001` retains its legacy request.
+- **SDK endpoint pinning:** Every provider adapter now passes its endpoint to
+  the SDK explicitly (CodeDoc's default, or your approved `api_base_url` for
+  an OpenAI-compatible endpoint), so a pinned SDK's own environment-variable
+  endpoint override (`OPENAI_BASE_URL`, `ANTHROPIC_BASE_URL`,
+  `GOOGLE_GEMINI_BASE_URL`, or the Vertex switches
+  `GOOGLE_GENAI_USE_VERTEXAI`/`GOOGLE_GENAI_USE_ENTERPRISE`) can no longer
+  silently change where a real run sends credentials, source, and prompts
+  while the recorded endpoint identity still said the default. A conflicting
+  override now stops the run with an error naming the variable, never its
+  value, before any credential is read. This gap existed from `0.14.4`,
+  when endpoint-trust approval was added, through `0.14.9`.
+- **Anthropic response extraction:** Text is now selected by concatenating
+  only `type == "text"` content blocks in response order, so a response
+  beginning with a thinking block is read correctly instead of returning
+  thinking content or an empty string; thinking content is never exposed.
+- **Exhaustion and refusal classification:** Provider finish/stop metadata is
+  now checked before returning text. A new closed reason code,
+  `provider-output-truncated`, covers OpenAI `length`, Anthropic `max_tokens`
+  and `model_context_window_exceeded`, and Gemini `MAX_TOKENS`, mapped to the
+  existing `input` verdict: that file fails without correction or retry,
+  while other files continue. An HTTP-200 Anthropic refusal, an OpenAI
+  `content_filter` or non-empty `message.refusal`, every Gemini policy finish
+  reason, and a Gemini prompt-level block reason map to the existing
+  `provider-input-rejected` code under the same `input` verdict. No text
+  under any other stop reason maps to the existing
+  `provider-response-malformed` code, retried as before. Provider request
+  failures keep their existing classification.
+- **Correction prompt invariant:** Replaced a bare `assert` (removed by
+  `python -O`) guarding the correction agent's field-summary character
+  ceiling with an explicit check that raises `CorrectionPromptInvariantError`,
+  a new `ResponseContractError` subclass. Its message names the ceiling only,
+  never a field value, and the correction ledger records no attempt when it
+  fires. The existing response-contract-final route (no correction, no file
+  retry, other files continue) is unchanged.
+- **Documentation:** README and RUN_FLOW now note that a directly installed
+  `tree-sitter-language-pack` should match the version pinned by the
+  `structure` extra for the installed release, since the parser version
+  contributes to split identity, and that a thinking-capable model may need a
+  larger `provider_request_timeout_s` than the 120-second default. The
+  `structure` extra remains optional; lexical split remains fully supported
+  without it. README also notes that Google limits Gemini 2.5 models,
+  including the default `gemini-2.5-flash`, to prior users and tells new
+  Gemini users to set `model_name` to a current model.
+- **Packaging:** No dependency declarations changed. The `structure` extra
+  stays optional by design.
+- **Compatibility:** The public document schema stays `1.4`. No split plan,
+  call manifest, cache identity, partial schema, prompt text, or successful
+  legacy provider request changed. Downgrading to `0.14.9` reads the same
+  public and partial formats; a model request newly working under `0.15.0`
+  may fail again there.
+- **Active identity ledger:** `source-structure-v2`, `semantic-unit-v3`,
+  `division-packer-v6`, `leaf-capsule-v11`, `fact-ledger-v7`,
+  `reduction-capsule-v1`, `reduction-packing-v5`, `file-reduction-v4`,
+  `file-synthesis-v4`, `division-execution-v6`, `large-file-v3`, and
+  `file-doc-v4` — all unchanged from `0.14.9`.
+
 ## 0.14.9 - 2026-09-09
 
 ### Targeted fixed-cap correction with recovery-safe identity refresh

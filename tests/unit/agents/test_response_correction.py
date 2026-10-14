@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 import codedoc.core.file_division as file_division
 from codedoc.agents import response_correction_agent as rca
@@ -563,15 +567,20 @@ def test_field_summary_ceiling_is_a_live_invariant():
     )
     assert len(ResponseCorrectionAgent._field_summary(normal)) <= 10_000
     # An impossible over-cap construction trips the invariant rather than
-    # silently truncating (mutation 30).
+    # silently truncating (mutation 30). HARD-1: an explicit guard, not a
+    # bare ``assert`` (which ``python -O`` strips), raising a typed,
+    # non-retryable, zero-attempt error naming the ceiling but no field value.
     absurd = _diag(
         removed=tuple(
             RemovedField("y" * MAX_PATH_CHARS, REMOVAL_RESPONSE_CAP, "d")
             for _ in range(400)
         )
     )
-    with pytest.raises(AssertionError):
+    with pytest.raises(rca.CorrectionPromptInvariantError) as caught:
         ResponseCorrectionAgent._field_summary(absurd)
+    assert caught.value.correction_attempted is False
+    assert "10000" in str(caught.value) or "10,000" in str(caught.value)
+    assert "y" * MAX_PATH_CHARS not in str(caught.value)
 
 
 # --- identity preservation by value (9.1 item 34, mutations 17-19) ---------
@@ -598,3 +607,98 @@ def test_only_the_two_required_split_revisions_advanced():
     assert file_division.LEAF_INPUT_DIGEST_REVISION == "leaf-input-v1"
     assert file_division.REDUCTION_INPUT_DIGEST_REVISION == "reduction-input-v1"
     assert file_division.FINAL_INPUT_DIGEST_REVISION == "final-input-v1"
+
+
+# ---------------------------------------------------------------------------
+# HARD-1: the field-summary ceiling guard survives `python -O`, which strips
+# `assert` statements. Run the probe as a child process from this NORMAL
+# pytest process -- never run pytest itself under `-O`, which would also
+# strip this test module's own assertions.
+# ---------------------------------------------------------------------------
+
+_OPTIMIZED_PROBE = """
+import sys
+
+if __debug__:
+    # -O was not actually active; this run cannot prove anything about
+    # assert-stripping, so fail loudly rather than silently passing.
+    sys.exit(1)
+
+from codedoc.agents.response_correction_agent import ResponseCorrectionAgent
+from codedoc.agents.response_diagnostics import (
+    MAX_PATH_CHARS,
+    REMOVAL_RESPONSE_CAP,
+    CorrectionLedger,
+    RemovedField,
+    ResponseDiagnostic,
+)
+from codedoc.utils.errors import CorrectionPromptInvariantError
+
+
+class _FailIfCalled:
+    provider_name = "must-not-be-called"
+
+    def complete_json(self, prompt, system=""):
+        sys.exit(5)
+
+    def complete(self, prompt, system="", temperature=0.1):
+        sys.exit(5)
+
+
+diagnostic = ResponseDiagnostic(
+    stage="clean",
+    reason_code="fixed_cap_exceeded",
+    agent="leaf",
+    file_path="m.py",
+    removed=tuple(
+        RemovedField("y" * MAX_PATH_CHARS, REMOVAL_RESPONSE_CAP, "d")
+        for _ in range(400)
+    ),
+)
+
+ledger = CorrectionLedger(True)
+agent = ResponseCorrectionAgent(_FailIfCalled(), None, ledger, True)
+
+try:
+    agent.repair(
+        agent="leaf",
+        file_path="m.py",
+        diagnostic=diagnostic,
+        correction_input={},
+        revalidate=lambda text: sys.exit(5),
+    )
+except CorrectionPromptInvariantError as exc:
+    if exc.correction_attempted is not False:
+        sys.exit(3)
+    if ledger.snapshot()["response_correction_calls_attempted"] != 0:
+        sys.exit(4)
+    sys.exit(0)
+except BaseException:
+    sys.exit(2)
+
+# repair() returned normally without raising: the guard did not fire.
+sys.exit(2)
+"""
+
+
+def test_field_summary_ceiling_guard_survives_optimized_mode():
+    """9.1 item 30 / HARD-1: a child ``python -O`` process (which strips
+    ``assert`` statements) directly drives ``ResponseCorrectionAgent.repair``
+    with an over-ceiling diagnostic and a provider fake that fails the probe
+    if ever called. It must exit zero only when ``CorrectionPromptInvariantError``
+    is raised with ``correction_attempted=False`` and the ledger records zero
+    attempts -- proving the guard is an explicit, always-active check, not a
+    ``python -O``-strippable ``assert``.
+    """
+    repo_root = Path(__file__).resolve().parents[3]
+    result = subprocess.run(
+        [sys.executable, "-O", "-c", _OPTIMIZED_PROBE],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, (
+        f"optimized-mode probe failed: exit={result.returncode}\n"
+        f"stdout={result.stdout}\nstderr={result.stderr}"
+    )

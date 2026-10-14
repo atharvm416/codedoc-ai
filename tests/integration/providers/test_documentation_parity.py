@@ -306,6 +306,8 @@ def test_provider_choice_does_not_change_pipeline_results_or_cache_policy(
 def test_native_json_entrypoints_present_on_real_adapters():
     # The correction path reuses the same complete_json entrypoint the initial
     # call uses; each real adapter keeps its own native JSON implementation.
+    # 0.15.0 FIX-1: Anthropic gained its own explicit complete_json path
+    # (exact-model capability selection) instead of the base-class fallback.
     assert "complete_json" in OpenAIProvider.__dict__
-    assert "complete_json" not in AnthropicProvider.__dict__  # inherits base fallback
+    assert "complete_json" in AnthropicProvider.__dict__
     assert "complete_json" in GeminiProvider.__dict__

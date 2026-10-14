@@ -82,11 +82,14 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
             def create(self, **kwargs):
                 calls.setdefault("create_calls", []).append(kwargs)
                 text = responder(kwargs["messages"][-1]["content"])
-                return SimpleNamespace(content=[SimpleNamespace(text=text)])
+                return SimpleNamespace(
+                    content=[SimpleNamespace(type="text", text=text)],
+                    stop_reason="end_turn",
+                )
 
         class Anthropic:
-            def __init__(self, api_key=None, timeout=None, max_retries=None):
-                calls["init"] = {"api_key": api_key}
+            def __init__(self, api_key=None, base_url=None, timeout=None, max_retries=None):
+                calls["init"] = {"api_key": api_key, "base_url": base_url}
                 self.messages = Messages()
 
         module.Anthropic = Anthropic
@@ -117,8 +120,8 @@ def _install_scripted_sdk(monkeypatch, calls: dict, provider_name: str, responde
             return SimpleNamespace(text=responder(contents))
 
     class Client:
-        def __init__(self, api_key=None, http_options=None):
-            calls["init"] = {"api_key": api_key}
+        def __init__(self, api_key=None, http_options=None, vertexai=None):
+            calls["init"] = {"api_key": api_key, "vertexai": vertexai}
             self.models = Models()
 
     genai_types.GenerateContentConfig = GenerateContentConfig

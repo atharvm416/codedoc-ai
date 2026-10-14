@@ -76,7 +76,7 @@ def _install_anthropic(monkeypatch, rec, verdict):
             return _AnthropicResponse(_respond(prompt, verdict, rec))
 
     class Anthropic:
-        def __init__(self, api_key=None, timeout=None, max_retries=None):
+        def __init__(self, api_key=None, base_url=None, timeout=None, max_retries=None):
             self.messages = _Messages()
 
     mod.Anthropic = Anthropic
@@ -108,7 +108,7 @@ def _install_gemini(monkeypatch, rec, verdict):
             return _GeminiResponse(_respond(contents, verdict, rec))
 
     class Client:
-        def __init__(self, api_key=None, http_options=None):
+        def __init__(self, api_key=None, http_options=None, vertexai=None):
             self.models = _Models()
 
     genai.Client = Client

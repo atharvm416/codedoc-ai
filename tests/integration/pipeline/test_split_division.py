@@ -65,6 +65,7 @@ from codedoc.llm.factory import (
     ProviderExecutionDescriptor,
     attest_provider_execution,
 )
+from codedoc.agents import response_correction_agent as rca
 from codedoc.pipeline import run_pipeline
 from codedoc.utils.errors import (
     ConfigError,
@@ -1282,6 +1283,310 @@ def test_split_response_correction_uses_the_originating_leaf_call(
     assert json.loads(
         (tmp_path / "docs" / "codedoc.json").read_text(encoding="utf-8")
     )["files"][0]["description"] == "A file."
+
+
+# ===========================================================================
+# HARD-1: the field-summary ceiling guard through the split leaf/reduction/
+# final route. The ceiling is monkeypatched low because it is structurally
+# unreachable through the normal bounded diagnostic collection path (section
+# 5.3's own invariant); each route must end with the file failed (not
+# checked), zero correction-provider calls, and no retry.
+# ===========================================================================
+
+
+def test_split_leaf_ceiling_breach_ends_the_file_with_zero_correction_calls(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(rca, "_FIELD_SUMMARY_CEILING_CHARS", 0)
+    source = _large_python_source()
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+
+    class RejectFirstLeaf(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_initial = False
+            self.correction_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "Previous response (verbatim" in prompt:
+                self.correction_calls += 1
+                return super().complete_json(prompt, system)
+            if (
+                "This is one bounded fragment of a larger" in prompt
+                and not self.failed_initial
+            ):
+                self.failed_initial = True
+                self.doc_calls += 1
+                return json.dumps({"functions": ["missing required description"]})
+            return super().complete_json(prompt, system)
+
+    provider = RejectFirstLeaf()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "max_parallel_files": 1,
+            "file_retry_attempts": 3,
+            "response_correction_enabled": True,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert provider.correction_calls == 0
+    assert stats["checked"] == 0 and stats["failed"] == 1
+    assert stats["response_correction_calls_attempted"] == 0
+    assert stats["response_correction_calls_succeeded"] == 0
+    assert stats["response_correction_calls_failed"] == 0
+    # The run completes normally (this route never aborts the whole run):
+    # recovery state is cleaned up exactly as a successful run's would be.
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
+
+
+def test_split_reduction_ceiling_breach_ends_the_file_with_zero_correction_calls(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(rca, "_FIELD_SUMMARY_CEILING_CHARS", 0)
+    source = _large_python_source(500)
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+    division = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(division, synthesis_manifest_chars=12000)
+    assert _reduction_total(tree) > 0, "test requires at least one reduction node"
+
+    class RejectFirstReduction(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_initial = False
+            self.correction_calls = 0
+            self.leaf_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "This is one bounded fragment of a larger" in prompt:
+                self.leaf_calls += 1
+            if "Previous response (verbatim" in prompt:
+                self.correction_calls += 1
+                return super().complete_json(prompt, system)
+            if (
+                "Refine one combined narrative from" in prompt
+                and not self.failed_initial
+            ):
+                self.failed_initial = True
+                self.doc_calls += 1
+                # Missing the reduction capsule's only required field
+                # ("narrative").
+                return json.dumps({})
+            return super().complete_json(prompt, system)
+
+    provider = RejectFirstReduction()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "max_parallel_files": 1,
+        "file_retry_attempts": 3,
+        "response_correction_enabled": True,
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    stats = run_pipeline(tmp_path, dict(config))
+
+    assert provider.failed_initial
+    assert provider.leaf_calls == len(division.chunks)
+    assert provider.correction_calls == 0
+    assert stats["checked"] == 0 and stats["failed"] == 1
+    assert stats["response_correction_calls_attempted"] == 0
+    assert stats["response_correction_calls_succeeded"] == 0
+    assert stats["response_correction_calls_failed"] == 0
+    # Completed leaf work ahead of the rejected reduction node is preserved
+    # for resumption, exactly as any other non-retryable node failure leaves
+    # it -- HARD-1 changes nothing about split recovery bookkeeping.
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    assert recovery_path.exists()
+    json.loads(recovery_path.read_text(encoding="utf-8"))
+
+    class FailIfLeafCalledAgain(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reduction_calls = 0
+            self.final_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "This is one bounded fragment of a larger" in prompt:
+                raise AssertionError("a preserved leaf must not be recomputed")
+            if "Refine one combined narrative from" in prompt:
+                self.reduction_calls += 1
+            if "Synthesize one final file-level documentation JSON object" in prompt:
+                self.final_calls += 1
+            return super().complete_json(prompt, system)
+
+    resumed_provider = FailIfLeafCalledAgain()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: resumed_provider
+    )
+    resumed = run_pipeline(tmp_path, dict(config))
+    assert resumed["checked"] == 1 and resumed["failed"] == 0
+    assert resumed_provider.reduction_calls == _reduction_total(tree)
+    assert resumed_provider.final_calls == 1
+    assert resumed["attempted_logical_calls"] == _reduction_total(tree) + 1
+    assert not recovery_path.exists()
+
+
+def test_split_final_ceiling_breach_ends_the_file_with_zero_correction_calls(
+    tmp_path, monkeypatch
+) -> None:
+    monkeypatch.setattr(rca, "_FIELD_SUMMARY_CEILING_CHARS", 0)
+    source = _large_python_source()
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+
+    class RejectFinal(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_initial = False
+            self.correction_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "Previous response (verbatim" in prompt:
+                self.correction_calls += 1
+                return super().complete_json(prompt, system)
+            if (
+                "Synthesize one final file-level documentation JSON object" in prompt
+                and not self.failed_initial
+            ):
+                self.failed_initial = True
+                self.doc_calls += 1
+                # Missing the final capsule's required "description" field.
+                return json.dumps({"role_in_system": "r"})
+            return super().complete_json(prompt, system)
+
+    provider = RejectFinal()
+    monkeypatch.setattr("codedoc.pipeline.create_provider", lambda _config: provider)
+
+    stats = run_pipeline(
+        tmp_path,
+        {
+            "entry_file": "main.py",
+            "large_file_strategy": "split",
+            "max_content_chars": 2000,
+            "max_parallel_files": 1,
+            "file_retry_attempts": 3,
+            "response_correction_enabled": True,
+            "propagate_changes": False,
+            "output_dir": "docs",
+        },
+    )
+
+    assert provider.correction_calls == 0
+    assert stats["checked"] == 0 and stats["failed"] == 1
+    assert stats["response_correction_calls_attempted"] == 0
+    # Completed leaf/reduction work ahead of the rejected final synthesis is
+    # preserved for resumption, exactly as any other non-retryable final-node
+    # failure leaves it -- HARD-1 changes nothing about split recovery
+    # bookkeeping.
+    recovery_path = tmp_path / "docs" / "crash_recovery.json"
+    assert recovery_path.exists()
+    json.loads(recovery_path.read_text(encoding="utf-8"))
+
+
+def test_split_final_ceiling_breach_preserved_leaf_and_reduction_work_is_reused(
+    tmp_path, monkeypatch
+) -> None:
+    """Plan requirement: preserved recovery state must be more than merely
+    present -- it must be functionally reusable. Runs the same final-ceiling-
+    breach scenario, then a second run whose provider raises if any leaf or
+    reduction prompt is ever sent again: the preserved checkpoints must be
+    resumed from, not recomputed, and the second run completes successfully
+    using only one additional (final-synthesis) call."""
+    monkeypatch.setattr(rca, "_FIELD_SUMMARY_CEILING_CHARS", 0)
+    source = _large_python_source(500)
+    (tmp_path / "main.py").write_bytes(source.encode("utf-8"))
+    division = build_division_plan(
+        rel_path="main.py", language="python", content=source, source_budget_chars=2000
+    )
+    tree = build_reduction_tree(division, synthesis_manifest_chars=12000)
+    assert _reduction_total(tree) > 0, "test requires a completed reduction node"
+
+    class RejectFinal(SmartFake):
+        def __init__(self) -> None:
+            super().__init__()
+            self.failed_initial = False
+            self.correction_calls = 0
+            self.leaf_calls = 0
+            self.reduction_calls = 0
+
+        def complete_json(self, prompt, system=""):
+            if "This is one bounded fragment of a larger" in prompt:
+                self.leaf_calls += 1
+            if "Refine one combined narrative from" in prompt:
+                self.reduction_calls += 1
+            if "Previous response (verbatim" in prompt:
+                self.correction_calls += 1
+                return super().complete_json(prompt, system)
+            if (
+                "Synthesize one final file-level documentation JSON object" in prompt
+                and not self.failed_initial
+            ):
+                self.failed_initial = True
+                self.doc_calls += 1
+                return json.dumps({"role_in_system": "r"})
+            return super().complete_json(prompt, system)
+
+    provider_run1 = RejectFinal()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider_run1
+    )
+    config = {
+        "entry_file": "main.py",
+        "large_file_strategy": "split",
+        "max_content_chars": 2000,
+        "max_parallel_files": 1,
+        "file_retry_attempts": 3,
+        "response_correction_enabled": True,
+        "propagate_changes": False,
+        "output_dir": "docs",
+    }
+    stats1 = run_pipeline(tmp_path, dict(config))
+    assert stats1["checked"] == 0 and stats1["failed"] == 1
+    assert provider_run1.failed_initial
+    assert provider_run1.correction_calls == 0
+    assert provider_run1.leaf_calls == len(division.chunks)
+    assert provider_run1.reduction_calls == _reduction_total(tree)
+    assert (tmp_path / "docs" / "crash_recovery.json").exists()
+
+    class FailIfLeafOrReductionCalledAgain(SmartFake):
+        def complete_json(self, prompt, system=""):
+            if "This is one bounded fragment of a larger" in prompt:
+                raise AssertionError(
+                    "a preserved leaf must not be recomputed on resume"
+                )
+            if "Refine one combined narrative from" in prompt:
+                raise AssertionError(
+                    "a preserved reduction node must not be recomputed on resume"
+                )
+            return super().complete_json(prompt, system)
+
+    provider_run2 = FailIfLeafOrReductionCalledAgain()
+    monkeypatch.setattr(
+        "codedoc.pipeline.create_provider", lambda _config: provider_run2
+    )
+    stats2 = run_pipeline(tmp_path, dict(config))
+
+    assert stats2["checked"] == 1 and stats2["failed"] == 0
+    # A resumed run's own plan already reflects the preserved nodes as paid:
+    # only the one remaining (final-synthesis) call is planned and attempted,
+    # not the full original leaf+reduction+final count -- the strongest proof
+    # that run 1's completed work survived and was reused, not recomputed.
+    assert stats2["total_calls_planned"] == 1
+    assert stats2["attempted_logical_calls"] == 1
+    assert stats2["planned_calls_not_attempted"] == 0
+    assert not (tmp_path / "docs" / "crash_recovery.json").exists()
 
 
 def test_mixed_ordinary_and_divided_files_resume_after_rate_limit_step_down(

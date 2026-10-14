@@ -14,9 +14,16 @@ import os
 import pytest
 
 from codedoc.core.loader import ResolvedConfig, load_config, validate_config_data
+from codedoc.llm.api_provider import (
+    _ANTHROPIC_DEFAULT_BASE_URL,
+    _GEMINI_DEFAULT_BASE_URL,
+    _OPENAI_DEFAULT_BASE_URL,
+)
 from codedoc.llm.factory import (
     ENDPOINT_TRUST_ATTRIBUTE,
+    _SDK_ENDPOINT_OVERRIDE_VARS,
     EndpointTrustAttestation,
+    _sdk_endpoint_override,
     create_provider,
     effective_endpoint_identity,
 )
@@ -360,3 +367,322 @@ def test_matching_approval_permits_the_run_on_the_same_terms_dry_or_real(
         trust_api_base_url=_URL,
     )
     assert stats.get("dry_run", False) is dry_run
+
+
+# ===========================================================================
+# FIX-4 (section 5.5): the pinned SDKs' own environment-override fallback
+# (OPENAI_BASE_URL, ANTHROPIC_BASE_URL, GOOGLE_GEMINI_BASE_URL,
+# GOOGLE_GENAI_USE_VERTEXAI, GOOGLE_GENAI_USE_ENTERPRISE) is checked and
+# refused, before any credential lookup or SDK construction, when it would
+# route the selected provider's traffic to a different endpoint than
+# CodeDoc's configured one.
+# ===========================================================================
+
+_SYNTHETIC_OPENAI_URL = "https://synthetic-openai.invalid/v1"
+_SYNTHETIC_ANTHROPIC_URL = "https://synthetic-anthropic.invalid"
+_SYNTHETIC_GEMINI_URL = "https://synthetic-gemini.invalid/"
+
+
+def _fail_credential_lookup(monkeypatch):
+    monkeypatch.setattr(
+        "codedoc.llm.factory._provider_api_key",
+        lambda *a, **k: pytest.fail("credential lookup must not run"),
+    )
+
+
+def _fail_sdk_construction(monkeypatch):
+    monkeypatch.setattr(
+        "codedoc.llm.factory._make_api",
+        lambda *a, **k: pytest.fail("SDK construction must not run"),
+    )
+
+
+@pytest.mark.parametrize(
+    ("provider_kind", "model", "var", "value"),
+    [
+        ("openai", "gpt-4o-mini", "OPENAI_BASE_URL", _SYNTHETIC_OPENAI_URL),
+        ("openai", "gpt-4o-mini", "OPENAI_BASE_URL", "not-a-valid-url"),
+        ("anthropic", "claude-haiku-4-5-20251001", "ANTHROPIC_BASE_URL", _SYNTHETIC_ANTHROPIC_URL),
+        ("anthropic", "claude-haiku-4-5-20251001", "ANTHROPIC_BASE_URL", "not-a-valid-url"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GEMINI_BASE_URL", _SYNTHETIC_GEMINI_URL),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GEMINI_BASE_URL", "not-a-valid-url"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_VERTEXAI", "true"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_VERTEXAI", "1"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_VERTEXAI", "TRUE"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_VERTEXAI", "True"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_ENTERPRISE", "true"),
+        ("gemini", "gemini-2.5-flash", "GOOGLE_GENAI_USE_ENTERPRISE", "1"),
+    ],
+)
+def test_conflicting_sdk_override_is_refused_before_credential_or_sdk_construction(
+    monkeypatch, provider_kind, model, var, value,
+):
+    """No ``api_key`` is supplied: ``config.get("api_key") or
+    _provider_api_key(...)`` would otherwise short-circuit on a truthy
+    supplied key regardless of where the gate sits, so this test would pass
+    even if the gate ran *after* credential lookup. Omitting it forces the
+    ``or`` branch to actually reach ``_provider_api_key`` unless the gate
+    itself stops the call first -- genuinely proving gate-before-credential
+    ordering."""
+    monkeypatch.setenv(var, value)
+    _fail_credential_lookup(monkeypatch)
+    _fail_sdk_construction(monkeypatch)
+
+    with pytest.raises(ProviderInitError) as caught:
+        create_provider(
+            {
+                "llm_mode": "api",
+                "llm_provider": provider_kind,
+                "model_name": model,
+            }
+        )
+    message = str(caught.value)
+    assert var in message
+    assert value not in message
+
+
+@pytest.mark.parametrize(
+    ("var", "value", "provider_kind"),
+    [
+        ("OPENAI_BASE_URL", "", "openai"),
+        ("OPENAI_BASE_URL", "   ", "openai"),
+        ("OPENAI_BASE_URL", _OPENAI_DEFAULT_BASE_URL, "openai"),
+        ("OPENAI_BASE_URL", "HTTPS://API.OPENAI.COM/v1", "openai"),
+        ("ANTHROPIC_BASE_URL", "", "anthropic"),
+        ("ANTHROPIC_BASE_URL", _ANTHROPIC_DEFAULT_BASE_URL, "anthropic"),
+        ("ANTHROPIC_BASE_URL", "HTTPS://API.ANTHROPIC.COM", "anthropic"),
+        ("GOOGLE_GEMINI_BASE_URL", "", "gemini"),
+        ("GOOGLE_GEMINI_BASE_URL", _GEMINI_DEFAULT_BASE_URL, "gemini"),
+        ("GOOGLE_GEMINI_BASE_URL", _GEMINI_DEFAULT_BASE_URL.rstrip("/"), "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", "", "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", "false", "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", "0", "gemini"),
+        ("GOOGLE_GENAI_USE_ENTERPRISE", "", "gemini"),
+        ("GOOGLE_GENAI_USE_ENTERPRISE", "false", "gemini"),
+        ("GOOGLE_GENAI_USE_ENTERPRISE", "0", "gemini"),
+        # A variable belonging to a different provider than the one selected.
+        ("OPENAI_BASE_URL", _SYNTHETIC_OPENAI_URL, "anthropic"),
+        ("ANTHROPIC_BASE_URL", _SYNTHETIC_ANTHROPIC_URL, "gemini"),
+        ("GOOGLE_GEMINI_BASE_URL", _SYNTHETIC_GEMINI_URL, "openai"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", "true", "openai"),
+        # Leading/trailing whitespace around a true-shaped value: the pinned
+        # SDK does not strip before comparing (`value.lower() in
+        # ['true', '1']`), so " true "/" 1 " are read as NOT true by the real
+        # SDK -- the gate must mirror that exactly (section 5.7 item 2).
+        ("GOOGLE_GENAI_USE_VERTEXAI", " true ", "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", "true ", "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", " true", "gemini"),
+        ("GOOGLE_GENAI_USE_VERTEXAI", " 1 ", "gemini"),
+        ("GOOGLE_GENAI_USE_ENTERPRISE", " true ", "gemini"),
+        ("GOOGLE_GENAI_USE_ENTERPRISE", " 1 ", "gemini"),
+    ],
+)
+def test_blank_default_equivalent_false_and_other_provider_overrides_are_allowed(
+    monkeypatch, var, value, provider_kind,
+):
+    monkeypatch.setenv(var, value)
+    assert _sdk_endpoint_override(provider_kind, None) is None
+
+
+def test_premise_the_real_sdk_does_not_strip_whitespace_around_a_vertex_value(
+    monkeypatch,
+):
+    """Premise: confirms the installed google-genai SDK itself treats
+    " true " (with spaces) as NOT true, so the gate's no-strip behavior is
+    mirroring real SDK parsing, not an arbitrary choice."""
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", " true ")
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(
+        api_key="fake-key", http_options=types.HttpOptions(timeout=30000)
+    )
+    assert client.vertexai is False
+
+
+def test_allowed_openai_environment_leaves_the_real_sdk_transport_at_the_default(
+    monkeypatch,
+):
+    """Fake key, real installed SDK client, no request: with no conflicting
+    override, the recorded identity and the actual constructed transport
+    both stay at the default."""
+    monkeypatch.setenv("OPENAI_BASE_URL", "")
+    provider = create_provider(
+        {
+            "llm_mode": "api",
+            "llm_provider": "openai",
+            "model_name": "gpt-4o-mini",
+            "api_key": "fake-key",
+        }
+    )
+    assert effective_endpoint_identity(
+        str(provider._client.base_url)
+    ) == effective_endpoint_identity(_OPENAI_DEFAULT_BASE_URL)
+
+
+def test_allowed_anthropic_environment_leaves_the_real_sdk_transport_at_the_default(
+    monkeypatch,
+):
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", _ANTHROPIC_DEFAULT_BASE_URL)
+    provider = create_provider(
+        {
+            "llm_mode": "api",
+            "llm_provider": "anthropic",
+            "model_name": "claude-haiku-4-5-20251001",
+            "api_key": "fake-key",
+        }
+    )
+    assert effective_endpoint_identity(
+        str(provider._client.base_url)
+    ) == effective_endpoint_identity(_ANTHROPIC_DEFAULT_BASE_URL)
+
+
+def test_allowed_gemini_environment_leaves_the_real_sdk_transport_at_the_default(
+    monkeypatch,
+):
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", _GEMINI_DEFAULT_BASE_URL.rstrip("/"))
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "false")
+    provider = create_provider(
+        {
+            "llm_mode": "api",
+            "llm_provider": "gemini",
+            "model_name": "gemini-2.5-flash",
+            "api_key": "fake-key",
+        }
+    )
+    http_options = provider._client._api_client._http_options
+    assert effective_endpoint_identity(
+        http_options.base_url
+    ) == effective_endpoint_identity(_GEMINI_DEFAULT_BASE_URL)
+    assert provider._client.vertexai is False
+
+
+def test_approved_api_base_url_wins_over_conflicting_openai_base_url_env(monkeypatch):
+    monkeypatch.setenv("OPENAI_BASE_URL", _SYNTHETIC_OPENAI_URL)
+    approved_url = "http://approved.example.com:9999/v1"
+    config = ResolvedConfig(
+        {
+            "llm_mode": "api",
+            "llm_provider": "openai",
+            "model_name": "gpt-4o-mini",
+            "api_key": "fake-key",
+            "api_base_url": approved_url,
+        },
+        endpoint_trust=EndpointTrustAttestation(
+            digest=effective_endpoint_identity(approved_url),
+            mechanism="--trust-api-base-url",
+        ),
+    )
+    provider = create_provider(config)
+    assert effective_endpoint_identity(
+        str(provider._client.base_url)
+    ) == effective_endpoint_identity(approved_url)
+
+
+def test_disabling_the_factory_gate_still_leaves_real_transport_at_the_default(
+    monkeypatch,
+):
+    """Defense in depth: even if the factory's own override detector were
+    disabled or buggy, the explicit SDK constructor arguments in
+    api_provider.py are an independent layer that still pins transport to
+    the default -- a malicious environment override never reaches the wire
+    either way."""
+    monkeypatch.setattr(
+        "codedoc.llm.factory._sdk_endpoint_override", lambda *a, **k: None
+    )
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", _SYNTHETIC_ANTHROPIC_URL)
+    provider = create_provider(
+        {
+            "llm_mode": "api",
+            "llm_provider": "anthropic",
+            "model_name": "claude-haiku-4-5-20251001",
+            "api_key": "fake-key",
+        }
+    )
+    assert effective_endpoint_identity(
+        str(provider._client.base_url)
+    ) == effective_endpoint_identity(_ANTHROPIC_DEFAULT_BASE_URL)
+
+
+def test_premise_unpinned_real_anthropic_sdk_honors_the_synthetic_override(
+    monkeypatch,
+):
+    """Premise check: the installed anthropic SDK really does fall back to
+    ANTHROPIC_BASE_URL when CodeDoc passes no explicit base_url -- proving
+    FIX-4's own explicit-argument pinning is the mechanism closing the gap,
+    not an SDK that never had this fallback to begin with."""
+    import anthropic
+
+    monkeypatch.setenv("ANTHROPIC_BASE_URL", _SYNTHETIC_ANTHROPIC_URL)
+    unpinned_client = anthropic.Anthropic(api_key="fake-key", timeout=30, max_retries=0)
+    assert effective_endpoint_identity(
+        str(unpinned_client.base_url)
+    ) == effective_endpoint_identity(_SYNTHETIC_ANTHROPIC_URL)
+
+
+def test_premise_unpinned_real_openai_sdk_honors_the_synthetic_override(monkeypatch):
+    import openai
+
+    monkeypatch.setenv("OPENAI_BASE_URL", _SYNTHETIC_OPENAI_URL)
+    unpinned_client = openai.OpenAI(api_key="fake-key", timeout=30, max_retries=0)
+    assert effective_endpoint_identity(
+        str(unpinned_client.base_url)
+    ) == effective_endpoint_identity(_SYNTHETIC_OPENAI_URL)
+
+
+def test_premise_unpinned_real_gemini_sdk_honors_the_synthetic_overrides(monkeypatch):
+    from google import genai
+    from google.genai import types
+
+    monkeypatch.setenv("GOOGLE_GEMINI_BASE_URL", _SYNTHETIC_GEMINI_URL)
+    http_options = types.HttpOptions(timeout=30000)
+    unpinned_client = genai.Client(api_key="fake-key", http_options=http_options)
+    assert effective_endpoint_identity(
+        unpinned_client._api_client._http_options.base_url
+    ) == effective_endpoint_identity(_SYNTHETIC_GEMINI_URL)
+
+    monkeypatch.setenv("GOOGLE_GENAI_USE_VERTEXAI", "true")
+    unpinned_vertex_client = genai.Client(
+        api_key="fake-key", http_options=types.HttpOptions(timeout=30000)
+    )
+    assert unpinned_vertex_client.vertexai is True
+
+
+def test_autouse_fixture_leaves_the_environment_clean_at_test_start():
+    for variables in _SDK_ENDPOINT_OVERRIDE_VARS.values():
+        for name in variables:
+            assert name not in os.environ
+
+
+@pytest.fixture(scope="class")
+def _sdk_overrides_preset_once_per_class():
+    """Sets every SDK endpoint-override variable once for the whole class,
+    through a class-scoped ``pytest.MonkeyPatch`` (not the function-scoped
+    ``monkeypatch`` fixture, which cannot outlive a single test). Because
+    scope="class" is broader than the conftest autouse fixture's default
+    function scope, pytest sets this one up first for each test in the
+    class; the function-scoped autouse scrub then runs immediately before
+    the test body, so a correctly-working scrub must have already removed
+    every value this fixture set, before the test even starts -- proven by
+    fixture nesting within one test, not by execution order across two
+    separate tests."""
+    mp = pytest.MonkeyPatch()
+    for variables in _SDK_ENDPOINT_OVERRIDE_VARS.values():
+        for name in variables:
+            value = (
+                "true" if name.startswith("GOOGLE_GENAI_USE_")
+                else "https://preexisting.invalid/v1"
+            )
+            mp.setenv(name, value)
+    yield
+    mp.undo()
+
+
+class TestAutouseFixtureScrubsPreexistingOverrides:
+    @pytest.mark.usefixtures("_sdk_overrides_preset_once_per_class")
+    def test_autouse_fixture_removed_every_preset_override_before_the_test_body_ran(
+        self,
+    ):
+        for variables in _SDK_ENDPOINT_OVERRIDE_VARS.values():
+            for name in variables:
+                assert name not in os.environ

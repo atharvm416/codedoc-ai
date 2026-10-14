@@ -164,6 +164,13 @@ The package is a reason-specific option, not a promise to repair malformed or
 error-dominated source. Refactoring is the reliable remedy when a usable syntax
 parse is unavailable.
 
+Installing `tree-sitter-language-pack` directly, rather than through the
+`structure` extra, should match the version the `structure` extra pins for
+your installed CodeDoc release: the parser package's version contributes to
+split identity, so a mismatched direct install can plan and split differently
+than the extra's pinned version would. Lexical split remains fully supported
+without the extra either way.
+
 Planning measures the exact canonical JSON representation used by bounded leaf,
 reducer, and final manifests, including quotes, backslashes, controls,
 newlines, and Unicode. It evaluates these provider-free capacity reasons in
@@ -285,6 +292,13 @@ explained rather than only rejected.
 10. **Diagnostics.** Keep bounded issues in memory and terminal output.
     Permitted hard-error summaries may appear in final output. CodeDoc does not
     create a persistent `error.log`.
+
+Every provider call in step 8 is a non-streaming request sent with an
+explicit `provider_request_timeout_s`. A thinking-capable model may need a
+larger value than the 120-second default: thinking tokens are billed and
+counted as output tokens ahead of the final response text, and the explicit
+timeout means the provider SDK's own default non-streaming timeout guard does
+not apply here.
 
 ## Cache and recovery identity
 
